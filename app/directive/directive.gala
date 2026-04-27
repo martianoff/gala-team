@@ -1,0 +1,43 @@
+package directive
+
+import (
+    . "martianoff/gala/std"
+)
+
+// ============================================================================
+// app/directive — the on-the-wire orchestration protocol the Team Lead
+// emits in its assistant text.
+//
+// Wire format (DESIGN.md §6):
+//
+//     @dispatch(Felix) Implement parser for the YAML team file...
+//     @end
+//
+//     @dispatch(Theo) Draft the test plan...
+//     @end
+//
+//     @consult(transpiler) We're hitting a transpiler bug...
+//     @end
+//
+//     @summary
+//     ## Summary
+//     ...
+//     @end
+//
+// This package owns the Directive sealed type + the parser that extracts
+// directives from a TL message.  No state, no IO — pure data + pure
+// parsing.  Downstream packages (app/fsm, app/runtime) consume the
+// Directive values to decide what to do next.
+// ============================================================================
+
+// Directive is one orchestration action the TL has asked for.
+sealed type Directive {
+    // Dispatch a task to a member of the local team.
+    case Dispatch(Target string, Body string)
+    // Consult an external team (see DESIGN.md §6.2). ProjectOverride is
+    // the optional `project="..."` arg; the registry's default is used
+    // when None.
+    case Consult(Target string, ProjectOverride Option[string], Body string)
+    // Final summary block — triggers the approval modal.
+    case Summary(Body string)
+}

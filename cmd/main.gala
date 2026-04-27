@@ -1,10 +1,8 @@
 package main
 
 import (
-    . "github.com/martianoff/gala-tui"
     . "martianoff/gala/std"
-    . "martianoff/gala/collection_immutable"
-    . "github.com/martianoff/gala_team/app"
+    . "github.com/martianoff/gala_team/app/team"
 )
 
 // ============================================================================
@@ -13,61 +11,21 @@ import (
 // the Team Lead delegates to subordinate agents (Engineers, QAs), reviews
 // their work, and produces a final summary + PR for the user to approve.
 //
-// This is the Phase-1 skeleton: enough to verify the build wiring (gala_team
-// → gala stdlib 0.37.0 → gala_tui).  The orchestrator (claude sessions,
-// dispatch parser, policy runner, …) lands in subsequent commits per
-// DESIGN.md §13.
+// This Phase-1 main.gala is Println-only: it loads no team yet, opens no
+// TUI yet — those wire up once the cross-module struct-construction
+// transpiler bug clears (then cmd/ takes a gala_tui dep, app/runtime
+// gets wrapped in FutureCmd, and update + view land per DESIGN.md §13).
+//
+// Verifies end-to-end build wiring: cmd → app/team → gala stdlib.
 //
 // Run:
 //     bazel run cmd:gala_team
-//
-// NOTE on the verbose Type{}.Apply(...) constructor calls below: cross-
-// module sealed-case + struct-named-arg emit is currently broken in the
-// transpiler — see docs/private/TRANSPILER_BUG_GALA_TUI_CROSSMODULE.md
-// in the gala_simple repo (Issues 2 + 3).  Once those land we can replace
-// `NoCmd[Msg]{}.Apply()` with `NoCmd[Msg]()` and
-// `Program[Model, Msg]{}.Apply(...)` with `Program[Model, Msg](...)`.
 // ============================================================================
 
-struct Model(Tick int)
-
-sealed type Msg {
-    case TmTick()
-    case TmQuit()
-    case TmNoOp()
-}
-
-func update(m Model, msg Msg) Tuple[Model, Cmd[Msg]] = msg match {
-    case TmTick() => (m.Copy(Tick = m.Tick + 1), NoCmd[Msg]{}.Apply())
-    case TmQuit() => (m, QuitCmd[Msg]{}.Apply())
-    case TmNoOp() => (m, NoCmd[Msg]{}.Apply())
-}
-
-func view(m Model) Widget {
-    val title = TextStyled("  ⛩  gala_team — Phase 1 skeleton",
-        DefaultStyle().WithBold().WithFg(BrightCyan()))
-    val state = TextStyled(
-        s"  Build wiring verified.  status: ${LoadPlaceholder()}  tick: ${m.Tick}",
-        DefaultStyle().WithFg(BrightWhite()))
-    val hint = TextStyled("  Press q (or Ctrl+C) to quit.",
-        DefaultStyle().WithDim())
-    return Column(ArrayOf[LayoutChild](
-        Fixed(2, title),
-        Fixed(2, state),
-        Fixed(2, hint),
-        Flex(1, Empty()),
-    ))
-}
-
-func keyToMsg(ev KeyEvent) Msg {
-    if KeyMatchesAny(ev, "q", "ctrl+c") { return TmQuit{}.Apply() }
-    return TmNoOp{}.Apply()
-}
-
 func main() {
-    // NewTUIProgram is a Go-side helper in the app/ package that wraps
-    // initial/update/view in std.Immutable manually — workaround for
-    // transpiler Issue 3 (cross-module struct named-arg construction).
-    val program = NewTUIProgram[Model, Msg](Model(Tick = 0), update, view)
-    val _ = Run[Model, Msg](program, keyToMsg)
+    val role = TeamLead{}.Apply()
+    Println(s"gala_team — Phase 1 skeleton (role probe: ${RoleName(role)})")
+    Println("  cmd → app/team → gala stdlib 0.37.0 wired cleanly")
+    Println("  TUI front-end + claude orchestration land once cross-module")
+    Println("  struct construction is fixed (TRANSPILER_BUG_GALA_TUI_*.md)")
 }

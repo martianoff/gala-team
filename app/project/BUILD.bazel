@@ -1,0 +1,24 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "project",
+    srcs = [
+        "project.gala",
+        "resolver.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/project",
+    deps = [
+        "@gala//collection_immutable",
+        "@gala//go_interop",
+        "@gala//subprocess",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "resolver_test",
+    srcs = ["resolver_test.gala"],
+    deps = [
+        ":project",
+    ],
+)

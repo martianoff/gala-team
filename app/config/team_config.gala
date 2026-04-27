@@ -1,37 +1,39 @@
-package app
+package config
 
 import (
     "martianoff/gala/yaml"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/team"
 )
 
 // ============================================================================
-// team_config.gala — loads a team.yaml file into a validated Team + Workflow.
+// app/config — loads a team.yaml file into a validated Team + Workflow.
 //
 // The yaml package's Codec[T] is the right tool conceptually, but its
 // generated decoder doesn't handle struct fields whose type is Array[T] or
-// HashMap (a Phase-2 TODO tracked in gala_simple/json/codec_typed.go).
-// Members are an Array[Member] so we'd hit that limitation immediately.
+// HashMap (Phase-2 TODO upstream). Members live in an Array[Member] so
+// we'd hit that limitation immediately.
 //
-// Workaround until the codec catches up: drive yaml.NewYamlDecoder via its
-// public FieldDecoder API directly.  More verbose than `Codec[TeamConfig]`
-// but bypasses the array-decode gap and gives us precise control over
-// which fields are required vs ignored.  See DESIGN.md §5.1, §5.3.
+// Workaround: drive yaml.NewYamlDecoder via its public FieldDecoder API
+// directly. More verbose than `Codec[TeamConfig]` but bypasses the
+// array-decode gap and gives precise control over which fields are
+// required vs ignored.  See DESIGN.md §5.1, §5.3.
 // ============================================================================
 
-// LoadTeamFromString parses a YAML document into (Team, Workflow), returning
-// Failure with a descriptive error on parse / validation problems.  Path-
-// based loading lives in the caller; this entry point keeps IO out of the
-// pure parser so unit tests can drive it with literals.
-func LoadTeamFromString(yamlStr string) Try[TeamConfig] = Try[TeamConfig](() => {
+// LoadFromString parses a YAML document into TeamConfig (Team + Workflow),
+// returning Failure with a descriptive error on parse / validation
+// problems.  Path-based loading lives in the caller; this entry point
+// keeps IO out of the pure parser so unit tests drive it with literals.
+func LoadFromString(yamlStr string) Try[TeamConfig] = Try[TeamConfig](() => {
     val d = yaml.NewYamlDecoder(yamlStr)
     return decodeTopLevel(d)
 })
 
-// TeamConfig is what LoadTeamFromString returns: the validated team plus
-// the workflow defaults applied.  Higher-level callers fold this into the
-// AppModel along with Project / Policies / Guidance / Registry siblings.
+// TeamConfig is what LoadFromString returns: the validated team plus
+// the workflow defaults applied.  Higher-level callers fold this into
+// the AppModel along with Project / Policies / Guidance / Registry
+// siblings.
 struct TeamConfig(Team Team, Workflow Workflow)
 
 // ----------------------------------------------------------------------------
@@ -55,8 +57,6 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
         } else if key == "workflow" {
             workflow = decodeWorkflowBlock(d)
         } else {
-            // Forward-compatible: unknown top-level keys are ignored.
-            // Future `consult:`, `policy_overrides:`, etc. land cleanly.
             d.Skip()
         }
     }
@@ -86,10 +86,8 @@ func decodeTeamBlock(d *yaml.YamlDecoderImpl) Tuple[string, Array[Member]] {
     return (name, members)
 }
 
-// Loop-bound Append is intentional: yaml.YamlDecoderImpl is an external
-// stateful pull-cursor, so each element comes from a side-effecting
-// HasMoreElements / decodeMember pair. There's no declarative shape until
-// the array is fully drained.
+// Loop-bound Append intentional: yaml.YamlDecoderImpl is a stateful
+// pull-cursor, so each element comes from a side-effecting call pair.
 func decodeMemberArray(d *yaml.YamlDecoderImpl) Array[Member] {
     var members = EmptyArray[Member]()
     d.StartArray()
@@ -116,7 +114,6 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
         } else if key == "personality" {
             personality = d.ReadString()
         } else if key == "model" {
-            // Keep null/missing as None so the CLI's --model default applies.
             if d.IsNull() {
                 d.ReadNull()
             } else {
@@ -133,9 +130,6 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
     if name == "" {
         panic("team.yaml: member is missing required 'name' field")
     }
-    // Two-step (rather than a `match { case None() => panic }` arm): the
-    // transpiler currently emits `return panic(...)` for a panic-shaped
-    // arm in a value-returning context, which Go rejects as "no value".
     val roleOpt = RoleFromName(roleStr)
     if !roleOpt.IsDefined() {
         panic(s"team.yaml: unknown role '${roleStr}' for member '${name}' (expected: team_lead | engineer | qa)")
@@ -161,7 +155,6 @@ func decodeWorkflowBlock(d *yaml.YamlDecoderImpl) Workflow {
         } else if key == "parallel_engineers" {
             parallel = d.ReadBool()
         } else if key == "approval" {
-            // approval: { require_user_confirm: bool }
             d.StartObject()
             for d.HasMoreFields() {
                 val ak = d.ReadKey()
@@ -185,7 +178,7 @@ func decodeWorkflowBlock(d *yaml.YamlDecoderImpl) Workflow {
 }
 
 // ----------------------------------------------------------------------------
-// Validation — runs after decode so we can give precise error messages.
+// Validation
 // ----------------------------------------------------------------------------
 
 func validate(name string, members Array[Member], workflow Workflow) TeamConfig {
@@ -196,27 +189,21 @@ func validate(name string, members Array[Member], workflow Workflow) TeamConfig 
         panic("team.yaml: team.members must contain at least one member")
     }
 
-    // Exactly one team_lead.
-    val leads = members.Filter((m) => isSameRole(m.Role, TeamLead()))
+    val leads = members.Filter((m Member) => SameRole(m.Role, TeamLead{}.Apply()))
     if leads.Length() != 1 {
         panic(s"team.yaml: must declare exactly one team_lead (found ${leads.Length()})")
     }
 
-    // At least one engineer.
-    val engineers = members.Filter((m) => isSameRole(m.Role, Engineer()))
+    val engineers = members.Filter((m Member) => SameRole(m.Role, Engineer{}.Apply()))
     if engineers.IsEmpty() {
         panic("team.yaml: at least one engineer is required")
     }
 
-    // QAs optional only if workflow.qa_required = false.
-    val qas = members.Filter((m) => isSameRole(m.Role, QA()))
+    val qas = members.Filter((m Member) => SameRole(m.Role, QA{}.Apply()))
     if workflow.QARequired && qas.IsEmpty() {
         panic("team.yaml: workflow.qa_required is true but no qa members declared")
     }
 
-    // Names unique across the team — FoldLeft tracks the seen-set in pure
-    // GALA shape; panic short-circuits on the first duplicate so the error
-    // message points at the offender.
     val _ = members.FoldLeft(EmptyHashMap[string, bool](), (seen, m) => {
         if seen.Contains(m.Name) {
             panic(s"team.yaml: duplicate member name '${m.Name}'")

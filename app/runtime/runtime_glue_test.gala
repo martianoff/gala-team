@@ -4,14 +4,13 @@ import (
     "errors"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
-    . "github.com/martianoff/gala_team/app"
+    . "github.com/martianoff/gala_team/app/runtime"
 )
 
 // runtime_glue's surface is mostly Cmd[Msg] builders that wrap subprocess
 // IO — those are exercised end-to-end against the real `claude` CLI when
-// cmd/main.gala wires the full TUI loop in the next commit.  These unit
-// tests just lock in the Msg sealed type's shape so refactors don't
-// silently break callers.
+// cmd/main.gala wires the full TUI loop.  These unit tests just lock in
+// the Msg sealed type's shape so refactors don't silently break callers.
 
 func TestMsg_ChunkArrived_Construction(t T) T {
     val msg = ChunkArrived(Member = "Felix", Line = "{\"type\":\"text\"}")

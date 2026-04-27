@@ -1,0 +1,22 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "fsm",
+    srcs = ["state_machine.gala"],
+    importpath = "github.com/martianoff/gala_team/app/fsm",
+    deps = [
+        "//app/directive",
+        "@gala//collection_immutable",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "state_machine_test",
+    srcs = ["state_machine_test.gala"],
+    deps = [
+        ":fsm",
+        "//app/directive",
+        "@gala//collection_immutable",
+    ],
+)

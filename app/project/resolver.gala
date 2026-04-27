@@ -1,4 +1,4 @@
-package app
+package project
 
 import (
     "os"
@@ -11,8 +11,8 @@ import (
 )
 
 // ============================================================================
-// project_resolver.gala — turns `--project <dir>` (+ optional override flags)
-// into a validated Project value.
+// resolver.gala — turns `--project <dir>` (+ optional override flags) into
+// a validated Project value.
 //
 // Resolution flow (DESIGN.md §5.2):
 //   1. require <dir> to exist, be a directory, contain a .git entry
@@ -25,23 +25,35 @@ import (
 //   5. Project.Repo        ← absolute path of <dir>
 // ============================================================================
 
-// ProjectOverrides is the bag of CLI escape-hatches that win over auto-
-// detection. Empty by default: all fields None.
-struct ProjectOverrides(
+// Overrides is the bag of CLI escape-hatches that win over auto-detection.
+// Empty by default: all fields None.
+struct Overrides(
     Name          Option[string],
     Github        Option[string],
     DefaultBranch Option[string],
 )
 
-func NoOverrides() ProjectOverrides = ProjectOverrides(
+func NoOverrides() Overrides = Overrides(
     Name          = None[string](),
     Github        = None[string](),
     DefaultBranch = None[string](),
 )
 
-// ResolveProject is the entry point. Returns Try[Project] so failures
-// (missing dir / not a git repo) surface with useful messages.
-func ResolveProject(dir string, overrides ProjectOverrides) Try[Project] = Try[Project](() => {
+// NewOverrides is a Go-friendly factory for cross-package callers that
+// need to construct Overrides with non-default values.  Same shape as
+// the named-arg constructor but works around the cross-module struct
+// construction transpiler bug (see TRANSPILER_BUG_GALA_TUI_CROSSMODULE.md
+// Issue 3).
+func NewOverrides(name Option[string], github Option[string], defaultBranch Option[string]) Overrides =
+    Overrides(
+        Name          = name,
+        Github        = github,
+        DefaultBranch = defaultBranch,
+    )
+
+// Resolve is the entry point. Returns Try[Project] so failures (missing
+// dir / not a git repo) surface with useful messages.
+func Resolve(dir string, overrides Overrides) Try[Project] = Try[Project](() => {
     val abs = absoluteOrPanic(dir)
     requireGitRepo(abs)
     val name = overrides.Name.GetOrElse(filepath.Base(abs))
@@ -56,7 +68,7 @@ func ResolveProject(dir string, overrides ProjectOverrides) Try[Project] = Try[P
 })
 
 // ----------------------------------------------------------------------------
-// Helpers
+// Internals
 // ----------------------------------------------------------------------------
 
 func absoluteOrPanic(dir string) string {
@@ -68,8 +80,7 @@ func absoluteOrPanic(dir string) string {
 }
 
 // requireGitRepo panics if `dir` doesn't exist or doesn't have a .git entry.
-// Accepts both real .git directories and worktree gitfiles (so worktrees
-// created by `git worktree add` also validate).
+// Accepts both real .git directories and worktree gitfiles.
 func requireGitRepo(dir string) {
     val info, statErr = os.Stat(dir)
     if statErr != nil {
@@ -86,18 +97,13 @@ func requireGitRepo(dir string) {
 }
 
 // chooseGithub picks the override if set; otherwise tries auto-detection.
-// Returns None on any auto-detection failure so the caller's PR-creation
-// path can degrade gracefully ("no GitHub remote — copy diff instead?").
-//
-// Match (rather than Option.OrElse) is intentional: detectGithub spawns a
-// subprocess, so we want lazy evaluation in the override-is-Some branch.
+// Match (rather than Option.OrElse) keeps detectGithub lazy — it spawns
+// a subprocess.
 func chooseGithub(override Option[string], repo string) Option[string] = override match {
     case Some(_) => override
     case None()  => detectGithub(repo)
 }
 
-// detectGithub: `git remote get-url origin` → Some(url) on success, None on
-// any failure (no remote, no git, etc.). Trims trailing whitespace.
 func detectGithub(repo string) Option[string] {
     val out = runGit(repo, ArrayOf[string]("remote", "get-url", "origin"))
     if out.IsFailure() { return None[string]() }
@@ -106,8 +112,6 @@ func detectGithub(repo string) Option[string] {
     return Some[string](trimmed)
 }
 
-// chooseDefaultBranch: same shape as chooseGithub, but always yields
-// some string (falls through to "main").
 func chooseDefaultBranch(override Option[string], repo string) string = override match {
     case Some(v) => v
     case None()  => detectDefaultBranch(repo).GetOrElse("main")
@@ -126,7 +130,7 @@ func detectDefaultBranch(repo string) Option[string] {
 // stdout joined with newlines on Success(code=0), or Failure on any
 // non-zero exit / spawn error / IO failure. Stderr is intentionally
 // dropped — the binary error message is rarely useful for the
-// auto-detection use case (we just want "did it work?").
+// auto-detection use case.
 func runGit(repo string, args Array[string]) Try[string] = Try[string](() => {
     val opts = subprocess.NewSpawnOpts(
         "git",
@@ -144,14 +148,8 @@ func runGit(repo string, args Array[string]) Try[string] = Try[string](() => {
     return out
 })
 
-// drainStdout reads lines until EOF and joins with newlines. EOF is the
-// expected terminator (subprocess.Process.ReadLine returns Failure(io.EOF)
-// when the child closes its stdout pipe).
-//
-// Loop-bound Append is intentional: we're consuming an external stateful
-// pull-stream where each ReadLine call mutates the underlying scanner.
-// No declarative shape (Map/Collect/FoldLeft) fits — there's nothing to
-// fold over until we've already drained.
+// Loop-bound Append intentional: stateful pull-stream from external scanner;
+// no declarative shape fits until the stream is fully drained.
 func drainStdout(p subprocess.Process) string {
     var sb = EmptyArray[string]()
     for {

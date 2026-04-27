@@ -1,0 +1,24 @@
+package project
+
+import (
+    . "martianoff/gala/std"
+)
+
+// ============================================================================
+// app/project — the workpiece (a git repository) the team operates on.
+//
+// Distinct from app/team (who's on the crew): a Team is reusable across
+// many projects, while a Project is one specific repo + remote. CLI args
+// `--project <dir>` plus optional override flags resolve into a Project
+// via project_resolver.gala in this same package.
+// ============================================================================
+
+// Project carries everything we know about *what* the team is working on.
+// Repo is always an absolute path here — relative paths get resolved by
+// the loader before construction.
+struct Project(
+    Name          string,
+    Repo          string,
+    Github        Option[string],
+    DefaultBranch string,
+)

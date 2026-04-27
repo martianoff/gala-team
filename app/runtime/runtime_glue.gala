@@ -1,0 +1,132 @@
+package runtime
+
+import (
+    "martianoff/gala/subprocess"
+    "martianoff/gala/concurrent"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/team"
+    . "github.com/martianoff/gala_team/app/project"
+)
+
+// ============================================================================
+// app/runtime — bridges the pure FSM (app/fsm) to actual `claude` CLI
+// subprocesses via concurrent.Future[Msg].
+//
+// This package depends only on gala stdlib (subprocess + concurrent) plus
+// our own team / project types — explicitly NOT on gala_tui.  The Future
+// values returned here can be wrapped into gala_tui's FutureCmd by a
+// thin UI layer (added when wiring the TUI).  Keeping that boundary
+// clean means runtime is testable in isolation and could later host an
+// alternative TUI / CLI front end without changes here.
+//
+// Reads are a self-perpetuating pump: each NextChunk Future completion
+// dispatches a ChunkArrived through the consumer's update loop, which
+// schedules another NextChunk. One in-flight Future[Msg] per active
+// member.
+// ============================================================================
+
+// Msg is the runtime side of the gala_team event vocabulary.  Cases here
+// are the things subprocess interactions produce; the full app Msg sealed
+// type (added when wiring update + view) folds these in alongside
+// keyboard / mouse / tick events.
+sealed type Msg {
+    case ChunkArrived(Member string, Line string)
+    case SessionFailed(Member string, Err error)
+    case WriteSent(Member string)
+}
+
+// MemberSession pairs a Member with the live subprocess driving them.
+struct MemberSession(
+    Member  Member,
+    Process subprocess.Process,
+)
+
+// ----------------------------------------------------------------------------
+// Spawning
+// ----------------------------------------------------------------------------
+
+// SpawnSession launches a `claude` CLI process for `m` inside `proj.Repo`,
+// optionally pinned to `m.Model` if set.  Returns Try[MemberSession];
+// failure carries the underlying spawn error.
+func SpawnSession(proj Project, m Member) Try[MemberSession] {
+    val args = claudeArgs(m)
+    val opts = subprocess.NewSpawnOpts(
+        "claude",
+        args.ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val spawned = subprocess.Spawn(opts)
+    return spawned.Map((p subprocess.Process) => MemberSession(Member = m, Process = p))
+}
+
+// claudeArgs assembles the standard `claude` CLI flags. We always use
+// stream-json so the FieldDecoder parser can walk chunks line-by-line.
+func claudeArgs(m Member) Array[string] {
+    val base = ArrayOf[string]("--output-format", "stream-json")
+    return m.Model match {
+        case Some(name) => base.AppendAll(ArrayOf[string]("--model", name))
+        case None()     => base
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Future builders
+// ----------------------------------------------------------------------------
+
+// NextChunkFuture schedules the next ReadLine on the session's stdout.
+// Returns a Future that resolves to ChunkArrived (success), SessionFailed
+// (any error including EOF — callers can match on Err to distinguish).
+//
+// EOF is treated as SessionFailed(io.EOF) so the orchestrator can
+// transition the member's status to Done; matching on Err lets callers
+// distinguish "stream done" from a real failure.
+func NextChunkFuture(s MemberSession) concurrent.Future[Msg] {
+    val name = s.Member.Name
+    return concurrent.FutureApply[Msg](() => {
+        val res = s.Process.ReadLine()
+        if res.IsSuccess() {
+            return ChunkArrived(Member = name, Line = res.Get())
+        }
+        return SessionFailed(Member = name, Err = res.GetError())
+    })
+}
+
+// SendFuture writes `prompt` + "\n" to the session's stdin and returns
+// a Future that resolves to WriteSent (success) or SessionFailed
+// (write error — usually means the child closed stdin or exited).
+func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
+    val name = s.Member.Name
+    return concurrent.FutureApply[Msg](() => {
+        val res = s.Process.WriteLine(prompt)
+        if res.IsSuccess() {
+            return WriteSent(Member = name)
+        }
+        return SessionFailed(Member = name, Err = res.GetError())
+    })
+}
+
+// ----------------------------------------------------------------------------
+// Lifecycle
+// ----------------------------------------------------------------------------
+
+// CloseSession gracefully terminates a member's subprocess: kills it, then
+// waits for the OS to reap it.
+func CloseSession(s MemberSession) Try[bool] {
+    val killed = s.Process.Kill()
+    if killed.IsFailure() { return killed }
+    val waited = s.Process.Wait()
+    if waited.IsFailure() {
+        return Failure[bool](waited.GetError())
+    }
+    return Success[bool](true)
+}
+
+// MsgMember extracts the member name from any runtime Msg variant.
+func MsgMember(msg Msg) string = msg match {
+    case ChunkArrived(name, _)    => name
+    case SessionFailed(name, _)   => name
+    case WriteSent(name)          => name
+}

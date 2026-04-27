@@ -1,4 +1,4 @@
-package app
+package team
 
 import (
     . "martianoff/gala/std"
@@ -6,21 +6,15 @@ import (
 )
 
 // ============================================================================
-// Domain types for gala_team — see DESIGN.md §9 for the full plan.
+// app/team — domain types about who's on the team.
 //
-// This file owns the value objects that downstream layers (config loaders,
-// state machine, runtime glue, view) all share.  Everything is immutable
-// (`val` semantics by default; no `var` fields) so the Elm-style update()
-// can reason about state without aliasing surprises.
-//
-// All construction below uses the natural Type() / Variant() form because
-// these types are defined and consumed in the same package.  Cross-module
-// callers (e.g. cmd/main.gala using gala_tui types) need the explicit
-// Type{}.Apply() workaround — see TRANSPILER_BUG_GALA_TUI_CROSSMODULE.md.
+// This is the leaf package: pure value objects, no IO, no dependencies on
+// other gala_team subpackages.  Every other component (config loader,
+// state machine, runtime glue, view) imports from here.
 // ============================================================================
 
 // ----------------------------------------------------------------------------
-// Team composition (loaded from team.yaml — see §5.1)
+// Roles
 // ----------------------------------------------------------------------------
 
 // Role identifies what a member does.  MVP catalogue is hard-coded; future
@@ -49,8 +43,15 @@ func RoleFromName(s string) Option[Role] {
     return None[Role]()
 }
 
-// Member is one Claude session in the team — a name, a role, a personality
-// blurb, and (optionally) a model override + extra system instructions.
+// SameRole compares two Role values via their canonical name (cheap and
+// exhaustive). Avoids a tuple-match — keeps the analyzer simple.
+func SameRole(a Role, b Role) bool = RoleName(a) == RoleName(b)
+
+// ----------------------------------------------------------------------------
+// Members + Workflow
+// ----------------------------------------------------------------------------
+
+// Member is one Claude session in the team.
 struct Member(
     Name        string,
     Role        Role,
@@ -60,8 +61,8 @@ struct Member(
 )
 
 // Workflow describes how *this team* operates internally — distinct from
-// per-project policy (.gala_team.yaml, see §5.4).  All fields are optional
-// in the YAML; defaults are applied at load time.
+// per-project policy (.gala_team.yaml). All fields are optional in the
+// YAML; defaults are applied at load time.
 struct Workflow(
     QARequired         bool,
     ParallelEngineers  bool,
@@ -76,6 +77,10 @@ func DefaultWorkflow() Workflow = Workflow(
     RequireUserConfirm = true,
 )
 
+// ----------------------------------------------------------------------------
+// Teams
+// ----------------------------------------------------------------------------
+
 // Team is the loaded team.yaml: a name plus an ordered list of members
 // plus a precomputed Lead pointer for convenience.  Order is preserved so
 // the UI shows roles in the user's authored order, not alphabetised.
@@ -87,45 +92,29 @@ struct Team(
 
 // MembersOf returns the members with the given role, in source order.
 func MembersOf(t Team, r Role) Array[Member] =
-    t.Members.Filter((m) => isSameRole(m.Role, r))
+    t.Members.Filter((m Member) => SameRole(m.Role, r))
 
-// MemberByName looks up a member; None if no match.  Names are unique
-// within a team (validated at load time, in app/team_config.gala).
+// MemberByName looks up a member; None if no match. Names are unique
+// within a team (validated at load time, in app/config).
 func MemberByName(t Team, name string) Option[Member] {
-    val matches = t.Members.Filter((m) => m.Name == name)
+    val matches = t.Members.Filter((m Member) => m.Name == name)
     if matches.IsEmpty() { return None[Member]() }
     return Some[Member](matches.Get(0))
 }
 
-// isSameRole compares two Role values via name (cheap and exhaustive).
-// Avoids a tuple-match which the analyzer prefers to keep simple.
-func isSameRole(a Role, b Role) bool = RoleName(a) == RoleName(b)
-
 // ----------------------------------------------------------------------------
-// Project context (resolved from --project + git, see §5.2)
-// ----------------------------------------------------------------------------
-
-// Project carries everything we know about *what* the team is working on.
-// Repo is always an absolute path here — relative paths get resolved by
-// the loader before construction.
-struct Project(
-    Name          string,
-    Repo          string,
-    Github        Option[string],
-    DefaultBranch string,
-)
-
-// ----------------------------------------------------------------------------
-// Per-member status (drives the team panel pills + spinners, see §8.1)
+// Per-member status (drives the team panel pills + spinners)
 // ----------------------------------------------------------------------------
 
 // Status is the live state of one member.  Pure value — the state machine
-// in app/state_machine.gala flips members through these transitions in
-// response to subprocess events.
+// in app/fsm flips members through these transitions in response to
+// subprocess events.
 //
 // Cases use the `St` prefix to avoid shadowing the AppState orchestration
-// cases defined in state_machine.gala (which also has an `Idle` variant).
-// GALA case constructors share package namespace.
+// cases defined in app/fsm (which also has an `Idle` variant): GALA case
+// constructors share package namespace within their own package, but
+// the same convention helps when both types end up dot-imported into a
+// view file.
 sealed type Status {
     case StIdle
     case StQueued
@@ -141,11 +130,3 @@ func StatusName(s Status) string = s match {
     case StDone()    => "done"
     case StFailed(_) => "failed"
 }
-
-// ----------------------------------------------------------------------------
-// Skeleton sentinel — drop once cmd/main.gala has real work to do.
-// ----------------------------------------------------------------------------
-
-// LoadPlaceholder is removed in the next commit when team_config.gala
-// brings in a real loadTeam(path) entry point.
-func LoadPlaceholder() string = "skeleton-ok"

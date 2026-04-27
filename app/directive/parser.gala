@@ -1,4 +1,4 @@
-package app
+package directive
 
 import (
     "strings"
@@ -7,24 +7,8 @@ import (
 )
 
 // ============================================================================
-// dispatch_parser.gala — extracts orchestration directives from a Team Lead's
-// streamed assistant message.
-//
-// Wire format (DESIGN.md §6):
-//
-//     @dispatch(Felix) Implement parser for the YAML team file...
-//     @end
-//
-//     @dispatch(Theo) Draft the test plan...
-//     @end
-//
-//     @consult(transpiler) We're hitting a transpiler bug...
-//     @end
-//
-//     @summary
-//     ## Summary
-//     ...
-//     @end
+// parser.gala — extract @dispatch / @consult / @summary blocks from a
+// streamed Team Lead assistant message.
 //
 // Rules:
 //   - Each directive starts on its own logical block beginning with one of
@@ -41,19 +25,7 @@ import (
 //     `@consult(transpiler, project="~/work/gala_simple-fork")`.
 // ============================================================================
 
-// Directive is one orchestration action the TL has asked for.
-sealed type Directive {
-    // Dispatch a task to a member of the local team.
-    case Dispatch(Target string, Body string)
-    // Consult an external team (see §6.2).  ProjectOverride is the
-    // optional `project="..."` arg; the registry's default is used when
-    // None.
-    case Consult(Target string, ProjectOverride Option[string], Body string)
-    // Final summary block — triggers the approval modal.
-    case Summary(Body string)
-}
-
-// ParseDirectives walks `msg` and returns every directive found, in order.
+// Parse walks `msg` and returns every directive found, in order.
 // Returns an empty array when the message contains no directives — that's
 // a valid case (TL is just chatting; no orchestration action).
 //
@@ -61,7 +33,7 @@ sealed type Directive {
 // `i = next` jumps past the matched directive's @end, so the cursor
 // movement isn't expressible as Map / Collect / FoldLeft over the lines
 // (each directive consumes a variable number of source lines).
-func ParseDirectives(msg string) Array[Directive] {
+func Parse(msg string) Array[Directive] {
     var out = EmptyArray[Directive]()
     val lines = strings.Split(msg, "\n")
     var i = 0
@@ -89,62 +61,53 @@ func ParseDirectives(msg string) Array[Directive] {
 // ----------------------------------------------------------------------------
 
 // openingTag is the parsed result of one opening line.
-struct openingTag(
-    Kind            string,         // "dispatch" | "consult" | "summary"
-    Target          string,         // member or team name; "" for summary
-    ProjectOverride Option[string], // consult's project="..." override
-    SameLineRest    string,         // body text after the opening tag on the same line
-)
+type openingTag struct {
+    Kind            string         // "dispatch" | "consult" | "summary"
+    Target          string         // member or team name; "" for summary
+    ProjectOverride Option[string] // consult's project="..." override
+    SameLineRest    string         // body text after the opening tag on the same line
+}
 
 func unpackOpening(o openingTag) Tuple4[string, string, Option[string], string] =
     (o.Kind, o.Target, o.ProjectOverride, o.SameLineRest)
 
-// parseOpeningTag inspects a line for one of the three opening shapes.
-// Returns Some(openingTag) when matched, None otherwise.  Whitespace at the
-// start of the line is tolerated.
 func parseOpeningTag(line string) Option[openingTag] {
     val trimmed = strings.TrimLeft(line, " \t")
     if strings.HasPrefix(trimmed, "@dispatch(") {
-        return parseDispatchOrConsult("dispatch", trimmed, len("@dispatch("))
+        return parseDispatchOrConsult("dispatch", strings.TrimPrefix(trimmed, "@dispatch("))
     }
     if strings.HasPrefix(trimmed, "@consult(") {
-        return parseDispatchOrConsult("consult", trimmed, len("@consult("))
+        return parseDispatchOrConsult("consult", strings.TrimPrefix(trimmed, "@consult("))
     }
-    // @summary takes no parens; it can sit on a line alone or with body
-    // text trailing it (we accept both).
     if strings.HasPrefix(trimmed, "@summary") {
-        val rest = strings.TrimLeft(substringFrom(trimmed, len("@summary")), " \t")
-        return Some[openingTag](openingTag(
-            Kind = "summary",
-            Target = "",
-            ProjectOverride = None[string](),
-            SameLineRest = rest,
-        ))
+        val rest = strings.TrimLeft(strings.TrimPrefix(trimmed, "@summary"), " \t")
+        return Some[openingTag](openingTag{
+            Kind:            "summary",
+            Target:          "",
+            ProjectOverride: None[string](),
+            SameLineRest:    rest,
+        })
     }
     return None[openingTag]()
 }
 
-// parseDispatchOrConsult handles "@dispatch(name)" or
-// "@consult(name[, key=value...])".  `prefixLen` skips past the opening
-// "@kind(" segment so we can find the matching ")".
-func parseDispatchOrConsult(kind string, line string, prefixLen int) Option[openingTag] {
-    val close = strings.Index(substringFrom(line, prefixLen), ")")
-    if close < 0 { return None[openingTag]() }
-    val args = substring(line, prefixLen, prefixLen + close)
-    val rest = strings.TrimLeft(substringFrom(line, prefixLen + close + 1), " \t")
-    val (target, projectOverride) = parseArgList(args)
+// parseDispatchOrConsult takes the line content AFTER the opening
+// "@dispatch(" or "@consult(" prefix has been stripped, then splits at
+// the first ")" to separate the args from the same-line body.
+func parseDispatchOrConsult(kind string, afterOpen string) Option[openingTag] {
+    val parts = strings.SplitN(afterOpen, ")", 2)
+    if len(parts) < 2 { return None[openingTag]() }
+    val (target, projectOverride) = parseArgList(parts[0])
     if target == "" { return None[openingTag]() }
-    return Some[openingTag](openingTag(
-        Kind = kind,
-        Target = target,
-        ProjectOverride = projectOverride,
-        SameLineRest = rest,
-    ))
+    val rest = strings.TrimLeft(parts[1], " \t")
+    return Some[openingTag](openingTag{
+        Kind:            kind,
+        Target:          target,
+        ProjectOverride: projectOverride,
+        SameLineRest:    rest,
+    })
 }
 
-// parseArgList splits "Felix" or "transpiler, project=\"~/work/x\"" into
-// (target, optional projectOverride).  Unknown kv pairs are tolerated and
-// dropped — forward-compatible with future @consult args.
 func parseArgList(args string) Tuple[string, Option[string]] {
     val parts = strings.Split(args, ",")
     if len(parts) == 0 { return ("", None[string]()) }
@@ -161,35 +124,20 @@ func parseArgList(args string) Tuple[string, Option[string]] {
     return (target, projectOverride)
 }
 
-// splitKVPair parses a single "key=\"value\"" or "key=value" segment.
-// Returns (key, unquoted value, ok).  Unquoted values are trimmed; quoted
-// values keep inner whitespace intact.
+// splitKVPair parses one "key=value" or "key=\"value\"" segment via
+// strings.SplitN(2) — no manual sub-string slicing. Quoted values strip
+// the surrounding quotes via TrimPrefix/TrimSuffix.
 func splitKVPair(seg string) Tuple3[string, string, bool] {
-    val s = strings.TrimSpace(seg)
-    val eq = strings.Index(s, "=")
-    if eq < 0 { return ("", "", false) }
-    val key = strings.TrimSpace(substringTo(s, eq))
-    val rawVal = strings.TrimSpace(substringFrom(s, eq + 1))
-    if len(rawVal) >= 2 && rawVal[0] == '"' && rawVal[len(rawVal) - 1] == '"' {
-        return (key, substring(rawVal, 1, len(rawVal) - 1), true)
-    }
-    return (key, rawVal, true)
+    val parts = strings.SplitN(strings.TrimSpace(seg), "=", 2)
+    if len(parts) < 2 { return ("", "", false) }
+    val key = strings.TrimSpace(parts[0])
+    val rawVal = strings.TrimSpace(parts[1])
+    val unquoted = strings.TrimSuffix(strings.TrimPrefix(rawVal, "\""), "\"")
+    return (key, unquoted, true)
 }
 
-// collectBody scans forward from the opening line (index `start`) until it
-// finds an `@end` line, then returns the joined body + the index of the
-// line *after* @end.  Bodies start with `sameLineRest` (content following
-// the tag on the opening line, if any), then each subsequent line up to
-// (but not including) the @end.
-//
-// If no @end is found before EOF, treats EOF as the implicit terminator —
-// the streamed transcript may not have caught up yet, and a partial body
-// is preferable to silently dropping a directive.
-//
 // Loop-bound Append is intentional: we need an early-return on @end (not
-// just take-while), and Array doesn't currently expose IndexOfFirst (only
-// IndexOf-by-equality and Find returning Option[T] without the index).
-// A ZipWithIndex().Find dance would be less readable than the direct walk.
+// just take-while), and Array doesn't currently expose IndexOfFirst.
 func collectBody(lines []string, start int, n int, sameLineRest string) Tuple[string, int] {
     var bodyParts = EmptyArray[string]()
     if sameLineRest != "" {
@@ -208,9 +156,6 @@ func collectBody(lines []string, start int, n int, sameLineRest string) Tuple[st
     return (joinBody(bodyParts), n)
 }
 
-// joinBody joins lines with \n then trims surrounding whitespace.  Inner
-// indentation is preserved verbatim (markdown / code fences inside a
-// directive body should round-trip cleanly).
 func joinBody(parts Array[string]) string =
     strings.TrimSpace(parts.MkString("\n"))
 

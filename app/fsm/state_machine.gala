@@ -1,49 +1,32 @@
-package app
+package fsm
 
 import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/directive"
 )
 
 // ============================================================================
-// state_machine.gala — pure transitions for the orchestration FSM.
+// app/fsm — pure orchestration state machine.
+//
+// Tracks where the orchestration loop is between user prompts and final
+// approval.  Consumes Directive values from app/directive on every TLDone
+// event and decides the next state.
 //
 // Lifecycle (DESIGN.md §7):
 //
-//             ┌────────────┐
-//             │   Idle     │ ◀───── start, after every fully-resolved turn
-//             └─────┬──────┘
-//                   │ user submits prompt
-//                   ▼
-//             ┌────────────┐
-//             │ TLThinking │  TL is streaming a response
-//             └──┬──┬──┬───┘
-//   @dispatch(s) │  │  └─ @summary → Approval
-//                ▼  │
-//        ┌────────────┐
-//        │ Delegating │ ──── all members done ──▶ QAGate (if qa_required)
-//        └────────────┘                          else  TLReview
+//   Idle ─UserPrompted→ TLThinking ─TLDone(@summary)→ Approval
+//                                   ─TLDone(@dispatch)→ Delegating
+//                                   ─TLDone()→ Idle (no directives = chat)
+//   Delegating ─MemberDone (drains pending)→ QAGate (qa_required)
+//                                           | TLReview
+//   QAGate ─QADone→ TLReview
+//   TLReview ─TLDone(...)→ same routing as TLThinking
+//   Approval ─Accepted | Rejected→ Idle
 //
-//             ┌────────────┐
-//             │ QAGate     │  ──── QA done ──▶ TLReview
-//             └────────────┘
-//
-//             ┌────────────┐
-//             │ TLReview   │ ──── @summary ──▶ Approval
-//             └────────────┘                  else loop or back to Idle
-//
-//             ┌────────────┐
-//             │ Approval   │ ──── accepted | rejected ──▶ Idle
-//             └────────────┘
-//
-// Phase 1 scope (this file):
-//   - the happy-path FSM above, ignoring the @consult / Consulting branch
-//     (state present but transitions are unsupported — the orchestrator
-//     converts a consult directive into a synthesized failure event)
-//   - no Resuming variant yet (recovery flow is its own task)
-//
-// Pure: every transition is a function of (state, event), no IO, no
-// Now() — testable in isolation from subprocesses.
+// Phase-1 scope: no Consulting / Resuming variants yet.  Pure: every
+// transition is a function of (state, event, ctx), no IO, no Now() —
+// testable in isolation from subprocesses.
 // ============================================================================
 
 // AppState is the top-level orchestration state.
@@ -58,39 +41,28 @@ sealed type AppState {
 
 // Event is anything that can advance the FSM.
 sealed type Event {
-    // The user submitted a fresh prompt to the Team Lead.
     case UserPrompted
-    // The TL finished one streaming response, with the parsed directives.
     case TLDone(Directives Array[Directive])
-    // A subordinate member finished its turn.
     case MemberDone(MemberName string)
-    // The QA pass concluded (orchestrator synthesizes this event after the
-    // QA member's MemberDone, when the gate is the next stop).
     case QADone
-    // The user clicked Yes on the approval modal.
     case ApprovalAccepted
-    // The user clicked No on the approval modal.
     case ApprovalRejected
 }
 
 // TransitionContext carries the per-team facts the FSM needs at each step
 // — distinct from AppState so the latter stays small and easy to render.
 struct TransitionContext(
-    QAMembers   Array[string],   // names of the QAs in the team
+    QAMembers   Array[string],
     QARequired  bool,
 )
 
 // Transition computes the next state from (current state, event, context).
 // Total: every (state, event) pair has a defined result.  Unsupported
-// pairs (e.g. ApprovalAccepted while Idle) return the input state unchanged
-// — an orchestrator layer can choose to log/toast those rather than
-// crashing on them.
+// pairs (e.g. ApprovalAccepted while Idle) return the input state unchanged.
 //
-// Implementation note: nested match (state, then event) instead of a
-// tuple-pattern match.  GALA's tuple destructuring treats identifiers as
-// bindings even when they name sealed-type constructors, so
-// `case (Idle(), UserPrompted()) =>` would silently bind `Idle` and
-// `UserPrompted` as variables.  The nested form is unambiguous.
+// Nested match (state → event) instead of a tuple-pattern match: GALA's
+// tuple destructuring treats identifiers as bindings even when they name
+// sealed-type constructors.
 func Transition(state AppState, event Event, ctx TransitionContext) AppState = state match {
     case Idle()                => onIdle(event)
     case TLThinking()          => onTLThinking(event, ctx)
@@ -101,8 +73,7 @@ func Transition(state AppState, event Event, ctx TransitionContext) AppState = s
 }
 
 // ----------------------------------------------------------------------------
-// Per-state event dispatchers.  Each returns the next state (or the
-// caller's current state for unknown events).
+// Per-state event dispatchers
 // ----------------------------------------------------------------------------
 
 func onIdle(event Event) AppState = event match {
@@ -138,24 +109,13 @@ func onApproval(state AppState, event Event) AppState = event match {
 }
 
 // ----------------------------------------------------------------------------
-// Helpers
+// Routing helpers
 // ----------------------------------------------------------------------------
 
 // afterTLDone routes a TL response based on what directives it contained.
-//
-// Precedence:
-//   1. @summary present  → Approval (summary takes precedence; if TL also
-//      produced @dispatch in the same turn, that's a TL bug — we treat
-//      the summary as authoritative)
-//   2. @dispatch present → Delegating(set of dispatched member names)
-//   3. otherwise         → Idle (TL has nothing to dispatch and nothing to
-//      summarise — usually it asked the user a clarifying question)
-//
-// @consult is parsed but not transitioned for Phase 1; the orchestrator
-// converts it into a synthesized "consult failed" tool result and re-runs
-// TLThinking — so from the FSM's POV, an emitted @consult acts like a
-// dispatch with an empty pending set, which then immediately resolves
-// to TLReview.
+//   1. @summary → Approval (summary takes precedence)
+//   2. @dispatch → Delegating(set of dispatched member names)
+//   3. otherwise → Idle (TL had nothing to dispatch / summarise)
 func afterTLDone(dirs Array[Directive], ctx TransitionContext) AppState = firstSummary(dirs) match {
     case Some(body) => Approval(SummaryBody = body)
     case None()     => {
@@ -167,10 +127,6 @@ func afterTLDone(dirs Array[Directive], ctx TransitionContext) AppState = firstS
 
 // afterMemberDone removes the named member from the Pending set; once the
 // set is empty, advances to either QAGate (if applicable) or TLReview.
-//
-// `inDelegating` distinguishes between the engineer-fan-out phase (true)
-// and the QA fan-out phase (false): only Delegating → QAGate transitions
-// when QA is required.
 func afterMemberDone(
     pending HashSet[string],
     name string,
@@ -184,7 +140,6 @@ func afterMemberDone(
         }
         return QAGate(Pending = rest)
     }
-    // Pending drained → next phase.
     if inDelegating && ctx.QARequired && !ctx.QAMembers.IsEmpty() {
         return QAGate(Pending = arrayToHashSet(ctx.QAMembers))
     }
@@ -194,7 +149,7 @@ func afterMemberDone(
 // firstSummary returns the body of the first @summary directive in dirs,
 // or None if no summary is present.
 func firstSummary(dirs Array[Directive]) Option[string] =
-    dirs.Find(isSummary).FlatMap((d) => d match {
+    dirs.Find(isSummary).FlatMap((d Directive) => d match {
         case Summary(body) => Some[string](body)
         case _             => None[string]()
     })
@@ -208,12 +163,10 @@ func isSummary(d Directive) bool = d match {
 // in the given array (preserving source order; consult / summary
 // directives are skipped).
 func directiveTargets(dirs Array[Directive]) Array[string] =
-    dirs.FlatMap((d) => d match {
+    dirs.FlatMap((d Directive) => d match {
         case Dispatch(target, _) => ArrayOf[string](target)
         case _                    => EmptyArray[string]()
     })
 
-// arrayToHashSet converts an Array[string] (preserving uniqueness) into
-// the HashSet[string] the Pending field expects.
 func arrayToHashSet(xs Array[string]) HashSet[string] =
     xs.FoldLeft(EmptyHashSet[string](), (acc, s) => acc.Add(s))

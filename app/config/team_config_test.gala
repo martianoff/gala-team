@@ -3,12 +3,9 @@ package main
 import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
-    . "github.com/martianoff/gala_team/app"
+    . "github.com/martianoff/gala_team/app/config"
+    . "github.com/martianoff/gala_team/app/team"
 )
-
-// Each YAML literal mirrors the corresponding testdata/teams/*.yaml fixture
-// — kept inline here so the test binary doesn't need the fixture files in
-// runfiles.  If the wire format ever drifts, sync both copies.
 
 val validTeamYaml = "team:\n" +
     "  name: \"Skunkworks\"\n" +
@@ -62,7 +59,7 @@ val dupNameYaml = "team:\n" +
     "      personality: \"Second.\"\n"
 
 func TestLoadValidTeam(t T) T {
-    val res = LoadTeamFromString(validTeamYaml)
+    val res = LoadFromString(validTeamYaml)
     val t1 = IsSuccess(t, res)
     val cfg = res.Get()
     val t2 = Eq(t1, cfg.Team.Name, "Skunkworks")
@@ -74,31 +71,24 @@ func TestLoadValidTeam(t T) T {
 }
 
 func TestLoadNoQa_AllowedWhenQaNotRequired(t T) T {
-    val res = LoadTeamFromString(noQaYaml)
+    val res = LoadFromString(noQaYaml)
     val t1 = IsSuccess(t, res)
     val cfg = res.Get()
     val t2 = IsFalse(t1, cfg.Workflow.QARequired)
-    val qas = MembersOf(cfg.Team, QA())
+    val qas = MembersOf(cfg.Team, QA{}.Apply())
     return IsTrue(t2, qas.IsEmpty())
 }
 
-func TestLoadNoLead_Fails(t T) T {
-    val res = LoadTeamFromString(noLeadYaml)
-    return IsFailure(t, res)
-}
-
-func TestLoadDupName_Fails(t T) T {
-    val res = LoadTeamFromString(dupNameYaml)
-    return IsFailure(t, res)
-}
+func TestLoadNoLead_Fails(t T) T = IsFailure(t, LoadFromString(noLeadYaml))
+func TestLoadDupName_Fails(t T) T = IsFailure(t, LoadFromString(dupNameYaml))
 
 func TestLoadEmptyMembers_Fails(t T) T {
     val empty = "team:\n  name: \"X\"\n  members: []\n"
-    return IsFailure(t, LoadTeamFromString(empty))
+    return IsFailure(t, LoadFromString(empty))
 }
 
 func TestUnknownRole_Fails(t T) T {
     val bad = "team:\n  name: \"X\"\n  members:\n" +
         "    - role: designer\n      name: \"Pia\"\n      personality: \"Unsupported role.\"\n"
-    return IsFailure(t, LoadTeamFromString(bad))
+    return IsFailure(t, LoadFromString(bad))
 }

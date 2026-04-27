@@ -1,0 +1,22 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "directive",
+    srcs = [
+        "directive.gala",
+        "parser.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/directive",
+    deps = [
+        "@gala//collection_immutable",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "parser_test",
+    srcs = ["parser_test.gala"],
+    deps = [
+        ":directive",
+    ],
+)

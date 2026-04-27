@@ -1,0 +1,55 @@
+package main
+
+import (
+    "os"
+    "path/filepath"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "github.com/martianoff/gala_team/app/project"
+)
+
+// resolver tests cover only the non-shelling-out paths.  Real git
+// auto-detection is exercised end-to-end by the cmd/main.gala startup
+// path against the developer's working repo; hermetic git fixtures
+// are out of scope for the MVP unit suite.
+
+func TestResolve_NonexistentDir_Fails(t T) T {
+    val res = Resolve("/nonexistent/path/that/should/not/exist", NoOverrides())
+    return IsFailure(t, res)
+}
+
+func TestResolve_NonGitDir_Fails(t T) T {
+    val tmp = mustMkTempDir(t)
+    defer os.RemoveAll(tmp)
+    val res = Resolve(tmp, NoOverrides())
+    return IsFailure(t, res)
+}
+
+func TestResolve_OverridesWinOverDetection(t T) T {
+    val tmp = mustMkTempDir(t)
+    defer os.RemoveAll(tmp)
+    val gitDir = filepath.Join(tmp, ".git")
+    val mkErr = os.MkdirAll(gitDir, os.FileMode(0755))
+    val _ = mkErr
+
+    val overrides = NewOverrides(
+        Some[string]("my-project"),
+        Some[string]("github.com/acme/my-project"),
+        Some[string]("trunk"),
+    )
+    val res = Resolve(tmp, overrides)
+    val t1 = IsSuccess(t, res)
+    val proj = res.Get()
+    val t2 = Eq(t1, proj.Name, "my-project")
+    val t3 = IsTrue(t2, proj.Github.IsDefined())
+    val t4 = Eq(t3, proj.Github.Get(), "github.com/acme/my-project")
+    return Eq(t4, proj.DefaultBranch, "trunk")
+}
+
+func mustMkTempDir(t T) string {
+    val dir, err = os.MkdirTemp("", "gala_team_test_*")
+    if err != nil {
+        panic(s"MkdirTemp: ${err.Error()}")
+    }
+    return dir
+}

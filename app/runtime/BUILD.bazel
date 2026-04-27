@@ -1,0 +1,24 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "runtime",
+    srcs = ["runtime_glue.gala"],
+    importpath = "github.com/martianoff/gala_team/app/runtime",
+    deps = [
+        "//app/project",
+        "//app/team",
+        "@gala//collection_immutable",
+        "@gala//concurrent",
+        "@gala//go_interop",
+        "@gala//subprocess",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "runtime_glue_test",
+    srcs = ["runtime_glue_test.gala"],
+    deps = [
+        ":runtime",
+    ],
+)

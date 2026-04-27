@@ -1,0 +1,22 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "config",
+    srcs = ["team_config.gala"],
+    importpath = "github.com/martianoff/gala_team/app/config",
+    deps = [
+        "//app/team",
+        "@gala//collection_immutable",
+        "@gala//yaml",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "team_config_test",
+    srcs = ["team_config_test.gala"],
+    deps = [
+        ":config",
+        "//app/team",
+    ],
+)

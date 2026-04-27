@@ -3,12 +3,11 @@ package main
 import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
-    . "github.com/martianoff/gala_team/app"
+    . "github.com/martianoff/gala_team/app/directive"
 )
 
-// Helper: extract the first directive from a parse result, or fail the test.
 func first(t T, msg string) Directive {
-    val arr = ParseDirectives(msg)
+    val arr = Parse(msg)
     if arr.IsEmpty() {
         panic("expected at least one directive, got none")
     }
@@ -37,8 +36,7 @@ func TestDispatch_MultiLineBody(t T) T {
     return first(t, msg) match {
         case Dispatch(target, body) => {
             val t1 = Eq(t, target, "Felix")
-            val t2 = IsTrue(t1, body == "Implement parser. Spec:\n  - validates exactly one team_lead\n  - returns Try[Team]")
-            return t2
+            return IsTrue(t1, body == "Implement parser. Spec:\n  - validates exactly one team_lead\n  - returns Try[Team]")
         }
         case _ => IsTrue(t, false)
     }
@@ -48,17 +46,17 @@ func TestDispatch_MultipleInOneMessage(t T) T {
     val msg = "Sure, splitting this two ways:\n\n" +
         "@dispatch(Felix) Token store implementation.\n@end\n\n" +
         "@dispatch(Mira) Session middleware patch.\n@end\n"
-    val dirs = ParseDirectives(msg)
+    val dirs = Parse(msg)
     val t1 = Eq(t, dirs.Length(), 2)
-    val first = dirs.Get(0)
-    val second = dirs.Get(1)
-    val t2 = first match {
+    val firstD = dirs.Get(0)
+    val secondD = dirs.Get(1)
+    val t2 = firstD match {
         case Dispatch(name, _) => Eq(t1, name, "Felix")
-        case _ => IsTrue(t1, false)
+        case _                  => IsTrue(t1, false)
     }
-    return second match {
+    return secondD match {
         case Dispatch(name, _) => Eq(t2, name, "Mira")
-        case _ => IsTrue(t2, false)
+        case _                  => IsTrue(t2, false)
     }
 }
 
@@ -93,20 +91,17 @@ func TestConsult_UnknownArgKeyIgnored(t T) T {
     val msg = "@consult(transpiler, unknown=foo, project=\"/x\")\nBody.\n@end"
     return first(t, msg) match {
         case Consult(_, override, _) => Eq(t, override.Get(), "/x")
-        case _ => IsTrue(t, false)
+        case _                       => IsTrue(t, false)
     }
 }
 
 // ----- @summary -------------------------------------------------------------
 
 func TestSummary_Block(t T) T {
-    val msg = "@summary\n" +
-        "## Summary\n" +
-        "Implemented loader.\n" +
-        "@end"
+    val msg = "@summary\n## Summary\nImplemented loader.\n@end"
     return first(t, msg) match {
         case Summary(body) => IsTrue(t, body == "## Summary\nImplemented loader.")
-        case _ => IsTrue(t, false)
+        case _              => IsTrue(t, false)
     }
 }
 
@@ -114,7 +109,7 @@ func TestSummary_SameLineHeader(t T) T {
     val msg = "@summary ## Header on same line\nbody line\n@end"
     return first(t, msg) match {
         case Summary(body) => IsTrue(t, body == "## Header on same line\nbody line")
-        case _ => IsTrue(t, false)
+        case _              => IsTrue(t, false)
     }
 }
 
@@ -122,13 +117,10 @@ func TestSummary_SameLineHeader(t T) T {
 
 func TestNoDirectives_EmptyResult(t T) T {
     val msg = "Just normal prose without any tags."
-    val dirs = ParseDirectives(msg)
-    return Eq(t, dirs.Length(), 0)
+    return Eq(t, Parse(msg).Length(), 0)
 }
 
 func TestUnterminatedDispatch_TreatsEofAsEnd(t T) T {
-    // Streamed transcripts may not have @end yet — extract a partial body
-    // rather than dropping the directive.
     val msg = "@dispatch(Felix) Mid-stream content"
     return first(t, msg) match {
         case Dispatch(target, body) => {
@@ -143,14 +135,13 @@ func TestProseAroundDispatch_Ignored(t T) T {
     val msg = "Got it. Splitting the work:\n\n" +
         "@dispatch(Felix) Do the work.\n@end\n\n" +
         "I'll review when both are back."
-    val dirs = ParseDirectives(msg)
-    return Eq(t, dirs.Length(), 1)
+    return Eq(t, Parse(msg).Length(), 1)
 }
 
 func TestDispatch_LeadingWhitespaceTolerated(t T) T {
     val msg = "    @dispatch(Felix) hello\n    @end"
     return first(t, msg) match {
         case Dispatch(target, _) => Eq(t, target, "Felix")
-        case _ => IsTrue(t, false)
+        case _                    => IsTrue(t, false)
     }
 }

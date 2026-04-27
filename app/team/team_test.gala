@@ -4,11 +4,9 @@ import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "github.com/martianoff/gala_team/app"
+    . "github.com/martianoff/gala_team/app/team"
 )
 
-// Sample team — wired by hand for the type tests.  Real teams come from
-// team_config.LoadTeam in a follow-up commit.
 func sampleTeam() Team {
     val iris = Member(
         Name = "Iris", Role = TeamLead{}.Apply(),
@@ -36,7 +34,6 @@ func TestRoleNameRoundTrip(t T) T {
     val t1 = Eq(t,  RoleName(TeamLead{}.Apply()), "team_lead")
     val t2 = Eq(t1, RoleName(Engineer{}.Apply()), "engineer")
     val t3 = Eq(t2, RoleName(QA{}.Apply()),       "qa")
-
     val parsed = RoleFromName("engineer")
     val t4 = IsSome(t3, parsed)
     val unknown = RoleFromName("designer")
@@ -44,19 +41,19 @@ func TestRoleNameRoundTrip(t T) T {
 }
 
 func TestMembersOf_FiltersByRole(t T) T {
-    val team = sampleTeam()
-    val engineers = MembersOf(team, Engineer{}.Apply())
+    val ts = sampleTeam()
+    val engineers = MembersOf(ts, Engineer{}.Apply())
     val t1 = Eq(t, engineers.Length(), 1)
     val t2 = Eq(t1, engineers.Get(0).Name, "Felix")
-    val qas = MembersOf(team, QA{}.Apply())
+    val qas = MembersOf(ts, QA{}.Apply())
     return Eq(t2, qas.Get(0).Name, "Theo")
 }
 
 func TestMemberByName(t T) T {
-    val team = sampleTeam()
-    val felix = MemberByName(team, "Felix")
+    val ts = sampleTeam()
+    val felix = MemberByName(ts, "Felix")
     val t1 = IsSome(t, felix)
-    val missing = MemberByName(team, "NoSuchPerson")
+    val missing = MemberByName(ts, "NoSuchPerson")
     return IsNone(t1, missing)
 }
 

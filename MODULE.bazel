@@ -5,20 +5,16 @@ module(
 
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "gala", version = "1.0.0")
-bazel_dep(name = "gala_tui", version = "0.1.0")
 bazel_dep(name = "gazelle", version = "0.47.0")
 bazel_dep(name = "rules_go", version = "0.59.0")
 
-# Dev: local sibling overrides for both gala stdlib (0.37.0+) and gala_tui.
-# Swap to bazel_central_registry entries once those ship there.
+# Dev: local sibling override for gala stdlib (0.37.0+).  Swap to a
+# versioned bazel_central_registry entry once published. gala_tui will
+# plug back in (with its own bazel_dep + override) once the cross-module
+# struct-construction emit issues clear (TRANSPILER_BUG_GALA_TUI_*.md).
 local_path_override(
     module_name = "gala",
     path = "../gala_simple",
-)
-
-local_path_override(
-    module_name = "gala_tui",
-    path = "../gala_tui",
 )
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
@@ -26,4 +22,3 @@ go_sdk.download(version = "1.25.5")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
-use_repo(go_deps, "org_golang_x_sys", "org_golang_x_term")

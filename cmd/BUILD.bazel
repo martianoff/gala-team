@@ -3,8 +3,12 @@ load("@gala//:gala.bzl", "gala_binary")
 gala_binary(
     name = "gala_team",
     srcs = ["main.gala"],
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
     deps = [
         "//app/team",
+        "@gala//collection_immutable",
     ],
     visibility = ["//visibility:public"],
 )

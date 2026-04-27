@@ -1,7 +1,9 @@
 package main
 
 import (
+    . "github.com/martianoff/gala-tui"
     . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/team"
 )
 
@@ -11,21 +13,55 @@ import (
 // the Team Lead delegates to subordinate agents (Engineers, QAs), reviews
 // their work, and produces a final summary + PR for the user to approve.
 //
-// This Phase-1 main.gala is Println-only: it loads no team yet, opens no
-// TUI yet — those wire up once the cross-module struct-construction
-// transpiler bug clears (then cmd/ takes a gala_tui dep, app/runtime
-// gets wrapped in FutureCmd, and update + view land per DESIGN.md §13).
-//
-// Verifies end-to-end build wiring: cmd → app/team → gala stdlib.
+// Phase-1 main: opens a placeholder TUI to validate end-to-end build
+// wiring.  Real orchestration (loading team.yaml, spawning claude
+// sessions, dispatch parsing, state machine, view rendering) lands in
+// subsequent commits.
 //
 // Run:
 //     bazel run cmd:gala_team
 // ============================================================================
 
+struct Model(Tick int)
+
+sealed type Msg {
+    case TmTick()
+    case TmQuit()
+    case TmNoOp()
+}
+
+func update(m Model, msg Msg) Tuple[Model, Cmd[Msg]] = msg match {
+    case TmTick() => (m.Copy(Tick = m.Tick + 1), NoCmd[Msg]())
+    case TmQuit() => (m, QuitCmd[Msg]())
+    case TmNoOp() => (m, NoCmd[Msg]())
+}
+
+func view(m Model) Widget {
+    val role = TeamLead()
+    val title = TextStyled(s"  ⛩  gala_team — Phase 1 skeleton (role probe: ${RoleName(role)})",
+        DefaultStyle().WithBold().WithFg(BrightCyan()))
+    val state = TextStyled(s"  tick: ${m.Tick}",
+        DefaultStyle().WithFg(BrightWhite()))
+    val hint = TextStyled("  Press q (or Ctrl+C) to quit.",
+        DefaultStyle().WithDim())
+    return Column(ArrayOf[LayoutChild](
+        Fixed(2, title),
+        Fixed(2, state),
+        Fixed(2, hint),
+        Flex(1, Empty()),
+    ))
+}
+
+func keyToMsg(ev KeyEvent) Msg {
+    if KeyMatchesAny(ev, "q", "ctrl+c") { return TmQuit() }
+    return TmNoOp()
+}
+
 func main() {
-    val role = TeamLead{}.Apply()
-    Println(s"gala_team — Phase 1 skeleton (role probe: ${RoleName(role)})")
-    Println("  cmd → app/team → gala stdlib 0.37.0 wired cleanly")
-    Println("  TUI front-end + claude orchestration land once cross-module")
-    Println("  struct construction is fixed (TRANSPILER_BUG_GALA_TUI_*.md)")
+    val program = Program[Model, Msg](
+        Initial = Model(Tick = 0),
+        Update  = (m, msg) => update(m, msg),
+        View    = (m) => view(m),
+    )
+    val _ = Run[Model, Msg](program, (ev) => keyToMsg(ev))
 }

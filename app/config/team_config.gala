@@ -130,6 +130,9 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
     if name == "" {
         panic("team.yaml: member is missing required 'name' field")
     }
+    // Two-step (rather than `case None() => panic` arm): the transpiler
+    // currently emits `return panic(...)` for a panic-shaped arm in a
+    // value-returning context, which Go rejects as "no value".
     val roleOpt = RoleFromName(roleStr)
     if !roleOpt.IsDefined() {
         panic(s"team.yaml: unknown role '${roleStr}' for member '${name}' (expected: team_lead | engineer | qa)")

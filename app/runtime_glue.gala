@@ -1,0 +1,149 @@
+package app
+
+import (
+    "martianoff/gala/subprocess"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala-tui"
+)
+
+// ============================================================================
+// runtime_glue.gala — bridges the pure FSM (state_machine.gala) to actual
+// `claude` CLI subprocesses via gala-tui's Cmd[Msg] event loop.
+//
+// The contract (DESIGN.md §4.1):
+//   - Each team member is one long-lived `claude --output-format
+//     stream-json` subprocess wrapped in a MemberSession value.
+//   - Reads are a self-perpetuating pump: each ReadLine completion
+//     dispatches a ChunkArrived Msg through update(), which then schedules
+//     another NextChunkCmd.  One in-flight Future[string] per active
+//     member at any time — no goroutines, no channels.
+//   - Writes go through SendCmd which produces a WriteSent Msg on success
+//     so update() can advance any "TL is composing the next dispatch"
+//     state without leaking IO into the pure layer.
+//
+// Tests for this module are deferred to the cmd/main.gala wire-up step —
+// MemberSession is opaque (Go-side process state) so a unit test would
+// need a fixture binary.  The Msg construction is trivially testable in
+// isolation; the subprocess pump is exercised end-to-end against the
+// real `claude` CLI once the full TUI lands.
+// ============================================================================
+
+// Msg is the runtime side of the gala_team event vocabulary.  Cases here
+// are the things subprocess interactions produce; the full app Msg sealed
+// type (added when wiring update + view) folds these in alongside
+// keyboard / mouse / tick events.
+sealed type Msg {
+    // A single line of stream-json output arrived from a member's stdout.
+    // Caller is responsible for parsing the JSON and dispatching to the
+    // state machine via the dispatch parser when appropriate.
+    case ChunkArrived(Member string, Line string)
+    // A subprocess call (Spawn / Read / Write / Wait) failed.  Carries
+    // the offending member name so the UI can mark them red.
+    case SessionFailed(Member string, Err error)
+    // A WriteLine to a member's stdin completed cleanly.
+    case WriteSent(Member string)
+}
+
+// MemberSession pairs a Member with the live subprocess driving them.
+// Value type (Process is itself a handle) — copy semantics are fine.
+struct MemberSession(
+    Member  Member,
+    Process subprocess.Process,
+)
+
+// ----------------------------------------------------------------------------
+// Spawning
+// ----------------------------------------------------------------------------
+
+// SpawnSession launches a `claude` CLI process for `m` inside `proj.Repo`,
+// optionally pinned to `m.Model` if set.  Returns Try[MemberSession];
+// failure carries the underlying spawn error so the caller can surface
+// "missing claude on PATH" / "permission denied" cleanly.
+//
+// Uses subprocess.NewSpawnOpts (the Go-side constructor shim) instead of
+// cross-module named-arg construction — see TRANSPILER_BUG_GALA_TUI_
+// CROSSMODULE.md Issue 3.
+func SpawnSession(proj Project, m Member) Try[MemberSession] {
+    val args = claudeArgs(m)
+    val opts = subprocess.NewSpawnOpts(
+        "claude",
+        args.ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val spawned = subprocess.Spawn(opts)
+    return spawned.Map((p) => MemberSession(Member = m, Process = p))
+}
+
+// claudeArgs assembles the standard `claude` CLI flags. We always use
+// stream-json so the FieldDecoder parser can walk chunks line-by-line;
+// model is only set when the team.yaml gave an override (otherwise the
+// CLI's own default applies).
+func claudeArgs(m Member) Array[string] {
+    val base = ArrayOf[string]("--output-format", "stream-json")
+    return m.Model match {
+        case Some(name) => base.AppendAll(ArrayOf[string]("--model", name))
+        case None()     => base
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Cmd builders — these turn one IO action into a self-contained Cmd[Msg]
+// the gala-tui runtime can poll until completion.
+// ----------------------------------------------------------------------------
+
+// NextChunkCmd schedules the next ReadLine on the session's stdout.  When
+// it completes the runtime dispatches a ChunkArrived (success) or
+// SessionFailed (any error other than EOF — see EOF handling below).
+//
+// EOF is treated as a SessionFailed so the orchestrator can transition
+// the member's status to Done and advance the state machine.  Callers
+// that want to distinguish EOF from a real error can match on Err.
+func NextChunkCmd(s MemberSession) Cmd[Msg] {
+    val name = s.Member.Name
+    return AsyncTry[string, Msg](
+        () => s.Process.ReadLine().Get(),
+        (line string) => ChunkArrived(Member = name, Line = line),
+        (err error)   => SessionFailed(Member = name, Err = err),
+    )
+}
+
+// SendCmd writes `prompt` + "\n" to the session's stdin and dispatches a
+// WriteSent (success) or SessionFailed (write error — usually means the
+// child closed stdin or exited).
+func SendCmd(s MemberSession, prompt string) Cmd[Msg] {
+    val name = s.Member.Name
+    return AsyncTry[bool, Msg](
+        () => s.Process.WriteLine(prompt).Get(),
+        (ok bool)   => WriteSent(Member = name),
+        (err error) => SessionFailed(Member = name, Err = err),
+    )
+}
+
+// ----------------------------------------------------------------------------
+// Lifecycle
+// ----------------------------------------------------------------------------
+
+// CloseSession gracefully terminates a member's subprocess: kills it, then
+// waits for the OS to reap it.  Returns Success(true) on a clean shutdown
+// (whether the process was already-exited or had to be killed).  Failure
+// is rare — usually only on I/O errors talking to the kernel.
+func CloseSession(s MemberSession) Try[bool] {
+    val killed = s.Process.Kill()
+    if killed.IsFailure() { return killed }
+    val waited = s.Process.Wait()
+    if waited.IsFailure() {
+        return Failure[bool](waited.GetError())
+    }
+    return Success[bool](true)
+}
+
+// MsgMember extracts the member name from any runtime Msg variant.  Useful
+// for UI dispatch (which member's panel does this Msg pertain to?).
+func MsgMember(msg Msg) string = msg match {
+    case ChunkArrived(name, _)    => name
+    case SessionFailed(name, _)   => name
+    case WriteSent(name)          => name
+}

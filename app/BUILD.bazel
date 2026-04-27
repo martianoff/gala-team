@@ -5,6 +5,7 @@ gala_library(
     srcs = [
         "dispatch_parser.gala",
         "project_resolver.gala",
+        "runtime_glue.gala",
         "state_machine.gala",
         "team_config.gala",
         "types.gala",
@@ -63,5 +64,13 @@ gala_go_test(
     deps = [
         ":app",
         "@gala//collection_immutable",
+    ],
+)
+
+gala_go_test(
+    name = "runtime_glue_test",
+    srcs = ["runtime_glue_test.gala"],
+    deps = [
+        ":app",
     ],
 )

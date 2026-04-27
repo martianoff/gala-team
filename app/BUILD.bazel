@@ -1,0 +1,11 @@
+load("@gala//:gala.bzl", "gala_library")
+
+gala_library(
+    name = "app",
+    srcs = ["types.gala"],
+    importpath = "github.com/martianoff/gala_team/app",
+    deps = [
+        "@gala//collection_immutable",
+    ],
+    visibility = ["//visibility:public"],
+)

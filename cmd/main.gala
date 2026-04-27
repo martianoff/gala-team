@@ -1,0 +1,27 @@
+package main
+
+import (
+    . "github.com/martianoff/gala_team/app"
+)
+
+// ============================================================================
+// gala_team — TUI orchestrator that turns a team of Claude CLI sessions into
+// a single chain-of-command.  The user only ever talks to the Team Lead;
+// the Team Lead delegates to subordinate agents (Engineers, QAs), reviews
+// their work, and produces a final summary + PR for the user to approve.
+//
+// This is the Phase-1 skeleton: enough to verify the build wiring (gala_team
+// → gala stdlib).  The gala_tui integration plugs in once the upstream
+// cross-module transpile issues are resolved (lambda param inference on
+// ArrayTabulate); see TRANSPILER_BUGS.md in the gala_tui tree.
+//
+// Run:
+//     bazel run //cmd:gala_team
+// ============================================================================
+
+func main() {
+    val status = LoadPlaceholder()
+    Println(s"gala_team — Phase 1 skeleton (${status})")
+    Println("  build wiring verified: cmd → app → gala stdlib")
+    Println("  TUI + claude integration land in subsequent commits")
+}

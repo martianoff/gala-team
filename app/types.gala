@@ -1,0 +1,25 @@
+package app
+
+// ============================================================================
+// app/types.gala — Phase 1 skeleton.  Just enough domain types to verify the
+// build wiring; real definitions land in subsequent commits per DESIGN.md §9.
+//
+// The full plan:
+//   - Role / Member / Status / Team               (this file, eventually)
+//   - Project / Policies / Guidance / Registry    (companion files)
+//   - AppState (state machine)                    (state_machine.gala)
+//   - AppModel (Elm model)                        (this file)
+//   - Msg                                         (this file)
+// ============================================================================
+
+sealed type Role { case TeamLead case Engineer case QA }
+
+struct Member(
+    Name        string,
+    Role        Role,
+    Personality string,
+)
+
+// LoadPlaceholder is a stub used by cmd/main.gala to prove the package
+// linkage works end to end.  Will be deleted once startup() is implemented.
+func LoadPlaceholder() string = "skeleton-ok"

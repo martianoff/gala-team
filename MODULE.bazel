@@ -1,0 +1,23 @@
+module(
+    name = "gala_team",
+    version = "0.0.1",
+)
+
+bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "gala", version = "1.0.0")
+bazel_dep(name = "gazelle", version = "0.47.0")
+bazel_dep(name = "rules_go", version = "0.59.0")
+
+# During development, pin gala stdlib to the local sibling checkout so we
+# can iterate without publishing.  Swap to a versioned bazel_central_registry
+# entry once the stdlib ships.
+local_path_override(
+    module_name = "gala",
+    path = "../gala_simple",
+)
+
+go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
+go_sdk.download(version = "1.25.5")
+
+go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
+go_deps.from_file(go_mod = "//:go.mod")

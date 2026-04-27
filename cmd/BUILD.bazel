@@ -1,0 +1,10 @@
+load("@gala//:gala.bzl", "gala_binary")
+
+gala_binary(
+    name = "gala_team",
+    srcs = ["main.gala"],
+    deps = [
+        "//app",
+    ],
+    visibility = ["//visibility:public"],
+)

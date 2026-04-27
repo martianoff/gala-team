@@ -1,0 +1,11 @@
+docs/private/
+transcripts/
+bazel-*
+*.gen.go
+
+# Bazel module lock — regenerated; safe to commit but noisy.
+MODULE.bazel.lock
+
+# Per-project session store created at runtime (subprocess transcripts,
+# AppModel snapshots, worktrees) — see DESIGN.md §4.6.
+.gala_team/

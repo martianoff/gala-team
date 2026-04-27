@@ -1,0 +1,86 @@
+package view
+
+import (
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/view/team_panel — left-side panel showing the crew, grouped by role.
+//
+//   ▼ Lead
+//     ⠋ Iris       working
+//   ▼ Engineering
+//     ⠋ Felix      working
+//     ◇ Mira       idle
+//   ▼ QA
+//     ◇ Theo       idle
+//
+// Status glyphs follow DESIGN.md §8.1.2:
+//   ◇ idle   ⠋ working   ✓ done   ✗ failed   ○ queued
+//
+// Pure rendering: takes a Team value + a per-member status map and emits
+// a gala_tui.Widget.  No state, no IO, no side effects — testable via
+// the gala_tui Snapshot helper.
+// ============================================================================
+
+// TeamPanelView builds the team panel widget for the given team + status
+// snapshot.  Members whose status isn't in `statuses` render as Idle.
+//
+// Phase-1 form is a static Tree (always expanded, no cursor / clicks).
+// Interactive variants (focus highlight, click-to-follow) layer on top
+// in the wire-update-view step.
+func TeamPanelView(team Team, statuses HashMap[string, Status]) Widget {
+    val leadGroup = NewTreeBranchExpanded("Lead",
+        rolePanelRows(team, TeamLead(), statuses))
+    val engGroup = NewTreeBranchExpanded("Engineering",
+        rolePanelRows(team, Engineer(), statuses))
+    val qaGroup = NewTreeBranchExpanded("QA",
+        rolePanelRows(team, QA(), statuses))
+    val root = NewTreeBranchExpanded("Team", ArrayOf[TreeNode](
+        leadGroup, engGroup, qaGroup,
+    ))
+    return Tree(root)
+}
+
+// rolePanelRows produces one TreeLeaf per member of the given role,
+// formatted as "<glyph> <name>    <status>".  Empty role renders no
+// rows (the parent branch becomes empty but still shows its label).
+func rolePanelRows(team Team, role Role, statuses HashMap[string, Status]) Array[TreeNode] =
+    MembersOf(team, role).Map((m Member) =>
+        NewTreeLeaf(memberRowText(m, statuses.Get(m.Name).GetOrElse(StIdle()))))
+
+// memberRowText is the visual encoding of one member row.  Padded to a
+// stable column width so the right-side status text aligns regardless
+// of name length.
+func memberRowText(m Member, status Status) string {
+    val glyph = statusGlyph(status)
+    val padded = padRight(m.Name, 10)
+    return s"${glyph} ${padded} ${StatusName(status)}"
+}
+
+// statusGlyph picks the visual marker for a status.  Spinner (working)
+// is the canonical braille frame; live animation is the caller's job
+// (drive a Tick subscription and pass the current frame's glyph).
+func statusGlyph(status Status) string = status match {
+    case StIdle()    => "◇"
+    case StQueued()  => "○"
+    case StWorking() => "⠋"
+    case StDone()    => "✓"
+    case StFailed(_) => "✗"
+}
+
+// padRight space-pads `s` on the right up to `width`.  Truncates if
+// `s` is already longer than `width` (rare; member names are short).
+func padRight(s string, width int) string {
+    val deficit = width - len(s)
+    if deficit <= 0 { return s }
+    return s + spacesOf(deficit)
+}
+
+// spacesOf returns a string of `n` spaces.  Implemented via FoldLeft
+// over a 1..n range to avoid a manual var loop.
+func spacesOf(n int) string =
+    ArrayTabulate[string](n, (i int) => " ").MkString("")

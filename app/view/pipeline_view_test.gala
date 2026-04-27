@@ -1,0 +1,60 @@
+package main
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/team"
+    . "github.com/martianoff/gala_team/app/view"
+)
+
+func TestPipeline_Empty_ShowsNoActiveTurn(t T) T {
+    val w = PipelineView(EmptyPipelineState())
+    val rendered = Snapshot(w, 40, 4)
+    return IsTrue(t, pContains(rendered, "no active turn"))
+}
+
+func TestPipeline_FanOut_ShowsAllNodes(t T) T {
+    val state = PipelineState(Nodes = ArrayOf[PipelineEvent](
+        PipelineEvent(Member = "Iris",  Status = StWorking{}.Apply()),
+        PipelineEvent(Member = "Felix", Status = StWorking{}.Apply()),
+        PipelineEvent(Member = "Mira",  Status = StIdle{}.Apply()),
+    ))
+    val w = PipelineView(state)
+    val rendered = Snapshot(w, 40, 12)
+    val t1 = IsTrue(t, pContains(rendered, "Iris"))
+    val t2 = IsTrue(t1, pContains(rendered, "Felix"))
+    return IsTrue(t2, pContains(rendered, "Mira"))
+}
+
+func TestPipeline_FailedNode_StillRenders(t T) T {
+    val state = PipelineState(Nodes = ArrayOf[PipelineEvent](
+        PipelineEvent(Member = "Felix", Status = StFailed(Reason = "boom")),
+    ))
+    val w = PipelineView(state)
+    val rendered = Snapshot(w, 40, 4)
+    return IsTrue(t, pContains(rendered, "Felix"))
+}
+
+// pContains: same shape as the team_panel test helper; duplicated here
+// to keep the pipeline test self-contained.
+func pContains(haystack string, needle string) bool {
+    var i = 0
+    val hayLen = len(haystack)
+    val ndlLen = len(needle)
+    if ndlLen == 0 { return true }
+    if hayLen < ndlLen { return false }
+    val limit = hayLen - ndlLen
+    for i <= limit {
+        var j = 0
+        var ok = true
+        for j < ndlLen {
+            if haystack[i + j] != needle[j] { ok = false; j = ndlLen }
+            else { j = j + 1 }
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    return false
+}

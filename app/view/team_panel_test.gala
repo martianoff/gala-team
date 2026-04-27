@@ -1,0 +1,82 @@
+package main
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/team"
+    . "github.com/martianoff/gala_team/app/view"
+)
+
+func skunkworks() Team {
+    val iris = Member(
+        Name = "Iris", Role = TeamLead{}.Apply(),
+        Personality = "calm",
+        Model = None[string]{}.Apply(), Extra = "",
+    )
+    val felix = Member(
+        Name = "Felix", Role = Engineer{}.Apply(),
+        Personality = "terse",
+        Model = None[string]{}.Apply(), Extra = "",
+    )
+    val theo = Member(
+        Name = "Theo", Role = QA{}.Apply(),
+        Personality = "evidence-driven",
+        Model = None[string]{}.Apply(), Extra = "",
+    )
+    return Team(
+        Name    = "Skunkworks",
+        Members = ArrayOf[Member](iris, felix, theo),
+        Lead    = iris,
+    )
+}
+
+func TestTeamPanel_AllIdle_ShowsAllMembers(t T) T {
+    val w = TeamPanelView(skunkworks(), EmptyHashMap[string, Status]())
+    val rendered = Snapshot(w, 40, 12)
+    val t1 = IsTrue(t, contains(rendered, "Iris"))
+    val t2 = IsTrue(t1, contains(rendered, "Felix"))
+    val t3 = IsTrue(t2, contains(rendered, "Theo"))
+    return IsTrue(t3, contains(rendered, "idle"))
+}
+
+func TestTeamPanel_WorkingMember_ShowsSpinnerGlyph(t T) T {
+    val statuses = EmptyHashMap[string, Status]()
+        .Put("Felix", StWorking{}.Apply())
+    val w = TeamPanelView(skunkworks(), statuses)
+    val rendered = Snapshot(w, 40, 12)
+    return IsTrue(t, contains(rendered, "working"))
+}
+
+func TestTeamPanel_DoneAndFailed(t T) T {
+    val statuses = EmptyHashMap[string, Status]()
+        .Put("Felix", StDone{}.Apply())
+        .Put("Theo",  StFailed(Reason = "boom"))
+    val w = TeamPanelView(skunkworks(), statuses)
+    val rendered = Snapshot(w, 40, 12)
+    val t1 = IsTrue(t, contains(rendered, "done"))
+    return IsTrue(t1, contains(rendered, "failed"))
+}
+
+// contains is a test helper so we can assert on substring presence in
+// snapshot output without pulling in strings.* at every call site.
+func contains(haystack string, needle string) bool {
+    var i = 0
+    val hayLen = len(haystack)
+    val ndlLen = len(needle)
+    if ndlLen == 0 { return true }
+    if hayLen < ndlLen { return false }
+    val limit = hayLen - ndlLen
+    for i <= limit {
+        var j = 0
+        var ok = true
+        for j < ndlLen {
+            if haystack[i + j] != needle[j] { ok = false; j = ndlLen }
+            else { j = j + 1 }
+        }
+        if ok { return true }
+        i = i + 1
+    }
+    return false
+}

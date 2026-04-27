@@ -1,0 +1,34 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "view",
+    srcs = [
+        "pipeline_view.gala",
+        "team_panel.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/view",
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    deps = [
+        "//app/team",
+        "@gala//collection_immutable",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "view_test",
+    srcs = [
+        "pipeline_view_test.gala",
+        "team_panel_test.gala",
+    ],
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    deps = [
+        ":view",
+        "//app/team",
+        "@gala//collection_immutable",
+    ],
+)

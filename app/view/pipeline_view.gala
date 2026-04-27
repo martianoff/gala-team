@@ -1,0 +1,78 @@
+package view
+
+import (
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/view/pipeline_view — middle "current dispatch" mini-graph.
+//
+//   You
+//    │
+//   Iris
+//    │
+//   ┌──┴──┐
+// [Felix][Mira]
+//
+// Phase-1 form is a simple text rendering — boxes around member names
+// plus ASCII arrows.  A custom-rendered (CustomW) version with click-
+// hits and lane layout lands in a follow-up commit.
+// ============================================================================
+
+// PipelineEvent is one node in the active turn's dispatch graph.
+//
+// Inactive nodes (the team's other members) are not rendered until they
+// receive a dispatch.  The graph reset on each new user prompt, so the
+// view always shows the *current* turn's structure.
+struct PipelineEvent(
+    Member  string,
+    Status  Status,
+)
+
+// PipelineState carries the nodes for the current turn, in the order
+// they were dispatched.  The first element is the Team Lead (always);
+// subsequent elements are the engineers / QA the TL routed to.
+struct PipelineState(Nodes Array[PipelineEvent])
+
+// EmptyPipelineState — render-time fallback when no turn is active.
+func EmptyPipelineState() PipelineState =
+    PipelineState(Nodes = EmptyArray[PipelineEvent]())
+
+// PipelineView renders the pipeline mini-graph.  Pure: takes a snapshot,
+// returns a Widget — no state, no animation logic (the caller drives
+// the spinner frame via TickSub).
+func PipelineView(state PipelineState) Widget {
+    if state.Nodes.IsEmpty() {
+        return TextStyled("  (no active turn)", DefaultStyle().WithDim())
+    }
+    val rows = state.Nodes.ZipWithIndex().Map((p) => {
+        val (event, i) = p
+        val isFirst = i == 0
+        val connector = if (isFirst) "" else "  │"
+        val box = pipelineBox(event)
+        return Fixed(2, Column(ArrayOf[LayoutChild](
+            Fixed(1, Text(connector)),
+            Fixed(1, box),
+        )))
+    })
+    return Column(rows)
+}
+
+// pipelineBox is one boxed node — `[<glyph><name>]` with the status
+// glyph next to the name.  Failed nodes render in red; working nodes
+// in cyan; everything else default.
+func pipelineBox(event PipelineEvent) Widget {
+    val glyph = statusGlyph(event.Status)
+    val text = s"  [${glyph} ${event.Member}]"
+    return TextStyled(text, pipelineNodeStyle(event.Status))
+}
+
+func pipelineNodeStyle(status Status) Style = status match {
+    case StWorking() => DefaultStyle().WithFg(BrightCyan()).WithBold()
+    case StDone()    => DefaultStyle().WithFg(BrightGreen())
+    case StFailed(_) => DefaultStyle().WithFg(BrightRed())
+    case _           => DefaultStyle()
+}

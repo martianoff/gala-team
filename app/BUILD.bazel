@@ -3,9 +3,11 @@ load("@gala//:gala.bzl", "gala_library")
 gala_library(
     name = "app",
     srcs = ["types.gala"],
+    go_srcs = ["program_helper.go"],
     importpath = "github.com/martianoff/gala_team/app",
     deps = [
         "@gala//collection_immutable",
+        "@gala_tui//:gala_tui",
     ],
     visibility = ["//visibility:public"],
 )

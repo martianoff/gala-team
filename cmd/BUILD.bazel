@@ -5,6 +5,11 @@ gala_binary(
     srcs = ["main.gala"],
     deps = [
         "//app",
+        "@gala//collection_immutable",
+        "@gala//concurrent",
+        "@gala//go_interop",
+        "@gala//time_utils",
+        "@gala_tui//:gala_tui",
     ],
     visibility = ["//visibility:public"],
 )

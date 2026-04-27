@@ -88,9 +88,12 @@ func requireGitRepo(dir string) {
 // chooseGithub picks the override if set; otherwise tries auto-detection.
 // Returns None on any auto-detection failure so the caller's PR-creation
 // path can degrade gracefully ("no GitHub remote — copy diff instead?").
-func chooseGithub(override Option[string], repo string) Option[string] {
-    if override.IsDefined() { return override }
-    return detectGithub(repo)
+//
+// Match (rather than Option.OrElse) is intentional: detectGithub spawns a
+// subprocess, so we want lazy evaluation in the override-is-Some branch.
+func chooseGithub(override Option[string], repo string) Option[string] = override match {
+    case Some(_) => override
+    case None()  => detectGithub(repo)
 }
 
 // detectGithub: `git remote get-url origin` → Some(url) on success, None on
@@ -105,11 +108,9 @@ func detectGithub(repo string) Option[string] {
 
 // chooseDefaultBranch: same shape as chooseGithub, but always yields
 // some string (falls through to "main").
-func chooseDefaultBranch(override Option[string], repo string) string {
-    if override.IsDefined() { return override.Get() }
-    val detected = detectDefaultBranch(repo)
-    if detected.IsDefined() { return detected.Get() }
-    return "main"
+func chooseDefaultBranch(override Option[string], repo string) string = override match {
+    case Some(v) => v
+    case None()  => detectDefaultBranch(repo).GetOrElse("main")
 }
 
 func detectDefaultBranch(repo string) Option[string] {
@@ -146,6 +147,11 @@ func runGit(repo string, args Array[string]) Try[string] = Try[string](() => {
 // drainStdout reads lines until EOF and joins with newlines. EOF is the
 // expected terminator (subprocess.Process.ReadLine returns Failure(io.EOF)
 // when the child closes its stdout pipe).
+//
+// Loop-bound Append is intentional: we're consuming an external stateful
+// pull-stream where each ReadLine call mutates the underlying scanner.
+// No declarative shape (Map/Collect/FoldLeft) fits — there's nothing to
+// fold over until we've already drained.
 func drainStdout(p subprocess.Process) string {
     var sb = EmptyArray[string]()
     for {

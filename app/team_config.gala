@@ -86,6 +86,10 @@ func decodeTeamBlock(d *yaml.YamlDecoderImpl) Tuple[string, Array[Member]] {
     return (name, members)
 }
 
+// Loop-bound Append is intentional: yaml.YamlDecoderImpl is an external
+// stateful pull-cursor, so each element comes from a side-effecting
+// HasMoreElements / decodeMember pair. There's no declarative shape until
+// the array is fully drained.
 func decodeMemberArray(d *yaml.YamlDecoderImpl) Array[Member] {
     var members = EmptyArray[Member]()
     d.StartArray()
@@ -126,16 +130,19 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
     }
     d.EndObject()
 
-    val parsedRole = RoleFromName(roleStr)
-    if !parsedRole.IsDefined() {
-        panic(s"team.yaml: unknown role '${roleStr}' for member '${name}' (expected: team_lead | engineer | qa)")
-    }
     if name == "" {
         panic("team.yaml: member is missing required 'name' field")
     }
+    // Two-step (rather than a `match { case None() => panic }` arm): the
+    // transpiler currently emits `return panic(...)` for a panic-shaped
+    // arm in a value-returning context, which Go rejects as "no value".
+    val roleOpt = RoleFromName(roleStr)
+    if !roleOpt.IsDefined() {
+        panic(s"team.yaml: unknown role '${roleStr}' for member '${name}' (expected: team_lead | engineer | qa)")
+    }
     return Member(
         Name        = name,
-        Role        = parsedRole.Get(),
+        Role        = roleOpt.Get(),
         Personality = personality,
         Model       = modelOpt,
         Extra       = extra,
@@ -207,17 +214,15 @@ func validate(name string, members Array[Member], workflow Workflow) TeamConfig 
         panic("team.yaml: workflow.qa_required is true but no qa members declared")
     }
 
-    // Names unique across the team.
-    var seen = EmptyHashMap[string, bool]()
-    var i = 0
-    for i < members.Length() {
-        val m = members.Get(i)
+    // Names unique across the team — FoldLeft tracks the seen-set in pure
+    // GALA shape; panic short-circuits on the first duplicate so the error
+    // message points at the offender.
+    val _ = members.FoldLeft(EmptyHashMap[string, bool](), (seen, m) => {
         if seen.Contains(m.Name) {
             panic(s"team.yaml: duplicate member name '${m.Name}'")
         }
-        seen = seen.Put(m.Name, true)
-        i = i + 1
-    }
+        return seen.Put(m.Name, true)
+    })
 
     return TeamConfig(
         Team = Team(

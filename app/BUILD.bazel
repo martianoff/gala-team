@@ -3,11 +3,15 @@ load("@gala//:gala.bzl", "gala_go_test", "gala_library")
 gala_library(
     name = "app",
     srcs = [
+        "dispatch_parser.gala",
         "project_resolver.gala",
         "team_config.gala",
         "types.gala",
     ],
-    go_srcs = ["program_helper.go"],
+    go_srcs = [
+        "program_helper.go",
+        "string_helpers.go",
+    ],
     importpath = "github.com/martianoff/gala_team/app",
     deps = [
         "@gala//collection_immutable",
@@ -39,6 +43,14 @@ gala_go_test(
 gala_go_test(
     name = "project_resolver_test",
     srcs = ["project_resolver_test.gala"],
+    deps = [
+        ":app",
+    ],
+)
+
+gala_go_test(
+    name = "dispatch_parser_test",
+    srcs = ["dispatch_parser_test.gala"],
     deps = [
         ":app",
     ],

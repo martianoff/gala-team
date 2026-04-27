@@ -1,0 +1,164 @@
+package app
+
+import (
+    "os"
+    "path/filepath"
+    "strings"
+    "martianoff/gala/subprocess"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+)
+
+// ============================================================================
+// project_resolver.gala — turns `--project <dir>` (+ optional override flags)
+// into a validated Project value.
+//
+// Resolution flow (DESIGN.md §5.2):
+//   1. require <dir> to exist, be a directory, contain a .git entry
+//   2. Project.Name        ← override else basename(<dir>)
+//   3. Project.Github      ← override else `git remote get-url origin`
+//                            (None on any git failure — graceful degrade)
+//   4. Project.DefaultBranch ← override else
+//                            `git symbolic-ref --short refs/remotes/origin/HEAD`
+//                            then strip leading "origin/"; "main" if all fails
+//   5. Project.Repo        ← absolute path of <dir>
+// ============================================================================
+
+// ProjectOverrides is the bag of CLI escape-hatches that win over auto-
+// detection. Empty by default: all fields None.
+struct ProjectOverrides(
+    Name          Option[string],
+    Github        Option[string],
+    DefaultBranch Option[string],
+)
+
+func NoOverrides() ProjectOverrides = ProjectOverrides(
+    Name          = None[string](),
+    Github        = None[string](),
+    DefaultBranch = None[string](),
+)
+
+// ResolveProject is the entry point. Returns Try[Project] so failures
+// (missing dir / not a git repo) surface with useful messages.
+func ResolveProject(dir string, overrides ProjectOverrides) Try[Project] = Try[Project](() => {
+    val abs = absoluteOrPanic(dir)
+    requireGitRepo(abs)
+    val name = overrides.Name.GetOrElse(filepath.Base(abs))
+    val github = chooseGithub(overrides.Github, abs)
+    val branch = chooseDefaultBranch(overrides.DefaultBranch, abs)
+    return Project(
+        Name          = name,
+        Repo          = abs,
+        Github        = github,
+        DefaultBranch = branch,
+    )
+})
+
+// ----------------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------------
+
+func absoluteOrPanic(dir string) string {
+    val abs, err = filepath.Abs(dir)
+    if err != nil {
+        panic(s"--project: cannot resolve absolute path of '${dir}': ${err.Error()}")
+    }
+    return abs
+}
+
+// requireGitRepo panics if `dir` doesn't exist or doesn't have a .git entry.
+// Accepts both real .git directories and worktree gitfiles (so worktrees
+// created by `git worktree add` also validate).
+func requireGitRepo(dir string) {
+    val info, statErr = os.Stat(dir)
+    if statErr != nil {
+        panic(s"--project: '${dir}' does not exist or is not accessible: ${statErr.Error()}")
+    }
+    if !info.IsDir() {
+        panic(s"--project: '${dir}' is not a directory")
+    }
+    val gitPath = filepath.Join(dir, ".git")
+    val _, gitErr = os.Stat(gitPath)
+    if gitErr != nil {
+        panic(s"--project: '${dir}' is not a git repository (no .git entry)")
+    }
+}
+
+// chooseGithub picks the override if set; otherwise tries auto-detection.
+// Returns None on any auto-detection failure so the caller's PR-creation
+// path can degrade gracefully ("no GitHub remote — copy diff instead?").
+func chooseGithub(override Option[string], repo string) Option[string] {
+    if override.IsDefined() { return override }
+    return detectGithub(repo)
+}
+
+// detectGithub: `git remote get-url origin` → Some(url) on success, None on
+// any failure (no remote, no git, etc.). Trims trailing whitespace.
+func detectGithub(repo string) Option[string] {
+    val out = runGit(repo, ArrayOf[string]("remote", "get-url", "origin"))
+    if out.IsFailure() { return None[string]() }
+    val trimmed = strings.TrimSpace(out.Get())
+    if trimmed == "" { return None[string]() }
+    return Some[string](trimmed)
+}
+
+// chooseDefaultBranch: same shape as chooseGithub, but always yields
+// some string (falls through to "main").
+func chooseDefaultBranch(override Option[string], repo string) string {
+    if override.IsDefined() { return override.Get() }
+    val detected = detectDefaultBranch(repo)
+    if detected.IsDefined() { return detected.Get() }
+    return "main"
+}
+
+func detectDefaultBranch(repo string) Option[string] {
+    val out = runGit(repo, ArrayOf[string]("symbolic-ref", "--short", "refs/remotes/origin/HEAD"))
+    if out.IsFailure() { return None[string]() }
+    val trimmed = strings.TrimSpace(out.Get())
+    if trimmed == "" { return None[string]() }
+    val stripped = strings.TrimPrefix(trimmed, "origin/")
+    return Some[string](stripped)
+}
+
+// runGit shells out to git in `repo` with the given args, returning
+// stdout joined with newlines on Success(code=0), or Failure on any
+// non-zero exit / spawn error / IO failure. Stderr is intentionally
+// dropped — the binary error message is rarely useful for the
+// auto-detection use case (we just want "did it work?").
+func runGit(repo string, args Array[string]) Try[string] = Try[string](() => {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        args.ToGoSlice(),
+        SliceEmpty[string](),
+        repo,
+    )
+    val proc = subprocess.Spawn(opts).Get()
+    val out = drainStdout(proc)
+    drainStderr(proc) // discard
+    val code = proc.Wait().Get()
+    if code != 0 {
+        panic(s"git ${args.MkString(" ")} exited with code ${code}")
+    }
+    return out
+})
+
+// drainStdout reads lines until EOF and joins with newlines. EOF is the
+// expected terminator (subprocess.Process.ReadLine returns Failure(io.EOF)
+// when the child closes its stdout pipe).
+func drainStdout(p subprocess.Process) string {
+    var sb = EmptyArray[string]()
+    for {
+        val line = p.ReadLine()
+        if line.IsFailure() { break }
+        sb = sb.Append(line.Get())
+    }
+    return sb.MkString("\n")
+}
+
+func drainStderr(p subprocess.Process) {
+    for {
+        val line = p.ReadStderrLine()
+        if line.IsFailure() { return }
+    }
+}

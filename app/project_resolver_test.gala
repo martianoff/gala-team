@@ -1,0 +1,61 @@
+package main
+
+import (
+    "os"
+    "path/filepath"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "github.com/martianoff/gala_team/app"
+)
+
+// project_resolver tests — only cover the non-shelling-out paths.
+// Real git auto-detection (detectGithub / detectDefaultBranch) is
+// exercised end-to-end by the cmd/main.gala startup path against the
+// developer's working repo; hermetic git fixtures are out of scope for
+// the MVP unit suite.
+
+func TestResolveProject_NonexistentDir_Fails(t T) T {
+    val res = ResolveProject("/nonexistent/path/that/should/not/exist", NoOverrides())
+    return IsFailure(t, res)
+}
+
+func TestResolveProject_NonGitDir_Fails(t T) T {
+    val tmp = mustMkTempDir(t)
+    defer os.RemoveAll(tmp)
+    val res = ResolveProject(tmp, NoOverrides())
+    return IsFailure(t, res)
+}
+
+func TestResolveProject_OverridesWinOverDetection(t T) T {
+    val tmp = mustMkTempDir(t)
+    defer os.RemoveAll(tmp)
+    // Create a fake .git entry so the "is this a repo?" check passes;
+    // we never actually invoke git on the result because all auto-
+    // detected fields have overrides set.
+    val gitDir = filepath.Join(tmp, ".git")
+    val mkErr = os.MkdirAll(gitDir, os.FileMode(0755))
+    val _ = mkErr   // tested via the resolve below — failure would surface there
+
+    val overrides = ProjectOverrides(
+        Name          = Some[string]("my-project"),
+        Github        = Some[string]("github.com/acme/my-project"),
+        DefaultBranch = Some[string]("trunk"),
+    )
+    val res = ResolveProject(tmp, overrides)
+    val t1 = IsSuccess(t, res)
+    val proj = res.Get()
+    val t2 = Eq(t1, proj.Name, "my-project")
+    val t3 = IsTrue(t2, proj.Github.IsDefined())
+    val t4 = Eq(t3, proj.Github.Get(), "github.com/acme/my-project")
+    return Eq(t4, proj.DefaultBranch, "trunk")
+}
+
+// mustMkTempDir creates a unique temp directory; panics on failure (which
+// the test framework surfaces as a clean test failure).
+func mustMkTempDir(t T) string {
+    val dir, err = os.MkdirTemp("", "gala_team_test_*")
+    if err != nil {
+        panic(s"MkdirTemp: ${err.Error()}")
+    }
+    return dir
+}

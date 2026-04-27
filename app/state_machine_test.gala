@@ -1,0 +1,138 @@
+package main
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app"
+)
+
+// ----- Helpers --------------------------------------------------------------
+
+func ctxWithQA(qaRequired bool) TransitionContext = TransitionContext(
+    QAMembers  = ArrayOf[string]("Theo"),
+    QARequired = qaRequired,
+)
+
+func ctxNoQA() TransitionContext = TransitionContext(
+    QAMembers  = EmptyArray[string](),
+    QARequired = false,
+)
+
+// stateName extracts a string label so test failures show readable diffs
+// instead of opaque AppState dumps.
+func stateName(s AppState) string = s match {
+    case Idle()           => "Idle"
+    case TLThinking()     => "TLThinking"
+    case Delegating(_)    => "Delegating"
+    case QAGate(_)        => "QAGate"
+    case TLReview()       => "TLReview"
+    case Approval(_)      => "Approval"
+}
+
+func dispatchTo(name string) Directive = Dispatch(Target = name, Body = "do work")
+func summary(body string) Directive    = Summary(Body = body)
+
+// ----- Idle ↔ TLThinking ----------------------------------------------------
+
+func TestIdle_OnUserPrompt_GoesToTLThinking(t T) T {
+    val s = Transition(Idle(), UserPrompted(), ctxWithQA(true))
+    return Eq(t, stateName(s), "TLThinking")
+}
+
+func TestIdle_OnIrrelevantEvent_StaysIdle(t T) T {
+    val s = Transition(Idle(), QADone(), ctxWithQA(true))
+    return Eq(t, stateName(s), "Idle")
+}
+
+// ----- TLThinking → Delegating / Approval / Idle ----------------------------
+
+func TestTLThinking_OnDispatchDirectives_GoesToDelegating(t T) T {
+    val dirs = ArrayOf[Directive](dispatchTo("Felix"), dispatchTo("Mira"))
+    val s = Transition(TLThinking(), TLDone(Directives = dirs), ctxWithQA(true))
+    return Eq(t, stateName(s), "Delegating")
+}
+
+func TestTLThinking_OnSummary_GoesToApproval(t T) T {
+    val dirs = ArrayOf[Directive](summary("## Done"))
+    val s = Transition(TLThinking(), TLDone(Directives = dirs), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "Approval")
+    return s match {
+        case Approval(body) => Eq(t1, body, "## Done")
+        case _              => IsTrue(t1, false)
+    }
+}
+
+func TestTLThinking_OnNoDirectives_BackToIdle(t T) T {
+    val dirs = EmptyArray[Directive]()
+    val s = Transition(TLThinking(), TLDone(Directives = dirs), ctxWithQA(true))
+    return Eq(t, stateName(s), "Idle")
+}
+
+func TestTLThinking_SummaryBeatsDispatch(t T) T {
+    val dirs = ArrayOf[Directive](dispatchTo("Felix"), summary("override"))
+    val s = Transition(TLThinking(), TLDone(Directives = dirs), ctxWithQA(true))
+    return Eq(t, stateName(s), "Approval")
+}
+
+// ----- Delegating drains pending → QAGate / TLReview ------------------------
+
+func TestDelegating_OneMemberDone_StaysDelegating(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix"), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "Delegating")
+    return s match {
+        case Delegating(rest) => Eq(t1, rest.Size(), 1)
+        case _                => IsTrue(t1, false)
+    }
+}
+
+func TestDelegating_AllDone_QARequired_GoesToQAGate(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix"), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "QAGate")
+    return s match {
+        case QAGate(qaPending) => Eq(t1, qaPending.Size(), 1) // contains Theo
+        case _                 => IsTrue(t1, false)
+    }
+}
+
+func TestDelegating_AllDone_NoQA_GoesToTLReview(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix"), ctxNoQA())
+    return Eq(t, stateName(s), "TLReview")
+}
+
+// ----- QAGate → TLReview ----------------------------------------------------
+
+func TestQAGate_OnQADone_GoesToTLReview(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo")
+    val s = Transition(QAGate(Pending = pending), QADone(), ctxWithQA(true))
+    return Eq(t, stateName(s), "TLReview")
+}
+
+// ----- Approval lifecycle ---------------------------------------------------
+
+func TestApproval_Accepted_BackToIdle(t T) T {
+    val s = Transition(Approval(SummaryBody = "..."), ApprovalAccepted(), ctxWithQA(true))
+    return Eq(t, stateName(s), "Idle")
+}
+
+func TestApproval_Rejected_BackToIdle(t T) T {
+    val s = Transition(Approval(SummaryBody = "..."), ApprovalRejected(), ctxWithQA(true))
+    return Eq(t, stateName(s), "Idle")
+}
+
+// ----- TL review re-runs the dispatch logic ---------------------------------
+
+func TestTLReview_OnSummary_GoesToApproval(t T) T {
+    val dirs = ArrayOf[Directive](summary("final"))
+    val s = Transition(TLReview(), TLDone(Directives = dirs), ctxWithQA(true))
+    return Eq(t, stateName(s), "Approval")
+}
+
+func TestTLReview_OnDispatch_GoesBackToDelegating(t T) T {
+    val dirs = ArrayOf[Directive](dispatchTo("Felix"))
+    val s = Transition(TLReview(), TLDone(Directives = dirs), ctxWithQA(true))
+    return Eq(t, stateName(s), "Delegating")
+}

@@ -5,6 +5,7 @@ gala_library(
     srcs = [
         "dispatch_parser.gala",
         "project_resolver.gala",
+        "state_machine.gala",
         "team_config.gala",
         "types.gala",
     ],
@@ -53,5 +54,14 @@ gala_go_test(
     srcs = ["dispatch_parser_test.gala"],
     deps = [
         ":app",
+    ],
+)
+
+gala_go_test(
+    name = "state_machine_test",
+    srcs = ["state_machine_test.gala"],
+    deps = [
+        ":app",
+        "@gala//collection_immutable",
     ],
 )

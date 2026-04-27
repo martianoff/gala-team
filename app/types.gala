@@ -120,22 +120,26 @@ struct Project(
 // ----------------------------------------------------------------------------
 
 // Status is the live state of one member.  Pure value — the state machine
-// in app/state_machine.gala (later commit) flips members through these
-// transitions in response to subprocess events.
+// in app/state_machine.gala flips members through these transitions in
+// response to subprocess events.
+//
+// Cases use the `St` prefix to avoid shadowing the AppState orchestration
+// cases defined in state_machine.gala (which also has an `Idle` variant).
+// GALA case constructors share package namespace.
 sealed type Status {
-    case Idle
-    case Queued
-    case Working
-    case Done
-    case Failed(Reason string)
+    case StIdle
+    case StQueued
+    case StWorking
+    case StDone
+    case StFailed(Reason string)
 }
 
 func StatusName(s Status) string = s match {
-    case Idle()    => "idle"
-    case Queued()  => "queued"
-    case Working() => "working"
-    case Done()    => "done"
-    case Failed(_) => "failed"
+    case StIdle()    => "idle"
+    case StQueued()  => "queued"
+    case StWorking() => "working"
+    case StDone()    => "done"
+    case StFailed(_) => "failed"
 }
 
 // ----------------------------------------------------------------------------

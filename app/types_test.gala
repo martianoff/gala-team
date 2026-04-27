@@ -61,11 +61,11 @@ func TestMemberByName(t T) T {
 }
 
 func TestStatusName(t T) T {
-    val t1 = Eq(t,  StatusName(Idle{}.Apply()),    "idle")
-    val t2 = Eq(t1, StatusName(Queued{}.Apply()),  "queued")
-    val t3 = Eq(t2, StatusName(Working{}.Apply()), "working")
-    val t4 = Eq(t3, StatusName(Done{}.Apply()),    "done")
-    return Eq(t4, StatusName(Failed(Reason = "boom")), "failed")
+    val t1 = Eq(t,  StatusName(StIdle{}.Apply()),    "idle")
+    val t2 = Eq(t1, StatusName(StQueued{}.Apply()),  "queued")
+    val t3 = Eq(t2, StatusName(StWorking{}.Apply()), "working")
+    val t4 = Eq(t3, StatusName(StDone{}.Apply()),    "done")
+    return Eq(t4, StatusName(StFailed(Reason = "boom")), "failed")
 }
 
 func TestDefaultWorkflow(t T) T {

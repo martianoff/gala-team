@@ -1,4 +1,4 @@
-load("@gala//:gala.bzl", "gala_library")
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
 
 gala_library(
     name = "app",
@@ -10,4 +10,13 @@ gala_library(
         "@gala_tui//:gala_tui",
     ],
     visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "types_test",
+    srcs = ["types_test.gala"],
+    deps = [
+        ":app",
+        "@gala//collection_immutable",
+    ],
 )

@@ -1,25 +1,147 @@
 package app
 
+import (
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
 // ============================================================================
-// app/types.gala — Phase 1 skeleton.  Just enough domain types to verify the
-// build wiring; real definitions land in subsequent commits per DESIGN.md §9.
+// Domain types for gala_team — see DESIGN.md §9 for the full plan.
 //
-// The full plan:
-//   - Role / Member / Status / Team               (this file, eventually)
-//   - Project / Policies / Guidance / Registry    (companion files)
-//   - AppState (state machine)                    (state_machine.gala)
-//   - AppModel (Elm model)                        (this file)
-//   - Msg                                         (this file)
+// This file owns the value objects that downstream layers (config loaders,
+// state machine, runtime glue, view) all share.  Everything is immutable
+// (`val` semantics by default; no `var` fields) so the Elm-style update()
+// can reason about state without aliasing surprises.
+//
+// All construction below uses the natural Type() / Variant() form because
+// these types are defined and consumed in the same package.  Cross-module
+// callers (e.g. cmd/main.gala using gala_tui types) need the explicit
+// Type{}.Apply() workaround — see TRANSPILER_BUG_GALA_TUI_CROSSMODULE.md.
 // ============================================================================
 
-sealed type Role { case TeamLead case Engineer case QA }
+// ----------------------------------------------------------------------------
+// Team composition (loaded from team.yaml — see §5.1)
+// ----------------------------------------------------------------------------
 
+// Role identifies what a member does.  MVP catalogue is hard-coded; future
+// versions can extend this when a real second team running gala_team needs
+// e.g. Designer or PM.
+sealed type Role {
+    case TeamLead
+    case Engineer
+    case QA
+}
+
+// RoleName returns the canonical YAML spelling used in team.yaml.
+func RoleName(r Role) string = r match {
+    case TeamLead() => "team_lead"
+    case Engineer() => "engineer"
+    case QA()       => "qa"
+}
+
+// RoleFromName parses the canonical YAML spelling back to a Role; None on
+// unknown input so callers can surface a useful validation error pointing
+// at the offending line.
+func RoleFromName(s string) Option[Role] {
+    if s == "team_lead" { return Some[Role](TeamLead()) }
+    if s == "engineer"  { return Some[Role](Engineer()) }
+    if s == "qa"        { return Some[Role](QA()) }
+    return None[Role]()
+}
+
+// Member is one Claude session in the team — a name, a role, a personality
+// blurb, and (optionally) a model override + extra system instructions.
 struct Member(
     Name        string,
     Role        Role,
     Personality string,
+    Model       Option[string],
+    Extra       string,
 )
 
-// LoadPlaceholder is a stub used by cmd/main.gala to prove the package
-// linkage works end to end.  Will be deleted once startup() is implemented.
+// Workflow describes how *this team* operates internally — distinct from
+// per-project policy (.gala_team.yaml, see §5.4).  All fields are optional
+// in the YAML; defaults are applied at load time.
+struct Workflow(
+    QARequired         bool,
+    ParallelEngineers  bool,
+    RequireUserConfirm bool,
+)
+
+// DefaultWorkflow — applied when team.yaml omits the `workflow:` block, or
+// individual fields within it.
+func DefaultWorkflow() Workflow = Workflow(
+    QARequired         = true,
+    ParallelEngineers  = true,
+    RequireUserConfirm = true,
+)
+
+// Team is the loaded team.yaml: a name plus an ordered list of members
+// plus a precomputed Lead pointer for convenience.  Order is preserved so
+// the UI shows roles in the user's authored order, not alphabetised.
+struct Team(
+    Name    string,
+    Members Array[Member],
+    Lead    Member,
+)
+
+// MembersOf returns the members with the given role, in source order.
+func MembersOf(t Team, r Role) Array[Member] =
+    t.Members.Filter((m) => isSameRole(m.Role, r))
+
+// MemberByName looks up a member; None if no match.  Names are unique
+// within a team (validated at load time, in app/team_config.gala).
+func MemberByName(t Team, name string) Option[Member] {
+    val matches = t.Members.Filter((m) => m.Name == name)
+    if matches.IsEmpty() { return None[Member]() }
+    return Some[Member](matches.Get(0))
+}
+
+// isSameRole compares two Role values via name (cheap and exhaustive).
+// Avoids a tuple-match which the analyzer prefers to keep simple.
+func isSameRole(a Role, b Role) bool = RoleName(a) == RoleName(b)
+
+// ----------------------------------------------------------------------------
+// Project context (resolved from --project + git, see §5.2)
+// ----------------------------------------------------------------------------
+
+// Project carries everything we know about *what* the team is working on.
+// Repo is always an absolute path here — relative paths get resolved by
+// the loader before construction.
+struct Project(
+    Name          string,
+    Repo          string,
+    Github        Option[string],
+    DefaultBranch string,
+)
+
+// ----------------------------------------------------------------------------
+// Per-member status (drives the team panel pills + spinners, see §8.1)
+// ----------------------------------------------------------------------------
+
+// Status is the live state of one member.  Pure value — the state machine
+// in app/state_machine.gala (later commit) flips members through these
+// transitions in response to subprocess events.
+sealed type Status {
+    case Idle
+    case Queued
+    case Working
+    case Done
+    case Failed(Reason string)
+}
+
+func StatusName(s Status) string = s match {
+    case Idle()    => "idle"
+    case Queued()  => "queued"
+    case Working() => "working"
+    case Done()    => "done"
+    case Failed(_) => "failed"
+}
+
+// ----------------------------------------------------------------------------
+// Skeleton sentinel — drop once cmd/main.gala has real work to do.
+// ----------------------------------------------------------------------------
+
+// LoadPlaceholder is removed in the next commit when team_config.gala
+// brings in a real loadTeam(path) entry point.
 func LoadPlaceholder() string = "skeleton-ok"

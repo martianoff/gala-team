@@ -1,0 +1,9 @@
+common --enable_bzlmod
+common --noenable_workspace
+build --enable_runfiles
+
+# Pass GOROOT and PATH to genrules so the transpiler can use go/importer to
+# resolve Go package types (function signatures, struct fields, method
+# sets, etc.). Required for cross-language type inference.
+build --action_env=GOROOT
+build --action_env=PATH

@@ -2,11 +2,15 @@ load("@gala//:gala.bzl", "gala_go_test", "gala_library")
 
 gala_library(
     name = "app",
-    srcs = ["types.gala"],
+    srcs = [
+        "team_config.gala",
+        "types.gala",
+    ],
     go_srcs = ["program_helper.go"],
     importpath = "github.com/martianoff/gala_team/app",
     deps = [
         "@gala//collection_immutable",
+        "@gala//yaml",
         "@gala_tui//:gala_tui",
     ],
     visibility = ["//visibility:public"],
@@ -18,5 +22,13 @@ gala_go_test(
     deps = [
         ":app",
         "@gala//collection_immutable",
+    ],
+)
+
+gala_go_test(
+    name = "team_config_test",
+    srcs = ["team_config_test.gala"],
+    deps = [
+        ":app",
     ],
 )

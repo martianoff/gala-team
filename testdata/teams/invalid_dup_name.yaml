@@ -1,0 +1,10 @@
+team:
+  name: "Conflict"
+  members:
+    - role: team_lead
+      name: "Iris"
+      personality: "First Iris."
+
+    - role: engineer
+      name: "Iris"
+      personality: "Second Iris — duplicate name should fail."

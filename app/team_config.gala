@@ -1,0 +1,230 @@
+package app
+
+import (
+    "martianoff/gala/yaml"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// team_config.gala — loads a team.yaml file into a validated Team + Workflow.
+//
+// The yaml package's Codec[T] is the right tool conceptually, but its
+// generated decoder doesn't handle struct fields whose type is Array[T] or
+// HashMap (a Phase-2 TODO tracked in gala_simple/json/codec_typed.go).
+// Members are an Array[Member] so we'd hit that limitation immediately.
+//
+// Workaround until the codec catches up: drive yaml.NewYamlDecoder via its
+// public FieldDecoder API directly.  More verbose than `Codec[TeamConfig]`
+// but bypasses the array-decode gap and gives us precise control over
+// which fields are required vs ignored.  See DESIGN.md §5.1, §5.3.
+// ============================================================================
+
+// LoadTeamFromString parses a YAML document into (Team, Workflow), returning
+// Failure with a descriptive error on parse / validation problems.  Path-
+// based loading lives in the caller; this entry point keeps IO out of the
+// pure parser so unit tests can drive it with literals.
+func LoadTeamFromString(yamlStr string) Try[TeamConfig] = Try[TeamConfig](() => {
+    val d = yaml.NewYamlDecoder(yamlStr)
+    return decodeTopLevel(d)
+})
+
+// TeamConfig is what LoadTeamFromString returns: the validated team plus
+// the workflow defaults applied.  Higher-level callers fold this into the
+// AppModel along with Project / Policies / Guidance / Registry siblings.
+struct TeamConfig(Team Team, Workflow Workflow)
+
+// ----------------------------------------------------------------------------
+// Manual decoder
+// ----------------------------------------------------------------------------
+
+func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
+    d.StartObject()
+    var teamName = ""
+    var members = EmptyArray[Member]()
+    var workflow = DefaultWorkflow()
+    var sawTeam = false
+
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == "team" {
+            sawTeam = true
+            val (nm, ms) = decodeTeamBlock(d)
+            teamName = nm
+            members = ms
+        } else if key == "workflow" {
+            workflow = decodeWorkflowBlock(d)
+        } else {
+            // Forward-compatible: unknown top-level keys are ignored.
+            // Future `consult:`, `policy_overrides:`, etc. land cleanly.
+            d.Skip()
+        }
+    }
+    d.EndObject()
+
+    if !sawTeam {
+        panic("team.yaml: top-level 'team:' block is required")
+    }
+    return validate(teamName, members, workflow)
+}
+
+func decodeTeamBlock(d *yaml.YamlDecoderImpl) Tuple[string, Array[Member]] {
+    d.StartObject()
+    var name = ""
+    var members = EmptyArray[Member]()
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == "name" {
+            name = d.ReadString()
+        } else if key == "members" {
+            members = decodeMemberArray(d)
+        } else {
+            d.Skip()
+        }
+    }
+    d.EndObject()
+    return (name, members)
+}
+
+func decodeMemberArray(d *yaml.YamlDecoderImpl) Array[Member] {
+    var members = EmptyArray[Member]()
+    d.StartArray()
+    for d.HasMoreElements() {
+        members = members.Append(decodeMember(d))
+    }
+    d.EndArray()
+    return members
+}
+
+func decodeMember(d *yaml.YamlDecoderImpl) Member {
+    d.StartObject()
+    var roleStr = ""
+    var name = ""
+    var personality = ""
+    var modelOpt = None[string]()
+    var extra = ""
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == "role" {
+            roleStr = d.ReadString()
+        } else if key == "name" {
+            name = d.ReadString()
+        } else if key == "personality" {
+            personality = d.ReadString()
+        } else if key == "model" {
+            // Keep null/missing as None so the CLI's --model default applies.
+            if d.IsNull() {
+                d.ReadNull()
+            } else {
+                modelOpt = Some[string](d.ReadString())
+            }
+        } else if key == "extra_instructions" {
+            extra = d.ReadString()
+        } else {
+            d.Skip()
+        }
+    }
+    d.EndObject()
+
+    val parsedRole = RoleFromName(roleStr)
+    if !parsedRole.IsDefined() {
+        panic(s"team.yaml: unknown role '${roleStr}' for member '${name}' (expected: team_lead | engineer | qa)")
+    }
+    if name == "" {
+        panic("team.yaml: member is missing required 'name' field")
+    }
+    return Member(
+        Name        = name,
+        Role        = parsedRole.Get(),
+        Personality = personality,
+        Model       = modelOpt,
+        Extra       = extra,
+    )
+}
+
+func decodeWorkflowBlock(d *yaml.YamlDecoderImpl) Workflow {
+    d.StartObject()
+    var qa = true
+    var parallel = true
+    var requireConfirm = true
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == "qa_required" {
+            qa = d.ReadBool()
+        } else if key == "parallel_engineers" {
+            parallel = d.ReadBool()
+        } else if key == "approval" {
+            // approval: { require_user_confirm: bool }
+            d.StartObject()
+            for d.HasMoreFields() {
+                val ak = d.ReadKey()
+                if ak == "require_user_confirm" {
+                    requireConfirm = d.ReadBool()
+                } else {
+                    d.Skip()
+                }
+            }
+            d.EndObject()
+        } else {
+            d.Skip()
+        }
+    }
+    d.EndObject()
+    return Workflow(
+        QARequired         = qa,
+        ParallelEngineers  = parallel,
+        RequireUserConfirm = requireConfirm,
+    )
+}
+
+// ----------------------------------------------------------------------------
+// Validation — runs after decode so we can give precise error messages.
+// ----------------------------------------------------------------------------
+
+func validate(name string, members Array[Member], workflow Workflow) TeamConfig {
+    if name == "" {
+        panic("team.yaml: team.name is required and must be non-empty")
+    }
+    if members.IsEmpty() {
+        panic("team.yaml: team.members must contain at least one member")
+    }
+
+    // Exactly one team_lead.
+    val leads = members.Filter((m) => isSameRole(m.Role, TeamLead()))
+    if leads.Length() != 1 {
+        panic(s"team.yaml: must declare exactly one team_lead (found ${leads.Length()})")
+    }
+
+    // At least one engineer.
+    val engineers = members.Filter((m) => isSameRole(m.Role, Engineer()))
+    if engineers.IsEmpty() {
+        panic("team.yaml: at least one engineer is required")
+    }
+
+    // QAs optional only if workflow.qa_required = false.
+    val qas = members.Filter((m) => isSameRole(m.Role, QA()))
+    if workflow.QARequired && qas.IsEmpty() {
+        panic("team.yaml: workflow.qa_required is true but no qa members declared")
+    }
+
+    // Names unique across the team.
+    var seen = EmptyHashMap[string, bool]()
+    var i = 0
+    for i < members.Length() {
+        val m = members.Get(i)
+        if seen.Contains(m.Name) {
+            panic(s"team.yaml: duplicate member name '${m.Name}'")
+        }
+        seen = seen.Put(m.Name, true)
+        i = i + 1
+    }
+
+    return TeamConfig(
+        Team = Team(
+            Name    = name,
+            Members = members,
+            Lead    = leads.Get(0),
+        ),
+        Workflow = workflow,
+    )
+}

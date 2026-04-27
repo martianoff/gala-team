@@ -9,3 +9,7 @@ MODULE.bazel.lock
 # Per-project session store created at runtime (subprocess transcripts,
 # AppModel snapshots, worktrees) — see DESIGN.md §4.6.
 .gala_team/
+
+# Bazel-managed local workspace cache for transpiled GALA stdlib;
+# regenerated on every `bazel build`, never edited by hand.
+.gala/

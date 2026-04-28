@@ -105,6 +105,11 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
     var personality = ""
     var modelOpt = None[string]()
     var extra = ""
+    // NOTE: kept as if-else-if rather than `match` per
+    // docs/private/TRANSPILER_BUGS_LINT_FIXUP_BLOCKERS.md #4 — the
+    // recommended `match`-as-statement form lowers void-returning arms
+    // (d.Skip(), d.ReadNull()) into Go's `_ = void()`, which doesn't
+    // compile.
     for d.HasMoreFields() {
         val key = d.ReadKey()
         if key == "role" {
@@ -117,7 +122,7 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
             if d.IsNull() {
                 d.ReadNull()
             } else {
-                modelOpt = Some[string](d.ReadString())
+                modelOpt = Some(d.ReadString())
             }
         } else if key == "extra_instructions" {
             extra = d.ReadString()
@@ -148,6 +153,7 @@ func decodeWorkflowBlock(d *yaml.YamlDecoderImpl) Workflow {
     var qa = true
     var parallel = true
     var requireConfirm = true
+    // See team_config.gala::decodeMember note about TRANSPILER_BUGS_LINT_FIXUP_BLOCKERS.md #4.
     for d.HasMoreFields() {
         val key = d.ReadKey()
         if key == "qa_required" {

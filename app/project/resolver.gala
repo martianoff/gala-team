@@ -104,27 +104,23 @@ func chooseGithub(override Option[string], repo string) Option[string] = overrid
     case None()  => detectGithub(repo)
 }
 
-func detectGithub(repo string) Option[string] {
-    val out = runGit(repo, ArrayOf[string]("remote", "get-url", "origin"))
-    if out.IsFailure() { return None[string]() }
-    val trimmed = strings.TrimSpace(out.Get())
-    if trimmed == "" { return None[string]() }
-    return Some[string](trimmed)
-}
+func detectGithub(repo string) Option[string] =
+    runGit(repo, ArrayOf("remote", "get-url", "origin"))
+        .ToOption()
+        .Map((out) => strings.TrimSpace(out))
+        .Filter((s) => s != "")
 
 func chooseDefaultBranch(override Option[string], repo string) string = override match {
     case Some(v) => v
     case None()  => detectDefaultBranch(repo).GetOrElse("main")
 }
 
-func detectDefaultBranch(repo string) Option[string] {
-    val out = runGit(repo, ArrayOf[string]("symbolic-ref", "--short", "refs/remotes/origin/HEAD"))
-    if out.IsFailure() { return None[string]() }
-    val trimmed = strings.TrimSpace(out.Get())
-    if trimmed == "" { return None[string]() }
-    val stripped = strings.TrimPrefix(trimmed, "origin/")
-    return Some[string](stripped)
-}
+func detectDefaultBranch(repo string) Option[string] =
+    runGit(repo, ArrayOf("symbolic-ref", "--short", "refs/remotes/origin/HEAD"))
+        .ToOption()
+        .Map((out) => strings.TrimSpace(out))
+        .Filter((s) => s != "")
+        .Map((s) => strings.TrimPrefix(s, "origin/"))
 
 // runGit shells out to git in `repo` with the given args, returning
 // stdout joined with newlines on Success(code=0), or Failure on any

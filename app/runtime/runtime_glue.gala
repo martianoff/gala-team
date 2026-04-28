@@ -52,23 +52,21 @@ struct MemberSession(
 // optionally pinned to `m.Model` if set.  Returns Try[MemberSession];
 // failure carries the underlying spawn error.
 func SpawnSession(proj Project, m Member) Try[MemberSession] {
-    val args = claudeArgs(m)
     val opts = subprocess.NewSpawnOpts(
         "claude",
-        args.ToGoSlice(),
+        claudeArgs(m).ToGoSlice(),
         SliceEmpty[string](),
         proj.Repo,
     )
-    val spawned = subprocess.Spawn(opts)
-    return spawned.Map((p subprocess.Process) => MemberSession(Member = m, Process = p))
+    return subprocess.Spawn(opts).Map((p) => MemberSession(Member = m, Process = p))
 }
 
 // claudeArgs assembles the standard `claude` CLI flags. We always use
 // stream-json so the FieldDecoder parser can walk chunks line-by-line.
 func claudeArgs(m Member) Array[string] {
-    val base = ArrayOf[string]("--output-format", "stream-json")
+    val base = ArrayOf("--output-format", "stream-json")
     return m.Model match {
-        case Some(name) => base.AppendAll(ArrayOf[string]("--model", name))
+        case Some(name) => base.AppendAll(ArrayOf("--model", name))
         case None()     => base
     }
 }
@@ -86,12 +84,9 @@ func claudeArgs(m Member) Array[string] {
 // distinguish "stream done" from a real failure.
 func NextChunkFuture(s MemberSession) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => {
-        val res = s.Process.ReadLine()
-        if res.IsSuccess() {
-            return RtChunkArrived(Member = name, Line = res.Get())
-        }
-        return RtSessionFailed(Member = name, Err = res.GetError())
+    return concurrent.FutureApply[Msg](() => s.Process.ReadLine() match {
+        case Success(line) => RtChunkArrived(Member = name, Line = line)
+        case Failure(err)  => RtSessionFailed(Member = name, Err = err)
     })
 }
 
@@ -100,12 +95,9 @@ func NextChunkFuture(s MemberSession) concurrent.Future[Msg] {
 // (write error — usually means the child closed stdin or exited).
 func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => {
-        val res = s.Process.WriteLine(prompt)
-        if res.IsSuccess() {
-            return RtWriteSent(Member = name)
-        }
-        return RtSessionFailed(Member = name, Err = res.GetError())
+    return concurrent.FutureApply[Msg](() => s.Process.WriteLine(prompt) match {
+        case Success(_)   => RtWriteSent(Member = name)
+        case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })
 }
 
@@ -114,15 +106,18 @@ func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
 // ----------------------------------------------------------------------------
 
 // CloseSession gracefully terminates a member's subprocess: kills it, then
-// waits for the OS to reap it.
-func CloseSession(s MemberSession) Try[bool] {
-    val killed = s.Process.Kill()
-    if killed.IsFailure() { return killed }
-    val waited = s.Process.Wait()
-    if waited.IsFailure() {
-        return Failure[bool](waited.GetError())
+// waits for the OS to reap it. The first failure short-circuits and the
+// result is Success(true) only when both legs succeed.
+//
+// Plain Try.FlatMap chaining loses the inner type param through the
+// transpiler's current inference, so we write the short-circuit as a
+// match — equivalent shape, no transpiler smell.
+func CloseSession(s MemberSession) Try[bool] = s.Process.Kill() match {
+    case Failure(err) => Failure[bool](err)
+    case Success(_)   => s.Process.Wait() match {
+        case Failure(err) => Failure[bool](err)
+        case Success(_)   => Success[bool](true)
     }
-    return Success[bool](true)
 }
 
 // MsgMember extracts the member name from any runtime Msg variant.

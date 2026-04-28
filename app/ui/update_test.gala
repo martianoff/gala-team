@@ -240,3 +240,122 @@ func TestPreMergeHooksFailed_StopsPipelineWithError(t T) T {
     val t2 = Eq(t1, m.Conversation.Size(), 1)
     return Eq(t2, m.Conversation.Get(0).Text, "pre-merge hooks: ✗ lint exited with code 1: 3 issues")
 }
+
+// ---------------------------------------------------------------------------
+// Keyboard edge cases
+// ---------------------------------------------------------------------------
+
+// Multi-byte UTF-8 (emoji) typed into the composer should render as a
+// single visual character. Critical because backspace below relies on
+// rune-aware trimming, not byte-fiddling.
+func TestKeyChar_AcceptsMultiByteRune(t T) T {
+    val (m, _) = Update(sampleModel(), KeyChar(C = '🚀'))
+    return Eq(t, m.Composer, "🚀")
+}
+
+// Backspace must trim *one rune*, not one byte — otherwise a multi-byte
+// emoji would leave a trailing UTF-8 continuation byte and corrupt the
+// composer string.
+func TestKeyBackspace_TrimsOneRuneNotOneByte(t T) T {
+    val (m1, _) = Update(sampleModel(),  KeyChar(C = 'x'))
+    val (m2, _) = Update(m1,             KeyChar(C = '🚀'))
+    val t1 = Eq(t, m2.Composer, "x🚀")
+    val (m3, _) = Update(m2, KeyBackspace())
+    return Eq(t1, m3.Composer, "x")
+}
+
+// Accented Latin-1 letters (é, ñ) round-trip through KeyChar. Sanity
+// check that the rune-based path doesn't lose information for the
+// common European-text case.
+func TestKeyChar_PreservesAccentedLatin(t T) T {
+    val (m1, _) = Update(sampleModel(), KeyChar(C = 'é'))
+    val (m2, _) = Update(m1,            KeyChar(C = 'ñ'))
+    return Eq(t, m2.Composer, "éñ")
+}
+
+// Space comes through as KeyChar(' '), not a separate variant.
+func TestKeyChar_SpaceIsRegularChar(t T) T {
+    val (m1, _) = Update(sampleModel(), KeyChar(C = 'a'))
+    val (m2, _) = Update(m1,            KeyChar(C = ' '))
+    val (m3, _) = Update(m2,            KeyChar(C = 'b'))
+    return Eq(t, m3.Composer, "a b")
+}
+
+// Tick should bump only the counter, never touch the composer or the
+// conversation log. Catches accidental field-stomp regressions in the
+// Copy() chain.
+func TestTickMsg_DoesNotStompComposerOrConversation(t T) T {
+    val seed = sampleModel().Copy(
+        Composer     = "draft",
+        Conversation = ArrayOf(ConversationLine(Speaker = "you", Text = "earlier")),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    val t1 = Eq(t, m.Composer, "draft")
+    val t2 = Eq(t1, m.Conversation.Size(), 1)
+    return Eq(t2, m.Tick, 1)
+}
+
+// Submitting the same prompt twice in a row only logs once into the
+// conversation when the second submit happens with an empty composer
+// (the first one cleared it).
+func TestKeySubmit_DoubleSubmitIsIdempotentOnEmpty(t T) T {
+    val seed = sampleModel().Copy(Composer = "hello")
+    val (m1, _) = Update(seed, KeySubmit())
+    val (m2, _) = Update(m1,   KeySubmit())  // composer is empty now
+    return Eq(t, m2.Conversation.Size(), 1)
+}
+
+// SessionFailed for a member that's not in m.Sessions should not
+// crash; Remove on a missing key is a no-op and LastError still
+// gets the wrapped message.
+func TestSessionFailed_OnUnknownMember_LogsAnyway(t T) T {
+    val (m, _) = Update(sampleModel(), SessionFailed(Member = "Ghost", ErrText = "EOF"))
+    return m.LastError match {
+        case Some(s) => Eq(t, s, "Ghost: EOF")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// Two ChunkArrived messages for different speakers append in order
+// and don't collapse / dedupe.
+func TestChunkArrived_DifferentSpeakersInterleave(t T) T {
+    val (m1, _) = Update(sampleModel(), ChunkArrived(Member = "Iris",  Line = "line A"))
+    val (m2, _) = Update(m1,            ChunkArrived(Member = "Felix", Line = "line B"))
+    val t1 = Eq(t,  m2.Conversation.Size(),                2)
+    val t2 = Eq(t1, m2.Conversation.Get(0).Speaker,         "Iris")
+    return Eq(t2, m2.Conversation.Get(1).Speaker,           "Felix")
+}
+
+// PrCreated after a session failure leaves the prior LastError intact —
+// the success line is appended to the conversation, but the error
+// surface (LastError → red footer) doesn't get cleared by an unrelated
+// success.
+func TestPrCreated_DoesNotClearPriorLastError(t T) T {
+    val seed = sampleModel().Copy(LastError = Some("session save: disk full"))
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1"))
+    return m.LastError match {
+        case Some(s) => Eq(t, s, "session save: disk full")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mouse plumbing
+// ---------------------------------------------------------------------------
+
+// Mouse events are routed but currently no-op — Phase 1 has no
+// clickable hit-targets. Locks in that the model is unchanged so a
+// future component-level dispatcher can replace the body of MouseAt
+// without ambiguity.
+func TestMouseAt_IsNoopOnModel(t T) T {
+    val seed = sampleModel().Copy(Composer = "keep me", Tick = 4)
+    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    val t1 = Eq(t, m.Composer, "keep me")
+    val t2 = Eq(t1, m.Tick, 4)
+    return Eq(t2, m.Conversation.Size(), 0)
+}
+
+func TestMouseAt_ReleaseAlsoNoop(t T) T {
+    val (m, _) = Update(sampleModel(), MouseAt(X = 0, Y = 0, Pressed = false))
+    return Eq(t, m.Composer, "")
+}

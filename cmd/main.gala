@@ -36,6 +36,22 @@ import (
 // conversation log.
 // ============================================================================
 
+// inputToAppMsg translates a unified gala-tui InputEvent (key, mouse,
+// resize, unknown) into an AppMsg. We dispatch keyboard via keyToAppMsg
+// and lift mouse clicks/drags into MouseAt; resize and unknown events
+// are no-ops for now.
+//
+// MouseAt is plumbed through Update but doesn't move the model yet —
+// the layout doesn't expose clickable hit-targets. Wiring it here is
+// what lets a future component-level click dispatcher land without
+// touching the runtime.
+func inputToAppMsg(ev InputEvent) AppMsg = ev match {
+    case KeyInput(key)        => keyToAppMsg(key)
+    case MouseInput(me)       => MouseAt(X = me.X, Y = me.Y, Pressed = me.Pressed)
+    case ResizeInput(_, _)    => NoOp()
+    case UnknownInput()       => NoOp()
+}
+
 // keyToAppMsg translates raw keyboard events to AppMsg. Most keys feed
 // the composer; Ctrl+C / Ctrl+Q quits. Approve/reject keys
 // (Ctrl+A / Ctrl+R) are routed to KeyApprove / KeyReject — Update
@@ -139,7 +155,7 @@ func main() {
         View    = (m) => View(m),
     )
     val tickSub = TickSub[AppMsg](Interval = Milliseconds(int64(120)), Make = () => TickMsg())
-    val _ = RunWithSub[AppModel, AppMsg](program, (ev) => keyToAppMsg(ev), tickSub)
+    val _ = RunWithMouse[AppModel, AppMsg](program, (ev) => inputToAppMsg(ev), tickSub)
 }
 
 // primeFromSnapshot replays the persisted conversation log into a fresh

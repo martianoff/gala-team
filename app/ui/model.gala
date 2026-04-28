@@ -85,6 +85,11 @@ sealed type AppMsg {
     case PreMergeHooksFailed(ErrText string)
     case PrCreated(Url string)
     case PrFailed(ErrText string)
+    // Mouse input. Phase 1: routed but unhandled — the layout doesn't
+    // yet expose clickable hit-targets. Plumbing is here so when a
+    // future component-level click dispatcher lands, the runtime, the
+    // event vocabulary, and the model state are all already wired.
+    case MouseAt(X int, Y int, Pressed bool)
     // Lifecycle
     case TickMsg
     case QuitMsg

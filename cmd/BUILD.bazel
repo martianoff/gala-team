@@ -7,11 +7,13 @@ gala_binary(
         "@gala_tui//:gala_tui",
     ],
     deps = [
+        "//app/config",
         "//app/fsm",
         "//app/project",
         "//app/team",
         "//app/ui",
         "@gala//collection_immutable",
+        "@gala//time_utils",
     ],
     visibility = ["//visibility:public"],
 )

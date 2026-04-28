@@ -78,3 +78,52 @@ func TestTickMsg_BumpsCounter(t T) T {
     val (m2, _) = Update(m1, TickMsg())
     return Eq(t, m2.Tick, 2)
 }
+
+// ---------------------------------------------------------------------------
+// Runtime subprocess events. We don't spawn a real claude here — the pump
+// codepaths (ensureSession, sendAndPumpCmd) are exercised via integration
+// against the real CLI when cmd/main.gala is run. These unit tests cover
+// the pure model transitions ChunkArrived / SessionFailed / WriteSent
+// drive without needing a subprocess.
+// ---------------------------------------------------------------------------
+
+func TestChunkArrived_AppendsToConversationLog(t T) T {
+    val (m, _) = Update(sampleModel(), ChunkArrived(Member = "Iris", Line = "hello world"))
+    val t1 = Eq(t, m.Conversation.Size(), 1)
+    val first = m.Conversation.Get(0)
+    val t2 = Eq(t1, first.Speaker, "Iris")
+    return Eq(t2, first.Text, "hello world")
+}
+
+func TestChunkArrived_PreservesEarlierLines(t T) T {
+    val (m1, _) = Update(sampleModel(), ChunkArrived(Member = "Iris", Line = "first"))
+    val (m2, _) = Update(m1,           ChunkArrived(Member = "Iris", Line = "second"))
+    val t1 = Eq(t, m2.Conversation.Size(), 2)
+    return Eq(t1, m2.Conversation.Get(1).Text, "second")
+}
+
+func TestSessionFailed_SetsLastErrorAndDropsSession(t T) T {
+    // Sessions starts empty; SessionFailed should leave it empty (Remove of
+    // a missing key is a no-op) and set LastError.
+    val (m, _) = Update(sampleModel(), SessionFailed(Member = "Iris", ErrText = "stream closed"))
+    val t1 = Eq(t, m.Sessions.Size(), 0)
+    return m.LastError match {
+        case Some(s) => Eq(t1, s, "Iris: stream closed")
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+func TestWriteSent_LeavesModelUnchanged(t T) T {
+    val seed = sampleModel().Copy(Composer = "draft", Tick = 7)
+    val (m, _) = Update(seed, WriteSent(Member = "Iris"))
+    val t1 = Eq(t, m.Composer, "draft")
+    val t2 = Eq(t1, m.Tick, 7)
+    return Eq(t2, m.Conversation.Size(), 0)
+}
+
+func TestNoOp_LeavesModelUnchanged(t T) T {
+    val seed = sampleModel().Copy(Composer = "x", Tick = 3)
+    val (m, _) = Update(seed, NoOp())
+    val t1 = Eq(t, m.Composer, "x")
+    return Eq(t1, m.Tick, 3)
+}

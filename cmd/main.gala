@@ -1,9 +1,12 @@
 package main
 
 import (
+    "os"
     . "github.com/martianoff/gala-tui"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/time_utils"
+    . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/ui"
@@ -15,14 +18,20 @@ import (
 // the Team Lead delegates to subordinate agents (Engineers, QAs), reviews
 // their work, and produces a final summary + PR for the user to approve.
 //
-// Phase-1 main: wires the Elm-architecture skeleton in app/ui (AppModel +
-// Update + View) against a hard-coded sample team. The keyboard plumbing
-// translates raw KeyEvents into the AppMsg sealed type. Real claude
-// subprocess pumping (spawning, prompt forwarding, NextChunk pump) lands
-// in a follow-up commit alongside YAML team loading.
+// Usage:
+//     gala_team [--project <dir>] [--team <yaml-path>]
 //
-// Run:
-//     bazel run cmd:gala_team
+//   --project <dir>     project directory (must be a git repo). Defaults
+//                       to the current working directory when omitted.
+//   --team <yaml-path>  path to team.yaml. When omitted falls back to
+//                       a hard-coded three-member sample so the binary
+//                       still launches end-to-end (useful for demos).
+//
+// The keyboard plumbing translates raw KeyEvents into the AppMsg sealed
+// type. A 120 ms TickSub drives spinner animation. Pressing Enter sends
+// the composed prompt to the Team Lead's claude subprocess (spawned on
+// first prompt) and the read pump streams chunks back into the
+// conversation log.
 // ============================================================================
 
 func keyToAppMsg(ev KeyEvent) AppMsg =
@@ -34,6 +43,46 @@ func keyToAppMsg(ev KeyEvent) AppMsg =
         case Space()      => KeyChar(C = ' ')
         case _            => NoOp()
     }
+
+// flagValue scans `os.Args` for a `--name <value>` pair and returns the
+// value if present, otherwise `dflt`. Simple linear scan is fine for the
+// two flags we expose; we deliberately avoid pulling in `flag` to keep
+// the CLI surface tiny and the error messages friendly.
+func flagValue(name string, dflt string) string {
+    val args = ArrayOf(os.Args...)
+    val n = args.Size()
+    var i = 1
+    var found = dflt
+    for i < n - 1 {
+        if args.Get(i) == name {
+            found = args.Get(i + 1)
+        }
+        i = i + 1
+    }
+    return found
+}
+
+// loadTeamConfig reads `path`, decodes the YAML, and panics with a
+// message that points at the file on any failure. Panics are
+// appropriate at startup — an invalid config is a fatal user error,
+// not something the running TUI should try to recover from.
+func loadTeamConfig(path string) TeamConfig =
+    Try(() => os.ReadFile(path)) match {
+        case Failure(err) => panic(s"--team: cannot read '${path}': ${err.Error()}")
+        case Success(b)   => LoadFromString(string(b)) match {
+            case Failure(err) => panic(s"--team: '${path}' decode error: ${err.Error()}")
+            case Success(cfg) => cfg
+        }
+    }
+
+// resolveProject runs the resolver and converts its Try into a panic on
+// failure; same rationale as loadTeamConfig.
+func resolveProject(dir string) Project = Resolve(dir, NoOverrides()) match {
+    case Success(p)   => p
+    case Failure(err) => panic(s"--project: ${err.Error()}")
+}
+
+// ----- demo fallback (only used when --team is omitted) ---------------------
 
 func sampleTeam() Team {
     val iris = Member(
@@ -58,17 +107,17 @@ func sampleTeam() Team {
     )
 }
 
-func sampleProject() Project = Project(
-    Name = "gala_team", Repo = ".",
-    Github = None[string](),
-    DefaultBranch = "main",
-)
-
 func main() {
+    val projDir  = flagValue("--project", ".")
+    val teamPath = flagValue("--team", "")
+    val proj     = resolveProject(projDir)
+    val cfg = if (teamPath == "") TeamConfig(Team = sampleTeam(), Workflow = DefaultWorkflow())
+              else                loadTeamConfig(teamPath)
     val program = Program[AppModel, AppMsg](
-        Initial = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow()),
+        Initial = InitialModel(proj, cfg.Team, cfg.Workflow),
         Update  = (m, msg) => Update(m, msg),
         View    = (m) => View(m),
     )
-    val _ = Run[AppModel, AppMsg](program, (ev) => keyToAppMsg(ev))
+    val tickSub = TickSub[AppMsg](Interval = Milliseconds(int64(120)), Make = () => TickMsg())
+    val _ = RunWithSub[AppModel, AppMsg](program, (ev) => keyToAppMsg(ev), tickSub)
 }

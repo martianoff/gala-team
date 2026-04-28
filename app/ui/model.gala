@@ -5,6 +5,7 @@ import (
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/session"
@@ -30,6 +31,7 @@ struct AppModel(
     Project      Project,
     Team         Team,
     Workflow     Workflow,
+    Policy       Policy,
     State        AppState,
     Statuses     HashMap[string, Status],
     Pipeline     PipelineState,
@@ -42,10 +44,11 @@ struct AppModel(
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
 // start Idle, no pipeline, no sessions, empty composer.
-func InitialModel(proj Project, team Team, workflow Workflow) AppModel = AppModel(
+func InitialModel(proj Project, team Team, workflow Workflow, policy Policy) AppModel = AppModel(
     Project      = proj,
     Team         = team,
     Workflow     = workflow,
+    Policy       = policy,
     State        = Idle(),
     Statuses     = EmptyHashMap[string, Status](),
     Pipeline     = EmptyPipelineState(),
@@ -75,7 +78,11 @@ sealed type AppMsg {
     case ChunkArrived(Member string, Line string)
     case SessionFailed(Member string, ErrText string)
     case WriteSent(Member string)
-    // PR creation outcome from `gh pr create` after KeyApprove.
+    // Approval pipeline outcomes. PreMergeHooksPassed kicks the actual
+    // `gh pr create` after a clean hook run; PreMergeHooksFailed surfaces
+    // the failure in LastError and leaves the PR uncut.
+    case PreMergeHooksPassed(SummaryBody string)
+    case PreMergeHooksFailed(ErrText string)
     case PrCreated(Url string)
     case PrFailed(ErrText string)
     // Lifecycle

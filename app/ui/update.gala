@@ -2,6 +2,7 @@ package ui
 
 import (
     "martianoff/gala/concurrent"
+    "github.com/martianoff/gala_team/app/policy"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -32,19 +33,21 @@ import (
 // ============================================================================
 
 func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
-    case KeyChar(c)              => (m.Copy(Composer = m.Composer + string(c)),    NoCmd[AppMsg]())
-    case KeyBackspace()          => (m.Copy(Composer = trimLastRune(m.Composer)),  NoCmd[AppMsg]())
-    case KeySubmit()             => onSubmit(m)
-    case KeyApprove()            => onApprove(m)
-    case KeyReject()             => onReject(m)
-    case ChunkArrived(name, ln)  => onChunk(m, name, ln)
-    case SessionFailed(name, e)  => onSessionFailed(m, name, e)
-    case WriteSent(_)            => (m, NoCmd[AppMsg]())
-    case PrCreated(url)          => onPrCreated(m, url)
-    case PrFailed(err)           => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
-    case TickMsg()               => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
-    case QuitMsg()               => (m, QuitCmd[AppMsg]())
-    case NoOp()                  => (m, NoCmd[AppMsg]())
+    case KeyChar(c)                  => (m.Copy(Composer = m.Composer + string(c)),    NoCmd[AppMsg]())
+    case KeyBackspace()              => (m.Copy(Composer = trimLastRune(m.Composer)),  NoCmd[AppMsg]())
+    case KeySubmit()                 => onSubmit(m)
+    case KeyApprove()                => onApprove(m)
+    case KeyReject()                 => onReject(m)
+    case ChunkArrived(name, ln)      => onChunk(m, name, ln)
+    case SessionFailed(name, e)      => onSessionFailed(m, name, e)
+    case WriteSent(_)                => (m, NoCmd[AppMsg]())
+    case PreMergeHooksPassed(body)   => onPreMergeHooksPassed(m, body)
+    case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
+    case PrCreated(url)              => onPrCreated(m, url)
+    case PrFailed(err)               => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
+    case TickMsg()                   => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
+    case QuitMsg()                   => (m, QuitCmd[AppMsg]())
+    case NoOp()                      => (m, NoCmd[AppMsg]())
 }
 
 // onSubmit drives the user's prompt into the team. It (a) kicks the FSM
@@ -142,27 +145,75 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
 }
 
 // onApprove is the Phase-1 approval flow: when the FSM is in Approval,
-// the user pressed Ctrl+A. We transition the FSM to Idle (via the
-// ApprovalAccepted event) and fire `gh pr create` with the summary as
-// the PR body. The Future resolves to PrCreated(url) or PrFailed(err)
-// which onPrCreated / the PrFailed arm in Update handle.
+// the user pressed Ctrl+A. We transition the FSM via ApprovalAccepted,
+// log "/approve", and gate the PR-create on the team's pre-merge hooks
+// (Policy.PreMerge). On a clean hook run, PreMergeHooksPassed fires
+// onPreMergeHooksPassed which finally spawns `gh pr create`. On the
+// first failure, PreMergeHooksFailed lands in LastError and no PR is
+// opened.
+//
+// When the policy has no pre-merge hooks (the default), we skip the
+// hook step and go straight to `gh pr create` — same shape as before
+// the policy gate landed.
 //
 // In any other state the key is a no-op so users don't accidentally
 // open PRs.
 func onApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return m.State match {
-        case Approval(body) => approveAndKickPr(m, body)
+        case Approval(body) => approveAndKickHooks(m, body)
         case _              => (m, NoCmd[AppMsg]())
     }
 }
 
-func approveAndKickPr(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
+func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
     val nextState = Transition(m.State, ApprovalAccepted(), transitionContext(m))
     val withState = m.Copy(
-        State = nextState,
+        State        = nextState,
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = "/approve")),
     )
-    return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body)))
+    if m.Policy.PreMerge.IsEmpty() {
+        return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body)))
+    }
+    val noted = withState.Copy(
+        Conversation = withState.Conversation.Append(
+            session.ConversationLine(Speaker = "policy", Text = s"running ${m.Policy.PreMerge.Size()} pre-merge hook(s)…"),
+        ),
+    )
+    return (noted, hooksFutureCmd(m.Project, m.Policy.PreMerge, body))
+}
+
+// hooksFutureCmd lifts policy.RunHooksFuture into a Cmd[AppMsg]. The
+// future resolves to Try[bool]; we map Success(_) to
+// PreMergeHooksPassed(body) (carrying the summary so the PR-create
+// step has it) and Failure(err) to PreMergeHooksFailed(err.Error()).
+func hooksFutureCmd(proj Project, hooks Array[policy.Hook], body string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = policy.RunHooksFuture(proj, hooks).Map((res Try[bool]) => res match {
+        case Success(_)   => PreMergeHooksPassed(SummaryBody = body)
+        case Failure(err) => PreMergeHooksFailed(ErrText = err.Error())
+    }))
+
+// onPreMergeHooksPassed appends a confirmation line to the transcript
+// and finally fires `gh pr create` with the original summary body.
+func onPreMergeHooksPassed(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
+    val withLog = m.Copy(
+        Conversation = m.Conversation.Append(
+            session.ConversationLine(Speaker = "policy", Text = "pre-merge hooks: ✓ all green, opening PR"),
+        ),
+    )
+    return (withLog, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body)))
+}
+
+// onPreMergeHooksFailed records the first failing hook's error and
+// stops the approval pipeline. The PR is not opened; the user can
+// inspect LastError, redirect the team to fix whatever the hook
+// flagged, and re-approve.
+func onPreMergeHooksFailed(m AppModel, err string) Tuple[AppModel, Cmd[AppMsg]] {
+    return (m.Copy(
+        LastError    = Some(s"pre-merge hooks: ${err}"),
+        Conversation = m.Conversation.Append(
+            session.ConversationLine(Speaker = "policy", Text = s"pre-merge hooks: ✗ ${err}"),
+        ),
+    ), NoCmd[AppMsg]())
 }
 
 // onReject mirrors onApprove but transitions the FSM via

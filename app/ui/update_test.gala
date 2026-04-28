@@ -6,6 +6,7 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/team"
@@ -43,7 +44,7 @@ func sampleTeam() Team {
     )
 }
 
-func sampleModel() AppModel = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow())
+func sampleModel() AppModel = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow(), DefaultPolicy())
 
 func TestKeyChar_AppendsToComposer(t T) T {
     val (m1, _) = Update(sampleModel(), KeyChar(C = 'h'))
@@ -190,4 +191,52 @@ func TestPrFailed_SetsLastErrorWithGhPrefix(t T) T {
         case Some(s) => Eq(t, s, "gh pr create: auth required")
         case None()  => IsTrue(t, false)
     }
+}
+
+// Pre-merge hook integration ---------------------------------------------
+
+func TestApprove_WithEmptyHooks_GoesStraightToPr(t T) T {
+    // Default policy has no pre-merge hooks; approval should advance the
+    // FSM and emit the gh pr create Cmd directly. We can't observe the
+    // Cmd's effect in a unit test, but we can confirm the model side:
+    // exactly one "/approve" line was logged and no policy line.
+    val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))
+    val (m, _) = Update(seed, KeyApprove())
+    val t1 = Eq(t, m.Conversation.Size(), 1)
+    return Eq(t1, m.Conversation.Get(0).Text, "/approve")
+}
+
+func TestApprove_WithHooks_LogsRunningBanner(t T) T {
+    // With a non-empty PreMerge list, onApprove should log the
+    // "/approve" line plus a policy "running N pre-merge hook(s)…"
+    // banner before kicking the runner Future.
+    val pol = DefaultPolicy().Copy(PreMerge = ArrayOf(
+        Hook(Name = "lint", Cmd = "git", Args = ArrayOf("--version")),
+    ))
+    val seed = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow(), pol)
+        .Copy(State = Approval(SummaryBody = "ship it"))
+    val (m, _) = Update(seed, KeyApprove())
+    val t1 = Eq(t, m.Conversation.Size(), 2)
+    val t2 = Eq(t1, m.Conversation.Get(0).Speaker, "you")
+    val t3 = Eq(t2, m.Conversation.Get(0).Text, "/approve")
+    val t4 = Eq(t3, m.Conversation.Get(1).Speaker, "policy")
+    return Eq(t4, m.Conversation.Get(1).Text, "running 1 pre-merge hook(s)…")
+}
+
+func TestPreMergeHooksPassed_LogsAndKicksPr(t T) T {
+    val seed = sampleModel().Copy(State = Idle())
+    val (m, _) = Update(seed, PreMergeHooksPassed(SummaryBody = "ship it"))
+    val t1 = Eq(t, m.Conversation.Size(), 1)
+    val t2 = Eq(t1, m.Conversation.Get(0).Speaker, "policy")
+    return Eq(t2, m.Conversation.Get(0).Text, "pre-merge hooks: ✓ all green, opening PR")
+}
+
+func TestPreMergeHooksFailed_StopsPipelineWithError(t T) T {
+    val (m, _) = Update(sampleModel(), PreMergeHooksFailed(ErrText = "lint exited with code 1: 3 issues"))
+    val t1 = m.LastError match {
+        case Some(s) => Eq(t, s, "pre-merge hooks: lint exited with code 1: 3 issues")
+        case None()  => IsTrue(t, false)
+    }
+    val t2 = Eq(t1, m.Conversation.Size(), 1)
+    return Eq(t2, m.Conversation.Get(0).Text, "pre-merge hooks: ✗ lint exited with code 1: 3 issues")
 }

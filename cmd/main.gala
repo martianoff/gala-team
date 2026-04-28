@@ -132,7 +132,7 @@ func main() {
               else                loadTeamConfig(teamPath)
     // Restore the prior conversation log if a snapshot exists under
     // <repo>/.gala_team/sessions/latest.json. None on first launch.
-    val initial = primeFromSnapshot(InitialModel(proj, cfg.Team, cfg.Workflow))
+    val initial = primeFromSnapshot(InitialModel(proj, cfg.Team, cfg.Workflow, cfg.Policy))
     val program = Program[AppModel, AppMsg](
         Initial = initial,
         Update  = (m, msg) => Update(m, msg),

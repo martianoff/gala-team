@@ -140,3 +140,186 @@ func TestLoadWithoutPolicy_DefaultsApplied(t T) T {
         case _             => IsTrue(t2, false)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Policy block edge cases
+// ---------------------------------------------------------------------------
+
+val policyMergeRuleSquashYaml = "team:\n" +
+    "  name: \"X\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+    "workflow:\n  qa_required: false\n" +
+    "policy:\n" +
+    "  merge_rule: squash\n"
+
+val policyMergeRulePlainYaml = "team:\n" +
+    "  name: \"X\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+    "workflow:\n  qa_required: false\n" +
+    "policy:\n" +
+    "  merge_rule: merge\n"
+
+val policyBadMergeRuleYaml = "team:\n" +
+    "  name: \"X\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+    "workflow:\n  qa_required: false\n" +
+    "policy:\n" +
+    "  merge_rule: ff-only\n"
+
+val policyBadWorkspaceModeYaml = "team:\n" +
+    "  name: \"X\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+    "workflow:\n  qa_required: false\n" +
+    "policy:\n" +
+    "  workspace_mode: detached\n"
+
+val policyOnlyPostMergeYaml = "team:\n" +
+    "  name: \"X\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+    "workflow:\n  qa_required: false\n" +
+    "policy:\n" +
+    "  post_merge:\n" +
+    "    - name: notify\n      cmd: echo\n      args:\n        - merged\n"
+
+val policyHookNoArgsYaml = "team:\n" +
+    "  name: \"X\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+    "workflow:\n  qa_required: false\n" +
+    "policy:\n" +
+    "  pre_merge:\n" +
+    "    - name: status\n      cmd: git\n"
+
+func TestLoadPolicy_SquashMergeRule(t T) T {
+    val res = LoadFromString(policyMergeRuleSquashYaml)
+    val t1 = IsSuccess(t, res)
+    return res.Get().Policy.MergeRule match {
+        case SquashMerge() => IsTrue(t1, true)
+        case _             => IsTrue(t1, false)
+    }
+}
+
+func TestLoadPolicy_PlainMergeRule(t T) T {
+    val res = LoadFromString(policyMergeRulePlainYaml)
+    val t1 = IsSuccess(t, res)
+    return res.Get().Policy.MergeRule match {
+        case PlainMerge() => IsTrue(t1, true)
+        case _            => IsTrue(t1, false)
+    }
+}
+
+func TestLoadPolicy_UnknownMergeRule_Fails(t T) T = IsFailure(t, LoadFromString(policyBadMergeRuleYaml))
+
+func TestLoadPolicy_UnknownWorkspaceMode_Fails(t T) T = IsFailure(t, LoadFromString(policyBadWorkspaceModeYaml))
+
+// post_merge can be set on its own without pre_merge — common when
+// the team only wants a notification step after a clean merge.
+func TestLoadPolicy_OnlyPostMergeIsLegal(t T) T {
+    val res = LoadFromString(policyOnlyPostMergeYaml)
+    val t1 = IsSuccess(t, res)
+    val pol = res.Get().Policy
+    val t2 = Eq(t1, pol.PreMerge.Size(),  0)
+    val t3 = Eq(t2, pol.PostMerge.Size(), 1)
+    return Eq(t3, pol.PostMerge.Get(0).Name, "notify")
+}
+
+// A hook with cmd but no args yaml-wise should yield Args = empty
+// array (not crash on missing key).
+func TestLoadPolicy_HookWithoutArgs_DefaultsToEmpty(t T) T {
+    val res = LoadFromString(policyHookNoArgsYaml)
+    val t1 = IsSuccess(t, res)
+    val pol = res.Get().Policy
+    val t2 = Eq(t1, pol.PreMerge.Size(), 1)
+    return Eq(t2, pol.PreMerge.Get(0).Args.Size(), 0)
+}
+
+// ---------------------------------------------------------------------------
+// Member-shape edge cases
+// ---------------------------------------------------------------------------
+
+val explicitNullModelYaml = "team:\n" +
+    "  name: \"X\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n      model: null\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n      model: \"claude-opus-4-7\"\n" +
+    "workflow:\n  qa_required: false\n"
+
+func TestLoadMember_ExplicitNullModelIsNone(t T) T {
+    val res = LoadFromString(explicitNullModelYaml)
+    val t1 = IsSuccess(t, res)
+    val members = res.Get().Team.Members
+    return members.Get(0).Model match {
+        case None()  => IsTrue(t1, true)
+        case Some(_) => IsTrue(t1, false)
+    }
+}
+
+func TestLoadMember_PinnedModelIsSome(t T) T {
+    val res = LoadFromString(explicitNullModelYaml)
+    val t1 = IsSuccess(t, res)
+    val members = res.Get().Team.Members
+    return members.Get(1).Model match {
+        case Some(name) => Eq(t1, name, "claude-opus-4-7")
+        case None()     => IsTrue(t1, false)
+    }
+}
+
+// Workflow defaults only some fields — verify the rest fall back
+// without forcing every key in every team.yaml.
+val partialWorkflowYaml = "team:\n" +
+    "  name: \"X\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+    "workflow:\n" +
+    "  qa_required: false\n"
+
+func TestLoadWorkflow_OmittedKeysDefault(t T) T {
+    val res = LoadFromString(partialWorkflowYaml)
+    val t1 = IsSuccess(t, res)
+    val w = res.Get().Workflow
+    val t2 = IsFalse(t1, w.QARequired)        // explicit
+    val t3 = IsTrue(t2, w.ParallelEngineers)  // default true
+    return IsTrue(t3, w.RequireUserConfirm)   // default true
+}
+
+// Two-engineer team — the validate() lead-uniqueness check is keyed on
+// role count, not name, so duplicates by role need to be allowed when
+// only one is the team_lead.
+val multiEngineerYaml = "team:\n" +
+    "  name: \"BigTeam\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+    "    - role: engineer\n      name: \"Mira\"\n      personality: \"sharp\"\n" +
+    "    - role: engineer\n      name: \"Zara\"\n      personality: \"thorough\"\n" +
+    "workflow:\n  qa_required: false\n"
+
+func TestLoad_ManyEngineersAllowed(t T) T {
+    val res = LoadFromString(multiEngineerYaml)
+    val t1 = IsSuccess(t, res)
+    val engs = MembersOf(res.Get().Team, Engineer())
+    return Eq(t1, engs.Length(), 3)
+}
+
+// Two team leads — must fail (validate enforces exactly one).
+val twoLeadsYaml = "team:\n" +
+    "  name: \"DoubleLead\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
+    "    - role: team_lead\n      name: \"Otto\"\n      personality: \"firm\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+    "workflow:\n  qa_required: false\n"
+
+func TestLoad_TwoTeamLeads_Fails(t T) T = IsFailure(t, LoadFromString(twoLeadsYaml))

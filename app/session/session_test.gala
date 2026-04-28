@@ -93,3 +93,169 @@ func TestLoad_CorruptedFileReturnsNone(t T) T {
         case Some(_) => IsTrue(t, false)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Round-trip edge cases — JSON has sharp edges around quotes, escapes,
+// embedded newlines, unicode. Conversation text from Claude often
+// contains all of them; the codec needs to handle them transparently.
+// ---------------------------------------------------------------------------
+
+func TestSaveThenLoad_EmptyConversation(t T) T {
+    val dir = mkTempDir("empty_convo")
+    val saved = Save(dir, "demo", EmptyArray[ConversationLine]())
+    val t1 = IsSuccess(t, saved)
+    return Load(dir) match {
+        case Some(snap) => Eq(t1, snap.Conversation.Size(), 0)
+        case None()     => IsTrue(t1, false)
+    }
+}
+
+func TestSaveThenLoad_TextWithDoubleQuotes(t T) T {
+    val dir = mkTempDir("quotes")
+    val convo = ArrayOf(
+        ConversationLine(Speaker = "you",  Text = "look at \"quoted\" stuff"),
+        ConversationLine(Speaker = "Iris", Text = "{\"key\": \"value\"}"),
+    )
+    val saved = Save(dir, "demo", convo)
+    val t1 = IsSuccess(t, saved)
+    return Load(dir) match {
+        case Some(snap) => {
+            val t2 = Eq(t1, snap.Conversation.Get(0).Text, "look at \"quoted\" stuff")
+            return Eq(t2, snap.Conversation.Get(1).Text, "{\"key\": \"value\"}")
+        }
+        case None() => IsTrue(t1, false)
+    }
+}
+
+func TestSaveThenLoad_TextWithBackslashes(t T) T {
+    val dir = mkTempDir("backslash")
+    val convo = ArrayOf(
+        ConversationLine(Speaker = "you", Text = "C:\\Users\\maxmr\\file.txt"),
+    )
+    val saved = Save(dir, "demo", convo)
+    val t1 = IsSuccess(t, saved)
+    return Load(dir) match {
+        case Some(snap) => Eq(t1, snap.Conversation.Get(0).Text, "C:\\Users\\maxmr\\file.txt")
+        case None()     => IsTrue(t1, false)
+    }
+}
+
+func TestSaveThenLoad_TextWithEmbeddedNewlines(t T) T {
+    val dir = mkTempDir("newlines")
+    val convo = ArrayOf(
+        ConversationLine(Speaker = "Iris", Text = "line one\nline two\nline three"),
+    )
+    val saved = Save(dir, "demo", convo)
+    val t1 = IsSuccess(t, saved)
+    return Load(dir) match {
+        case Some(snap) => Eq(t1, snap.Conversation.Get(0).Text, "line one\nline two\nline three")
+        case None()     => IsTrue(t1, false)
+    }
+}
+
+// Multi-byte UTF-8 (emoji, accented Latin, CJK) must survive the
+// JSON encoder + decoder without mojibake. Conversation logs from the
+// real claude CLI contain emoji in confirmation lines.
+func TestSaveThenLoad_TextWithUnicode(t T) T {
+    val dir = mkTempDir("unicode")
+    val convo = ArrayOf(
+        ConversationLine(Speaker = "you",  Text = "ship it 🚀"),
+        ConversationLine(Speaker = "Iris", Text = "café résumé"),
+        ConversationLine(Speaker = "Felix", Text = "日本語テスト"),
+    )
+    val saved = Save(dir, "demo", convo)
+    val t1 = IsSuccess(t, saved)
+    return Load(dir) match {
+        case Some(snap) => {
+            val t2 = Eq(t1, snap.Conversation.Get(0).Text, "ship it 🚀")
+            val t3 = Eq(t2, snap.Conversation.Get(1).Text, "café résumé")
+            return Eq(t3, snap.Conversation.Get(2).Text, "日本語テスト")
+        }
+        case None() => IsTrue(t1, false)
+    }
+}
+
+// Speaker names with non-ASCII — defensive: not common but the team
+// config schema doesn't constrain names.
+func TestSaveThenLoad_SpeakerWithUnicode(t T) T {
+    val dir = mkTempDir("speaker_unicode")
+    val convo = ArrayOf(
+        ConversationLine(Speaker = "Иван",   Text = "приветствие"),
+    )
+    val saved = Save(dir, "demo", convo)
+    val t1 = IsSuccess(t, saved)
+    return Load(dir) match {
+        case Some(snap) => {
+            val t2 = Eq(t1, snap.Conversation.Get(0).Speaker, "Иван")
+            return Eq(t2, snap.Conversation.Get(0).Text,    "приветствие")
+        }
+        case None() => IsTrue(t1, false)
+    }
+}
+
+// Many-line conversations exercise the per-element comma handling that
+// FIX-001 (json codec nested array) addressed. 50 lines is overkill
+// for a regression but fast enough.
+func TestSaveThenLoad_FiftyLineConversation(t T) T {
+    val dir = mkTempDir("many_lines")
+    var convo = EmptyArray[ConversationLine]()
+    var i = 0
+    for i < 50 {
+        convo = convo.Append(ConversationLine(Speaker = "Iris", Text = s"line ${i}"))
+        i = i + 1
+    }
+    val saved = Save(dir, "demo", convo)
+    val t1 = IsSuccess(t, saved)
+    return Load(dir) match {
+        case Some(snap) => {
+            val t2 = Eq(t1, snap.Conversation.Size(), 50)
+            val t3 = Eq(t2, snap.Conversation.Get(0).Text,  "line 0")
+            return Eq(t3, snap.Conversation.Get(49).Text, "line 49")
+        }
+        case None() => IsTrue(t1, false)
+    }
+}
+
+func TestSave_PreservesProjectName(t T) T {
+    val dir = mkTempDir("projname")
+    val saved = Save(dir, "Skunkworks_v2", EmptyArray[ConversationLine]())
+    val t1 = IsSuccess(t, saved)
+    return Load(dir) match {
+        case Some(snap) => Eq(t1, snap.ProjectName, "Skunkworks_v2")
+        case None()     => IsTrue(t1, false)
+    }
+}
+
+func TestSave_RecordsSavedAtMonotonic(t T) T {
+    val dir = mkTempDir("savedat")
+    val s1 = Save(dir, "demo", EmptyArray[ConversationLine]())
+    val first = IsSuccess(t, s1)
+    val snap1 = Load(dir).Get()
+    val s2 = Save(dir, "demo", EmptyArray[ConversationLine]())
+    val second = IsSuccess(first, s2)
+    val snap2 = Load(dir).Get()
+    // Second save's timestamp should be >= the first. Equal is allowed
+    // because some CI runners have low-resolution wall clocks.
+    return IsTrue(second, snap2.SavedAt >= snap1.SavedAt)
+}
+
+func TestLoadOrError_OnMissingFile_LeftWithReadError(t T) T {
+    val dir = mkTempDir("loaderr_missing")
+    return LoadOrError(dir) match {
+        case Right(_)  => IsTrue(t, false)
+        case Left(err) => IsTrue(t, len(err) > 0)
+    }
+}
+
+func TestLoadOrError_OnCorrupted_LeftWithDecodeError(t T) T {
+    val dir = mkTempDir("loaderr_bad")
+    val parent = filepath.Dir(SessionPath(dir))
+    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
+    if mkErr != nil { panic(mkErr.Error()) }
+    val writeErr = os.WriteFile(SessionPath(dir), ToBytes("{not json"), os.FileMode(0644))
+    if writeErr != nil { panic(writeErr.Error()) }
+    return LoadOrError(dir) match {
+        case Right(_)  => IsTrue(t, false)
+        case Left(err) => IsTrue(t, len(err) > 0)
+    }
+}

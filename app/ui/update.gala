@@ -79,7 +79,7 @@ func onQuit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     }
     val withFailureLog = failures.FoldLeft(m, (acc, f) => acc.Copy(
         Conversation = acc.Conversation.Append(
-            session.ConversationLine(Speaker = "shutdown", Text = s"close ${f.Member}: ${f.Err.Error()}"),
+            session.ConversationLine(Speaker = "shutdown", Text = s"close ${f.V1}: ${f.V2.Error()}"),
         ),
     ))
     return (withFailureLog, QuitCmd[AppMsg]())

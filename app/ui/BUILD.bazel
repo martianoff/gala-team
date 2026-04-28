@@ -1,0 +1,36 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "ui",
+    srcs = [
+        "model.gala",
+        "update.gala",
+        "view.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/ui",
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    deps = [
+        "//app/fsm",
+        "//app/team",
+        "//app/view",
+        "@gala//collection_immutable",
+        "@gala//go_interop",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "update_test",
+    srcs = ["update_test.gala"],
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    deps = [
+        ":ui",
+        "//app/fsm",
+        "//app/team",
+        "@gala//collection_immutable",
+    ],
+)

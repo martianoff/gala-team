@@ -1,0 +1,71 @@
+package ui
+
+import (
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/ui/update — Elm update() function.
+//
+// Dispatches AppMsg to the right handler:
+//   - composer keys → buffer mutations
+//   - Submit → kicks the FSM via UserPrompted (subprocess wiring lands
+//     in the next commit; for now the prompt text is just consumed)
+//   - Tick → bumps the tick counter, drives spinner animation
+//   - Quit → QuitCmd
+//
+// Returns Tuple[AppModel, Cmd[AppMsg]] in the standard gala-tui shape.
+// Pure for the Phase-1 skeleton; the FSM-facing transitions stay
+// separate from the IO-bearing ones so the latter can plug in cleanly.
+// ============================================================================
+
+func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
+    case KeyChar(c)      => (m.Copy(Composer = m.Composer + string(c)),       NoCmd[AppMsg]())
+    case KeyBackspace()  => (m.Copy(Composer = trimLastRune(m.Composer)),     NoCmd[AppMsg]())
+    case KeySubmit()     => onSubmit(m)
+    case TickMsg()       => (m.Copy(Tick = m.Tick + 1),                       NoCmd[AppMsg]())
+    case QuitMsg()       => (m, QuitCmd[AppMsg]())
+    case NoOp()          => (m, NoCmd[AppMsg]())
+}
+
+// onSubmit kicks the FSM with a UserPrompted event.  The composed prompt
+// text is captured for now but not sent anywhere — subprocess wiring
+// (spawn claude, pipe prompt to stdin, register pump) lands in a
+// follow-up commit.
+func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if m.Composer == "" {
+        return (m, NoCmd[AppMsg]())
+    }
+    val ctx = transitionContext(m)
+    val nextState = Transition(m.State, UserPrompted{}.Apply(), ctx)
+    return (m.Copy(
+        State = nextState,
+        Composer = "",
+    ), NoCmd[AppMsg]())
+}
+
+// transitionContext extracts the per-team facts the FSM needs from the
+// current model.  Pure; doesn't touch IO.
+func transitionContext(m AppModel) TransitionContext = TransitionContext(
+    QAMembers  = MembersOf(m.Team, QA{}.Apply()).Map((member Member) => member.Name),
+    QARequired = m.Workflow.QARequired,
+)
+
+// trimLastRune removes the final rune from `s`. Returns "" if `s` is
+// already empty.  Goes via []rune so we trim grapheme-cleanly instead
+// of byte-fiddling at the UTF-8 level.
+//
+// SliceTo (from go_interop) gives us the rune slice; string(...) is
+// Go's native []rune → string conversion (the inverse direction
+// without a helper is not supported by GALA's parser).
+func trimLastRune(s string) string {
+    val rs = ToRunes(s)
+    val n = len(rs)
+    if n == 0 { return "" }
+    return string(SliceTo(rs, n - 1))
+}

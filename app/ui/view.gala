@@ -1,0 +1,99 @@
+package ui
+
+import (
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/view"
+)
+
+// ============================================================================
+// app/ui/view — top-level Elm view() function.
+//
+// Layout (DESIGN.md §8.1, simplified for Phase 1):
+//   ┏━━━━ header ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+//   ┃ project · team · state · tick                    ┃
+//   ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+//   ┌──── Team ────┬──── Conversation ───────────────┐
+//   │ ▼ Lead       │ (placeholder until conversation │
+//   │   ⠋ Iris     │  log + claude wiring lands)     │
+//   │ ▼ Engineering│                                  │
+//   │   ◇ Felix    │                                  │
+//   │ Pipeline     │                                  │
+//   │  (active)    │                                  │
+//   ├─────────────────────────────────────────────────┤
+//   │ Compose to Iris…                                │
+//   └─────────────────────────────────────────────────┘
+//   key hints
+//
+// ============================================================================
+
+// View renders the AppModel as a gala-tui Widget tree.
+func View(m AppModel) Widget {
+    val header = headerWidget(m)
+    val sidebar = sidebarWidget(m)
+    val conversation = conversationPlaceholder()
+    val composer = composerWidget(m)
+    val footer = footerWidget(m)
+    return Column(ArrayOf[LayoutChild](
+        Fixed(3, header),
+        Flex(1, Row(ArrayOf[LayoutChild](
+            Fixed(28, BorderOf(sidebar, RoundedBorder())),
+            Flex(1, BorderOf(conversation, RoundedBorder())),
+        ))),
+        Fixed(3, BorderOf(composer, RoundedBorder())),
+        Fixed(1, footer),
+    ))
+}
+
+// ----- pieces ---------------------------------------------------------------
+
+func headerWidget(m AppModel) Widget {
+    val title = TextStyled(s"  ⛩  gala_team   ${stateLabel(m.State)}   tick:${m.Tick}",
+        DefaultStyle().WithBold().WithFg(BrightCyan()))
+    return Column(ArrayOf[LayoutChild](
+        Fixed(1, title),
+        Fixed(1, FillCh('─')),
+        Fixed(1, Empty()),
+    ))
+}
+
+func sidebarWidget(m AppModel) Widget = Column(ArrayOf[LayoutChild](
+    Fixed(1, TextStyled("  Team", DefaultStyle().WithBold())),
+    Flex(1, TeamPanelView(m.Team, m.Statuses)),
+    Fixed(1, TextStyled("  Pipeline", DefaultStyle().WithBold())),
+    Flex(1, PipelineView(m.Pipeline)),
+))
+
+func conversationPlaceholder() Widget = Column(ArrayOf[LayoutChild](
+    Fixed(1, TextStyled("  Conversation with Team Lead", DefaultStyle().WithBold())),
+    Fixed(1, Empty()),
+    Fixed(1, TextStyled("  (real conversation log + claude streaming",
+        DefaultStyle().WithDim())),
+    Fixed(1, TextStyled("   land in subsequent commits)", DefaultStyle().WithDim())),
+    Flex(1, Empty()),
+))
+
+func composerWidget(m AppModel) Widget {
+    val prompt = if (m.Composer == "") "Type to Iris…" else m.Composer
+    val style = if (m.Composer == "")
+                    DefaultStyle().WithDim()
+                else
+                    DefaultStyle().WithFg(BrightWhite())
+    return TextStyled(s"  ${prompt}▌", style)
+}
+
+func footerWidget(m AppModel) Widget = TextStyled(
+    "  Enter submit · Backspace delete · Ctrl+C / q quit",
+    DefaultStyle().WithDim())
+
+// stateLabel pretty-prints the current AppState for the header line.
+func stateLabel(s AppState) string = s match {
+    case Idle()           => "state: idle"
+    case TLThinking()     => "state: TL thinking"
+    case Delegating(_)    => "state: delegating"
+    case QAGate(_)        => "state: QA gate"
+    case TLReview()       => "state: TL review"
+    case Approval(_)      => "state: approval"
+}

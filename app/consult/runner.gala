@@ -1,0 +1,96 @@
+package consult
+
+import (
+    "os"
+    "martianoff/gala/concurrent"
+    "github.com/martianoff/gala_team/app/config"
+    "github.com/martianoff/gala_team/app/headless"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/consult/runner — given a registry entry + a body, spawn a one-
+// shot gala_team session against the target team and return its
+// captured response.
+//
+// Synchronous + asynchronous variants:
+//   - RunConsult: blocks until the consult resolves. Used by tests
+//     and by tools that want a simple call-and-wait API.
+//   - RunConsultFuture: wraps RunConsult in a Future so the TUI's
+//     update loop can dispatch consults as Cmd[Future[…]] without
+//     blocking the UI thread.
+//
+// The flow:
+//   1. Resolve target name → ConsultEntry via Registry.Get.
+//   2. project.Resolve(entry.Repo) → validated Project (must be a
+//      git repo).
+//   3. Read team.yaml file → config.LoadFromString → TeamConfig.
+//   4. headless.RunHeadless(proj, team, body) — fires the session,
+//      streams chunks, returns once the target session closes.
+//
+// Each step short-circuits on failure with a tagged error message
+// ("project ${name}: …", "team ${name}: …", "headless ${name}: …")
+// so the user can tell where the consult derailed.
+// ============================================================================
+
+// ConsultOutcome wraps the result of a single consult: either the
+// successful headless run (with its conversation log + summary) or
+// an error string with enough context for the orchestrator to
+// surface it to the user.
+sealed type ConsultOutcome {
+    case ConsultOk(Name string, Result headless.HeadlessResult)
+    case ConsultErr(Name string, ErrText string)
+}
+
+// RunConsult resolves `name` against `r` and runs a headless session
+// against the target team with `body` as the prompt. Synchronous;
+// returns when the target's TL session closes.
+func RunConsult(r Registry, name string, body string) ConsultOutcome =
+    Get(r, name) match {
+        case None()      => ConsultErr(Name = name, ErrText = s"no registry entry for '${name}'")
+        case Some(entry) => resolveProjectStep(entry, body)
+    }
+
+// resolveProjectStep handles step 2: resolve the target repo to a
+// validated Project. On failure, surface a "project: …" error.
+func resolveProjectStep(entry ConsultEntry, body string) ConsultOutcome =
+    Resolve(entry.Repo, NoOverrides()) match {
+        case Failure(e) => ConsultErr(Name = entry.Name, ErrText = s"project: ${e.Error()}")
+        case Success(p) => loadTeamStep(entry, p, body)
+    }
+
+// loadTeamStep handles step 3: read team.yaml. On failure, surface a
+// "team: …" error.
+func loadTeamStep(entry ConsultEntry, proj Project, body string) ConsultOutcome =
+    loadTeamFromFile(entry.TeamYaml) match {
+        case Failure(e) => ConsultErr(Name = entry.Name, ErrText = s"team: ${e.Error()}")
+        case Success(c) => runHeadlessStep(entry, proj, c.Team, body)
+    }
+
+// runHeadlessStep handles step 4: drive the headless session. The
+// headless module returns Left(err) for spawn / infrastructure failures
+// and Right(result) for everything else (the result's Err field
+// captures non-fatal stream-level issues).
+func runHeadlessStep(entry ConsultEntry, proj Project, tm Team, body string) ConsultOutcome =
+    headless.RunHeadless(proj, tm, body) match {
+        case Left(err)     => ConsultErr(Name = entry.Name, ErrText = err)
+        case Right(result) => ConsultOk(Name = entry.Name, Result = result)
+    }
+
+// loadTeamFromFile reads the team.yaml file at `path` and decodes it.
+// Lives here rather than in app/config so the consult package owns
+// its own thin facade and config.LoadFromString stays string-only.
+func loadTeamFromFile(path string) Try[config.TeamConfig] = Try[config.TeamConfig](() => {
+    val raw, err = os.ReadFile(path)
+    if err != nil { panic(s"read ${path}: ${err.Error()}") }
+    return config.LoadFromString(string(raw)).Get()
+})
+
+// RunConsultFuture wraps RunConsult in a Future so callers in the
+// TUI's update loop can return it as a Cmd without blocking the UI
+// thread on the (potentially long) child gala_team session.
+func RunConsultFuture(r Registry, name string, body string) concurrent.Future[ConsultOutcome] =
+    concurrent.FutureApply[ConsultOutcome](() => RunConsult(r, name, body))

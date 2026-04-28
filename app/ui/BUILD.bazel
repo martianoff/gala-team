@@ -12,6 +12,7 @@ gala_library(
         "@gala_tui//:gala_tui",
     ],
     deps = [
+        "//app/consult",
         "//app/fsm",
         "//app/onboarding",
         "//app/policy",

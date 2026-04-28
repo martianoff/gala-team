@@ -1,0 +1,100 @@
+package main
+
+import (
+    "os"
+    "path/filepath"
+    "strings"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/consult"
+)
+
+// Runner unit tests cover the failure paths that don't require a real
+// `claude` binary on PATH. The end-to-end "spawn child gala_team
+// session" flow is exercised manually until we have a fake-CLI test
+// harness.
+//
+// Strategy: build a small registry in-memory, point its entries at
+// fake file-system locations, and verify each step's tagged error
+// surfaces correctly.
+//
+// Faking a project: same trick the resolver tests use — create
+// `<tmp>/.git/` so `requireGitRepo` is satisfied without shelling
+// out to `git init`.
+
+// ----------------------------------------------------------------------------
+// Registry-lookup failure
+// ----------------------------------------------------------------------------
+
+func TestRunConsult_UnknownName_ReturnsRegistryError(t T) T {
+    val r = Registry(Entries = EmptyArray[ConsultEntry]())
+    val outcome = RunConsult(r, "nope", "do work")
+    return outcome match {
+        case ConsultOk(_, _)    => IsTrue(t, false)
+        case ConsultErr(name, txt) => {
+            val t1 = Eq(t, name, "nope")
+            return IsTrue(t1, strings.Contains(txt, "no registry entry"))
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Project resolution failures (project.Resolve panics inside Try)
+// ----------------------------------------------------------------------------
+
+func TestRunConsult_NonexistentRepo_TaggedAsProjectError(t T) T {
+    val r = singleEntry("alpha", "/nonexistent/path/should/not/exist", "/nonexistent/team.yaml")
+    val outcome = RunConsult(r, "alpha", "do work")
+    return assertConsultErrPrefix(t, outcome, "alpha", "project:")
+}
+
+func TestRunConsult_NonGitDir_TaggedAsProjectError(t T) T {
+    val tmp = mustMkTempDir(t)
+    defer os.RemoveAll(tmp)
+    val r = singleEntry("alpha", tmp, filepath.Join(tmp, "team.yaml"))
+    val outcome = RunConsult(r, "alpha", "do work")
+    return assertConsultErrPrefix(t, outcome, "alpha", "project:")
+}
+
+// ----------------------------------------------------------------------------
+// Team-load failure (.git present, but team.yaml missing)
+// ----------------------------------------------------------------------------
+
+func TestRunConsult_MissingTeamYaml_TaggedAsTeamError(t T) T {
+    val tmp = mustMkTempDir(t)
+    defer os.RemoveAll(tmp)
+    fakeGitRepo(tmp)
+    val r = singleEntry("alpha", tmp, filepath.Join(tmp, "missing-team.yaml"))
+    val outcome = RunConsult(r, "alpha", "do work")
+    return assertConsultErrPrefix(t, outcome, "alpha", "team:")
+}
+
+// ----------------------------------------------------------------------------
+// Helpers
+// ----------------------------------------------------------------------------
+
+func singleEntry(name string, repo string, teamYaml string) Registry =
+    Registry(Entries = EmptyArray[ConsultEntry]().Append(
+        ConsultEntry(Name = name, Repo = repo, TeamYaml = teamYaml),
+    ))
+
+func assertConsultErrPrefix(t T, outcome ConsultOutcome, expectedName string, expectedPrefix string) T =
+    outcome match {
+        case ConsultOk(_, _)       => IsTrue(t, false)
+        case ConsultErr(name, txt) => {
+            val t1 = Eq(t, name, expectedName)
+            return IsTrue(t1, strings.HasPrefix(txt, expectedPrefix))
+        }
+    }
+
+func mustMkTempDir(t T) string {
+    val dir, err = os.MkdirTemp("", "gala_team_consult_runner_")
+    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    return dir
+}
+
+func fakeGitRepo(dir string) {
+    val mkErr = os.MkdirAll(filepath.Join(dir, ".git"), os.FileMode(0755))
+    if mkErr != nil { panic(s"fakeGitRepo: ${mkErr.Error()}") }
+}

@@ -8,6 +8,7 @@ gala_binary(
     ],
     deps = [
         "//app/config",
+        "//app/consult",
         "//app/fsm",
         "//app/policy",
         "//app/project",

@@ -2,10 +2,12 @@ package main
 
 import (
     "os"
+    "path/filepath"
     . "github.com/martianoff/gala-tui"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/time_utils"
+    "github.com/martianoff/gala_team/app/consult"
     "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/policy"
@@ -112,6 +114,17 @@ func resolveProject(dir string) Project = Resolve(dir, NoOverrides()) match {
     case Failure(err) => panic(s"--project: ${err.Error()}")
 }
 
+// loadRegistry reads `<repo>/.gala_team/consults.yaml`, falling back to
+// an empty registry on missing-file or decode failure. Failure to load
+// the consults file is non-fatal — the user can still run the team
+// interactively; only `@consult(<name>)` directives will fail until
+// they fix the YAML.
+func loadRegistry(proj Project) consult.Registry =
+    consult.LoadFromFile(filepath.Join(proj.Repo, ".gala_team", "consults.yaml")) match {
+        case Success(r)   => r
+        case Failure(_)   => consult.EmptyRegistry()
+    }
+
 // ----- demo fallback (only used when --team is omitted) ---------------------
 
 func sampleTeam() Team {
@@ -153,7 +166,8 @@ func main() {
               else                loadTeamConfig(teamPath)
     // Restore the prior conversation log if a snapshot exists under
     // <repo>/.gala_team/sessions/latest.json. None on first launch.
-    val initial = primeFromSnapshot(InitialModel(proj, cfg.Team, cfg.Workflow, cfg.Policy))
+    val registry = loadRegistry(proj)
+    val initial = primeFromSnapshot(InitialModel(proj, cfg.Team, cfg.Workflow, cfg.Policy, registry))
     val program = Program[AppModel, AppMsg](
         Initial = initial,
         Update  = (m, msg) => Update(m, msg),

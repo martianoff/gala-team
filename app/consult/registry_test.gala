@@ -1,0 +1,121 @@
+package main
+
+import (
+    "os"
+    "path/filepath"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/consult"
+)
+
+val sampleYaml = "consults:\n" +
+    "  - name: transpiler\n" +
+    "    repo: /work/gala_simple\n" +
+    "    team: /work/gala_simple/team.yaml\n" +
+    "  - name: qa-lib\n" +
+    "    repo: ../qa-lib\n" +
+    "    team: ../qa-lib/team.yaml\n"
+
+func TestLoadFromString_RoundTripsTwoEntries(t T) T {
+    val res = LoadFromString(sampleYaml)
+    val t1 = IsSuccess(t, res)
+    val r = res.Get()
+    val t2 = Eq(t1, r.Entries.Size(), 2)
+    val t3 = Eq(t2, r.Entries.Get(0).Name, "transpiler")
+    val t4 = Eq(t3, r.Entries.Get(0).Repo, "/work/gala_simple")
+    val t5 = Eq(t4, r.Entries.Get(1).Name, "qa-lib")
+    return Eq(t5, r.Entries.Get(1).TeamYaml, "../qa-lib/team.yaml")
+}
+
+// The YAML lib doesn't support flow-style sequences; absence of the
+// `consults` key is the supported way to express an empty registry.
+func TestLoadFromString_EmptyDocumentReturnsEmpty(t T) T {
+    val res = LoadFromString("")
+    val t1 = IsSuccess(t, res)
+    return Eq(t1, res.Get().Entries.Size(), 0)
+}
+
+func TestLoadFromString_MissingNameFails(t T) T {
+    val bad = "consults:\n  - repo: /x\n    team: /x/team.yaml\n"
+    return IsFailure(t, LoadFromString(bad))
+}
+
+func TestLoadFromString_MissingRepoFails(t T) T {
+    val bad = "consults:\n  - name: x\n    team: /x/team.yaml\n"
+    return IsFailure(t, LoadFromString(bad))
+}
+
+func TestLoadFromString_MissingTeamFails(t T) T {
+    val bad = "consults:\n  - name: x\n    repo: /x\n"
+    return IsFailure(t, LoadFromString(bad))
+}
+
+func TestLoadFromString_UnknownTopLevelKeysIgnored(t T) T {
+    val ok = "consults:\n  - name: a\n    repo: /a\n    team: /a/t.yaml\n" +
+             "version: 1\n"
+    val res = LoadFromString(ok)
+    return IsSuccess(t, res)
+}
+
+// Get returns the entry by exact name; case-sensitive.
+func TestGet_FindsKnownEntry(t T) T {
+    val r = LoadFromString(sampleYaml).Get()
+    val t1 = Get(r, "transpiler") match {
+        case Some(e) => Eq(t, e.Repo, "/work/gala_simple")
+        case None()  => IsTrue(t, false)
+    }
+    return Get(r, "qa-lib") match {
+        case Some(e) => Eq(t1, e.TeamYaml, "../qa-lib/team.yaml")
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+func TestGet_UnknownNameReturnsNone(t T) T {
+    val r = LoadFromString(sampleYaml).Get()
+    return Get(r, "Designer") match {
+        case None()  => IsTrue(t, true)
+        case Some(_) => IsTrue(t, false)
+    }
+}
+
+func TestGet_CaseSensitiveLookup(t T) T {
+    val r = LoadFromString(sampleYaml).Get()
+    return Get(r, "Transpiler") match {
+        case None()  => IsTrue(t, true)
+        case Some(_) => IsTrue(t, false)
+    }
+}
+
+// EmptyRegistry — no entries; every Get returns None.
+func TestEmptyRegistry_AllGetsReturnNone(t T) T {
+    val r = EmptyRegistry()
+    val t1 = Eq(t, r.Entries.Size(), 0)
+    return Get(r, "anything") match {
+        case None()  => IsTrue(t1, true)
+        case Some(_) => IsTrue(t1, false)
+    }
+}
+
+// LoadFromFile: missing file returns empty (treated as "first run").
+func TestLoadFromFile_MissingFileReturnsEmpty(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_consult_load_")
+    if err != nil { panic(err.Error()) }
+    val path = filepath.Join(dir, "consults.yaml")  // doesn't exist
+    val res = LoadFromFile(path)
+    val t1 = IsSuccess(t, res)
+    return Eq(t1, res.Get().Entries.Size(), 0)
+}
+
+// LoadFromFile reads a real file.
+func TestLoadFromFile_ReadsRealFile(t T) T {
+    val dir, mkErr = os.MkdirTemp("", "gala_team_consult_real_")
+    if mkErr != nil { panic(mkErr.Error()) }
+    val path = filepath.Join(dir, "consults.yaml")
+    val wErr = os.WriteFile(path, ToBytes(sampleYaml), os.FileMode(0644))
+    if wErr != nil { panic(wErr.Error()) }
+    val res = LoadFromFile(path)
+    val t1 = IsSuccess(t, res)
+    return Eq(t1, res.Get().Entries.Size(), 2)
+}

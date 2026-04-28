@@ -3,6 +3,7 @@ package ui
 import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/consult"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
@@ -32,6 +33,7 @@ struct AppModel(
     Team         Team,
     Workflow     Workflow,
     Policy       Policy,
+    Registry     Registry,                         // cross-team consult targets
     State        AppState,
     Statuses     HashMap[string, Status],
     Pipeline     PipelineState,
@@ -44,12 +46,22 @@ struct AppModel(
 )
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
-// start Idle, no pipeline, no sessions, empty composer.
-func InitialModel(proj Project, team Team, workflow Workflow, policy Policy) AppModel = AppModel(
+// start Idle, no pipeline, no sessions, empty composer. `registry`
+// defaults to empty so existing tests don't need to pass one — only
+// production startup (cmd/main.gala) loads a real registry from
+// .gala_team/consults.yaml.
+func InitialModel(
+    proj Project,
+    team Team,
+    workflow Workflow,
+    policy Policy,
+    registry Registry = EmptyRegistry(),
+) AppModel = AppModel(
     Project      = proj,
     Team         = team,
     Workflow     = workflow,
     Policy       = policy,
+    Registry     = registry,
     State        = Idle(),
     Statuses     = EmptyHashMap[string, Status](),
     Pipeline     = EmptyPipelineState(),

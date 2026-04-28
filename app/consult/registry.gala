@@ -1,0 +1,119 @@
+package consult
+
+import (
+    "os"
+    "martianoff/gala/yaml"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+)
+
+// ============================================================================
+// app/consult/registry — list of cross-team consult targets keyed by
+// name. The directive parser turns `@consult(transpiler) … @end` into a
+// lookup against this registry; the runner (runner.gala) takes the
+// resolved entry and fires a headless gala_team session against the
+// target's repo.
+//
+// Loaded from `<proj>/.gala_team/consults.yaml` (project-scoped) with
+// a fallback to `~/.gala_team/registry.yaml` (user-scoped). Format:
+//
+//     consults:
+//       - name: transpiler
+//         repo: C:/Users/me/work/gala_simple
+//         team: C:/Users/me/work/gala_simple/team.yaml
+//       - name: qa-lib
+//         repo: ../qa-lib
+//         team: ../qa-lib/team.yaml
+//
+// Empty / missing file = empty registry; @consult against an unknown
+// name fails fast with a clear "no entry for <name>" error rather
+// than silently dropping the consult.
+// ============================================================================
+
+// ConsultEntry maps a name (the `@consult(<name>)` argument) to the
+// target team's location. Repo points at the team's project directory;
+// TeamYaml at the team.yaml inside that repo (typically just
+// `<repo>/team.yaml` but kept explicit so a single repo can host
+// multiple personas).
+struct ConsultEntry(
+    Name     string,
+    Repo     string,
+    TeamYaml string,
+)
+
+// Registry is the loaded consult table.
+struct Registry(Entries Array[ConsultEntry])
+
+// EmptyRegistry — what callers get when no consults file is present.
+// Resolving any name returns None.
+func EmptyRegistry() Registry = Registry(Entries = EmptyArray[ConsultEntry]())
+
+// Get looks up the entry for `name`; None if absent. Lookup is O(N)
+// but registries are tiny in practice (single-digit entries), so a
+// HashMap would be premature.
+func Get(r Registry, name string) Option[ConsultEntry] =
+    r.Entries.Find((e) => e.Name == name)
+
+// LoadFromFile reads the YAML at `path` and decodes it. Missing file
+// returns Success(EmptyRegistry()) so callers don't have to special-
+// case "first run". Decode errors surface as Failure.
+func LoadFromFile(path string) Try[Registry] = Try[Registry](() => {
+    val info, statErr = os.Stat(path)
+    if statErr != nil { return EmptyRegistry() }
+    if info.IsDir() { panic(s"consult registry: ${path} is a directory") }
+    val raw, readErr = os.ReadFile(path)
+    if readErr != nil { panic(s"consult registry: read ${path}: ${readErr.Error()}") }
+    return decodeRegistry(yaml.NewYamlDecoder(string(raw)))
+})
+
+// LoadFromString is the test-friendly entry point — same decoder as
+// LoadFromFile but reads from an in-memory string.
+func LoadFromString(yamlStr string) Try[Registry] = Try[Registry](() => {
+    return decodeRegistry(yaml.NewYamlDecoder(yamlStr))
+})
+
+func decodeRegistry(d *yaml.YamlDecoderImpl) Registry {
+    d.StartObject()
+    var entries = EmptyArray[ConsultEntry]()
+    for d.HasMoreFields() {
+        d.ReadKey() match {
+            case "consults" => entries = decodeEntries(d)
+            case _          => d.Skip()
+        }
+    }
+    d.EndObject()
+    return Registry(Entries = entries)
+}
+
+// Loop-bound Append intentional: pull-cursor over a stateful YAML
+// decoder.
+func decodeEntries(d *yaml.YamlDecoderImpl) Array[ConsultEntry] {
+    var out = EmptyArray[ConsultEntry]()
+    d.StartArray()
+    for d.HasMoreElements() {
+        out = out.Append(decodeEntry(d))
+    }
+    d.EndArray()
+    return out
+}
+
+func decodeEntry(d *yaml.YamlDecoderImpl) ConsultEntry {
+    d.StartObject()
+    var name = ""
+    var repo = ""
+    var teamYaml = ""
+    for d.HasMoreFields() {
+        d.ReadKey() match {
+            case "name" => name = d.ReadString()
+            case "repo" => repo = d.ReadString()
+            case "team" => teamYaml = d.ReadString()
+            case _      => d.Skip()
+        }
+    }
+    d.EndObject()
+    if name == ""     { panic("consult registry: entry missing 'name'") }
+    if repo == ""     { panic(s"consult registry: '${name}' missing 'repo'") }
+    if teamYaml == "" { panic(s"consult registry: '${name}' missing 'team'") }
+    return ConsultEntry(Name = name, Repo = repo, TeamYaml = teamYaml)
+}

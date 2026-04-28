@@ -1,0 +1,41 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "consult",
+    srcs = [
+        "registry.gala",
+        "runner.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/consult",
+    deps = [
+        "//app/config",
+        "//app/headless",
+        "//app/project",
+        "//app/team",
+        "@gala//collection_immutable",
+        "@gala//concurrent",
+        "@gala//go_interop",
+        "@gala//yaml",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "registry_test",
+    srcs = ["registry_test.gala"],
+    deps = [
+        ":consult",
+        "@gala//collection_immutable",
+        "@gala//go_interop",
+    ],
+)
+
+gala_go_test(
+    name = "runner_test",
+    srcs = ["runner_test.gala"],
+    deps = [
+        ":consult",
+        "//app/headless",
+        "@gala//collection_immutable",
+    ],
+)

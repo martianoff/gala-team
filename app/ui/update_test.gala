@@ -510,3 +510,95 @@ func TestMouseAt_ReleaseAlsoNoop(t T) T {
     val (m, _) = Update(sampleModel(), MouseAt(X = 0, Y = 0, Pressed = false))
     return Eq(t, m.Composer, "")
 }
+
+// ---------------------------------------------------------------------------
+// @consult dispatch from chunk pump
+// ---------------------------------------------------------------------------
+
+// Plain TL chatter — no @consult — only updates TurnBuffer; ConsultsFired
+// and Conversation reflect the single chunk and nothing more.
+func TestChunkArrived_TLChatter_BuffersWithoutDispatch(t T) T {
+    val (m, _) = Update(sampleModel(), ChunkArrived(Member = "Iris", Line = "just thinking out loud"))
+    val t1 = Eq(t,  m.TurnBuffer, "just thinking out loud")
+    val t2 = Eq(t1, m.ConsultsFired, 0)
+    return Eq(t2, m.Conversation.Size(), 1)
+}
+
+// Non-TL chunks do not advance TurnBuffer — only the lead's output is
+// scanned for @consult directives.
+func TestChunkArrived_NonLeadDoesNotBuffer(t T) T {
+    val (m, _) = Update(sampleModel(), ChunkArrived(Member = "Felix", Line = "engineer chatter"))
+    val t1 = Eq(t,  m.TurnBuffer, "")
+    return Eq(t1, m.ConsultsFired, 0)
+}
+
+// Drip-fed chunks that complete a `@consult(name) ... @end` block over
+// two lines should bump ConsultsFired exactly once and append a
+// "consult: dispatching → name" line.
+func TestChunkArrived_LeadConsultBlock_KicksOneDispatch(t T) T {
+    val seed = sampleModel()
+    val (m1, _) = Update(seed, ChunkArrived(Member = "Iris", Line = "@consult(transpiler) help"))
+    val t1 = Eq(t, m1.ConsultsFired, 0)  // not yet — @end missing
+    val (m2, _) = Update(m1,   ChunkArrived(Member = "Iris", Line = "@end"))
+    val t2 = Eq(t1, m2.ConsultsFired, 1)
+    val last = m2.Conversation.Get(m2.Conversation.Size() - 1)
+    val t3 = Eq(t2, last.Speaker, "consult")
+    return IsTrue(t3, last.Text == "dispatching → transpiler")
+}
+
+// A second @consult block in the same turn fires a second dispatch
+// without re-firing the first (ConsultsFired guards against that).
+func TestChunkArrived_TwoConsults_FireInSequence(t T) T {
+    val seed = sampleModel()
+    val msg = "@consult(a) one\n@end\n@consult(b) two\n@end"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = msg))
+    return Eq(t, m.ConsultsFired, 2)
+}
+
+// KeySubmit resets the per-turn buffer and consult counter — the next
+// turn can re-detect @consult blocks by name without inheriting state.
+func TestKeySubmit_ResetsTurnBufferAndConsultsFired(t T) T {
+    val seed = sampleModel().Copy(
+        Composer      = "next turn",
+        TurnBuffer    = "stale",
+        ConsultsFired = 3,
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    val t1 = Eq(t,  m.TurnBuffer, "")
+    return Eq(t1, m.ConsultsFired, 0)
+}
+
+// ConsultCompleted appends the result body under the consulted team's
+// name and a "✓" status line under "consult".
+func TestConsultCompleted_AppendsResultToConversation(t T) T {
+    val (m, _) = Update(sampleModel(), ConsultCompleted(Name = "transpiler", Summary = Some("fix landed")))
+    val n = m.Conversation.Size()
+    val tickLine = m.Conversation.Get(n - 2)
+    val bodyLine = m.Conversation.Get(n - 1)
+    val t1 = Eq(t,  tickLine.Speaker, "consult")
+    val t2 = IsTrue(t1, tickLine.Text == "transpiler ✓")
+    val t3 = Eq(t2, bodyLine.Speaker, "transpiler")
+    return Eq(t3, bodyLine.Text, "fix landed")
+}
+
+// ConsultCompleted with no summary surfaces an explicit placeholder so
+// the user / TL can tell apart "no @summary block" from "summary said
+// nothing".
+func TestConsultCompleted_NoSummary_LogsPlaceholder(t T) T {
+    val (m, _) = Update(sampleModel(), ConsultCompleted(Name = "transpiler", Summary = None[string]()))
+    val last = m.Conversation.Get(m.Conversation.Size() - 1)
+    return IsTrue(t, last.Text != "")
+}
+
+// ConsultFailed records the error in LastError and appends a "✗ <err>"
+// line under "consult".
+func TestConsultFailed_RecordsErrorAndConvoLine(t T) T {
+    val (m, _) = Update(sampleModel(), ConsultFailed(Name = "transpiler", ErrText = "no registry entry"))
+    val t1 = m.LastError match {
+        case Some(e) => IsTrue(t, e == "consult transpiler: no registry entry")
+        case None()  => IsTrue(t, false)
+    }
+    val last = m.Conversation.Get(m.Conversation.Size() - 1)
+    val t2 = Eq(t1, last.Speaker, "consult")
+    return IsTrue(t2, last.Text == "transpiler ✗ no registry entry")
+}

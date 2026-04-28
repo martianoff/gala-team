@@ -9,6 +9,8 @@ import (
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/consult"
+    . "github.com/martianoff/gala_team/app/directive"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
@@ -51,6 +53,8 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case MergeFailed(err)            => (m.Copy(LastError = Some(s"gh pr merge: ${err}")), NoCmd[AppMsg]())
     case PostMergeHooksPassed(url)   => onPostMergeHooksPassed(m, url)
     case PostMergeHooksFailed(err)   => (m.Copy(LastError = Some(s"post-merge hooks: ${err}")), NoCmd[AppMsg]())
+    case ConsultCompleted(name, sum) => onConsultCompleted(m, name, sum)
+    case ConsultFailed(name, err)    => onConsultFailed(m, name, err)
     case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
     case TickMsg()                   => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
     case QuitMsg()                   => onQuit(m)
@@ -101,6 +105,8 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         State = nextState,
         Composer = "",
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt)),
+        TurnBuffer    = "",
+        ConsultsFired = 0,
     )
     val lead = m.Team.Lead
     val firstSpawn = !m.Sessions.Get(lead.Name).IsDefined()
@@ -159,6 +165,12 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 // has been closed (e.g. SessionFailed already swept it out of
 // m.Sessions) the pump is not restarted.
 //
+// When the chunk came from the Team Lead, the line is also appended to
+// `TurnBuffer` and the directive parser is rerun against the buffer;
+// any newly-completed `@consult(name) … @end` blocks past the
+// `ConsultsFired` watermark are dispatched as RunConsultFuture and
+// batched into the returned Cmd alongside the next chunk pull.
+//
 // Save runs synchronously: the file is small, the write is fast, and
 // pushing it through a Future would lose the exactly-after-this-chunk
 // ordering guarantee the user expects (close terminal → reopen → see
@@ -167,10 +179,94 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
     val nextConvo = m.Conversation.Append(session.ConversationLine(Speaker = name, Text = line))
     val withLine = setStatus(persistConversation(m, nextConvo), name, StWorking())
-    return withLine.Sessions.Get(name) match {
-        case Some(s) => (withLine, runtimeFutureToCmd(NextChunkFuture(s)))
-        case None()  => (withLine, NoCmd[AppMsg]())
+    val (m1, consultCmds) = maybeDispatchConsults(withLine, name, line)
+    val pumpCmd = m1.Sessions.Get(name) match {
+        case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
+        case None()  => NoCmd[AppMsg]()
     }
+    return (m1, batchAll(consultCmds.Append(pumpCmd)))
+}
+
+// maybeDispatchConsults inspects the latest TL chunk for newly-
+// completed `@consult(name) … @end` blocks. Returns the updated model
+// (with `TurnBuffer` and `ConsultsFired` advanced) plus an array of
+// Cmds — one RunConsultFuture per new directive — that the chunk
+// handler batches together with the standard re-arm-pump Cmd.
+//
+// Non-TL chunks are no-ops; the per-turn buffer only tracks the lead
+// since other members never emit `@consult`.
+func maybeDispatchConsults(m AppModel, speaker string, line string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    if speaker != m.Team.Lead.Name {
+        return (m, EmptyArray[Cmd[AppMsg]]())
+    }
+    val nextBuffer = if (m.TurnBuffer == "") line else m.TurnBuffer + "\n" + line
+    val dirs = Parse(nextBuffer)
+    val consults = dirs.Collect({
+        case Consult(target, _, body) => (target, body)
+    })
+    val total = consults.Size()
+    if total <= m.ConsultsFired {
+        return (m.Copy(TurnBuffer = nextBuffer), EmptyArray[Cmd[AppMsg]]())
+    }
+    val (newConvo, cmds) = dispatchPendingConsults(
+        m.Conversation,
+        m.Registry,
+        consults,
+        m.ConsultsFired,
+        total,
+    )
+    val m2 = m.Copy(
+        TurnBuffer    = nextBuffer,
+        ConsultsFired = total,
+        Conversation  = newConvo,
+    )
+    return (m2, cmds)
+}
+
+// dispatchPendingConsults walks the consult directives from
+// `firstNew..total` and returns the convo log (with one "consult:
+// dispatching" line per new directive) + an array of consult-future
+// Cmds. Pure: doesn't reach into the model so it stays test-friendly.
+func dispatchPendingConsults(
+    convo Array[session.ConversationLine],
+    reg Registry,
+    consults Array[Tuple[string, string]],
+    firstNew int,
+    total int,
+) Tuple[Array[session.ConversationLine], Array[Cmd[AppMsg]]] {
+    var nextConvo = convo
+    var cmds = EmptyArray[Cmd[AppMsg]]()
+    var i = firstNew
+    for i < total {
+        val (target, body) = (consults.Get(i).V1, consults.Get(i).V2)
+        nextConvo = nextConvo.Append(session.ConversationLine(
+            Speaker = "consult",
+            Text    = s"dispatching → ${target}",
+        ))
+        cmds = cmds.Append(consultFutureCmd(reg, target, body))
+        i = i + 1
+    }
+    return (nextConvo, cmds)
+}
+
+// consultFutureCmd lifts RunConsultFuture into Cmd[AppMsg] space,
+// mapping ConsultOk → ConsultCompleted and ConsultErr → ConsultFailed.
+func consultFutureCmd(reg Registry, name string, body string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = RunConsultFuture(reg, name, body).Map(consultOutcomeToAppMsg))
+
+func consultOutcomeToAppMsg(o ConsultOutcome) AppMsg = o match {
+    case ConsultOk(name, result) => ConsultCompleted(Name = name, Summary = result.Summary)
+    case ConsultErr(name, txt)   => ConsultFailed(Name = name, ErrText = txt)
+}
+
+// batchAll wraps a list of Cmds into a single BatchCmd. Empty list →
+// NoCmd; single-element list → that element directly (no need for an
+// outer Batch wrapper).
+func batchAll(cmds Array[Cmd[AppMsg]]) Cmd[AppMsg] {
+    val n = cmds.Size()
+    if n == 0 { return NoCmd[AppMsg]() }
+    if n == 1 { return cmds.Get(0) }
+    return cmds.FoldLeft(NoCmd[AppMsg](), (acc, c) => Batch[AppMsg](acc, c))
 }
 
 // persistConversation writes the new conversation log to disk under
@@ -371,6 +467,63 @@ func onPostMergeHooksPassed(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]]
             session.ConversationLine(Speaker = "policy", Text = s"post-merge hooks: ✓ all green (${url})"),
         ),
     ), NoCmd[AppMsg]())
+}
+
+// onConsultCompleted records the consult outcome in the conversation
+// log and forwards it to the TL's stdin so the TL can incorporate the
+// result into its next response. Summary may be None when the consulted
+// team didn't emit `@summary`; we surface that explicitly so the user
+// (and the TL) can tell apart "no summary" from "summary said nothing".
+func onConsultCompleted(m AppModel, name string, summary Option[string]) Tuple[AppModel, Cmd[AppMsg]] {
+    val body = summary match {
+        case Some(s) => s
+        case None()  => "(no @summary block — see project log for full transcript)"
+    }
+    val withLog = m.Copy(
+        Conversation = m.Conversation
+            .Append(session.ConversationLine(
+                Speaker = "consult",
+                Text    = s"${name} ✓",
+            ))
+            .Append(session.ConversationLine(
+                Speaker = name,
+                Text    = body,
+            )),
+    )
+    return (withLog, sendConsultBackToLead(withLead(m), name, body, true))
+}
+
+// onConsultFailed records the failure in the conversation log and
+// forwards a brief notice to the TL so it can react (e.g. retry, fall
+// back to its own knowledge).
+func onConsultFailed(m AppModel, name string, errText string) Tuple[AppModel, Cmd[AppMsg]] {
+    val withLog = m.Copy(
+        LastError    = Some(s"consult ${name}: ${errText}"),
+        Conversation = m.Conversation.Append(session.ConversationLine(
+            Speaker = "consult",
+            Text    = s"${name} ✗ ${errText}",
+        )),
+    )
+    return (withLog, sendConsultBackToLead(withLead(m), name, errText, false))
+}
+
+// withLead returns the team lead's MemberSession if alive — otherwise
+// None — so the consult-result-forwarding Cmd can be a no-op when the
+// TL has died or never spawned.
+func withLead(m AppModel) Option[MemberSession] = m.Sessions.Get(m.Team.Lead.Name)
+
+// sendConsultBackToLead wraps the consult outcome as a single
+// `[consult/<name>] <body>` line on the TL's stdin so the TL can read
+// it back as part of the conversation. We don't re-arm the chunk pump
+// here — onChunk is already in flight for the lead; this just feeds
+// new context so its next thought has the consult result available.
+func sendConsultBackToLead(lead Option[MemberSession], name string, body string, ok bool) Cmd[AppMsg] = lead match {
+    case None()    => NoCmd[AppMsg]()
+    case Some(s)   => {
+        val tag = if (ok) "consult-ok" else "consult-err"
+        val msg = s"[${tag}/${name}] ${body}"
+        return runtimeFutureToCmd(SendFuture(s, msg))
+    }
 }
 
 // runtimeFutureToCmd lifts a runtime.Msg-typed Future into the AppMsg

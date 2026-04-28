@@ -13,6 +13,7 @@ gala_library(
     ],
     deps = [
         "//app/consult",
+        "//app/directive",
         "//app/fsm",
         "//app/onboarding",
         "//app/policy",

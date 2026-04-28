@@ -43,6 +43,15 @@ struct AppModel(
     Tick         int,                              // monotonic tick counter (drives spinners)
     LastError    Option[string],                   // most recent runtime error, footer
     LastPrUrl    Option[string],                   // PR awaiting `gh pr merge` after PrCreated
+    // Per-turn TL output accumulator. Reset on every KeySubmit. Used by
+    // the chunk pump to detect newly-completed @consult blocks without
+    // re-scanning the entire conversation log.
+    TurnBuffer    string,
+    // Count of @consult directives already dispatched in the current
+    // turn. The directive parser returns directives in source order, so
+    // anything past index `ConsultsFired` in the parsed list is new
+    // and must be kicked off.
+    ConsultsFired int,
 )
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
@@ -71,6 +80,8 @@ func InitialModel(
     Tick         = 0,
     LastError    = None[string](),
     LastPrUrl    = None[string](),
+    TurnBuffer    = "",
+    ConsultsFired = 0,
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -108,6 +119,13 @@ sealed type AppMsg {
     case MergeFailed(ErrText string)
     case PostMergeHooksPassed(Url string)
     case PostMergeHooksFailed(ErrText string)
+    // Cross-team consult outcomes. Dispatched when the TL emits a
+    // `@consult(name) … @end` block; the runtime spawns a child
+    // gala_team session and feeds the result back into the TL once
+    // the child closes. ConsultCompleted carries the child's optional
+    // @summary body; ConsultFailed carries an explanatory error string.
+    case ConsultCompleted(Name string, Summary Option[string])
+    case ConsultFailed(Name string, ErrText string)
     // Mouse input. Phase 1: routed but unhandled — the layout doesn't
     // yet expose clickable hit-targets. Plumbing is here so when a
     // future component-level click dispatcher lands, the runtime, the

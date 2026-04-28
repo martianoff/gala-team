@@ -6,6 +6,7 @@ import (
     . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/view"
 )
 

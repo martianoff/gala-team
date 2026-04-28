@@ -1,0 +1,84 @@
+package main
+
+import (
+    "os"
+    "path/filepath"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/session"
+)
+
+// mkTempDir creates a fresh empty directory for the duration of one test
+// case. Tests panic the test rather than skipping; the test framework
+// records the failure and moves on.
+func mkTempDir(label string) string {
+    val dir, err = os.MkdirTemp("", "gala_team_session_" + label)
+    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    return dir
+}
+
+func TestSessionPath_PutsFileUnderGalaTeam(t T) T {
+    val path = SessionPath("/tmp/proj")
+    return Eq(t, path, filepath.Join("/tmp/proj", ".gala_team", "sessions", "latest.json"))
+}
+
+func TestLoad_MissingFileReturnsNone(t T) T {
+    val dir = mkTempDir("load_missing")
+    val loaded = Load(dir)
+    return loaded match {
+        case None()   => IsTrue(t, true)
+        case Some(_)  => IsTrue(t, false)
+    }
+}
+
+func TestSaveThenLoad_RoundTripsConversation(t T) T {
+    val dir = mkTempDir("roundtrip")
+    val convo = ArrayOf(
+        ConversationLine(Speaker = "you",  Text = "ship it"),
+        ConversationLine(Speaker = "Iris", Text = "@summary done"),
+    )
+    val saved = Save(dir, "demo", convo)
+    val t1 = IsSuccess(t, saved)
+    val loaded = Load(dir)
+    return loaded match {
+        case None()       => IsTrue(t1, false)
+        case Some(snap)   => {
+            val t2 = Eq(t1, snap.ProjectName, "demo")
+            val t3 = Eq(t2, snap.Conversation.Size(), 2)
+            val t4 = Eq(t3, snap.Conversation.Get(0).Text, "ship it")
+            return Eq(t4, snap.Conversation.Get(1).Speaker, "Iris")
+        }
+    }
+}
+
+func TestSave_OverwritesPriorSnapshot(t T) T {
+    val dir = mkTempDir("overwrite")
+    val first = ArrayOf(ConversationLine(Speaker = "you", Text = "first"))
+    val second = ArrayOf(
+        ConversationLine(Speaker = "you", Text = "second"),
+        ConversationLine(Speaker = "Iris", Text = "ack"),
+    )
+    val s1 = Save(dir, "demo", first)
+    val t1 = IsSuccess(t, s1)
+    val s2 = Save(dir, "demo", second)
+    val t2 = IsSuccess(t1, s2)
+    val loaded = Load(dir)
+    return loaded match {
+        case None()     => IsTrue(t2, false)
+        case Some(snap) => Eq(t2, snap.Conversation.Size(), 2)
+    }
+}
+
+func TestLoad_CorruptedFileReturnsNone(t T) T {
+    val dir = mkTempDir("corrupt")
+    val parent = filepath.Dir(SessionPath(dir))
+    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
+    if mkErr != nil { panic(mkErr.Error()) }
+    val writeErr = os.WriteFile(SessionPath(dir), []byte("{not json"), os.FileMode(0644))
+    if writeErr != nil { panic(writeErr.Error()) }
+    return Load(dir) match {
+        case None()  => IsTrue(t, true)
+        case Some(_) => IsTrue(t, false)
+    }
+}

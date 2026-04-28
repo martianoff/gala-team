@@ -1,0 +1,21 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "session",
+    srcs = ["session.gala"],
+    importpath = "github.com/martianoff/gala_team/app/session",
+    deps = [
+        "@gala//collection_immutable",
+        "@gala//json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "session_test",
+    srcs = ["session_test.gala"],
+    deps = [
+        ":session",
+        "@gala//collection_immutable",
+    ],
+)

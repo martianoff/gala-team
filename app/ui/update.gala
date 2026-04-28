@@ -8,6 +8,7 @@ import (
     . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/runtime"
+    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/team"
 )
 
@@ -101,18 +102,32 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
     }
 }
 
-// onChunk records a streamed line under the speaker's name and re-arms
-// the pump for the same member (one in-flight Future per active member).
-// If the session has been closed (e.g. SessionFailed already swept it
-// out of m.Sessions) the pump is not restarted.
+// onChunk records a streamed line under the speaker's name, persists
+// the updated transcript via app/session, and re-arms the pump for the
+// same member (one in-flight Future per active member). If the session
+// has been closed (e.g. SessionFailed already swept it out of
+// m.Sessions) the pump is not restarted.
+//
+// Save runs synchronously: the file is small, the write is fast, and
+// pushing it through a Future would lose the exactly-after-this-chunk
+// ordering guarantee the user expects (close terminal → reopen → see
+// the same transcript). Failures are stuck in LastError so the user
+// notices but the TUI keeps running.
 func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
-    val withLine = m.Copy(
-        Conversation = m.Conversation.Append(ConversationLine(Speaker = name, Text = line)),
-    )
-    return m.Sessions.Get(name) match {
+    val nextConvo = m.Conversation.Append(ConversationLine(Speaker = name, Text = line))
+    val withLine = persistConversation(m, nextConvo)
+    return withLine.Sessions.Get(name) match {
         case Some(s) => (withLine, runtimeFutureToCmd(NextChunkFuture(s)))
         case None()  => (withLine, NoCmd[AppMsg]())
     }
+}
+
+// persistConversation writes the new conversation log to disk under
+// m.Project.Repo and returns the updated model. Save failures only set
+// LastError — the in-memory transcript stays canonical.
+func persistConversation(m AppModel, nextConvo Array[ConversationLine]) AppModel = Save(m.Project.Repo, m.Project.Name, nextConvo) match {
+    case Success(_)   => m.Copy(Conversation = nextConvo)
+    case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some(s"session save: ${err.Error()}"))
 }
 
 // onSessionFailed marks the member's session as gone (drops it from

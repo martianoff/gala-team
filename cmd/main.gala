@@ -8,6 +8,7 @@ import (
     . "martianoff/gala/time_utils"
     . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/ui"
 )
@@ -124,11 +125,22 @@ func main() {
     val proj     = resolveProject(projDir)
     val cfg = if (teamPath == "") TeamConfig(Team = sampleTeam(), Workflow = DefaultWorkflow())
               else                loadTeamConfig(teamPath)
+    // Restore the prior conversation log if a snapshot exists under
+    // <repo>/.gala_team/sessions/latest.json. None on first launch.
+    val initial = primeFromSnapshot(InitialModel(proj, cfg.Team, cfg.Workflow))
     val program = Program[AppModel, AppMsg](
-        Initial = InitialModel(proj, cfg.Team, cfg.Workflow),
+        Initial = initial,
         Update  = (m, msg) => Update(m, msg),
         View    = (m) => View(m),
     )
     val tickSub = TickSub[AppMsg](Interval = Milliseconds(int64(120)), Make = () => TickMsg())
     val _ = RunWithSub[AppModel, AppMsg](program, (ev) => keyToAppMsg(ev), tickSub)
+}
+
+// primeFromSnapshot replays the persisted conversation log into a fresh
+// AppModel. We ignore SavedAt and ProjectName for now — the user's
+// next prompt picks up where the prior session left off.
+func primeFromSnapshot(m AppModel) AppModel = Load(m.Project.Repo) match {
+    case None()       => m
+    case Some(snap)   => m.Copy(Conversation = snap.Conversation)
 }

@@ -7,6 +7,7 @@ import (
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/runtime"
+    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/view"
 )
 
@@ -18,9 +19,9 @@ import (
 // (keyboard, tick, runtime subprocess events).
 // ============================================================================
 
-// ConversationLine is a single rendered turn in the Team-Lead conversation
-// log: who spoke (the user, or a member name) and the text they produced.
-struct ConversationLine(Speaker string, Text string)
+// ConversationLine lives in app/session — durably-storable shape that
+// the on-disk snapshot uses too. Re-exported here as a convenience so
+// existing references in update.gala / view.gala still resolve.
 
 // AppModel is the top-level Elm model.  Everything the view() function
 // needs to render must live here.  Mutations happen only through

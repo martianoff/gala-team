@@ -1,0 +1,88 @@
+package session
+
+import (
+    "os"
+    "path/filepath"
+    "time"
+    "martianoff/gala/json"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// app/session — durable per-project conversation log.
+//
+// Every time the user sees a chunk arrive, the new conversation log is
+// JSON-serialized to <project repo>/.gala_team/sessions/latest.json. On
+// startup, cmd/main.gala reads that file (if present) and primes the
+// AppModel's Conversation field so the user sees their prior context
+// without re-prompting.
+//
+// Scope is deliberately narrow: only the conversation log + project name
+// + saved-at timestamp. We do NOT serialize:
+//   - subprocess sessions (live OS handles, not portable)
+//   - workflow / team config (re-read from team.yaml on every launch)
+//   - FSM state (resuming mid-flight is brittle; prefer to start Idle)
+//
+// ConversationLine lives here rather than in app/ui so app/ui can depend
+// on session (and not the other way around) — saves the type from being
+// duplicated and keeps app/session self-contained for the cmd-side load.
+// ============================================================================
+
+// ConversationLine is a single rendered turn in the Team-Lead conversation
+// log: who spoke (the user, or a member name) and the text they produced.
+struct ConversationLine(Speaker string, Text string)
+
+// Snapshot is the on-disk shape. ProjectName is informational (lets us
+// detect cross-project mismatches later); SavedAt is unix nanos at the
+// moment Save was called.
+struct Snapshot(
+    ProjectName  string,
+    SavedAt      int64,
+    Conversation Array[ConversationLine],
+)
+
+// SessionPath returns the canonical save path for a given project repo.
+// Always under .gala_team/sessions/latest.json — leaves room for future
+// multi-snapshot retention without breaking the "load latest" contract.
+func SessionPath(repoDir string) string =
+    filepath.Join(repoDir, ".gala_team", "sessions", "latest.json")
+
+// Save writes a Snapshot to .gala_team/sessions/latest.json under
+// repoDir. Returns Try[bool] so callers can decide whether a save
+// failure (disk full, permissions, …) should bubble up. Failures are
+// logged via the AppModel's LastError; the running TUI never blocks
+// on Save.
+func Save(repoDir string, projectName string, conversation Array[ConversationLine]) Try[bool] = Try[bool](() => {
+    val codec = Codec[Snapshot](SnakeCase())
+    val snap  = Snapshot(
+        ProjectName  = projectName,
+        SavedAt      = time.Now().UnixNano(),
+        Conversation = conversation,
+    )
+    val encoded = codec.Encode(snap).Get()
+    val path    = SessionPath(repoDir)
+    val parent  = filepath.Dir(path)
+    val mkErr   = os.MkdirAll(parent, os.FileMode(0755))
+    if mkErr != nil { panic(s"session: mkdir ${parent}: ${mkErr.Error()}") }
+    val writeErr = os.WriteFile(path, ToBytes(encoded), os.FileMode(0644))
+    if writeErr != nil { panic(s"session: write ${path}: ${writeErr.Error()}") }
+    return true
+})
+
+// Load reads a Snapshot from .gala_team/sessions/latest.json under
+// repoDir. Returns None when no file exists (first run); returns Some
+// on a successful decode; returns None on a corrupted file too — we
+// prefer "start clean" over "blow up at startup" since the durable log
+// is for convenience, not correctness.
+func Load(repoDir string) Option[Snapshot] {
+    val path = SessionPath(repoDir)
+    val readResult = Try(() => os.ReadFile(path))
+    return readResult match {
+        case Failure(_)     => None[Snapshot]()
+        case Success(bytes) => Codec[Snapshot](SnakeCase()).Decode(string(bytes)) match {
+            case Success(snap) => Some(snap)
+            case Failure(_)    => None[Snapshot]()
+        }
+    }
+}

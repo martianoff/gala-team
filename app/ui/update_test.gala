@@ -1,20 +1,29 @@
 package main
 
 import (
+    "os"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/ui"
 )
 
-func sampleProject() Project = Project(
-    Name = "demo", Repo = ".",
-    Github = None[string](),
-    DefaultBranch = "main",
-)
+// sampleProject points Repo at a fresh temp dir so onChunk's auto-save
+// has somewhere to write without polluting the cwd. Each call returns a
+// new dir so tests don't share state.
+func sampleProject() Project {
+    val dir, err = os.MkdirTemp("", "gala_team_update_test_")
+    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    return Project(
+        Name = "demo", Repo = dir,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+}
 
 func sampleTeam() Team {
     val iris = Member(

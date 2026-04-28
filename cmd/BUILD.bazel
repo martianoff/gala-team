@@ -10,6 +10,7 @@ gala_binary(
         "//app/config",
         "//app/fsm",
         "//app/project",
+        "//app/session",
         "//app/team",
         "//app/ui",
         "@gala//collection_immutable",

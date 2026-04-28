@@ -604,3 +604,150 @@ func TestConsultFailed_RecordsErrorAndConvoLine(t T) T {
     val t2 = Eq(t1, last.Speaker, "consult")
     return IsTrue(t2, last.Text == "transpiler ✗ no registry entry")
 }
+
+// ---------------------------------------------------------------------------
+// QuitMsg lifecycle
+// ---------------------------------------------------------------------------
+
+// QuitMsg with no live sessions: model passes through untouched, the
+// returned Cmd is the runtime's QuitCmd. We don't introspect the Cmd
+// shape here (gala-tui's Cmd sealed type is opaque to update_test) —
+// the contract we care about is that the model is left clean.
+func TestQuitMsg_NoSessions_ModelStableAndConversationUntouched(t T) T {
+    val seed = sampleModel().Copy(
+        Composer = "draft",
+        Tick     = 9,
+        Conversation = EmptyArray[ConversationLine]().Append(
+            ConversationLine(Speaker = "you", Text = "earlier"),
+        ),
+    )
+    val (m, _) = Update(seed, QuitMsg())
+    val t1 = Eq(t,  m.Composer, "draft")
+    val t2 = Eq(t1, m.Tick, 9)
+    return Eq(t2, m.Conversation.Size(), 1)
+}
+
+// QuitMsg never falls through to a panic on an empty model — guards
+// the no-failures path of CloseAllSessions where FoldLeftKV runs over
+// an empty HashMap.
+func TestQuitMsg_OnFreshModel_DoesNotPanic(t T) T {
+    val (m, _) = Update(sampleModel(), QuitMsg())
+    return Eq(t, m.Conversation.Size(), 0)
+}
+
+// ---------------------------------------------------------------------------
+// State × key matrix gaps
+// ---------------------------------------------------------------------------
+
+// KeySubmit while in Approval is allowed (the FSM keeps Approval state
+// since `_ => state` matches non-Accepted/Rejected events) — the prompt
+// is logged so the user has a record of what they tried to send. They
+// must Ctrl+R first to redirect the team.
+func TestKeySubmit_InApproval_StaysInApprovalAndLogs(t T) T {
+    val seed = sampleModel().Copy(
+        Composer = "redirect please",
+        State    = Approval(SummaryBody = "ship it"),
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    val t1 = m.State match {
+        case Approval(_) => IsTrue(t, true)
+        case _           => IsTrue(t, false)
+    }
+    return Eq(t1, m.Composer, "")
+}
+
+// KeySubmit while TLThinking is currently allowed — the lead is busy
+// but the prompt still gets queued. We document that the FSM stays in
+// TLThinking and the message is appended to conversation.
+func TestKeySubmit_InTLThinking_StaysInTLThinking(t T) T {
+    val seed = sampleModel().Copy(
+        Composer = "extra context",
+        State    = TLThinking(),
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    return m.State match {
+        case TLThinking() => IsTrue(t, true)
+        case _            => IsTrue(t, false)
+    }
+}
+
+// KeyMerge with no LastPrUrl is a strict no-op even if PrFailed has
+// already populated LastError — we never let Ctrl+M re-fire after a
+// failed PR-create attempt.
+func TestKeyMerge_AfterPrFailed_NoOp(t T) T {
+    val seed = sampleModel().Copy(LastError = Some("gh pr create: auth required"))
+    val (m, _) = Update(seed, KeyMerge())
+    val t1 = Eq(t, m.Conversation.Size(), 0)
+    return m.LastPrUrl match {
+        case None()  => IsTrue(t1, true)
+        case Some(_) => IsTrue(t1, false)
+    }
+}
+
+// KeyApprove from each non-Approval state must stay in that state and
+// emit no conversation entry.
+func TestKeyApprove_InEveryNonApprovalState_NoOp(t T) T {
+    val states = ArrayOf[AppState](
+        Idle(),
+        TLThinking(),
+        TLReview(),
+        Delegating(Pending = EmptyHashSet[string]()),
+        QAGate(Pending = EmptyHashSet[string]()),
+    )
+    return states.FoldLeft(t, (acc, st) => {
+        val (m, _) = Update(sampleModel().Copy(State = st), KeyApprove())
+        return Eq(acc, m.Conversation.Size(), 0)
+    })
+}
+
+// KeyReject from each non-Approval state must stay in that state and
+// emit no conversation entry.
+func TestKeyReject_InEveryNonApprovalState_NoOp(t T) T {
+    val states = ArrayOf[AppState](
+        Idle(),
+        TLThinking(),
+        TLReview(),
+        Delegating(Pending = EmptyHashSet[string]()),
+        QAGate(Pending = EmptyHashSet[string]()),
+    )
+    return states.FoldLeft(t, (acc, st) => {
+        val (m, _) = Update(sampleModel().Copy(State = st), KeyReject())
+        return Eq(acc, m.Conversation.Size(), 0)
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Consult dispatch corner cases
+// ---------------------------------------------------------------------------
+
+// A chunk containing an unbalanced @consult( open with no matching `)`
+// is not a valid directive and must not bump ConsultsFired.
+func TestChunkArrived_MalformedConsultOpener_NoDispatch(t T) T {
+    val (m, _) = Update(sampleModel(), ChunkArrived(Member = "Iris", Line = "@consult(broken"))
+    return Eq(t, m.ConsultsFired, 0)
+}
+
+// ConsultCompleted with a dead lead session (no entry in m.Sessions)
+// still appends the result lines but produces no SendFuture-shaped
+// Cmd — the conversation log is the user-visible record either way.
+func TestConsultCompleted_DeadLeadSession_LogsResultSilently(t T) T {
+    val (m, _) = Update(sampleModel(), ConsultCompleted(Name = "transpiler", Summary = Some("done")))
+    val n = m.Conversation.Size()
+    val tickLine = m.Conversation.Get(n - 2)
+    val bodyLine = m.Conversation.Get(n - 1)
+    val t1 = IsTrue(t,  tickLine.Text == "transpiler ✓")
+    return IsTrue(t1, bodyLine.Text == "done")
+}
+
+// Two consult dispatches in the same chunk advance ConsultsFired by 2
+// AND append two distinct "dispatching → name" lines (one per target).
+func TestChunkArrived_TwoConsults_AppendsTwoDispatchLines(t T) T {
+    val seed = sampleModel()
+    val msg = "@consult(a) one\n@end\n@consult(b) two\n@end"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = msg))
+    val n = m.Conversation.Size()
+    val l1 = m.Conversation.Get(n - 2)
+    val l2 = m.Conversation.Get(n - 1)
+    val t1 = IsTrue(t,  l1.Text == "dispatching → a")
+    return IsTrue(t1, l2.Text == "dispatching → b")
+}

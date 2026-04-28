@@ -1,6 +1,7 @@
 package ui
 
 import (
+    "strings"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -67,8 +68,12 @@ func approvalBanner(m AppModel) LayoutChild = m.State match {
 
 // approvalSnippet picks the first ~60 chars of the summary body for
 // the banner; the full body still goes into the PR via gh pr create.
+// Newlines are flattened to single spaces so the snippet always fits
+// on the banner's single Fixed(1) line — without this, an embedded
+// "\n" would corrupt the layout below the banner.
 func approvalSnippet(body string) string {
-    val rs = ToRunes(body)
+    val flat = strings.Join(strings.Fields(body), " ")
+    val rs = ToRunes(flat)
     val n = len(rs)
     return if (n <= 60) string(rs)
            else         string(SliceTo(rs, 60)) + "..."
@@ -156,6 +161,8 @@ func footerWidget(m AppModel) Widget = m.LastError match {
 
 // footerHints picks a context-appropriate key legend. After
 // PrCreated, surface Ctrl+M; otherwise show the default legend.
+// Ctrl+C and Ctrl+Q are equivalent quit shortcuts — we only mention
+// Ctrl+C in the hint to keep the legend short.
 func footerHints(m AppModel) string = m.LastPrUrl match {
     case Some(_) => "  Ctrl+M merge · Ctrl+A re-approve · Ctrl+C quit"
     case None()  => "  Enter send · Backspace delete · Ctrl+A approve · Ctrl+R reject · Ctrl+C quit"

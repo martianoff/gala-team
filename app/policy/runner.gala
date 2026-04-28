@@ -1,0 +1,106 @@
+package policy
+
+import (
+    "martianoff/gala/subprocess"
+    "martianoff/gala/concurrent"
+    "fmt"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/project"
+)
+
+// ============================================================================
+// runner — sequential hook execution against a project.
+//
+// The Phase 1 contract is intentionally narrow: feed in an array of
+// Hooks plus a Project, get back Try[bool] that's Success(true) iff
+// every hook exited 0. The first non-zero exit (or spawn failure)
+// short-circuits and surfaces with a "<hook name>: <error>" message.
+//
+// Hooks run in the project repo (`proj.Repo`). Per-engineer worktree
+// cwds will land in a follow-up once WorktreePerEngineer is wired up.
+//
+// We expose two flavors:
+//   - RunHooks: blocking, returns a Try. Useful for unit tests.
+//   - RunHooksFuture: same call wrapped in a concurrent.Future so the
+//     UI can dispatch it as a Cmd without blocking the event loop.
+// ============================================================================
+
+// HookResult captures the per-hook outcome for callers that want a
+// detailed report (which hook ran, what it produced) rather than just
+// "did anything fail".
+struct HookResult(
+    Name     string,
+    ExitCode int,
+    Stdout   string,
+    Stderr   string,
+)
+
+// RunHooks runs every hook in `hooks` sequentially against `proj.Repo`.
+// Returns Success(true) iff every hook exited 0; otherwise Failure
+// with a wrapped error tagged with the failing hook's name.
+//
+// This is the synchronous, in-process flavor. The Future variant below
+// wraps this same call site for the UI layer.
+func RunHooks(proj Project, hooks Array[Hook]) Try[bool] = Try[bool](() => {
+    var i = 0
+    val n = hooks.Size()
+    for i < n {
+        val hook = hooks.Get(i)
+        val res = runOne(proj, hook)
+        if res.IsFailure() {
+            panic(s"${hook.Name}: ${res.GetError().Error()}")
+        }
+        val r = res.Get()
+        if r.ExitCode != 0 {
+            panic(s"${hook.Name} exited with code ${r.ExitCode}: ${r.Stderr}")
+        }
+        i = i + 1
+    }
+    return true
+})
+
+// RunHooksFuture wraps RunHooks for the UI dispatch loop.
+func RunHooksFuture(proj Project, hooks Array[Hook]) concurrent.Future[Try[bool]] =
+    concurrent.FutureApply[Try[bool]](() => RunHooks(proj, hooks))
+
+// runOne spawns a single hook and drains its stdout / stderr. Returns
+// HookResult on success (the spawn ran to completion; the exit code
+// might still be non-zero), Failure if the spawn itself failed
+// (executable not found, etc.).
+func runOne(proj Project, hook Hook) Try[HookResult] = Try[HookResult](() => {
+    val opts = subprocess.NewSpawnOpts(
+        hook.Cmd,
+        hook.Args.ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val proc = subprocess.Spawn(opts) match {
+        case Success(p)   => p
+        case Failure(err) => panic(fmt.Sprintf("spawn %s: %s", hook.Cmd, err.Error()))
+    }
+    val stdout = drainStream(proc, true)
+    val stderr = drainStream(proc, false)
+    val code = proc.Wait().Get()
+    return HookResult(
+        Name     = hook.Name,
+        ExitCode = code,
+        Stdout   = stdout,
+        Stderr   = stderr,
+    )
+})
+
+// drainStream reads every line from one of the process's two output
+// streams (stdout when `out` is true, stderr otherwise) and joins them
+// with newlines. Loop-bound Append intentional — this is a pull-stream
+// from an external scanner, no declarative shape fits.
+func drainStream(p subprocess.Process, out bool) string {
+    var sb = EmptyArray[string]()
+    for {
+        val line = if (out) p.ReadLine() else p.ReadStderrLine()
+        if line.IsFailure() { break }
+        sb = sb.Append(line.Get())
+    }
+    return sb.MkString("\n")
+}

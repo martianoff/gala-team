@@ -1,0 +1,72 @@
+package main
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/policy"
+    . "github.com/martianoff/gala_team/app/project"
+)
+
+// ----- Pure schema tests -----------------------------------------------------
+
+func TestDefaultPolicy_HasShape(t T) T {
+    val p = DefaultPolicy()
+    val t1 = p.WorkspaceMode match {
+        case Shared() => IsTrue(t, true)
+        case _        => IsTrue(t, false)
+    }
+    val t2 = p.MergeRule match {
+        case SquashMerge() => IsTrue(t1, true)
+        case _             => IsTrue(t1, false)
+    }
+    val t3 = Eq(t2, p.PreMerge.Size(), 0)
+    return Eq(t3, p.PostMerge.Size(), 0)
+}
+
+func TestMergeRuleName_AllVariants(t T) T {
+    val t1 = Eq(t,  MergeRuleName(SquashMerge()), "squash")
+    val t2 = Eq(t1, MergeRuleName(RebaseMerge()), "rebase")
+    return       Eq(t2, MergeRuleName(PlainMerge()),  "merge")
+}
+
+func TestWorkspaceModeName_BothVariants(t T) T {
+    val t1 = Eq(t,  WorkspaceModeName(Shared()),              "shared")
+    return       Eq(t1, WorkspaceModeName(WorktreePerEngineer()), "worktree-per-engineer")
+}
+
+// ----- Runner tests ----------------------------------------------------------
+//
+// The runner shells out via subprocess; we drive it against `cmd /c`
+// (Windows) / `/bin/true` (Unix) style trivial invocations. To keep the
+// test cross-platform we use the host's actual `go` binary which we
+// know is on PATH, and send it `version` (always exits 0) or a bogus
+// flag (always exits non-zero).
+
+func sampleProject() Project = Project(
+    Name = "demo", Repo = ".",
+    Github = None[string](),
+    DefaultBranch = "main",
+)
+
+func TestRunHooks_EmptyHooksReturnsSuccess(t T) T {
+    val res = RunHooks(sampleProject(), EmptyArray[Hook]())
+    return IsSuccess(t, res)
+}
+
+func TestRunHooks_SingleSuccessfulHook(t T) T {
+    val hooks = ArrayOf(
+        Hook(Name = "go-version", Cmd = "go", Args = ArrayOf("version")),
+    )
+    val res = RunHooks(sampleProject(), hooks)
+    return IsSuccess(t, res)
+}
+
+func TestRunHooks_FirstFailureShortCircuits(t T) T {
+    val hooks = ArrayOf(
+        Hook(Name = "doomed",  Cmd = "go", Args = ArrayOf("--definitely-not-a-flag")),
+        Hook(Name = "skipped", Cmd = "go", Args = ArrayOf("version")),
+    )
+    val res = RunHooks(sampleProject(), hooks)
+    return IsFailure(t, res)
+}

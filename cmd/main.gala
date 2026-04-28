@@ -7,6 +7,7 @@ import (
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/time_utils"
     . "github.com/martianoff/gala_team/app/config"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/team"
@@ -123,7 +124,11 @@ func main() {
     val projDir  = flagValue("--project", ".")
     val teamPath = flagValue("--team", "")
     val proj     = resolveProject(projDir)
-    val cfg = if (teamPath == "") TeamConfig(Team = sampleTeam(), Workflow = DefaultWorkflow())
+    val cfg = if (teamPath == "") TeamConfig(
+                                      Team     = sampleTeam(),
+                                      Workflow = DefaultWorkflow(),
+                                      Policy   = DefaultPolicy(),
+                                  )
               else                loadTeamConfig(teamPath)
     // Restore the prior conversation log if a snapshot exists under
     // <repo>/.gala_team/sessions/latest.json. None on first launch.

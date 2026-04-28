@@ -4,6 +4,7 @@ import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "github.com/martianoff/gala_team/app/config"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/team"
 )
 
@@ -91,4 +92,51 @@ func TestUnknownRole_Fails(t T) T {
     val bad = "team:\n  name: \"X\"\n  members:\n" +
         "    - role: designer\n      name: \"Pia\"\n      personality: \"Unsupported role.\"\n"
     return IsFailure(t, LoadFromString(bad))
+}
+
+// Policy block parsing -------------------------------------------------------
+
+val withPolicyYaml = "team:\n" +
+    "  name: \"PolicyDemo\"\n" +
+    "  members:\n" +
+    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"Calm.\"\n" +
+    "    - role: engineer\n      name: \"Felix\"\n      personality: \"Terse.\"\n" +
+    "workflow:\n" +
+    "  qa_required: false\n" +
+    "policy:\n" +
+    "  workspace_mode: worktree-per-engineer\n" +
+    "  merge_rule: rebase\n" +
+    "  pre_merge:\n" +
+    "    - name: lint\n      cmd: go\n      args: [vet, ./...]\n" +
+    "    - name: test\n      cmd: go\n      args: [test, ./...]\n"
+
+func TestLoadWithPolicy_ParsesAllFields(t T) T {
+    val res = LoadFromString(withPolicyYaml)
+    val t1 = IsSuccess(t, res)
+    val pol = res.Get().Policy
+    val t2 = pol.WorkspaceMode match {
+        case WorktreePerEngineer() => IsTrue(t1, true)
+        case _                     => IsTrue(t1, false)
+    }
+    val t3 = pol.MergeRule match {
+        case RebaseMerge() => IsTrue(t2, true)
+        case _             => IsTrue(t2, false)
+    }
+    val t4 = Eq(t3, pol.PreMerge.Size(), 2)
+    val t5 = Eq(t4, pol.PreMerge.Get(0).Name, "lint")
+    return Eq(t5, pol.PreMerge.Get(1).Cmd, "go")
+}
+
+func TestLoadWithoutPolicy_DefaultsApplied(t T) T {
+    val res = LoadFromString(validTeamYaml)
+    val t1 = IsSuccess(t, res)
+    val pol = res.Get().Policy
+    val t2 = pol.WorkspaceMode match {
+        case Shared() => IsTrue(t1, true)
+        case _        => IsTrue(t1, false)
+    }
+    return pol.MergeRule match {
+        case SquashMerge() => IsTrue(t2, true)
+        case _             => IsTrue(t2, false)
+    }
 }

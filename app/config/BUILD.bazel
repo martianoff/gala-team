@@ -5,6 +5,7 @@ gala_library(
     srcs = ["team_config.gala"],
     importpath = "github.com/martianoff/gala_team/app/config",
     deps = [
+        "//app/policy",
         "//app/team",
         "@gala//collection_immutable",
         "@gala//yaml",
@@ -17,6 +18,7 @@ gala_go_test(
     srcs = ["team_config_test.gala"],
     deps = [
         ":config",
+        "//app/policy",
         "//app/team",
     ],
 )

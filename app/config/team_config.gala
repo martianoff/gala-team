@@ -4,6 +4,7 @@ import (
     "martianoff/gala/yaml"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/team"
 )
 
@@ -31,10 +32,15 @@ func LoadFromString(yamlStr string) Try[TeamConfig] = Try[TeamConfig](() => {
 })
 
 // TeamConfig is what LoadFromString returns: the validated team plus
-// the workflow defaults applied.  Higher-level callers fold this into
-// the AppModel along with Project / Policies / Guidance / Registry
-// siblings.
-struct TeamConfig(Team Team, Workflow Workflow)
+// the workflow defaults applied. Policy is the orchestration ruleset
+// (workspace mode / hooks / merge rule); when team.yaml omits the
+// `policy:` block we fall back to DefaultPolicy() — shared workspace,
+// no hooks, squash merge.
+struct TeamConfig(
+    Team     Team,
+    Workflow Workflow,
+    Policy   Policy,
+)
 
 // ----------------------------------------------------------------------------
 // Manual decoder
@@ -45,6 +51,7 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
     var teamName = ""
     var members = EmptyArray[Member]()
     var workflow = DefaultWorkflow()
+    var pol = DefaultPolicy()
     var sawTeam = false
 
     for d.HasMoreFields() {
@@ -56,6 +63,8 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
             members = ms
         } else if key == "workflow" {
             workflow = decodeWorkflowBlock(d)
+        } else if key == "policy" {
+            pol = decodePolicyBlock(d)
         } else {
             d.Skip()
         }
@@ -65,7 +74,7 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
     if !sawTeam {
         panic("team.yaml: top-level 'team:' block is required")
     }
-    return validate(teamName, members, workflow)
+    return validate(teamName, members, workflow, pol)
 }
 
 func decodeTeamBlock(d *yaml.YamlDecoderImpl) Tuple[string, Array[Member]] {
@@ -187,7 +196,109 @@ func decodeWorkflowBlock(d *yaml.YamlDecoderImpl) Workflow {
 // Validation
 // ----------------------------------------------------------------------------
 
-func validate(name string, members Array[Member], workflow Workflow) TeamConfig {
+// ----------------------------------------------------------------------------
+// Policy block decoder
+// ----------------------------------------------------------------------------
+//
+// Shape mirrored on team.yaml:
+//
+//   policy:
+//     workspace_mode: shared | worktree-per-engineer
+//     merge_rule:     squash | rebase | merge
+//     pre_merge:
+//       - name: lint
+//         cmd: go
+//         args: [vet, ./...]
+//     post_merge:
+//       - name: notify
+//         cmd: ...
+//
+// Unknown keys are skipped so adding new top-level policy keys upstream
+// won't break older configs that don't recognize them.
+
+func decodePolicyBlock(d *yaml.YamlDecoderImpl) Policy {
+    d.StartObject()
+    var mode = WorkspaceMode(Shared())
+    var rule = MergeRule(SquashMerge())
+    var pre = EmptyArray[Hook]()
+    var post = EmptyArray[Hook]()
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == "workspace_mode" {
+            mode = decodeWorkspaceMode(d.ReadString())
+        } else if key == "merge_rule" {
+            rule = decodeMergeRule(d.ReadString())
+        } else if key == "pre_merge" {
+            pre = decodeHooks(d)
+        } else if key == "post_merge" {
+            post = decodeHooks(d)
+        } else {
+            d.Skip()
+        }
+    }
+    d.EndObject()
+    return Policy(WorkspaceMode = mode, MergeRule = rule, PreMerge = pre, PostMerge = post)
+}
+
+func decodeWorkspaceMode(s string) WorkspaceMode {
+    if s == "shared" { return Shared() }
+    if s == "worktree-per-engineer" { return WorktreePerEngineer() }
+    panic(s"team.yaml: unknown policy.workspace_mode '${s}' (expected: shared | worktree-per-engineer)")
+}
+
+func decodeMergeRule(s string) MergeRule {
+    if s == "squash" { return SquashMerge() }
+    if s == "rebase" { return RebaseMerge() }
+    if s == "merge"  { return PlainMerge() }
+    panic(s"team.yaml: unknown policy.merge_rule '${s}' (expected: squash | rebase | merge)")
+}
+
+// Loop-bound Append intentional: yaml.YamlDecoderImpl is a stateful
+// pull-cursor, so each element comes from a side-effecting call pair.
+func decodeHooks(d *yaml.YamlDecoderImpl) Array[Hook] {
+    var hooks = EmptyArray[Hook]()
+    d.StartArray()
+    for d.HasMoreElements() {
+        hooks = hooks.Append(decodeHook(d))
+    }
+    d.EndArray()
+    return hooks
+}
+
+func decodeHook(d *yaml.YamlDecoderImpl) Hook {
+    d.StartObject()
+    var name = ""
+    var cmd = ""
+    var args = EmptyArray[string]()
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == "name" {
+            name = d.ReadString()
+        } else if key == "cmd" {
+            cmd = d.ReadString()
+        } else if key == "args" {
+            args = decodeStringArray(d)
+        } else {
+            d.Skip()
+        }
+    }
+    d.EndObject()
+    if name == "" { panic("team.yaml: policy hook is missing required 'name'") }
+    if cmd == ""  { panic(s"team.yaml: policy hook '${name}' is missing required 'cmd'") }
+    return Hook(Name = name, Cmd = cmd, Args = args)
+}
+
+func decodeStringArray(d *yaml.YamlDecoderImpl) Array[string] {
+    var xs = EmptyArray[string]()
+    d.StartArray()
+    for d.HasMoreElements() {
+        xs = xs.Append(d.ReadString())
+    }
+    d.EndArray()
+    return xs
+}
+
+func validate(name string, members Array[Member], workflow Workflow, pol Policy) TeamConfig {
     if name == "" {
         panic("team.yaml: team.name is required and must be non-empty")
     }
@@ -224,5 +335,6 @@ func validate(name string, members Array[Member], workflow Workflow) TeamConfig 
             Lead    = leads.Get(0),
         ),
         Workflow = workflow,
+        Policy   = pol,
     )
 }

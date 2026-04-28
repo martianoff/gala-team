@@ -1,0 +1,28 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "policy",
+    srcs = [
+        "policy.gala",
+        "runner.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/policy",
+    deps = [
+        "//app/project",
+        "@gala//collection_immutable",
+        "@gala//concurrent",
+        "@gala//go_interop",
+        "@gala//subprocess",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "policy_test",
+    srcs = ["policy_test.gala"],
+    deps = [
+        ":policy",
+        "//app/project",
+        "@gala//collection_immutable",
+    ],
+)

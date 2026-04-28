@@ -1,0 +1,88 @@
+package policy
+
+import (
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// app/policy — schema for the orchestration rules a team can declare.
+//
+// Three concerns are bundled here:
+//
+//   1. Workspaces — one git worktree per engineer (so parallel work
+//      doesn't stomp on the same checkout) vs. a single shared
+//      workspace (faster, fine for single-engineer teams).
+//
+//   2. Hooks — shell commands the runner executes at fixed lifecycle
+//      points (pre-merge, post-merge). Lint, test, bench, etc.
+//      Sequential by design — the first failure short-circuits.
+//
+//   3. Merge rule — squash / rebase / plain merge. Shapes the final
+//      `gh pr merge` invocation when the team lead approves.
+//
+// `DefaultPolicy()` returns the most permissive shape (shared workspace,
+// no hooks, squash merge) so projects that don't declare a `policy:`
+// block in team.yaml still get a valid Policy out of the loader.
+// ============================================================================
+
+// WorkspaceMode dictates whether each engineer works in their own
+// worktree or shares a single checkout with the rest of the team.
+sealed type WorkspaceMode {
+    case Shared
+    case WorktreePerEngineer
+}
+
+// MergeRule decides how the final merge happens after approval.
+//   - SquashMerge: squash the engineer's commits into one with the PR
+//     title as message; what most teams use day-to-day.
+//   - RebaseMerge: rebase the engineer's commits onto base, preserving
+//     individual commits.
+//   - PlainMerge: classic three-way merge with a merge commit.
+sealed type MergeRule {
+    case SquashMerge
+    case RebaseMerge
+    case PlainMerge
+}
+
+// Hook is a single shell command run at a lifecycle point. Name is
+// surfaced in the conversation log when the hook fires; Cmd is the
+// program; Args is its argv tail. Cwd defaults to the project repo
+// (Phase 1; future versions may add per-engineer worktree cwds).
+struct Hook(
+    Name string,
+    Cmd  string,
+    Args Array[string],
+)
+
+// Policy is the full per-team orchestration ruleset. Parsed from the
+// optional `policy:` block in team.yaml.
+struct Policy(
+    WorkspaceMode WorkspaceMode,
+    PreMerge      Array[Hook],
+    PostMerge     Array[Hook],
+    MergeRule     MergeRule,
+)
+
+// DefaultPolicy returns the most permissive shape — shared workspace,
+// no hooks, squash merge. This is what a team gets if they omit the
+// `policy:` block entirely.
+func DefaultPolicy() Policy = Policy(
+    WorkspaceMode = Shared(),
+    PreMerge      = EmptyArray[Hook](),
+    PostMerge     = EmptyArray[Hook](),
+    MergeRule     = SquashMerge(),
+)
+
+// MergeRuleName pretty-prints a MergeRule for UI / log surfaces.
+func MergeRuleName(r MergeRule) string = r match {
+    case SquashMerge() => "squash"
+    case RebaseMerge() => "rebase"
+    case PlainMerge()  => "merge"
+}
+
+// WorkspaceModeName mirrors MergeRuleName for the workspace mode.
+func WorkspaceModeName(m WorkspaceMode) string = m match {
+    case Shared()              => "shared"
+    case WorktreePerEngineer() => "worktree-per-engineer"
+}

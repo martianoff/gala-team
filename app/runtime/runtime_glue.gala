@@ -181,23 +181,11 @@ func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
 // Lifecycle
 // ----------------------------------------------------------------------------
 
-// CloseSession gracefully terminates a member's subprocess: kills it, then
-// waits for the OS to reap it. The first failure short-circuits and the
-// result is Success(true) only when both legs succeed.
-//
-// Plain Try.FlatMap(_).Map((_) => true) lowers correctly upstream
-// (examples/try_chain_typeparam_repro), but when Process is a struct
-// imported from another package (here martianoff/gala/subprocess) the
-// inner Map's Try[bool] type still gets erased to bare Try in the
-// emitted closure. Tracked separately; the match-nested shape
-// produces correct Go either way.
-func CloseSession(s MemberSession) Try[bool] = s.Process.Kill() match {
-    case Failure(err) => Failure[bool](err)
-    case Success(_)   => s.Process.Wait() match {
-        case Failure(err) => Failure[bool](err)
-        case Success(_)   => Success[bool](true)
-    }
-}
+// CloseSession gracefully terminates a member's subprocess: kills it,
+// then waits for the OS to reap it. The first failure short-circuits;
+// the result is Success(true) only when both legs succeed.
+func CloseSession(s MemberSession) Try[bool] =
+    s.Process.Kill().FlatMap((_) => s.Process.Wait()).Map((_) => true)
 
 // CloseAllSessions kills every live MemberSession in `sessions` and
 // waits for the OS to reap each one. Returns an Array of (member

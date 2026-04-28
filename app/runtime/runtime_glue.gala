@@ -195,23 +195,11 @@ func CloseSession(s MemberSession) Try[bool] =
 // Used on shutdown (QuitMsg) so the spawned `claude` subprocesses
 // don't outlive the TUI. Best-effort: a failed Kill on one member
 // does not stop the other Kills from running.
-func CloseAllSessions(sessions HashMap[string, MemberSession]) Array[Tuple[string, error]] {
-    var failures = EmptyArray[Tuple[string, error]]()
-    val pairs = sessions.ToArray()
-    var i = 0
-    val n = pairs.Size()
-    for i < n {
-        val pair = pairs.Get(i)
-        val name = pair.V1
-        val sess = pair.V2
-        CloseSession(sess) match {
-            case Success(_)   => {}
-            case Failure(err) => failures = failures.Append((name, err))
-        }
-        i = i + 1
-    }
-    return failures
-}
+func CloseAllSessions(sessions HashMap[string, MemberSession]) Array[Tuple[string, error]] =
+    sessions.FoldLeftKV(EmptyArray[Tuple[string, error]](), (acc, name, sess) => CloseSession(sess) match {
+        case Success(_)   => acc
+        case Failure(err) => acc.Append((name, err))
+    })
 
 // MsgMember extracts the member name from any runtime Msg variant.
 // PR / merge variants don't have a member; they return "" so callers

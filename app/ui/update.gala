@@ -34,9 +34,13 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case KeyChar(c)              => (m.Copy(Composer = m.Composer + string(c)),    NoCmd[AppMsg]())
     case KeyBackspace()          => (m.Copy(Composer = trimLastRune(m.Composer)),  NoCmd[AppMsg]())
     case KeySubmit()             => onSubmit(m)
+    case KeyApprove()            => onApprove(m)
+    case KeyReject()             => onReject(m)
     case ChunkArrived(name, ln)  => onChunk(m, name, ln)
     case SessionFailed(name, e)  => onSessionFailed(m, name, e)
     case WriteSent(_)            => (m, NoCmd[AppMsg]())
+    case PrCreated(url)          => onPrCreated(m, url)
+    case PrFailed(err)           => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
     case TickMsg()               => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
     case QuitMsg()               => (m, QuitCmd[AppMsg]())
     case NoOp()                  => (m, NoCmd[AppMsg]())
@@ -122,6 +126,58 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
     ), NoCmd[AppMsg]())
 }
 
+// onApprove is the Phase-1 approval flow: when the FSM is in Approval,
+// the user pressed Ctrl+A. We transition the FSM to Idle (via the
+// ApprovalAccepted event) and fire `gh pr create` with the summary as
+// the PR body. The Future resolves to PrCreated(url) or PrFailed(err)
+// which onPrCreated / the PrFailed arm in Update handle.
+//
+// In any other state the key is a no-op so users don't accidentally
+// open PRs.
+func onApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    return m.State match {
+        case Approval(body) => approveAndKickPr(m, body)
+        case _              => (m, NoCmd[AppMsg]())
+    }
+}
+
+func approveAndKickPr(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
+    val nextState = Transition(m.State, ApprovalAccepted(), transitionContext(m))
+    val withState = m.Copy(
+        State = nextState,
+        Conversation = m.Conversation.Append(ConversationLine(Speaker = "you", Text = "/approve")),
+    )
+    return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body)))
+}
+
+// onReject mirrors onApprove but transitions the FSM via
+// ApprovalRejected and emits no Cmd (no PR is created). The user is
+// expected to type a follow-up prompt to redirect the team.
+func onReject(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    return m.State match {
+        case Approval(_) => rejectAndIdle(m)
+        case _           => (m, NoCmd[AppMsg]())
+    }
+}
+
+func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val nextState = Transition(m.State, ApprovalRejected(), transitionContext(m))
+    val withState = m.Copy(
+        State = nextState,
+        Conversation = m.Conversation.Append(ConversationLine(Speaker = "you", Text = "/reject")),
+    )
+    return (withState, NoCmd[AppMsg]())
+}
+
+// onPrCreated records the URL in the conversation log so the user has
+// a copy-paste-friendly link to open the PR. We don't auto-open the
+// browser because in headless or CI contexts there is none.
+func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
+    return (m.Copy(
+        Conversation = m.Conversation.Append(ConversationLine(Speaker = "gh", Text = s"PR created: ${url}")),
+    ), NoCmd[AppMsg]())
+}
+
 // runtimeFutureToCmd lifts a runtime.Msg-typed Future into the AppMsg
 // vocabulary so it can be returned as a Cmd from update(). The mapping
 // is one-to-one over the three runtime.Msg variants.
@@ -130,13 +186,15 @@ func runtimeFutureToCmd(fut concurrent.Future[Msg]) Cmd[AppMsg] =
 
 // runtimeToAppMsg lifts a runtime.Msg into the AppMsg sealed type. The
 // runtime cases are prefixed `Rt` so they don't collide with the AppMsg
-// names when both sealed types are dot-imported. SessionFailed carries
-// an error at the runtime boundary; we materialize the message here so
-// AppMsg stays string-only.
+// names when both sealed types are dot-imported. SessionFailed and
+// PrFailed carry an error at the runtime boundary; we materialize the
+// message here so AppMsg stays string-only.
 func runtimeToAppMsg(rm Msg) AppMsg = rm match {
     case RtChunkArrived(name, line) => ChunkArrived(Member = name, Line = line)
     case RtSessionFailed(name, err) => SessionFailed(Member = name, ErrText = err.Error())
     case RtWriteSent(name)          => WriteSent(Member = name)
+    case RtPrCreated(url)           => PrCreated(Url = url)
+    case RtPrFailed(err)            => PrFailed(ErrText = err.Error())
 }
 
 // transitionContext extracts the per-team facts the FSM needs from the

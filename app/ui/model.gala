@@ -65,11 +65,18 @@ sealed type AppMsg {
     case KeyChar(C rune)
     case KeyBackspace
     case KeySubmit                  // Enter: send composer to TL
+    // Approval keys (only meaningful when State is Approval; otherwise
+    // ignored). Routed by cmd/main.gala's keyToAppMsg from 'a'/'r'.
+    case KeyApprove
+    case KeyReject
     // Runtime subprocess events (mirrors runtime.Msg, lifted into the
     // app vocabulary so update() can dispatch on a single sealed type).
     case ChunkArrived(Member string, Line string)
     case SessionFailed(Member string, ErrText string)
     case WriteSent(Member string)
+    // PR creation outcome from `gh pr create` after KeyApprove.
+    case PrCreated(Url string)
+    case PrFailed(ErrText string)
     // Lifecycle
     case TickMsg
     case QuitMsg

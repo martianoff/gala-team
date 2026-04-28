@@ -127,3 +127,58 @@ func TestNoOp_LeavesModelUnchanged(t T) T {
     val t1 = Eq(t, m.Composer, "x")
     return Eq(t1, m.Tick, 3)
 }
+
+// Approval flow ---------------------------------------------------------------
+
+func TestKeyApprove_OutsideApproval_NoOp(t T) T {
+    val seed = sampleModel()  // Idle state
+    val (m, _) = Update(seed, KeyApprove())
+    return m.State match {
+        case Idle() => Eq(t, m.Conversation.Size(), 0)  // no log entry
+        case _      => IsTrue(t, false)
+    }
+}
+
+func TestKeyApprove_InApproval_TransitionsToIdleAndLogs(t T) T {
+    val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))
+    val (m, _) = Update(seed, KeyApprove())
+    val t1 = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    val t2 = Eq(t1, m.Conversation.Size(), 1)
+    return Eq(t2, m.Conversation.Get(0).Text, "/approve")
+}
+
+func TestKeyReject_InApproval_TransitionsToIdleAndLogs(t T) T {
+    val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))
+    val (m, _) = Update(seed, KeyReject())
+    val t1 = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    val t2 = Eq(t1, m.Conversation.Size(), 1)
+    return Eq(t2, m.Conversation.Get(0).Text, "/reject")
+}
+
+func TestKeyReject_OutsideApproval_NoOp(t T) T {
+    val seed = sampleModel().Copy(Tick = 5)
+    val (m, _) = Update(seed, KeyReject())
+    return Eq(t, m.Tick, 5)  // unchanged
+}
+
+func TestPrCreated_AppendsUrlToConversationLog(t T) T {
+    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://github.com/x/y/pull/1"))
+    val t1 = Eq(t, m.Conversation.Size(), 1)
+    val first = m.Conversation.Get(0)
+    val t2 = Eq(t1, first.Speaker, "gh")
+    return Eq(t2, first.Text, "PR created: https://github.com/x/y/pull/1")
+}
+
+func TestPrFailed_SetsLastErrorWithGhPrefix(t T) T {
+    val (m, _) = Update(sampleModel(), PrFailed(ErrText = "auth required"))
+    return m.LastError match {
+        case Some(s) => Eq(t, s, "gh pr create: auth required")
+        case None()  => IsTrue(t, false)
+    }
+}

@@ -34,15 +34,26 @@ import (
 // conversation log.
 // ============================================================================
 
-func keyToAppMsg(ev KeyEvent) AppMsg =
-    if (KeyMatchesAny(ev, "ctrl+c", "ctrl+q")) QuitMsg()
-    else ev.Key match {
+// keyToAppMsg translates raw keyboard events to AppMsg. Most keys feed
+// the composer; Ctrl+C / Ctrl+Q quits. Approve/reject keys
+// (Ctrl+A / Ctrl+R) are routed to KeyApprove / KeyReject — Update
+// itself no-ops them outside the Approval state, so accidental presses
+// while typing can't fire `gh pr create`.
+//
+// We use Ctrl-modified keys rather than plain 'a'/'r' so the composer
+// stays usable for words containing those letters.
+func keyToAppMsg(ev KeyEvent) AppMsg {
+    if (KeyMatchesAny(ev, "ctrl+c", "ctrl+q")) { return QuitMsg() }
+    if (KeyMatchesAny(ev, "ctrl+a"))           { return KeyApprove() }
+    if (KeyMatchesAny(ev, "ctrl+r"))           { return KeyReject() }
+    return ev.Key match {
         case Backspace()  => KeyBackspace()
         case Enter()      => KeySubmit()
         case Char(c)      => KeyChar(C = c)
         case Space()      => KeyChar(C = ' ')
         case _            => NoOp()
     }
+}
 
 // flagValue scans `os.Args` for a `--name <value>` pair and returns the
 // value if present, otherwise `dflt`. Simple linear scan is fine for the

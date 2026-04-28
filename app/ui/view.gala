@@ -3,6 +3,7 @@ package ui
 import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/view"
@@ -40,11 +41,36 @@ func View(m AppModel) Widget {
         Fixed(3, header),
         Flex(1, Row(ArrayOf[LayoutChild](
             Fixed(28, BorderOf(sidebar, RoundedBorder())),
-            Flex(1, BorderOf(conversation, RoundedBorder())),
+            Flex(1, Column(ArrayOf[LayoutChild](
+                approvalBanner(m),
+                Flex(1, BorderOf(conversation, RoundedBorder())),
+            ))),
         ))),
         Fixed(3, BorderOf(composer, RoundedBorder())),
         Fixed(1, footer),
     ))
+}
+
+// approvalBanner shows a Ctrl+A / Ctrl+R hint above the conversation
+// pane when the FSM is in Approval. Hidden in every other state by
+// returning a zero-height layout child.
+func approvalBanner(m AppModel) LayoutChild = m.State match {
+    case Approval(body) => Fixed(2, Column(ArrayOf[LayoutChild](
+        Fixed(1, TextStyled(s"  ▶ Ready to ship: ${approvalSnippet(body)}",
+            DefaultStyle().WithBold().WithFg(BrightYellow()))),
+        Fixed(1, TextStyled("    Ctrl+A approve & open PR · Ctrl+R reject (back to chat)",
+            DefaultStyle().WithDim())),
+    )))
+    case _ => Fixed(0, Empty())
+}
+
+// approvalSnippet picks the first ~60 chars of the summary body for
+// the banner; the full body still goes into the PR via gh pr create.
+func approvalSnippet(body string) string {
+    val rs = ToRunes(body)
+    val n = len(rs)
+    return if (n <= 60) string(rs)
+           else         string(SliceTo(rs, 60)) + "..."
 }
 
 // ----- pieces ---------------------------------------------------------------
@@ -99,9 +125,12 @@ func composerWidget(m AppModel) Widget {
     return TextStyled(s"  ${prompt}▌", style)
 }
 
-func footerWidget(m AppModel) Widget = TextStyled(
-    "  Enter submit · Backspace delete · Ctrl+C / q quit",
-    DefaultStyle().WithDim())
+func footerWidget(m AppModel) Widget = m.LastError match {
+    case Some(err) => TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed()))
+    case None()    => TextStyled(
+        "  Enter send · Backspace delete · Ctrl+A approve · Ctrl+R reject · Ctrl+C quit",
+        DefaultStyle().WithDim())
+}
 
 // stateLabel pretty-prints the current AppState for the header line.
 func stateLabel(s AppState) string = s match {

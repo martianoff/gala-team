@@ -1,6 +1,8 @@
 package runtime
 
 import (
+    "errors"
+    "strings"
     "martianoff/gala/subprocess"
     "martianoff/gala/concurrent"
     . "martianoff/gala/std"
@@ -36,6 +38,8 @@ sealed type Msg {
     case RtChunkArrived(Member string, Line string)
     case RtSessionFailed(Member string, Err error)
     case RtWriteSent(Member string)
+    case RtPrCreated(Url string)
+    case RtPrFailed(Err error)
 }
 
 // MemberSession pairs a Member with the live subprocess driving them.
@@ -121,8 +125,79 @@ func CloseSession(s MemberSession) Try[bool] = s.Process.Kill() match {
 }
 
 // MsgMember extracts the member name from any runtime Msg variant.
+// PR-related variants don't have a member; they return "" so callers
+// can branch on that or pattern-match instead.
 func MsgMember(msg Msg) string = msg match {
     case RtChunkArrived(name, _)    => name
     case RtSessionFailed(name, _)   => name
     case RtWriteSent(name)          => name
+    case RtPrCreated(_)             => ""
+    case RtPrFailed(_)              => ""
+}
+
+// ----------------------------------------------------------------------------
+// Approval / PR creation
+// ----------------------------------------------------------------------------
+
+// GhPrCreateFuture spawns `gh pr create` against `proj.Repo` with the
+// summary text as the PR body. The first line of `body` becomes the
+// title (capped at 70 chars per gala-style rule), the rest goes into
+// the body via the `--body` flag.
+//
+// Returns RtPrCreated(url) on success — `gh` prints the PR URL on its
+// last stdout line, so we read until the stream closes and take the
+// last non-empty line. Returns RtPrFailed(err) on any spawn or non-zero
+// exit. The user typically reads the URL from the conversation log
+// then opens it in their browser; alternative would be to launch the
+// browser directly via `gh pr view --web` but that bypasses the audit
+// trail of "what summary did the team agree to".
+func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
+    val title = ghTitle(body)
+    val args = ArrayOf("pr", "create", "--title", title, "--body", body)
+    return concurrent.FutureApply[Msg](() => {
+        val opts = subprocess.NewSpawnOpts(
+            "gh",
+            args.ToGoSlice(),
+            SliceEmpty[string](),
+            proj.Repo,
+        )
+        return subprocess.Spawn(opts) match {
+            case Failure(err) => RtPrFailed(Err = err)
+            case Success(p)   => readGhPrUrl(p)
+        }
+    })
+}
+
+// readGhPrUrl drains gh's stdout, looking for the URL line. `gh pr
+// create` prints assorted status to stderr and the final PR URL on
+// stdout; the URL is the last non-empty stdout line.
+func readGhPrUrl(p subprocess.Process) Msg {
+    var lastLine = ""
+    for {
+        val line = p.ReadLine()
+        if line.IsFailure() { break }
+        val trimmed = line.Get()
+        if trimmed != "" {
+            lastLine = trimmed
+        }
+    }
+    return p.Wait() match {
+        case Failure(err)  => RtPrFailed(Err = err)
+        case Success(code) =>
+            if (code != 0)           RtPrFailed(Err = errors.New(s"gh pr create exited with code ${code}"))
+            else if (lastLine == "") RtPrFailed(Err = errors.New("gh pr create produced no output"))
+            else                     RtPrCreated(Url = lastLine)
+    }
+}
+
+// ghTitle picks the first non-empty line of `body` and clamps it to 70
+// chars (with an ellipsis when truncated) for use as the PR title.
+// strings.SplitN returns a Go []string at the interop boundary so we
+// rebuild as an Array for GALA-side access.
+func ghTitle(body string) string {
+    val parts = ArrayOf(strings.SplitN(body, "\n", 2)...)
+    val firstLine = parts.HeadOption().GetOrElse("")
+    val trimmed = strings.TrimSpace(firstLine)
+    return if (len(trimmed) <= 70) trimmed
+           else                    string(SliceTo(ToRunes(trimmed), 67)) + "..."
 }

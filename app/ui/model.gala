@@ -58,8 +58,12 @@ struct AppModel(
     ActiveConsults HashMap[string, ConsultSession],
     // Per-consult accumulator of raw stdout lines (no `[consult/<name>]`
     // prefix). Drained by onConsultEnded for summary extraction, then
-    // discarded.
+    // discarded. Also rendered live in the consult viewer modal.
     ConsultBuffers HashMap[string, Array[string]],
+    // Toggled by Tab. When true, the main conversation pane is
+    // replaced by the consult viewer overlay listing every active
+    // consult and its last few streamed lines.
+    ConsultViewerOpen bool,
 )
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
@@ -92,6 +96,7 @@ func InitialModel(
     ConsultsFired = 0,
     ActiveConsults = EmptyHashMap[string, ConsultSession](),
     ConsultBuffers = EmptyHashMap[string, Array[string]](),
+    ConsultViewerOpen = false,
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -144,6 +149,8 @@ sealed type AppMsg {
     // so the back-to-TL forwarding handlers can stay reused.
     case ConsultChunkArrived(Name string, Line string)
     case ConsultEnded(Name string, ErrText Option[string])
+    // Toggles the consult viewer modal overlay (Tab key).
+    case KeyToggleConsultViewer
     // Mouse input. Phase 1: routed but unhandled — the layout doesn't
     // yet expose clickable hit-targets. Plumbing is here so when a
     // future component-level click dispatcher lands, the runtime, the

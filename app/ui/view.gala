@@ -7,6 +7,7 @@ import (
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/consult"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/view"
 )
@@ -32,11 +33,16 @@ import (
 //
 // ============================================================================
 
-// View renders the AppModel as a gala-tui Widget tree.
+// View renders the AppModel as a gala-tui Widget tree. When the
+// consult viewer modal is toggled open, the main conversation pane
+// is replaced by the viewer overlay; the sidebar and composer stay
+// rendered so the user can keep typing into the lead while watching
+// child consults stream in.
 func View(m AppModel) Widget {
     val header = headerWidget(m)
     val sidebar = sidebarWidget(m)
-    val conversation = conversationPanel(m)
+    val mainPanel = if (m.ConsultViewerOpen) consultViewerPanel(m)
+                    else                     conversationPanel(m)
     val composer = composerWidget(m)
     val footer = footerWidget(m)
     return Column(ArrayOf[LayoutChild](
@@ -45,7 +51,7 @@ func View(m AppModel) Widget {
             Fixed(28, BorderOf(sidebar, RoundedBorder())),
             Flex(1, Column(ArrayOf[LayoutChild](
                 approvalBanner(m),
-                Flex(1, BorderOf(conversation, RoundedBorder())),
+                Flex(1, BorderOf(mainPanel, RoundedBorder())),
             ))),
         ))),
         Fixed(3, BorderOf(composer, RoundedBorder())),
@@ -145,6 +151,74 @@ func speakerStyle(speaker string) Style =
     if (speaker == "you") DefaultStyle().WithFg(BrightWhite())
     else                  DefaultStyle().WithFg(BrightCyan())
 
+// consultViewerVisibleLines is how many of each consult's most-
+// recent stdout lines we render in the modal — the full transcript
+// is in the conversation log under speaker `consult/<name>`. Tail
+// preview here gives the user a "is the child stuck?" signal without
+// fighting the main pane for vertical space.
+val consultViewerVisibleLines = 8
+
+// consultViewerPanel renders the modal overlay listing every active
+// cross-team consult with its target team / project header and the
+// last few streamed stdout lines. Replaces the main conversation
+// pane when AppModel.ConsultViewerOpen is true.
+func consultViewerPanel(m AppModel) Widget {
+    val header = TextStyled("  Consult viewer  (Tab to close)",
+        DefaultStyle().WithBold().WithFg(BrightYellow()))
+    val active = m.ActiveConsults
+    if active.IsEmpty() {
+        return Column(ArrayOf[LayoutChild](
+            Fixed(1, header),
+            Fixed(1, Empty()),
+            Fixed(1, TextStyled(
+                "  (no active consults — Tab again or wait for the lead to @consult someone)",
+                DefaultStyle().WithDim())),
+            Flex(1, Empty()),
+        ))
+    }
+    val rows = active.FoldLeftKV(EmptyArray[LayoutChild](), (acc, name, sess) =>
+        acc.AppendAll(consultEntryRows(m, name, sess))
+    )
+    val children = ArrayOf[LayoutChild](Fixed(1, header), Fixed(1, Empty()))
+        .AppendAll(rows)
+        .Append(Flex(1, Empty()))
+    return Column(children)
+}
+
+// consultEntryRows renders one consult: a "▶ name @ team · repo" header
+// line followed by up to consultViewerVisibleLines tail lines of the
+// child team's stdout.
+func consultEntryRows(m AppModel, name string, sess ConsultSession) Array[LayoutChild] {
+    val title = TextStyled(
+        s"  ▶ ${name}  ·  team: ${sess.TeamName}  ·  ${sess.Project.Name}",
+        DefaultStyle().WithBold().WithFg(BrightCyan()),
+    )
+    val buffer = m.ConsultBuffers.Get(name).GetOrElse(EmptyArray[string]())
+    val total = buffer.Size()
+    val tail = if (total <= consultViewerVisibleLines) buffer
+               else                                     buffer.Drop(total - consultViewerVisibleLines)
+    val hidden = total - tail.Size()
+    val hiddenRow = if (hidden > 0)
+                        ArrayOf[LayoutChild](Fixed(1, TextStyled(
+                            s"      …${hidden} earlier line(s) hidden",
+                            DefaultStyle().WithDim())))
+                    else
+                        EmptyArray[LayoutChild]()
+    val tailRows = if (tail.IsEmpty())
+                       ArrayOf[LayoutChild](Fixed(1, TextStyled(
+                           "      (waiting for first chunk…)",
+                           DefaultStyle().WithDim())))
+                   else
+                       tail.Map((line) => Fixed(1, TextStyled(
+                           s"      ${line}",
+                           DefaultStyle().WithFg(BrightCyan()),
+                       )))
+    return ArrayOf[LayoutChild](Fixed(1, title))
+        .AppendAll(hiddenRow)
+        .AppendAll(tailRows)
+        .Append(Fixed(1, Empty()))
+}
+
 func composerWidget(m AppModel) Widget {
     val prompt = if (m.Composer == "") "Type to Iris…" else m.Composer
     val style = if (m.Composer == "")
@@ -162,10 +236,12 @@ func footerWidget(m AppModel) Widget = m.LastError match {
 // footerHints picks a context-appropriate key legend. After
 // PrCreated, surface Ctrl+M; otherwise show the default legend.
 // Ctrl+C and Ctrl+Q are equivalent quit shortcuts — we only mention
-// Ctrl+C in the hint to keep the legend short.
+// Ctrl+C in the hint to keep the legend short. Tab toggles the
+// consult viewer modal whenever there are (or might soon be) active
+// cross-team consults to peek at.
 func footerHints(m AppModel) string = m.LastPrUrl match {
-    case Some(_) => "  Ctrl+M merge · Ctrl+A re-approve · Ctrl+C quit"
-    case None()  => "  Enter send · Backspace delete · Ctrl+A approve · Ctrl+R reject · Ctrl+C quit"
+    case Some(_) => "  Ctrl+M merge · Ctrl+A re-approve · Tab consults · Ctrl+C quit"
+    case None()  => "  Enter send · Backspace · Ctrl+A approve · Ctrl+R reject · Tab consults · Ctrl+C quit"
 }
 
 // stateLabel pretty-prints the current AppState for the header line.

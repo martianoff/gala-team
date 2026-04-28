@@ -57,6 +57,7 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case ConsultFailed(name, err)    => onConsultFailed(m, name, err)
     case ConsultChunkArrived(n, ln)  => onConsultChunkArrived(m, n, ln)
     case ConsultEnded(name, err)     => onConsultEnded(m, name, err)
+    case KeyToggleConsultViewer()    => (m.Copy(ConsultViewerOpen = !m.ConsultViewerOpen), NoCmd[AppMsg]())
     case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
     case TickMsg()                   => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
     case QuitMsg()                   => onQuit(m)

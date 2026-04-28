@@ -842,3 +842,32 @@ func TestConsultEnded_UnknownConsult_NoOp(t T) T {
     val (m, _) = Update(seed, ConsultEnded(Name = "ghost", ErrText = None[string]()))
     return Eq(t, m.Conversation.Size(), 1)
 }
+
+// ---------------------------------------------------------------------------
+// Consult viewer modal toggle (Phase 2.3)
+// ---------------------------------------------------------------------------
+
+// Tab toggles ConsultViewerOpen on/off. Pressing it twice returns the
+// model to the original closed state.
+func TestKeyToggleConsultViewer_FlipsOpenFlag(t T) T {
+    val (m1, _) = Update(sampleModel(), KeyToggleConsultViewer())
+    val t1 = IsTrue(t, m1.ConsultViewerOpen)
+    val (m2, _) = Update(m1,            KeyToggleConsultViewer())
+    return IsFalse(t1, m2.ConsultViewerOpen)
+}
+
+// Toggling the viewer must not touch any of the existing model fields
+// — composer, conversation, sessions, statuses are all preserved.
+func TestKeyToggleConsultViewer_LeavesOtherStateAlone(t T) T {
+    val seed = sampleModel().Copy(
+        Composer     = "draft",
+        Tick         = 5,
+        Conversation = EmptyArray[ConversationLine]().Append(
+            ConversationLine(Speaker = "you", Text = "earlier"),
+        ),
+    )
+    val (m, _) = Update(seed, KeyToggleConsultViewer())
+    val t1 = Eq(t,  m.Composer, "draft")
+    val t2 = Eq(t1, m.Tick, 5)
+    return Eq(t2, m.Conversation.Size(), 1)
+}

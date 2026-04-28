@@ -27,10 +27,12 @@ func sampleTeam() Team {
         Onboarding = EmptyArray[string](),
     )
     return Team(
-        Name       = "Skunkworks",
-        Members    = ArrayOf[Member](iris, felix, theo),
-        Lead       = iris,
-        Onboarding = EmptyArray[string](),
+        Key         = "main",
+        Name        = "Skunkworks",
+        Description = "",
+        Members     = ArrayOf[Member](iris, felix, theo),
+        Lead        = iris,
+        Onboarding  = EmptyArray[string](),
     )
 }
 
@@ -116,7 +118,8 @@ func TestMembersOf_EmptyForMissingRole(t T) T {
         Onboarding = EmptyArray[string](),
     )
     val tm = Team(
-        Name = "Solo", Members = ArrayOf(iris, felix), Lead = iris,
+        Key = "solo", Name = "Solo", Description = "",
+        Members = ArrayOf(iris, felix), Lead = iris,
         Onboarding = EmptyArray[string](),
     )
     return Eq(t, MembersOf(tm, QA()).Length(), 0)

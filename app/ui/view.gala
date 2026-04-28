@@ -100,12 +100,20 @@ func approvalSnippet(body string) string {
 func headerWidget(m AppModel) Widget {
     val title = TextStyled(s"  ⛩  gala_team   ${stateLabel(m.State)}   tick:${m.Tick}",
         DefaultStyle().WithBold().WithFg(BrightCyan()))
+    val sub = TextStyled(s"     ${m.Team.Name}${teamDescriptionSuffix(m.Team.Description)}",
+        DefaultStyle().WithDim())
     return Column(ArrayOf[LayoutChild](
         Fixed(1, title),
+        Fixed(1, sub),
         Fixed(1, FillCh('─')),
-        Fixed(1, Empty()),
     ))
 }
+
+// teamDescriptionSuffix appends "  ·  <description>" when the team
+// declared a description; empty otherwise so the header stays clean
+// for legacy team.yaml files that don't set one.
+func teamDescriptionSuffix(desc string) string =
+    if (desc == "") "" else s"  ·  ${desc}"
 
 func sidebarWidget(m AppModel) Widget = Column(ArrayOf[LayoutChild](
     Fixed(1, TextStyled("  Team", DefaultStyle().WithBold())),

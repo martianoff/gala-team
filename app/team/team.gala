@@ -93,15 +93,25 @@ func DefaultWorkflow() Workflow = Workflow(
 // plus a precomputed Lead pointer for convenience. Order is preserved so
 // the UI shows roles in the user's authored order, not alphabetised.
 //
+// Key is the lookup token used by `@consult(<key>)` directives and by
+// the `--team-key <key>` CLI flag. When omitted in YAML, the loader
+// derives it from Name (lowercased, spaces → dashes).
+//
+// Description is a one-line human-readable hint surfaced in the team
+// picker and the TUI header so the user can tell apart "main" from
+// "transpiler-wizards" at a glance.
+//
 // Onboarding is a list of file paths every member reads before its
 // first prompt — typically architecture docs, conventions, the
 // project's CONTRIBUTING.md. Composed with each Member.Onboarding to
 // form the per-member onboarding pack (see app/onboarding.Compose).
 struct Team(
-    Name       string,
-    Members    Array[Member],
-    Lead       Member,
-    Onboarding Array[string],
+    Key         string,
+    Name        string,
+    Description string,
+    Members     Array[Member],
+    Lead        Member,
+    Onboarding  Array[string],
 )
 
 // MembersOf returns the members with the given role, in source order.
@@ -111,6 +121,14 @@ func MembersOf(t Team, r Role) Array[Member] =
 // MemberByName looks up a member; None if no match. Names are unique
 // within a team (validated at load time, in app/config).
 func MemberByName(t Team, name string) Option[Member] = t.Members.Find((m) => m.Name == name)
+
+// FindTeamByKey scans `teams` for the entry whose Key equals `key`.
+// Lives in the team package so the lambda body can do
+// `tm.Key == key` cleanly — the transpiler doesn't auto-unwrap the
+// std.Immutable[string] wrapper on cross-package field access in
+// equality comparisons.
+func FindTeamByKey(teams Array[Team], key string) Option[Team] =
+    teams.Find((tm) => tm.Key == key)
 
 // ----------------------------------------------------------------------------
 // Per-member status (drives the team panel pills + spinners)

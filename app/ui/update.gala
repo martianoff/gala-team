@@ -234,10 +234,10 @@ func maybeDispatchConsults(m AppModel, speaker string, line string) Tuple[AppMod
     )
 }
 
-// dispatchOneConsult fires off one `@consult(target)` block. Spawns
-// the child gala_team session synchronously (its IO is fast — registry
-// lookup, project resolve, team yaml read, subprocess fork, prompt
-// stdin write); on success registers the live ConsultSession +
+// dispatchOneConsult fires off one `@consult(target)` block. Routes
+// through DispatchConsult which prefers an in-project sibling team
+// (declared alongside the main team in team.yaml) over a cross-repo
+// registry entry. On success registers the live ConsultSession +
 // initial empty buffer and re-arms the event pump; on failure emits
 // an immediate ConsultFailed via MsgCmd so the existing failure
 // handler logs and forwards to the TL.
@@ -248,7 +248,9 @@ func dispatchOneConsult(m AppModel, target string, body string) Tuple[AppModel, 
             Text    = s"dispatching → ${target}",
         )),
     )
-    return SpawnConsult(m.Registry, target, body) match {
+    val mainKey = m.Team.Key
+    val siblings = m.Teams.Filter((t) => t.Key != mainKey)
+    return DispatchConsult(siblings, m.Project, m.Registry, target, body) match {
         case Failure(e) => {
             val cmd = MsgCmd[AppMsg](Msg = ConsultFailed(Name = target, ErrText = e.Error()))
             return (withDispatchLog, cmd)

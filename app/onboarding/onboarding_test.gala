@@ -46,10 +46,12 @@ func mkMember(name string, role Role, onboarding Array[string]) Member = Member(
 )
 
 func mkTeam(teamOnboarding Array[string], members Array[Member]) Team = Team(
-    Name       = "TestTeam",
-    Members    = members,
-    Lead       = members.Get(0),
-    Onboarding = teamOnboarding,
+    Key         = "test",
+    Name        = "TestTeam",
+    Description = "",
+    Members     = members,
+    Lead        = members.Get(0),
+    Onboarding  = teamOnboarding,
 )
 
 // Compose interleaves team-wide first then member-specific.

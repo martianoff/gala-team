@@ -40,10 +40,12 @@ func sampleTeam() Team {
         Onboarding = EmptyArray[string](),
     )
     return Team(
-        Name       = "Skunkworks",
-        Members    = ArrayOf[Member](iris, felix),
-        Lead       = iris,
-        Onboarding = EmptyArray[string](),
+        Key         = "main",
+        Name        = "Skunkworks",
+        Description = "",
+        Members     = ArrayOf[Member](iris, felix),
+        Lead        = iris,
+        Onboarding  = EmptyArray[string](),
     )
 }
 
@@ -975,4 +977,36 @@ func sampleArchive(savedAt int64, label string) session.SnapshotMeta = session.S
 func makeSnap() session.Snapshot {
     val convo = EmptyArray[session.ConversationLine]()
     return session.Snapshot("demo", int64(12345), convo)
+}
+
+// ---------------------------------------------------------------------------
+// Multi-team / in-project consult plumbing (Phase 4c)
+// ---------------------------------------------------------------------------
+
+// AppModel.Teams defaults to a single-entry list containing the main
+// team when InitialModel is used without an explicit teams argument.
+func TestInitialModel_TeamsListContainsMainTeam(t T) T {
+    val m = sampleModel()
+    val t1 = Eq(t,  m.Teams.Size(), 1)
+    return Eq(t1, m.Teams.Get(0).Key, "main")
+}
+
+// dispatchOneConsult must filter the main team out of the in-project
+// team list before passing to DispatchConsult — otherwise a lead's
+// `@consult(<own-key>)` would loop back to itself instead of
+// surfacing as an unknown registry name.
+func TestDispatchOneConsult_DoesNotLoopBackToMainTeam(t T) T {
+    // Two-team model where the main team's key is "main"; a chunk
+    // emitting `@consult(main)` should fall through to the registry
+    // (which is empty) and fire a ConsultFailed via MsgCmd.
+    val seed = sampleModel()
+    val (m, _) = Update(seed, ChunkArrived(
+        Member = "Iris",
+        Line   = "@consult(main) loop\n@end",
+    ))
+    // ConsultsFired bumps regardless — the dispatch attempt happened.
+    // What we want to verify is that the main team isn't picked as
+    // the in-project sibling, which would have spawned a real claude
+    // session and crashed the test (no claude binary on PATH).
+    return Eq(t, m.ConsultsFired, 1)
 }

@@ -152,28 +152,36 @@ func sampleTeam() Team {
         Onboarding = EmptyArray[string](),
     )
     return Team(
-        Name       = "Skunkworks",
-        Members    = ArrayOf(iris, felix, quinn),
-        Lead       = iris,
-        Onboarding = EmptyArray[string](),
+        Key         = "main",
+        Name        = "Skunkworks",
+        Description = "Default product team — calm lead, terse engineer, skeptical QA.",
+        Members     = ArrayOf(iris, felix, quinn),
+        Lead        = iris,
+        Onboarding  = EmptyArray[string](),
     )
 }
 
 func main() {
     val projDir  = flagValue("--project", ".")
     val teamPath = flagValue("--team", "")
+    val teamKey  = flagValue("--team-key", "")
     val proj     = resolveProject(projDir)
-    val cfg = if (teamPath == "") TeamConfig(
-                                      Team     = sampleTeam(),
-                                      Workflow = DefaultWorkflow(),
-                                      Policy   = DefaultPolicy(),
-                                  )
-              else                loadTeamConfig(teamPath)
+    val cfgRaw = if (teamPath == "") {
+                     val tm = sampleTeam()
+                     return TeamConfig(
+                         Team     = tm,
+                         Teams    = ArrayOf(tm),
+                         Workflow = DefaultWorkflow(),
+                         Policy   = DefaultPolicy(),
+                     )
+                 }
+                 else loadTeamConfig(teamPath)
+    val cfg = pickMainTeam(cfgRaw, teamKey)
     // Restore the prior conversation log if a snapshot exists under
     // <repo>/.gala_team/sessions/latest.json. None on first launch.
     val registry = loadRegistry(proj)
     val archives = loadArchives(proj)
-    val seeded = primeFromSnapshot(InitialModel(proj, cfg.Team, cfg.Workflow, cfg.Policy, registry))
+    val seeded = primeFromSnapshot(InitialModelWithTeams(proj, cfg.Team, cfg.Workflow, cfg.Policy, registry, cfg.Teams))
     val initial = seeded.Copy(Archives = archives)
     val program = Program[AppModel, AppMsg](
         Initial = initial,
@@ -190,6 +198,21 @@ func main() {
 // archive directory.
 func loadArchives(proj Project) Array[session.SnapshotMeta] =
     session.ListArchives(proj.Repo).GetOrElse(EmptyArray[session.SnapshotMeta]())
+
+// pickMainTeam swaps cfg.Team to the team whose Key matches the
+// `--team-key` flag. When the flag is empty the first team in source
+// order is the main one (already set by team_config.validate); when
+// the flag is non-empty but no team matches we panic with the list
+// of valid keys so the user sees what they typed wrong.
+func pickMainTeam(cfg TeamConfig, key string) TeamConfig {
+    if key == "" { return cfg }
+    val match_ = FindTeamByKey(cfg.Teams, key)
+    if !match_.IsDefined() {
+        val keys = cfg.Teams.Map((t) => t.Key).MkString(", ")
+        panic(s"--team-key: '${key}' not found (available: ${keys})")
+    }
+    return cfg.Copy(Team = match_.Get())
+}
 
 // primeFromSnapshot replays the persisted conversation log into a fresh
 // AppModel. We ignore SavedAt and ProjectName for now — the user's

@@ -323,3 +323,90 @@ val twoLeadsYaml = "team:\n" +
     "workflow:\n  qa_required: false\n"
 
 func TestLoad_TwoTeamLeads_Fails(t T) T = IsFailure(t, LoadFromString(twoLeadsYaml))
+
+// ---------------------------------------------------------------------------
+// Multi-team schema (Phase 4b)
+// ---------------------------------------------------------------------------
+
+val multiTeamsYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: Skunkworks\n" +
+    "    description: Default product team\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: Iris\n        personality: calm\n" +
+    "      - role: engineer\n        name: Felix\n        personality: terse\n" +
+    "  - key: transpiler\n" +
+    "    name: Transpiler Wizards\n" +
+    "    description: Compiler / language work\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: Theo\n        personality: precise\n" +
+    "      - role: engineer\n        name: Cade\n        personality: pragmatic\n" +
+    "workflow:\n" +
+    "  qa_required: false\n"
+
+func TestLoadMultiTeams_ParsesAllEntries(t T) T {
+    val res = LoadFromString(multiTeamsYaml)
+    val t1 = IsSuccess(t, res)
+    val cfg = res.Get()
+    val t2 = Eq(t1, cfg.Teams.Size(), 2)
+    val t3 = Eq(t2, cfg.Teams.Get(0).Key, "main")
+    val t4 = Eq(t3, cfg.Teams.Get(0).Description, "Default product team")
+    val t5 = Eq(t4, cfg.Teams.Get(1).Key, "transpiler")
+    return Eq(t5, cfg.Teams.Get(1).Lead.Name, "Theo")
+}
+
+// First team in the source list becomes the "main" team
+// (cfg.Team is the convenience pointer; cfg.Teams.Get(0) is the
+// canonical source).
+func TestLoadMultiTeams_FirstIsMain(t T) T {
+    val res = LoadFromString(multiTeamsYaml)
+    val t1 = IsSuccess(t, res)
+    val cfg = res.Get()
+    val t2 = Eq(t1, cfg.Team.Key, "main")
+    return Eq(t2, cfg.Team.Name, "Skunkworks")
+}
+
+// Backward-compat: the legacy `team:` (singular) shape still works
+// and produces a one-entry Teams list with Key = "main".
+func TestLoadLegacyTeam_PopulatesTeamsListWithOneEntry(t T) T {
+    val res = LoadFromString(validTeamYaml)
+    val t1 = IsSuccess(t, res)
+    val cfg = res.Get()
+    val t2 = Eq(t1, cfg.Teams.Size(), 1)
+    return Eq(t2, cfg.Teams.Get(0).Key, "main")
+}
+
+// Missing `key:` falls back to a slugified `name`.
+val noKeyYaml = "teams:\n" +
+    "  - name: Transpiler Wizards\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: Theo\n        personality: precise\n" +
+    "      - role: engineer\n        name: Cade\n        personality: pragmatic\n" +
+    "workflow:\n  qa_required: false\n"
+
+func TestLoadMultiTeams_KeyDefaultsToSluggedName(t T) T {
+    val res = LoadFromString(noKeyYaml)
+    val t1 = IsSuccess(t, res)
+    return Eq(t1, res.Get().Team.Key, "transpiler-wizards")
+}
+
+// Duplicate keys across teams — must fail.
+val dupKeyYaml = "teams:\n" +
+    "  - key: shared\n    name: First\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: A\n        personality: x\n" +
+    "      - role: engineer\n        name: B\n        personality: x\n" +
+    "  - key: shared\n    name: Second\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: C\n        personality: x\n" +
+    "      - role: engineer\n        name: D\n        personality: x\n" +
+    "workflow:\n  qa_required: false\n"
+
+func TestLoadMultiTeams_DuplicateKey_Fails(t T) T =
+    IsFailure(t, LoadFromString(dupKeyYaml))
+
+// A teams list with no entries — must fail (top-level must declare at
+// least one team, same constraint as the legacy shape).
+val emptyTeamsYaml = "teams: []\nworkflow:\n  qa_required: false\n"
+func TestLoadMultiTeams_Empty_Fails(t T) T =
+    IsFailure(t, LoadFromString(emptyTeamsYaml))

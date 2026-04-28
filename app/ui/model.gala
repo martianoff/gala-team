@@ -31,6 +31,13 @@ import (
 struct AppModel(
     Project      Project,
     Team         Team,
+    // Every team declared in team.yaml. The main team is `Team`
+    // (selected at startup via --team-key); the rest are
+    // in-project consult targets addressable by Key from
+    // `@consult(<key>)`. Empty for legacy single-team yamls is
+    // never observed because team_config.validate always populates
+    // at least one entry.
+    Teams        Array[Team],
     Workflow     Workflow,
     Policy       Policy,
     Registry     Registry,                         // cross-team consult targets
@@ -81,16 +88,30 @@ struct AppModel(
 // start Idle, no pipeline, no sessions, empty composer. `registry`
 // defaults to empty so existing tests don't need to pass one — only
 // production startup (cmd/main.gala) loads a real registry from
-// .gala_team/consults.yaml.
+// .gala_team/consults.yaml. The Teams list always contains at least
+// the main team — set via InitialModelWithTeams when the caller has
+// the full list.
 func InitialModel(
     proj Project,
     team Team,
     workflow Workflow,
     policy Policy,
     registry Registry = EmptyRegistry(),
+) AppModel = InitialModelWithTeams(proj, team, workflow, policy, registry, ArrayOf(team))
+
+// InitialModelWithTeams is the multi-team-aware constructor used by
+// production startup; tests use the simpler InitialModel above.
+func InitialModelWithTeams(
+    proj Project,
+    team Team,
+    workflow Workflow,
+    policy Policy,
+    registry Registry,
+    teams Array[Team],
 ) AppModel = AppModel(
     Project      = proj,
     Team         = team,
+    Teams        = teams,
     Workflow     = workflow,
     Policy       = policy,
     Registry     = registry,

@@ -1,6 +1,7 @@
 package config
 
 import (
+    "strings"
     "martianoff/gala/yaml"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -36,8 +37,19 @@ func LoadFromString(yamlStr string) Try[TeamConfig] = Try[TeamConfig](() => {
 // (workspace mode / hooks / merge rule); when team.yaml omits the
 // `policy:` block we fall back to DefaultPolicy() — shared workspace,
 // no hooks, squash merge.
+// TeamConfig carries every team declared in the yaml file plus the
+// shared workflow + policy. Team is the main team — what the lead is
+// driving — and is also at index 0 of Teams. Additional entries in
+// Teams are in-project consultancies addressable by key from
+// `@consult(<key>)` directives, and selectable as the main team via
+// the `--team-key <key>` CLI flag.
+//
+// Backwards-compat: a single `team:` block in the yaml produces a
+// Teams list with exactly one entry (Key = "main"), so consumers can
+// always iterate `Teams` without checking for the singular shape.
 struct TeamConfig(
     Team     Team,
+    Teams    Array[Team],
     Workflow Workflow,
     Policy   Policy,
 )
@@ -48,21 +60,21 @@ struct TeamConfig(
 
 func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
     d.StartObject()
-    var teamName = ""
-    var members = EmptyArray[Member]()
-    var teamOnboarding = EmptyArray[string]()
+    var teams = EmptyArray[Team]()
     var workflow = DefaultWorkflow()
     var pol = DefaultPolicy()
-    var sawTeam = false
 
     for d.HasMoreFields() {
         d.ReadKey() match {
             case "team" => {
-                sawTeam = true
-                val (nm, ms, onb) = decodeTeamBlock(d)
-                teamName = nm
-                members = ms
-                teamOnboarding = onb
+                // Legacy single-team shape: `team: { name, members, onboarding }`
+                // becomes a one-entry Teams list keyed "main".
+                val one = decodeTeamEntry(d, "main")
+                teams = teams.Append(one)
+            }
+            case "teams" => {
+                // New multi-team shape: `teams: [{key, name, description, members, onboarding}, ...]`.
+                teams = teams.AppendAll(decodeTeamsArray(d))
             }
             case "workflow" => workflow = decodeWorkflowBlock(d)
             case "policy"   => pol = decodePolicyBlock(d)
@@ -71,27 +83,70 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
     }
     d.EndObject()
 
-    if !sawTeam {
-        panic("team.yaml: top-level 'team:' block is required")
+    if teams.IsEmpty() {
+        panic("team.yaml: must declare at least one team via top-level 'team:' or 'teams:'")
     }
-    return validate(teamName, members, teamOnboarding, workflow, pol)
+    return validate(teams, workflow, pol)
 }
 
-func decodeTeamBlock(d *yaml.YamlDecoderImpl) Tuple3[string, Array[Member], Array[string]] {
+// decodeTeamsArray walks a `teams: [ … ]` list. Each entry must have
+// at minimum a name + members; key defaults to a slug of the name
+// when unset.
+func decodeTeamsArray(d *yaml.YamlDecoderImpl) Array[Team] {
+    var out = EmptyArray[Team]()
+    d.StartArray()
+    for d.HasMoreElements() {
+        out = out.Append(decodeTeamEntry(d, ""))
+    }
+    d.EndArray()
+    return out
+}
+
+// decodeTeamEntry parses one team object. `defaultKey` is what we
+// fall back to when the YAML omits `key:` — for the legacy `team:`
+// shape it's "main"; for entries inside a `teams:` list it's "" so
+// we can derive a slug from the name.
+func decodeTeamEntry(d *yaml.YamlDecoderImpl, defaultKey string) Team {
     d.StartObject()
+    var key = defaultKey
     var name = ""
+    var description = ""
     var members = EmptyArray[Member]()
     var onboarding = EmptyArray[string]()
     for d.HasMoreFields() {
         d.ReadKey() match {
-            case "name"       => name = d.ReadString()
-            case "members"    => members = decodeMemberArray(d)
-            case "onboarding" => onboarding = decodeStringArray(d)
-            case _            => d.Skip()
+            case "key"         => key = d.ReadString()
+            case "name"        => name = d.ReadString()
+            case "description" => description = d.ReadString()
+            case "members"     => members = decodeMemberArray(d)
+            case "onboarding"  => onboarding = decodeStringArray(d)
+            case _             => d.Skip()
         }
     }
     d.EndObject()
-    return (name, members, onboarding)
+    if name == "" { panic("team.yaml: team.name is required and must be non-empty") }
+    if members.IsEmpty() { panic(s"team.yaml: team '${name}' has no members") }
+    val leads = members.Filter((m) => SameRole(m.Role, TeamLead()))
+    if leads.Length() != 1 {
+        panic(s"team.yaml: team '${name}' must declare exactly one team_lead (found ${leads.Length()})")
+    }
+    val effectiveKey = if (key == "") slugify(name) else key
+    return Team(
+        Key         = effectiveKey,
+        Name        = name,
+        Description = description,
+        Members     = members,
+        Lead        = leads.Get(0),
+        Onboarding  = onboarding,
+    )
+}
+
+// slugify turns a team name into a usable Key fallback: trim, lower
+// case, replace whitespace runs with single dashes. "Transpiler
+// Wizards" → "transpiler-wizards".
+func slugify(name string) string {
+    val lower = strings.ToLower(strings.TrimSpace(name))
+    return strings.Join(strings.Fields(lower), "-")
 }
 
 // Loop-bound Append intentional: yaml.YamlDecoderImpl is a stateful
@@ -286,44 +341,45 @@ func decodeStringArray(d *yaml.YamlDecoderImpl) Array[string] {
     return xs
 }
 
-func validate(name string, members Array[Member], onboarding Array[string], workflow Workflow, pol Policy) TeamConfig {
-    if name == "" {
-        panic("team.yaml: team.name is required and must be non-empty")
-    }
-    if members.IsEmpty() {
-        panic("team.yaml: team.members must contain at least one member")
-    }
+// validate runs the per-team and cross-team checks before producing
+// the TeamConfig. Per-team: at least one engineer; QA presence
+// matches workflow.qa_required; member names unique within the team.
+// Cross-team: keys are unique across the whole list. The first team
+// in source order is the "main" team.
+func validate(teams Array[Team], workflow Workflow, pol Policy) TeamConfig {
+    teams.ForEach((tm) => validateOneTeam(tm, workflow))
 
-    val leads = members.Filter((m) => SameRole(m.Role, TeamLead()))
-    if leads.Length() != 1 {
-        panic(s"team.yaml: must declare exactly one team_lead (found ${leads.Length()})")
-    }
-
-    val engineers = members.Filter((m) => SameRole(m.Role, Engineer()))
-    if engineers.IsEmpty() {
-        panic("team.yaml: at least one engineer is required")
-    }
-
-    val qas = members.Filter((m) => SameRole(m.Role, QA()))
-    if workflow.QARequired && qas.IsEmpty() {
-        panic("team.yaml: workflow.qa_required is true but no qa members declared")
-    }
-
-    val _ = members.FoldLeft(EmptyHashMap[string, bool](), (seen, m) => {
-        if seen.Contains(m.Name) {
-            panic(s"team.yaml: duplicate member name '${m.Name}'")
+    val _ = teams.FoldLeft(EmptyHashMap[string, bool](), (seen, tm) => {
+        if seen.Contains(tm.Key) {
+            panic(s"team.yaml: duplicate team key '${tm.Key}'")
         }
-        return seen.Put(m.Name, true)
+        return seen.Put(tm.Key, true)
     })
 
     return TeamConfig(
-        Team = Team(
-            Name       = name,
-            Members    = members,
-            Lead       = leads.Get(0),
-            Onboarding = onboarding,
-        ),
+        Team     = teams.Get(0),
+        Teams    = teams,
         Workflow = workflow,
         Policy   = pol,
     )
+}
+
+// validateOneTeam enforces the per-team invariants. Lead presence is
+// already checked in decodeTeamEntry; here we cover engineers and the
+// QA-required workflow constraint, plus member-name uniqueness.
+func validateOneTeam(tm Team, workflow Workflow) {
+    val engineers = tm.Members.Filter((m) => SameRole(m.Role, Engineer()))
+    if engineers.IsEmpty() {
+        panic(s"team.yaml: team '${tm.Name}' must declare at least one engineer")
+    }
+    val qas = tm.Members.Filter((m) => SameRole(m.Role, QA()))
+    if workflow.QARequired && qas.IsEmpty() {
+        panic(s"team.yaml: workflow.qa_required is true but team '${tm.Name}' has no qa members")
+    }
+    val _ = tm.Members.FoldLeft(EmptyHashMap[string, bool](), (seen, m) => {
+        if seen.Contains(m.Name) {
+            panic(s"team.yaml: team '${tm.Name}' has duplicate member name '${m.Name}'")
+        }
+        return seen.Put(m.Name, true)
+    })
 }

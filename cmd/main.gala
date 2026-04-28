@@ -4,6 +4,7 @@ import (
     . "github.com/martianoff/gala-tui"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/ui"
 )
@@ -58,9 +59,15 @@ func sampleTeam() Team {
     )
 }
 
+func sampleProject() Project = Project(
+    Name = "gala_team", Repo = ".",
+    Github = None[string](),
+    DefaultBranch = "main",
+)
+
 func main() {
     val program = Program[AppModel, AppMsg](
-        Initial = InitialModel(sampleTeam(), DefaultWorkflow()),
+        Initial = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow()),
         Update  = (m, msg) => Update(m, msg),
         View    = (m) => View(m),
     )

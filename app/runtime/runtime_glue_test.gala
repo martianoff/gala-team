@@ -12,10 +12,10 @@ import (
 // cmd/main.gala wires the full TUI loop.  These unit tests just lock in
 // the Msg sealed type's shape so refactors don't silently break callers.
 
-func TestMsg_ChunkArrived_Construction(t T) T {
-    val msg = ChunkArrived(Member = "Felix", Line = "{\"type\":\"text\"}")
+func TestMsg_RtChunkArrived_Construction(t T) T {
+    val msg = RtChunkArrived(Member = "Felix", Line = "{\"type\":\"text\"}")
     return msg match {
-        case ChunkArrived(name, line) => {
+        case RtChunkArrived(name, line) => {
             val t1 = Eq(t, name, "Felix")
             return Eq(t1, line, "{\"type\":\"text\"}")
         }
@@ -23,11 +23,11 @@ func TestMsg_ChunkArrived_Construction(t T) T {
     }
 }
 
-func TestMsg_SessionFailed_Construction(t T) T {
+func TestMsg_RtSessionFailed_Construction(t T) T {
     val err = errors.New("spawn failed")
-    val msg = SessionFailed(Member = "Iris", Err = err)
+    val msg = RtSessionFailed(Member = "Iris", Err = err)
     return msg match {
-        case SessionFailed(name, e) => {
+        case RtSessionFailed(name, e) => {
             val t1 = Eq(t, name, "Iris")
             return Eq(t1, e.Error(), "spawn failed")
         }
@@ -35,16 +35,16 @@ func TestMsg_SessionFailed_Construction(t T) T {
     }
 }
 
-func TestMsg_WriteSent_Construction(t T) T {
-    val msg = WriteSent(Member = "Theo")
+func TestMsg_RtWriteSent_Construction(t T) T {
+    val msg = RtWriteSent(Member = "Theo")
     return msg match {
-        case WriteSent(name) => Eq(t, name, "Theo")
-        case _               => IsTrue(t, false)
+        case RtWriteSent(name) => Eq(t, name, "Theo")
+        case _                 => IsTrue(t, false)
     }
 }
 
 func TestMsgMember_AcrossAllVariants(t T) T {
-    val t1 = Eq(t,  MsgMember(ChunkArrived(Member = "A", Line = "x")),   "A")
-    val t2 = Eq(t1, MsgMember(WriteSent(Member = "B")),                  "B")
-    return       Eq(t2, MsgMember(SessionFailed(Member = "C", Err = errors.New("e"))), "C")
+    val t1 = Eq(t,  MsgMember(RtChunkArrived(Member = "A", Line = "x")),   "A")
+    val t2 = Eq(t1, MsgMember(RtWriteSent(Member = "B")),                  "B")
+    return       Eq(t2, MsgMember(RtSessionFailed(Member = "C", Err = errors.New("e"))), "C")
 }

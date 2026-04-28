@@ -13,9 +13,12 @@ gala_library(
     ],
     deps = [
         "//app/fsm",
+        "//app/project",
+        "//app/runtime",
         "//app/team",
         "//app/view",
         "@gala//collection_immutable",
+        "@gala//concurrent",
         "@gala//go_interop",
     ],
     visibility = ["//visibility:public"],
@@ -30,6 +33,7 @@ gala_go_test(
     deps = [
         ":ui",
         "//app/fsm",
+        "//app/project",
         "//app/team",
         "@gala//collection_immutable",
     ],

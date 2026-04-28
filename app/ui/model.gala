@@ -3,9 +3,10 @@ package ui
 import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/view"
 )
 
@@ -14,46 +15,61 @@ import (
 //
 // Owns the full AppModel that the gala_tui runtime drives, plus the
 // AppMsg sealed type that carries every event the UI cares about
-// (keyboard, tick, runtime — the last one folded in once subprocess
-// pumping is wired up).
+// (keyboard, tick, runtime subprocess events).
 // ============================================================================
+
+// ConversationLine is a single rendered turn in the Team-Lead conversation
+// log: who spoke (the user, or a member name) and the text they produced.
+struct ConversationLine(Speaker string, Text string)
 
 // AppModel is the top-level Elm model.  Everything the view() function
 // needs to render must live here.  Mutations happen only through
 // update() returning a new copy.
 struct AppModel(
-    Team        Team,
-    Workflow    Workflow,
-    State       AppState,
-    Statuses    HashMap[string, Status],
-    Pipeline    PipelineState,
-    Composer    string,            // current draft prompt text
-    Tick        int,               // monotonic tick counter (drives spinners)
-    LastError   Option[string],    // most recent runtime error, displayed in footer
+    Project      Project,
+    Team         Team,
+    Workflow     Workflow,
+    State        AppState,
+    Statuses     HashMap[string, Status],
+    Pipeline     PipelineState,
+    Sessions     HashMap[string, MemberSession],   // live subprocess per member name
+    Conversation Array[ConversationLine],          // rendered log of TL talk + chunks
+    Composer     string,                           // current draft prompt text
+    Tick         int,                              // monotonic tick counter (drives spinners)
+    LastError    Option[string],                   // most recent runtime error, footer
 )
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
-// start Idle, no pipeline, empty composer.
-func InitialModel(team Team, workflow Workflow) AppModel = AppModel(
-    Team      = team,
-    Workflow  = workflow,
-    State     = Idle{}.Apply(),
-    Statuses  = EmptyHashMap[string, Status](),
-    Pipeline  = EmptyPipelineState(),
-    Composer  = "",
-    Tick      = 0,
-    LastError = None[string](),
+// start Idle, no pipeline, no sessions, empty composer.
+func InitialModel(proj Project, team Team, workflow Workflow) AppModel = AppModel(
+    Project      = proj,
+    Team         = team,
+    Workflow     = workflow,
+    State        = Idle{}.Apply(),
+    Statuses     = EmptyHashMap[string, Status](),
+    Pipeline     = EmptyPipelineState(),
+    Sessions     = EmptyHashMap[string, MemberSession](),
+    Conversation = EmptyArray[ConversationLine](),
+    Composer     = "",
+    Tick         = 0,
+    LastError    = None[string](),
 )
 
-// AppMsg is every event the UI dispatches through update().  The runtime
-// layer (app/runtime) will plug ChunkArrived / SessionFailed / WriteSent
-// in here once subprocess pumping wires up — for now the sealed type
-// covers the keyboard + tick paths the Phase-1 skeleton needs.
+// AppMsg is every event the UI dispatches through update().  Keyboard +
+// tick events come from the gala-tui runtime; ChunkArrived /
+// SessionFailed / WriteSent come from the runtime subprocess pump
+// (app/runtime returns concurrent.Future[runtime.Msg], which the
+// onSubmit / continuePump helpers wrap into FutureCmd[AppMsg]).
 sealed type AppMsg {
     // Composer keyboard input
     case KeyChar(C rune)
     case KeyBackspace
     case KeySubmit                  // Enter: send composer to TL
+    // Runtime subprocess events (mirrors runtime.Msg, lifted into the
+    // app vocabulary so update() can dispatch on a single sealed type).
+    case ChunkArrived(Member string, Line string)
+    case SessionFailed(Member string, ErrText string)
+    case WriteSent(Member string)
     // Lifecycle
     case TickMsg
     case QuitMsg

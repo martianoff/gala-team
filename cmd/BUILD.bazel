@@ -8,6 +8,7 @@ gala_binary(
     ],
     deps = [
         "//app/fsm",
+        "//app/project",
         "//app/team",
         "//app/ui",
         "@gala//collection_immutable",

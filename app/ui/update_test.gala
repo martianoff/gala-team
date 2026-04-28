@@ -5,8 +5,15 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/ui"
+)
+
+func sampleProject() Project = Project(
+    Name = "demo", Repo = ".",
+    Github = None[string](),
+    DefaultBranch = "main",
 )
 
 func sampleTeam() Team {
@@ -27,7 +34,7 @@ func sampleTeam() Team {
     )
 }
 
-func sampleModel() AppModel = InitialModel(sampleTeam(), DefaultWorkflow())
+func sampleModel() AppModel = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow())
 
 func TestKeyChar_AppendsToComposer(t T) T {
     val (m1, _) = Update(sampleModel(), KeyChar(C = 'h'))

@@ -33,7 +33,7 @@ import (
 func View(m AppModel) Widget {
     val header = headerWidget(m)
     val sidebar = sidebarWidget(m)
-    val conversation = conversationPlaceholder()
+    val conversation = conversationPanel(m)
     val composer = composerWidget(m)
     val footer = footerWidget(m)
     return Column(ArrayOf[LayoutChild](
@@ -66,14 +66,30 @@ func sidebarWidget(m AppModel) Widget = Column(ArrayOf[LayoutChild](
     Flex(1, PipelineView(m.Pipeline)),
 ))
 
-func conversationPlaceholder() Widget = Column(ArrayOf[LayoutChild](
-    Fixed(1, TextStyled("  Conversation with Team Lead", DefaultStyle().WithBold())),
-    Fixed(1, Empty()),
-    Fixed(1, TextStyled("  (real conversation log + claude streaming",
-        DefaultStyle().WithDim())),
-    Fixed(1, TextStyled("   land in subsequent commits)", DefaultStyle().WithDim())),
-    Flex(1, Empty()),
-))
+func conversationPanel(m AppModel) Widget {
+    val header = TextStyled("  Conversation with Team Lead", DefaultStyle().WithBold())
+    val lines = m.Conversation.Map((cl ConversationLine) => Fixed(
+        1,
+        TextStyled(s"  ${cl.Speaker}: ${cl.Text}",
+            speakerStyle(cl.Speaker)),
+    ))
+    val body = if (lines.IsEmpty())
+                   ArrayOf[LayoutChild](
+                       Fixed(1, Empty()),
+                       Fixed(1, TextStyled("  (no conversation yet — type a prompt below)",
+                           DefaultStyle().WithDim())),
+                   )
+               else lines
+    val children = ArrayOf[LayoutChild](Fixed(1, header)).AppendAll(body).Append(Flex(1, Empty()))
+    return Column(children)
+}
+
+// speakerStyle picks a text style based on who's speaking — the user
+// gets bright white, members get cyan, anything else dimmed.
+func speakerStyle(speaker string) Style {
+    if speaker == "you" { return DefaultStyle().WithFg(BrightWhite()) }
+    return DefaultStyle().WithFg(BrightCyan())
+}
 
 func composerWidget(m AppModel) Widget {
     val prompt = if (m.Composer == "") "Type to Iris…" else m.Composer

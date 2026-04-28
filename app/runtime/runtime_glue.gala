@@ -29,12 +29,13 @@ import (
 
 // Msg is the runtime side of the gala_team event vocabulary.  Cases here
 // are the things subprocess interactions produce; the full app Msg sealed
-// type (added when wiring update + view) folds these in alongside
-// keyboard / mouse / tick events.
+// type folds these in alongside keyboard / mouse / tick events. Names
+// are prefixed `Rt` so they don't collide with the lifted versions in
+// app/ui.AppMsg when both are dot-imported in the same file.
 sealed type Msg {
-    case ChunkArrived(Member string, Line string)
-    case SessionFailed(Member string, Err error)
-    case WriteSent(Member string)
+    case RtChunkArrived(Member string, Line string)
+    case RtSessionFailed(Member string, Err error)
+    case RtWriteSent(Member string)
 }
 
 // MemberSession pairs a Member with the live subprocess driving them.
@@ -88,9 +89,9 @@ func NextChunkFuture(s MemberSession) concurrent.Future[Msg] {
     return concurrent.FutureApply[Msg](() => {
         val res = s.Process.ReadLine()
         if res.IsSuccess() {
-            return ChunkArrived(Member = name, Line = res.Get())
+            return RtChunkArrived(Member = name, Line = res.Get())
         }
-        return SessionFailed(Member = name, Err = res.GetError())
+        return RtSessionFailed(Member = name, Err = res.GetError())
     })
 }
 
@@ -102,9 +103,9 @@ func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
     return concurrent.FutureApply[Msg](() => {
         val res = s.Process.WriteLine(prompt)
         if res.IsSuccess() {
-            return WriteSent(Member = name)
+            return RtWriteSent(Member = name)
         }
-        return SessionFailed(Member = name, Err = res.GetError())
+        return RtSessionFailed(Member = name, Err = res.GetError())
     })
 }
 
@@ -126,7 +127,7 @@ func CloseSession(s MemberSession) Try[bool] {
 
 // MsgMember extracts the member name from any runtime Msg variant.
 func MsgMember(msg Msg) string = msg match {
-    case ChunkArrived(name, _)    => name
-    case SessionFailed(name, _)   => name
-    case WriteSent(name)          => name
+    case RtChunkArrived(name, _)    => name
+    case RtSessionFailed(name, _)   => name
+    case RtWriteSent(name)          => name
 }

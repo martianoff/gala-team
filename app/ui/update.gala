@@ -1,11 +1,13 @@
 package ui
 
 import (
+    "martianoff/gala/concurrent"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
 )
 
@@ -14,39 +16,128 @@ import (
 //
 // Dispatches AppMsg to the right handler:
 //   - composer keys → buffer mutations
-//   - Submit → kicks the FSM via UserPrompted (subprocess wiring lands
-//     in the next commit; for now the prompt text is just consumed)
-//   - Tick → bumps the tick counter, drives spinner animation
-//   - Quit → QuitCmd
+//   - KeySubmit → kicks the FSM (UserPrompted), spawns a TL session if
+//     none is alive, sends the prompt, and starts the read pump
+//   - ChunkArrived → appends to the conversation log and re-arms the
+//     pump (one in-flight Future per active member)
+//   - SessionFailed → records the error and stops that member's pump
+//   - WriteSent → bookkeeping only; transcript already shows the user line
+//   - TickMsg → bumps the tick counter (drives spinner animation)
+//   - QuitMsg → QuitCmd
 //
 // Returns Tuple[AppModel, Cmd[AppMsg]] in the standard gala-tui shape.
-// Pure for the Phase-1 skeleton; the FSM-facing transitions stay
-// separate from the IO-bearing ones so the latter can plug in cleanly.
+// Pure paths (KeyChar, KeyBackspace, TickMsg) stay separate from the
+// IO-bearing ones so they remain test-friendly without a real subprocess.
 // ============================================================================
 
 func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
-    case KeyChar(c)      => (m.Copy(Composer = m.Composer + string(c)),       NoCmd[AppMsg]())
-    case KeyBackspace()  => (m.Copy(Composer = trimLastRune(m.Composer)),     NoCmd[AppMsg]())
-    case KeySubmit()     => onSubmit(m)
-    case TickMsg()       => (m.Copy(Tick = m.Tick + 1),                       NoCmd[AppMsg]())
-    case QuitMsg()       => (m, QuitCmd[AppMsg]())
-    case NoOp()          => (m, NoCmd[AppMsg]())
+    case KeyChar(c)              => (m.Copy(Composer = m.Composer + string(c)),    NoCmd[AppMsg]())
+    case KeyBackspace()          => (m.Copy(Composer = trimLastRune(m.Composer)),  NoCmd[AppMsg]())
+    case KeySubmit()             => onSubmit(m)
+    case ChunkArrived(name, ln)  => onChunk(m, name, ln)
+    case SessionFailed(name, e)  => onSessionFailed(m, name, e)
+    case WriteSent(_)            => (m, NoCmd[AppMsg]())
+    case TickMsg()               => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
+    case QuitMsg()               => (m, QuitCmd[AppMsg]())
+    case NoOp()                  => (m, NoCmd[AppMsg]())
 }
 
-// onSubmit kicks the FSM with a UserPrompted event.  The composed prompt
-// text is captured for now but not sent anywhere — subprocess wiring
-// (spawn claude, pipe prompt to stdin, register pump) lands in a
-// follow-up commit.
+// onSubmit drives the user's prompt into the team. It (a) kicks the FSM
+// with UserPrompted, (b) ensures the Team Lead has a live claude session
+// (spawns one if not), (c) appends the user line to the conversation
+// transcript, (d) clears the composer, and (e) returns a Cmd that sends
+// the prompt to the TL and starts the chunk-read pump.
+//
+// On spawn failure (claude binary missing, repo path wrong, …) the model
+// records LastError and returns no Cmd, so the user sees a footer message
+// rather than a hung UI.
 func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if m.Composer == "" {
         return (m, NoCmd[AppMsg]())
     }
+    val prompt = m.Composer
     val ctx = transitionContext(m)
     val nextState = Transition(m.State, UserPrompted{}.Apply(), ctx)
-    return (m.Copy(
+    val withState = m.Copy(
         State = nextState,
         Composer = "",
+        Conversation = m.Conversation.Append(ConversationLine(Speaker = "you", Text = prompt)),
+    )
+    val lead = m.Team.Lead
+    return ensureSession(withState, lead) match {
+        case Right(m1)  => (m1, sendAndPumpCmd(m1, lead, prompt))
+        case Left(err)  => (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
+    }
+}
+
+// ensureSession looks up `member` in m.Sessions and spawns a new claude
+// session if none is registered. Returns Right(updatedModel) on success
+// (or no-op when already present), Left(errorString) on spawn failure.
+func ensureSession(m AppModel, member Member) Either[string, AppModel] {
+    return m.Sessions.Get(member.Name) match {
+        case Some(_) => Right[string, AppModel](m)
+        case None()  => SpawnSession(m.Project, member) match {
+            case Success(s) => Right[string, AppModel](m.Copy(Sessions = m.Sessions.Put(member.Name, s)))
+            case Failure(e) => Left[string, AppModel](s"spawn ${member.Name}: ${e.Error()}")
+        }
+    }
+}
+
+// sendAndPumpCmd batches: (1) write the prompt to the member's stdin,
+// (2) start the read-pump that produces ChunkArrived per stdout line.
+// Both Futures live in runtime.Msg space; they're mapped to AppMsg via
+// runtimeFutureToCmd.
+func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
+    return m.Sessions.Get(member.Name) match {
+        case Some(s) => Batch[AppMsg](
+            runtimeFutureToCmd(SendFuture(s, prompt)),
+            runtimeFutureToCmd(NextChunkFuture(s)),
+        )
+        case None() => NoCmd[AppMsg]()
+    }
+}
+
+// onChunk records a streamed line under the speaker's name and re-arms
+// the pump for the same member (one in-flight Future per active member).
+// If the session has been closed (e.g. SessionFailed already swept it
+// out of m.Sessions) the pump is not restarted.
+func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
+    val withLine = m.Copy(
+        Conversation = m.Conversation.Append(ConversationLine(Speaker = name, Text = line)),
+    )
+    return m.Sessions.Get(name) match {
+        case Some(s) => (withLine, runtimeFutureToCmd(NextChunkFuture(s)))
+        case None()  => (withLine, NoCmd[AppMsg]())
+    }
+}
+
+// onSessionFailed marks the member's session as gone (drops it from
+// Sessions, sets LastError) and stops the pump. The transcript keeps the
+// chunks already recorded so the user can read what came through before
+// the failure.
+func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[AppMsg]] {
+    return (m.Copy(
+        Sessions  = m.Sessions.Remove(name),
+        LastError = Some(s"${name}: ${err}"),
     ), NoCmd[AppMsg]())
+}
+
+// runtimeFutureToCmd lifts a runtime.Msg-typed Future into the AppMsg
+// vocabulary so it can be returned as a Cmd from update(). The mapping
+// is one-to-one over the three runtime.Msg variants.
+func runtimeFutureToCmd(fut concurrent.Future[Msg]) Cmd[AppMsg] {
+    return FutureCmd[AppMsg](Fut = fut.Map((rm Msg) => runtimeToAppMsg(rm)))
+}
+
+// runtimeToAppMsg lifts a runtime.Msg into the AppMsg sealed type. The
+// runtime cases are prefixed `Rt` so they don't collide with the AppMsg
+// names when both sealed types are dot-imported. SessionFailed carries
+// an error at the runtime boundary; we materialize the message here so
+// AppMsg stays string-only.
+func runtimeToAppMsg(rm Msg) AppMsg = rm match {
+    case RtChunkArrived(name, line) => ChunkArrived(Member = name, Line = line)
+    case RtSessionFailed(name, err) => SessionFailed(Member = name, ErrText = err.Error())
+    case RtWriteSent(name)          => WriteSent(Member = name)
 }
 
 // transitionContext extracts the per-team facts the FSM needs from the

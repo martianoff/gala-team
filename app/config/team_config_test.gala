@@ -107,8 +107,8 @@ val withPolicyYaml = "team:\n" +
     "  workspace_mode: worktree-per-engineer\n" +
     "  merge_rule: rebase\n" +
     "  pre_merge:\n" +
-    "    - name: lint\n      cmd: go\n      args: [vet, ./...]\n" +
-    "    - name: test\n      cmd: go\n      args: [test, ./...]\n"
+    "    - name: lint\n      cmd: go\n      args:\n        - vet\n        - ./...\n" +
+    "    - name: test\n      cmd: go\n      args:\n        - test\n        - ./...\n"
 
 func TestLoadWithPolicy_ParsesAllFields(t T) T {
     val res = LoadFromString(withPolicyYaml)

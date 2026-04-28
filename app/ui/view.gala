@@ -1,12 +1,12 @@
 package ui
 
 import (
+    "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/fsm"
-    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/view"
 )
 
@@ -95,7 +95,7 @@ func sidebarWidget(m AppModel) Widget = Column(ArrayOf[LayoutChild](
 
 func conversationPanel(m AppModel) Widget {
     val header = TextStyled("  Conversation with Team Lead", DefaultStyle().WithBold())
-    val lines = m.Conversation.Map((cl) => Fixed(
+    val lines = m.Conversation.Map((cl session.ConversationLine) => Fixed(
         1,
         TextStyled(s"  ${cl.Speaker}: ${cl.Text}",
             speakerStyle(cl.Speaker)),

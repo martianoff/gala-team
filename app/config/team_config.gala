@@ -218,8 +218,8 @@ func decodeWorkflowBlock(d *yaml.YamlDecoderImpl) Workflow {
 
 func decodePolicyBlock(d *yaml.YamlDecoderImpl) Policy {
     d.StartObject()
-    var mode = WorkspaceMode(Shared())
-    var rule = MergeRule(SquashMerge())
+    var mode WorkspaceMode = Shared()
+    var rule MergeRule = SquashMerge()
     var pre = EmptyArray[Hook]()
     var post = EmptyArray[Hook]()
     for d.HasMoreFields() {

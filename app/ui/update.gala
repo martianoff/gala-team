@@ -2,13 +2,13 @@ package ui
 
 import (
     "martianoff/gala/concurrent"
+    "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/runtime"
-    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/team"
 )
 
@@ -66,7 +66,7 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val withState = m.Copy(
         State = nextState,
         Composer = "",
-        Conversation = m.Conversation.Append(ConversationLine(Speaker = "you", Text = prompt)),
+        Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt)),
     )
     val lead = m.Team.Lead
     return ensureSession(withState, lead) match {
@@ -114,7 +114,7 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 // the same transcript). Failures are stuck in LastError so the user
 // notices but the TUI keeps running.
 func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
-    val nextConvo = m.Conversation.Append(ConversationLine(Speaker = name, Text = line))
+    val nextConvo = m.Conversation.Append(session.ConversationLine(Speaker = name, Text = line))
     val withLine = persistConversation(m, nextConvo)
     return withLine.Sessions.Get(name) match {
         case Some(s) => (withLine, runtimeFutureToCmd(NextChunkFuture(s)))
@@ -125,7 +125,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
 // persistConversation writes the new conversation log to disk under
 // m.Project.Repo and returns the updated model. Save failures only set
 // LastError — the in-memory transcript stays canonical.
-func persistConversation(m AppModel, nextConvo Array[ConversationLine]) AppModel = Save(m.Project.Repo, m.Project.Name, nextConvo) match {
+func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) AppModel = session.Save(m.Project.Repo, m.Project.Name, nextConvo) match {
     case Success(_)   => m.Copy(Conversation = nextConvo)
     case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some(s"session save: ${err.Error()}"))
 }
@@ -160,7 +160,7 @@ func approveAndKickPr(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
     val nextState = Transition(m.State, ApprovalAccepted(), transitionContext(m))
     val withState = m.Copy(
         State = nextState,
-        Conversation = m.Conversation.Append(ConversationLine(Speaker = "you", Text = "/approve")),
+        Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = "/approve")),
     )
     return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body)))
 }
@@ -179,7 +179,7 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val nextState = Transition(m.State, ApprovalRejected(), transitionContext(m))
     val withState = m.Copy(
         State = nextState,
-        Conversation = m.Conversation.Append(ConversationLine(Speaker = "you", Text = "/reject")),
+        Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = "/reject")),
     )
     return (withState, NoCmd[AppMsg]())
 }
@@ -189,7 +189,7 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // browser because in headless or CI contexts there is none.
 func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(
-        Conversation = m.Conversation.Append(ConversationLine(Speaker = "gh", Text = s"PR created: ${url}")),
+        Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${url}")),
     ), NoCmd[AppMsg]())
 }
 

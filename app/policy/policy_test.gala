@@ -55,8 +55,11 @@ func TestRunHooks_EmptyHooksReturnsSuccess(t T) T {
 }
 
 func TestRunHooks_SingleSuccessfulHook(t T) T {
+    // git --version is on PATH on every platform that has bazel set up
+    // and doesn't depend on GOPATH / GOMODCACHE the way `go version` does
+    // inside Bazel's sandbox. Self-contained "exit 0" probe.
     val hooks = ArrayOf(
-        Hook(Name = "go-version", Cmd = "go", Args = ArrayOf("version")),
+        Hook(Name = "git-version", Cmd = "git", Args = ArrayOf("--version")),
     )
     val res = RunHooks(sampleProject(), hooks)
     return IsSuccess(t, res)
@@ -64,8 +67,8 @@ func TestRunHooks_SingleSuccessfulHook(t T) T {
 
 func TestRunHooks_FirstFailureShortCircuits(t T) T {
     val hooks = ArrayOf(
-        Hook(Name = "doomed",  Cmd = "go", Args = ArrayOf("--definitely-not-a-flag")),
-        Hook(Name = "skipped", Cmd = "go", Args = ArrayOf("version")),
+        Hook(Name = "doomed",  Cmd = "git", Args = ArrayOf("--definitely-not-a-flag")),
+        Hook(Name = "skipped", Cmd = "git", Args = ArrayOf("--version")),
     )
     val res = RunHooks(sampleProject(), hooks)
     return IsFailure(t, res)

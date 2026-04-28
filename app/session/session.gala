@@ -7,6 +7,7 @@ import (
     "martianoff/gala/json"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
 )
 
 // ============================================================================
@@ -27,6 +28,15 @@ import (
 // ConversationLine lives here rather than in app/ui so app/ui can depend
 // on session (and not the other way around) — saves the type from being
 // duplicated and keeps app/session self-contained for the cmd-side load.
+//
+// Implementation note: we drive json.JsonEncoderImpl / JsonDecoderImpl
+// directly rather than `Codec[Snapshot]`. Same reason team_config.gala
+// hand-writes the YAML decoder — neither auto-codec handles struct
+// fields whose type is `Array[T]` for a struct T (only primitives).
+// We work around this by serializing the conversation as two parallel
+// Array[string]s (speakers + texts) and rebuilding ConversationLines at
+// the API boundary. See `JSON_CODEC_NESTED_ARRAY_GAP.md` (private docs)
+// for the upstream fix proposal.
 // ============================================================================
 
 // ConversationLine is a single rendered turn in the Team-Lead conversation
@@ -54,13 +64,9 @@ func SessionPath(repoDir string) string =
 // logged via the AppModel's LastError; the running TUI never blocks
 // on Save.
 func Save(repoDir string, projectName string, conversation Array[ConversationLine]) Try[bool] = Try[bool](() => {
-    val codec = Codec[Snapshot](SnakeCase())
-    val snap  = Snapshot(
-        ProjectName  = projectName,
-        SavedAt      = time.Now().UnixNano(),
-        Conversation = conversation,
-    )
-    val encoded = codec.Encode(snap).Get()
+    val w = json.NewJsonEncoder()
+    encodeSnapshot(w, projectName, time.Now().UnixNano(), conversation)
+    val encoded = w.String()
     val path    = SessionPath(repoDir)
     val parent  = filepath.Dir(path)
     val mkErr   = os.MkdirAll(parent, os.FileMode(0755))
@@ -71,18 +77,100 @@ func Save(repoDir string, projectName string, conversation Array[ConversationLin
 })
 
 // Load reads a Snapshot from .gala_team/sessions/latest.json under
-// repoDir. Returns None when no file exists (first run); returns Some
-// on a successful decode; returns None on a corrupted file too — we
-// prefer "start clean" over "blow up at startup" since the durable log
-// is for convenience, not correctness.
-func Load(repoDir string) Option[Snapshot] {
+// repoDir. Returns None when no file exists (first run) OR when the
+// file is corrupted — we prefer "start clean" over "blow up at startup"
+// since the durable log is for convenience, not correctness.
+func Load(repoDir string) Option[Snapshot] = LoadOrError(repoDir) match {
+    case Right(snap) => Some(snap)
+    case Left(_)     => None[Snapshot]()
+}
+
+// LoadOrError mirrors Load but surfaces the underlying error string
+// when the file exists but decoding fails. Useful for tests and the
+// LastError surface in the running TUI.
+func LoadOrError(repoDir string) Either[string, Snapshot] {
     val path = SessionPath(repoDir)
     val readResult = Try(() => os.ReadFile(path))
     return readResult match {
-        case Failure(_)     => None[Snapshot]()
-        case Success(bytes) => Codec[Snapshot](SnakeCase()).Decode(string(bytes)) match {
-            case Success(snap) => Some(snap)
-            case Failure(_)    => None[Snapshot]()
+        case Failure(err) => Left[string, Snapshot](s"read: ${err.Error()}")
+        case Success(bytes) => Try[Snapshot](() => decodeSnapshot(json.NewJsonDecoder(string(bytes)))) match {
+            case Success(snap) => Right[string, Snapshot](snap)
+            case Failure(err)  => Left[string, Snapshot](s"decode: ${err.Error()}")
         }
     }
+}
+
+// ----------------------------------------------------------------------------
+// Manual encode/decode
+// ----------------------------------------------------------------------------
+
+func encodeSnapshot(w *json.JsonEncoderImpl, projectName string, savedAt int64, convo Array[ConversationLine]) {
+    w.WriteStartObject()
+    w.WriteKey("project_name"); w.WriteString(projectName)
+    w.WriteKey("saved_at");     w.WriteInt64(savedAt)
+    w.WriteKey("speakers")
+    writeStringArray(w, convo.Map((cl) => cl.Speaker))
+    w.WriteKey("texts")
+    writeStringArray(w, convo.Map((cl) => cl.Text))
+    w.WriteEndObject()
+}
+
+func writeStringArray(w *json.JsonEncoderImpl, xs Array[string]) {
+    w.WriteStartArray()
+    xs.ForEach((s) => w.WriteString(s))
+    w.WriteEndArray()
+}
+
+func decodeSnapshot(d *json.JsonDecoderImpl) Snapshot {
+    d.StartObject()
+    var name = ""
+    var savedAt = int64(0)
+    var speakers = EmptyArray[string]()
+    var texts = EmptyArray[string]()
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == "project_name" {
+            name = d.ReadString()
+        } else if key == "saved_at" {
+            savedAt = d.ReadInt64()
+        } else if key == "speakers" {
+            speakers = readStringArray(d)
+        } else if key == "texts" {
+            texts = readStringArray(d)
+        } else {
+            d.Skip()
+        }
+    }
+    d.EndObject()
+    return Snapshot(
+        ProjectName = name,
+        SavedAt = savedAt,
+        Conversation = zipConversation(speakers, texts),
+    )
+}
+
+// Loop-bound Append intentional: stateful pull-stream from the JSON
+// decoder, no declarative shape fits.
+func readStringArray(d *json.JsonDecoderImpl) Array[string] {
+    var out = EmptyArray[string]()
+    d.StartArray()
+    for d.HasMoreElements() {
+        out = out.Append(d.ReadString())
+    }
+    d.EndArray()
+    return out
+}
+
+// zipConversation rebuilds the Array[ConversationLine] from the two
+// parallel arrays we use on disk. Truncates to the shorter array so a
+// half-written snapshot doesn't crash the loader.
+func zipConversation(speakers Array[string], texts Array[string]) Array[ConversationLine] {
+    val n = if (speakers.Size() < texts.Size()) speakers.Size() else texts.Size()
+    var out = EmptyArray[ConversationLine]()
+    var i = 0
+    for i < n {
+        out = out.Append(ConversationLine(Speaker = speakers.Get(i), Text = texts.Get(i)))
+        i = i + 1
+    }
+    return out
 }

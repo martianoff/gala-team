@@ -6,10 +6,10 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/time_utils"
+    "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
-    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/ui"
 )
@@ -145,7 +145,7 @@ func main() {
 // primeFromSnapshot replays the persisted conversation log into a fresh
 // AppModel. We ignore SavedAt and ProjectName for now — the user's
 // next prompt picks up where the prior session left off.
-func primeFromSnapshot(m AppModel) AppModel = Load(m.Project.Repo) match {
+func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match {
     case None()       => m
     case Some(snap)   => m.Copy(Conversation = snap.Conversation)
 }

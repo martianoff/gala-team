@@ -6,6 +6,7 @@ import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala_team/app/session"
 )
 
@@ -39,15 +40,23 @@ func TestSaveThenLoad_RoundTripsConversation(t T) T {
         ConversationLine(Speaker = "Iris", Text = "@summary done"),
     )
     val saved = Save(dir, "demo", convo)
-    val t1 = IsSuccess(t, saved)
+    var saveErr = "OK"
+    if saved.IsFailure() { saveErr = saved.GetError().Error() }
+    val t1 = Eq(t, saveErr, "OK")
     val loaded = Load(dir)
+    var loadOK = "OK"
+    LoadOrError(dir) match {
+        case Right(_)  => loadOK = "OK"
+        case Left(err) => loadOK = err
+    }
+    val t2 = Eq(t1, loadOK, "OK")
     return loaded match {
-        case None()       => IsTrue(t1, false)
+        case None()       => IsTrue(t2, false)
         case Some(snap)   => {
-            val t2 = Eq(t1, snap.ProjectName, "demo")
-            val t3 = Eq(t2, snap.Conversation.Size(), 2)
-            val t4 = Eq(t3, snap.Conversation.Get(0).Text, "ship it")
-            return Eq(t4, snap.Conversation.Get(1).Speaker, "Iris")
+            val t3 = Eq(t2, snap.ProjectName, "demo")
+            val t4 = Eq(t3, snap.Conversation.Size(), 2)
+            val t5 = Eq(t4, snap.Conversation.Get(0).Text, "ship it")
+            return Eq(t5, snap.Conversation.Get(1).Speaker, "Iris")
         }
     }
 }
@@ -75,7 +84,7 @@ func TestLoad_CorruptedFileReturnsNone(t T) T {
     val parent = filepath.Dir(SessionPath(dir))
     val mkErr = os.MkdirAll(parent, os.FileMode(0755))
     if mkErr != nil { panic(mkErr.Error()) }
-    val writeErr = os.WriteFile(SessionPath(dir), []byte("{not json"), os.FileMode(0644))
+    val writeErr = os.WriteFile(SessionPath(dir), ToBytes("{not json"), os.FileMode(0644))
     if writeErr != nil { panic(writeErr.Error()) }
     return Load(dir) match {
         case None()  => IsTrue(t, true)

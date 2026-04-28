@@ -6,6 +6,7 @@ gala_library(
     importpath = "github.com/martianoff/gala_team/app/session",
     deps = [
         "@gala//collection_immutable",
+        "@gala//go_interop",
         "@gala//json",
     ],
     visibility = ["//visibility:public"],
@@ -17,5 +18,6 @@ gala_go_test(
     deps = [
         ":session",
         "@gala//collection_immutable",
+        "@gala//go_interop",
     ],
 )

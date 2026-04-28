@@ -11,19 +11,19 @@ import (
 
 func skunkworks() Team {
     val iris = Member(
-        Name = "Iris", Role = TeamLead{}.Apply(),
+        Name = "Iris", Role = TeamLead(),
         Personality = "calm",
-        Model = None[string]{}.Apply(), Extra = "",
+        Model = None[string](), Extra = "",
     )
     val felix = Member(
-        Name = "Felix", Role = Engineer{}.Apply(),
+        Name = "Felix", Role = Engineer(),
         Personality = "terse",
-        Model = None[string]{}.Apply(), Extra = "",
+        Model = None[string](), Extra = "",
     )
     val theo = Member(
-        Name = "Theo", Role = QA{}.Apply(),
+        Name = "Theo", Role = QA(),
         Personality = "evidence-driven",
-        Model = None[string]{}.Apply(), Extra = "",
+        Model = None[string](), Extra = "",
     )
     return Team(
         Name    = "Skunkworks",
@@ -43,7 +43,7 @@ func TestTeamPanel_AllIdle_ShowsAllMembers(t T) T {
 
 func TestTeamPanel_WorkingMember_ShowsSpinnerGlyph(t T) T {
     val statuses = EmptyHashMap[string, Status]()
-        .Put("Felix", StWorking{}.Apply())
+        .Put("Felix", StWorking())
     val w = TeamPanelView(skunkworks(), statuses)
     val rendered = Snapshot(w, 40, 12)
     return IsTrue(t, contains(rendered, "working"))
@@ -51,7 +51,7 @@ func TestTeamPanel_WorkingMember_ShowsSpinnerGlyph(t T) T {
 
 func TestTeamPanel_DoneAndFailed(t T) T {
     val statuses = EmptyHashMap[string, Status]()
-        .Put("Felix", StDone{}.Apply())
+        .Put("Felix", StDone())
         .Put("Theo",  StFailed(Reason = "boom"))
     val w = TeamPanelView(skunkworks(), statuses)
     val rendered = Snapshot(w, 40, 12)

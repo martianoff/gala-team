@@ -18,14 +18,14 @@ func sampleProject() Project = Project(
 
 func sampleTeam() Team {
     val iris = Member(
-        Name = "Iris", Role = TeamLead{}.Apply(),
+        Name = "Iris", Role = TeamLead(),
         Personality = "calm",
-        Model = None[string]{}.Apply(), Extra = "",
+        Model = None[string](), Extra = "",
     )
     val felix = Member(
-        Name = "Felix", Role = Engineer{}.Apply(),
+        Name = "Felix", Role = Engineer(),
         Personality = "terse",
-        Model = None[string]{}.Apply(), Extra = "",
+        Model = None[string](), Extra = "",
     )
     return Team(
         Name    = "Skunkworks",
@@ -45,18 +45,18 @@ func TestKeyChar_AppendsToComposer(t T) T {
 func TestKeyBackspace_TrimsLastRune(t T) T {
     val (m1, _) = Update(sampleModel(), KeyChar(C = 'h'))
     val (m2, _) = Update(m1, KeyChar(C = 'i'))
-    val (m3, _) = Update(m2, KeyBackspace{}.Apply())
+    val (m3, _) = Update(m2, KeyBackspace())
     return Eq(t, m3.Composer, "h")
 }
 
 func TestKeyBackspace_OnEmpty_NoOp(t T) T {
-    val (m, _) = Update(sampleModel(), KeyBackspace{}.Apply())
+    val (m, _) = Update(sampleModel(), KeyBackspace())
     return Eq(t, m.Composer, "")
 }
 
 func TestKeySubmit_NonEmpty_AdvancesFsmAndClearsComposer(t T) T {
     val seed = sampleModel().Copy(Composer = "hello")
-    val (m, _) = Update(seed, KeySubmit{}.Apply())
+    val (m, _) = Update(seed, KeySubmit())
     val t1 = Eq(t, m.Composer, "")
     return m.State match {
         case TLThinking() => IsTrue(t1, true)
@@ -65,7 +65,7 @@ func TestKeySubmit_NonEmpty_AdvancesFsmAndClearsComposer(t T) T {
 }
 
 func TestKeySubmit_Empty_NoOp(t T) T {
-    val (m, _) = Update(sampleModel(), KeySubmit{}.Apply())
+    val (m, _) = Update(sampleModel(), KeySubmit())
     val t1 = Eq(t, m.Composer, "")
     return m.State match {
         case Idle() => IsTrue(t1, true)
@@ -74,7 +74,7 @@ func TestKeySubmit_Empty_NoOp(t T) T {
 }
 
 func TestTickMsg_BumpsCounter(t T) T {
-    val (m1, _) = Update(sampleModel(), TickMsg{}.Apply())
-    val (m2, _) = Update(m1, TickMsg{}.Apply())
+    val (m1, _) = Update(sampleModel(), TickMsg())
+    val (m2, _) = Update(m1, TickMsg())
     return Eq(t, m2.Tick, 2)
 }

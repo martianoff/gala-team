@@ -25,36 +25,35 @@ import (
 //     bazel run cmd:gala_team
 // ============================================================================
 
-func keyToAppMsg(ev KeyEvent) AppMsg {
-    if KeyMatchesAny(ev, "ctrl+c", "ctrl+q") { return QuitMsg{}.Apply() }
-    return ev.Key match {
-        case Backspace()  => KeyBackspace{}.Apply()
-        case Enter()      => KeySubmit{}.Apply()
+func keyToAppMsg(ev KeyEvent) AppMsg =
+    if (KeyMatchesAny(ev, "ctrl+c", "ctrl+q")) QuitMsg()
+    else ev.Key match {
+        case Backspace()  => KeyBackspace()
+        case Enter()      => KeySubmit()
         case Char(c)      => KeyChar(C = c)
         case Space()      => KeyChar(C = ' ')
-        case _            => NoOp{}.Apply()
+        case _            => NoOp()
     }
-}
 
 func sampleTeam() Team {
     val iris = Member(
-        Name = "Iris",  Role = TeamLead{}.Apply(),
+        Name = "Iris",  Role = TeamLead(),
         Personality = "calm",
         Model = None[string](), Extra = "",
     )
     val felix = Member(
-        Name = "Felix", Role = Engineer{}.Apply(),
+        Name = "Felix", Role = Engineer(),
         Personality = "terse",
         Model = None[string](), Extra = "",
     )
     val quinn = Member(
-        Name = "Quinn", Role = QA{}.Apply(),
+        Name = "Quinn", Role = QA(),
         Personality = "skeptical",
         Model = None[string](), Extra = "",
     )
     return Team(
         Name    = "Skunkworks",
-        Members = ArrayOf[Member](iris, felix, quinn),
+        Members = ArrayOf(iris, felix, quinn),
         Lead    = iris,
     )
 }

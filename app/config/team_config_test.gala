@@ -75,7 +75,7 @@ func TestLoadNoQa_AllowedWhenQaNotRequired(t T) T {
     val t1 = IsSuccess(t, res)
     val cfg = res.Get()
     val t2 = IsFalse(t1, cfg.Workflow.QARequired)
-    val qas = MembersOf(cfg.Team, QA{}.Apply())
+    val qas = MembersOf(cfg.Team, QA())
     return IsTrue(t2, qas.IsEmpty())
 }
 

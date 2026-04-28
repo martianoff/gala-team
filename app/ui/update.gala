@@ -57,7 +57,7 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     }
     val prompt = m.Composer
     val ctx = transitionContext(m)
-    val nextState = Transition(m.State, UserPrompted{}.Apply(), ctx)
+    val nextState = Transition(m.State, UserPrompted(), ctx)
     val withState = m.Copy(
         State = nextState,
         Composer = "",
@@ -125,9 +125,8 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
 // runtimeFutureToCmd lifts a runtime.Msg-typed Future into the AppMsg
 // vocabulary so it can be returned as a Cmd from update(). The mapping
 // is one-to-one over the three runtime.Msg variants.
-func runtimeFutureToCmd(fut concurrent.Future[Msg]) Cmd[AppMsg] {
-    return FutureCmd[AppMsg](Fut = fut.Map((rm Msg) => runtimeToAppMsg(rm)))
-}
+func runtimeFutureToCmd(fut concurrent.Future[Msg]) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = fut.Map(runtimeToAppMsg))
 
 // runtimeToAppMsg lifts a runtime.Msg into the AppMsg sealed type. The
 // runtime cases are prefixed `Rt` so they don't collide with the AppMsg
@@ -143,7 +142,7 @@ func runtimeToAppMsg(rm Msg) AppMsg = rm match {
 // transitionContext extracts the per-team facts the FSM needs from the
 // current model.  Pure; doesn't touch IO.
 func transitionContext(m AppModel) TransitionContext = TransitionContext(
-    QAMembers  = MembersOf(m.Team, QA{}.Apply()).Map((member Member) => member.Name),
+    QAMembers  = MembersOf(m.Team, QA()).Map((member) => member.Name),
     QARequired = m.Workflow.QARequired,
 )
 
@@ -157,6 +156,5 @@ func transitionContext(m AppModel) TransitionContext = TransitionContext(
 func trimLastRune(s string) string {
     val rs = ToRunes(s)
     val n = len(rs)
-    if n == 0 { return "" }
-    return string(SliceTo(rs, n - 1))
+    return if (n == 0) "" else string(SliceTo(rs, n - 1))
 }

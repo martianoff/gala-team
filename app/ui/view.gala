@@ -68,7 +68,7 @@ func sidebarWidget(m AppModel) Widget = Column(ArrayOf[LayoutChild](
 
 func conversationPanel(m AppModel) Widget {
     val header = TextStyled("  Conversation with Team Lead", DefaultStyle().WithBold())
-    val lines = m.Conversation.Map((cl ConversationLine) => Fixed(
+    val lines = m.Conversation.Map((cl) => Fixed(
         1,
         TextStyled(s"  ${cl.Speaker}: ${cl.Text}",
             speakerStyle(cl.Speaker)),
@@ -85,11 +85,10 @@ func conversationPanel(m AppModel) Widget {
 }
 
 // speakerStyle picks a text style based on who's speaking — the user
-// gets bright white, members get cyan, anything else dimmed.
-func speakerStyle(speaker string) Style {
-    if speaker == "you" { return DefaultStyle().WithFg(BrightWhite()) }
-    return DefaultStyle().WithFg(BrightCyan())
-}
+// gets bright white, members get cyan.
+func speakerStyle(speaker string) Style =
+    if (speaker == "you") DefaultStyle().WithFg(BrightWhite())
+    else                  DefaultStyle().WithFg(BrightCyan())
 
 func composerWidget(m AppModel) Widget {
     val prompt = if (m.Composer == "") "Type to Iris…" else m.Composer

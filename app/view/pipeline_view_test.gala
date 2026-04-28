@@ -17,9 +17,9 @@ func TestPipeline_Empty_ShowsNoActiveTurn(t T) T {
 
 func TestPipeline_FanOut_ShowsAllNodes(t T) T {
     val state = PipelineState(Nodes = ArrayOf[PipelineEvent](
-        PipelineEvent(Member = "Iris",  Status = StWorking{}.Apply()),
-        PipelineEvent(Member = "Felix", Status = StWorking{}.Apply()),
-        PipelineEvent(Member = "Mira",  Status = StIdle{}.Apply()),
+        PipelineEvent(Member = "Iris",  Status = StWorking()),
+        PipelineEvent(Member = "Felix", Status = StWorking()),
+        PipelineEvent(Member = "Mira",  Status = StIdle()),
     ))
     val w = PipelineView(state)
     val rendered = Snapshot(w, 40, 12)

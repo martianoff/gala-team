@@ -122,26 +122,10 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
 // extractSummary joins every member-spoken line of the conversation
 // (skipping the user's prompt), runs the directive parser, and
 // returns the body of the first @summary if one is present.
-func extractSummary(convo Array[session.ConversationLine]) Option[string] {
-    val joined = convo
-        .Filter((cl) => cl.Speaker != "you")
-        .Map((cl) => cl.Text)
-        .MkString("\n")
-    val dirs = Parse(joined)
-    val first = dirs.Find(isSummaryDirective)
-    return first match {
-        case None()  => None[string]()
-        case Some(d) => d match {
-            case Summary(body) => Some(body)
-            case _             => None[string]()
-        }
-    }
-}
-
-func isSummaryDirective(d Directive) bool = d match {
-    case Summary(_) => true
-    case _          => false
-}
+func extractSummary(convo Array[session.ConversationLine]) Option[string] =
+    Parse(convo.Filter((cl) => cl.Speaker != "you").Map((cl) => cl.Text).MkString("\n"))
+        .Collect({ case Summary(body) => body })
+        .HeadOption()
 
 // EncodeJson serialises a HeadlessResult to a JSON string suitable for
 // piping into another tool. Conversation is a JSON array of

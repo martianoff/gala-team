@@ -5,63 +5,64 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/team"
+    . "github.com/martianoff/gala_team/app/ui"
 )
 
 // ============================================================================
 // gala_team — TUI orchestrator that turns a team of Claude CLI sessions into
-// a single chain-of-command.  The user only ever talks to the Team Lead;
+// a single chain-of-command. The user only ever talks to the Team Lead;
 // the Team Lead delegates to subordinate agents (Engineers, QAs), reviews
 // their work, and produces a final summary + PR for the user to approve.
 //
-// Phase-1 main: opens a placeholder TUI to validate end-to-end build
-// wiring.  Real orchestration (loading team.yaml, spawning claude
-// sessions, dispatch parsing, state machine, view rendering) lands in
-// subsequent commits.
+// Phase-1 main: wires the Elm-architecture skeleton in app/ui (AppModel +
+// Update + View) against a hard-coded sample team. The keyboard plumbing
+// translates raw KeyEvents into the AppMsg sealed type. Real claude
+// subprocess pumping (spawning, prompt forwarding, NextChunk pump) lands
+// in a follow-up commit alongside YAML team loading.
 //
 // Run:
 //     bazel run cmd:gala_team
 // ============================================================================
 
-struct Model(Tick int)
-
-sealed type Msg {
-    case TmTick()
-    case TmQuit()
-    case TmNoOp()
+func keyToAppMsg(ev KeyEvent) AppMsg {
+    if KeyMatchesAny(ev, "ctrl+c", "ctrl+q") { return QuitMsg{}.Apply() }
+    return ev.Key match {
+        case Backspace()  => KeyBackspace{}.Apply()
+        case Enter()      => KeySubmit{}.Apply()
+        case Char(c)      => KeyChar(C = c)
+        case Space()      => KeyChar(C = ' ')
+        case _            => NoOp{}.Apply()
+    }
 }
 
-func update(m Model, msg Msg) Tuple[Model, Cmd[Msg]] = msg match {
-    case TmTick() => (m.Copy(Tick = m.Tick + 1), NoCmd[Msg]())
-    case TmQuit() => (m, QuitCmd[Msg]())
-    case TmNoOp() => (m, NoCmd[Msg]())
-}
-
-func view(m Model) Widget {
-    val role = TeamLead()
-    val title = TextStyled(s"  ⛩  gala_team — Phase 1 skeleton (role probe: ${RoleName(role)})",
-        DefaultStyle().WithBold().WithFg(BrightCyan()))
-    val state = TextStyled(s"  tick: ${m.Tick}",
-        DefaultStyle().WithFg(BrightWhite()))
-    val hint = TextStyled("  Press q (or Ctrl+C) to quit.",
-        DefaultStyle().WithDim())
-    return Column(ArrayOf[LayoutChild](
-        Fixed(2, title),
-        Fixed(2, state),
-        Fixed(2, hint),
-        Flex(1, Empty()),
-    ))
-}
-
-func keyToMsg(ev KeyEvent) Msg {
-    if KeyMatchesAny(ev, "q", "ctrl+c") { return TmQuit() }
-    return TmNoOp()
+func sampleTeam() Team {
+    val iris = Member(
+        Name = "Iris",  Role = TeamLead{}.Apply(),
+        Personality = "calm",
+        Model = None[string](), Extra = "",
+    )
+    val felix = Member(
+        Name = "Felix", Role = Engineer{}.Apply(),
+        Personality = "terse",
+        Model = None[string](), Extra = "",
+    )
+    val quinn = Member(
+        Name = "Quinn", Role = QA{}.Apply(),
+        Personality = "skeptical",
+        Model = None[string](), Extra = "",
+    )
+    return Team(
+        Name    = "Skunkworks",
+        Members = ArrayOf[Member](iris, felix, quinn),
+        Lead    = iris,
+    )
 }
 
 func main() {
-    val program = Program[Model, Msg](
-        Initial = Model(Tick = 0),
-        Update  = (m, msg) => update(m, msg),
-        View    = (m) => view(m),
+    val program = Program[AppModel, AppMsg](
+        Initial = InitialModel(sampleTeam(), DefaultWorkflow()),
+        Update  = (m, msg) => Update(m, msg),
+        View    = (m) => View(m),
     )
-    val _ = Run[Model, Msg](program, (ev) => keyToMsg(ev))
+    val _ = Run[AppModel, AppMsg](program, (ev) => keyToAppMsg(ev))
 }

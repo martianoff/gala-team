@@ -52,6 +52,14 @@ struct AppModel(
     // anything past index `ConsultsFired` in the parsed list is new
     // and must be kicked off.
     ConsultsFired int,
+    // Live cross-team consults keyed by registry name. Populated when
+    // SpawnConsult succeeds; dropped when the matching ConsultEnded
+    // fires. Drives the consult viewer modal.
+    ActiveConsults HashMap[string, ConsultSession],
+    // Per-consult accumulator of raw stdout lines (no `[consult/<name>]`
+    // prefix). Drained by onConsultEnded for summary extraction, then
+    // discarded.
+    ConsultBuffers HashMap[string, Array[string]],
 )
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
@@ -82,6 +90,8 @@ func InitialModel(
     LastPrUrl    = None[string](),
     TurnBuffer    = "",
     ConsultsFired = 0,
+    ActiveConsults = EmptyHashMap[string, ConsultSession](),
+    ConsultBuffers = EmptyHashMap[string, Array[string]](),
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -126,6 +136,14 @@ sealed type AppMsg {
     // @summary body; ConsultFailed carries an explanatory error string.
     case ConsultCompleted(Name string, Summary Option[string])
     case ConsultFailed(Name string, ErrText string)
+    // Streaming events from a live ConsultSession. ConsultChunkArrived
+    // is one stdout line from the child team-lead; the UI both logs it
+    // and accumulates it in ConsultBuffers for end-of-stream summary
+    // extraction. ConsultEnded fires once when the read pump terminates
+    // and is internally translated into ConsultCompleted / ConsultFailed
+    // so the back-to-TL forwarding handlers can stay reused.
+    case ConsultChunkArrived(Name string, Line string)
+    case ConsultEnded(Name string, ErrText Option[string])
     // Mouse input. Phase 1: routed but unhandled — the layout doesn't
     // yet expose clickable hit-targets. Plumbing is here so when a
     // future component-level click dispatcher lands, the runtime, the

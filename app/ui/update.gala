@@ -55,6 +55,8 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case PostMergeHooksFailed(err)   => (m.Copy(LastError = Some(s"post-merge hooks: ${err}")), NoCmd[AppMsg]())
     case ConsultCompleted(name, sum) => onConsultCompleted(m, name, sum)
     case ConsultFailed(name, err)    => onConsultFailed(m, name, err)
+    case ConsultChunkArrived(n, ln)  => onConsultChunkArrived(m, n, ln)
+    case ConsultEnded(name, err)     => onConsultEnded(m, name, err)
     case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
     case TickMsg()                   => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
     case QuitMsg()                   => onQuit(m)
@@ -189,9 +191,10 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
 
 // maybeDispatchConsults inspects the latest TL chunk for newly-
 // completed `@consult(name) … @end` blocks. Returns the updated model
-// (with `TurnBuffer` and `ConsultsFired` advanced) plus an array of
-// Cmds — one RunConsultFuture per new directive — that the chunk
-// handler batches together with the standard re-arm-pump Cmd.
+// (with `TurnBuffer`, `ConsultsFired`, ActiveConsults, ConsultBuffers
+// advanced) plus an array of Cmds — one re-armed event-pump per
+// successfully-spawned consult, plus an immediate MsgCmd for any
+// consult whose SpawnConsult failed pre-stream.
 //
 // Non-TL chunks are no-ops; the per-turn buffer only tracks the lead
 // since other members never emit `@consult`.
@@ -208,55 +211,57 @@ func maybeDispatchConsults(m AppModel, speaker string, line string) Tuple[AppMod
     if total <= m.ConsultsFired {
         return (m.Copy(TurnBuffer = nextBuffer), EmptyArray[Cmd[AppMsg]]())
     }
-    val (newConvo, cmds) = dispatchPendingConsults(
-        m.Conversation,
-        m.Registry,
-        consults,
-        m.ConsultsFired,
-        total,
+    val withBuffer = m.Copy(TurnBuffer = nextBuffer, ConsultsFired = total)
+    return consults.Drop(m.ConsultsFired).FoldLeft(
+        (withBuffer, EmptyArray[Cmd[AppMsg]]()),
+        (acc, c) => {
+            val (m1, cmd) = dispatchOneConsult(acc.V1, c.V1, c.V2)
+            return (m1, acc.V2.Append(cmd))
+        },
     )
-    val m2 = m.Copy(
-        TurnBuffer    = nextBuffer,
-        ConsultsFired = total,
-        Conversation  = newConvo,
-    )
-    return (m2, cmds)
 }
 
-// dispatchPendingConsults walks the consult directives from
-// `firstNew..total` and returns the convo log (with one "consult:
-// dispatching" line per new directive) + an array of consult-future
-// Cmds. Pure: doesn't reach into the model so it stays test-friendly.
-func dispatchPendingConsults(
-    convo Array[session.ConversationLine],
-    reg Registry,
-    consults Array[Tuple[string, string]],
-    firstNew int,
-    total int,
-) Tuple[Array[session.ConversationLine], Array[Cmd[AppMsg]]] {
-    var nextConvo = convo
-    var cmds = EmptyArray[Cmd[AppMsg]]()
-    var i = firstNew
-    for i < total {
-        val (target, body) = (consults.Get(i).V1, consults.Get(i).V2)
-        nextConvo = nextConvo.Append(session.ConversationLine(
+// dispatchOneConsult fires off one `@consult(target)` block. Spawns
+// the child gala_team session synchronously (its IO is fast — registry
+// lookup, project resolve, team yaml read, subprocess fork, prompt
+// stdin write); on success registers the live ConsultSession +
+// initial empty buffer and re-arms the event pump; on failure emits
+// an immediate ConsultFailed via MsgCmd so the existing failure
+// handler logs and forwards to the TL.
+func dispatchOneConsult(m AppModel, target string, body string) Tuple[AppModel, Cmd[AppMsg]] {
+    val withDispatchLog = m.Copy(
+        Conversation = m.Conversation.Append(session.ConversationLine(
             Speaker = "consult",
             Text    = s"dispatching → ${target}",
-        ))
-        cmds = cmds.Append(consultFutureCmd(reg, target, body))
-        i = i + 1
+        )),
+    )
+    return SpawnConsult(m.Registry, target, body) match {
+        case Failure(e) => {
+            val cmd = MsgCmd[AppMsg](Msg = ConsultFailed(Name = target, ErrText = e.Error()))
+            return (withDispatchLog, cmd)
+        }
+        case Success(s) => {
+            val m1 = withDispatchLog.Copy(
+                ActiveConsults = withDispatchLog.ActiveConsults.Put(target, s),
+                ConsultBuffers = withDispatchLog.ConsultBuffers.Put(target, EmptyArray[string]()),
+            )
+            return (m1, consultEventFutureCmd(s))
+        }
     }
-    return (nextConvo, cmds)
 }
 
-// consultFutureCmd lifts RunConsultFuture into Cmd[AppMsg] space,
-// mapping ConsultOk → ConsultCompleted and ConsultErr → ConsultFailed.
-func consultFutureCmd(reg Registry, name string, body string) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = RunConsultFuture(reg, name, body).Map(consultOutcomeToAppMsg))
+// consultEventFutureCmd lifts the next ConsultEvent read into the
+// AppMsg vocabulary so the chunk pump can be re-armed cleanly between
+// chunks.
+func consultEventFutureCmd(s ConsultSession) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = NextConsultEventFuture(s).Map(consultEventToAppMsg))
 
-func consultOutcomeToAppMsg(o ConsultOutcome) AppMsg = o match {
-    case ConsultOk(name, result) => ConsultCompleted(Name = name, Summary = result.Summary)
-    case ConsultErr(name, txt)   => ConsultFailed(Name = name, ErrText = txt)
+func consultEventToAppMsg(ev ConsultEvent) AppMsg = ev match {
+    case ConsultChunk(name, line) => ConsultChunkArrived(Name = name, Line = line)
+    case ConsultEnd(name, errOpt) => ConsultEnded(
+        Name    = name,
+        ErrText = errOpt.Map[string]((e) => e.Error()),
+    )
 }
 
 // batchAll wraps a list of Cmds into a single BatchCmd. Empty list →
@@ -468,6 +473,63 @@ func onPostMergeHooksPassed(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]]
         ),
     ), NoCmd[AppMsg]())
 }
+
+// onConsultChunkArrived appends one streamed line from the child team
+// to the conversation log under a `consult/<name>` speaker, and
+// accumulates the raw line into ConsultBuffers so the eventual
+// onConsultEnded can extract the @summary block from the full child
+// transcript. Re-arms the event pump for that consult; if the
+// session has been swept out (e.g. ConsultEnded already fired) the
+// pump is not restarted.
+func onConsultChunkArrived(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
+    val newConvo = m.Conversation.Append(session.ConversationLine(
+        Speaker = s"consult/${name}",
+        Text    = line,
+    ))
+    val priorBuffer = m.ConsultBuffers.Get(name).GetOrElse(EmptyArray[string]())
+    val newBuffers  = m.ConsultBuffers.Put(name, priorBuffer.Append(line))
+    val withChunk   = m.Copy(Conversation = newConvo, ConsultBuffers = newBuffers)
+    return withChunk.ActiveConsults.Get(name) match {
+        case Some(s) => (withChunk, consultEventFutureCmd(s))
+        case None()  => (withChunk, NoCmd[AppMsg]())
+    }
+}
+
+// onConsultEnded fires once the child team's TL closes its stdout.
+// Drains the per-consult buffer, parses it for an `@summary` block,
+// drops the live session + buffer, and re-emits a ConsultCompleted /
+// ConsultFailed so the existing back-to-TL forwarding handlers stay
+// the single source of truth for "what does the lead see when a
+// consult finishes". A best-effort CloseConsultSession runs to reap
+// the subprocess; failure is silent (the kernel will reap the zombie
+// when the parent exits).
+func onConsultEnded(m AppModel, name string, errText Option[string]) Tuple[AppModel, Cmd[AppMsg]] {
+    val priorBuffer = m.ConsultBuffers.Get(name).GetOrElse(EmptyArray[string]())
+    val cleaned = m.ActiveConsults.Get(name) match {
+        case Some(s) => {
+            val _ = CloseConsultSession(s)
+            return m.Copy(ActiveConsults = m.ActiveConsults.Remove(name))
+        }
+        case None() => m
+    }
+    val finalModel = cleaned.Copy(ConsultBuffers = cleaned.ConsultBuffers.Remove(name))
+    val nextMsg = errText match {
+        case None()    => ConsultCompleted(Name = name, Summary = extractConsultSummary(priorBuffer))
+        case Some(err) => if (err == "EOF") ConsultCompleted(Name = name, Summary = extractConsultSummary(priorBuffer))
+                          else              ConsultFailed(Name = name, ErrText = err)
+    }
+    return (finalModel, MsgCmd[AppMsg](Msg = nextMsg))
+}
+
+// extractConsultSummary scans the accumulated raw stdout lines from
+// the child team's TL for the first `@summary` block and returns its
+// body. Mirrors headless.extractSummary but operates on Array[string]
+// so we don't need to wrap each line in a ConversationLine just to
+// unwrap it for parsing.
+func extractConsultSummary(lines Array[string]) Option[string] =
+    Parse(lines.MkString("\n"))
+        .Collect({ case Summary(body) => body })
+        .HeadOption()
 
 // onConsultCompleted records the consult outcome in the conversation
 // log and forwards it to the TL's stdin so the TL can incorporate the

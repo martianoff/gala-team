@@ -1,0 +1,114 @@
+package consult
+
+import (
+    "errors"
+    "martianoff/gala/concurrent"
+    "github.com/martianoff/gala_team/app/onboarding"
+    . "martianoff/gala/std"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/runtime"
+)
+
+// ============================================================================
+// app/consult/streaming — chunk-pump dispatch for cross-team consults.
+//
+// Where runner.gala's RunConsult blocks until the child gala_team
+// session closes and returns a single ConsultOutcome, this module
+// exposes the same flow as a one-event-at-a-time pump that the TUI
+// can drive without blocking its update loop:
+//
+//     1. SpawnConsult(reg, name, body) → Try[ConsultSession]
+//        Resolves the registry entry, loads the target team.yaml,
+//        spawns the child team-lead `claude` subprocess in the
+//        target repo's cwd, and writes the wrapped prompt to its
+//        stdin. Failure short-circuits with a tagged error
+//        ("project: …", "team: …", "spawn: …", "send: …").
+//
+//     2. NextConsultEventFuture(session) → Future[ConsultEvent]
+//        Reads the next stdout line. Resolves to ConsultChunk on a
+//        clean read, ConsultEnd on EOF / read error.
+//
+//     3. CloseConsultSession(session) → Try[bool]
+//        Kill + Wait on the child subprocess, used at end-of-pump
+//        and on TUI shutdown.
+//
+// Mirrors runtime.MemberSession's NextChunkFuture / CloseSession
+// pattern so the UI layer can reuse the same "in-flight Future per
+// active session, re-armed on each chunk" structure it already uses
+// for team-member chunk reads.
+// ============================================================================
+
+// ConsultSession wraps the live child gala_team subprocess plus the
+// orchestration metadata the UI needs to render the in-flight consult
+// (target name, validated project, team name).
+struct ConsultSession(
+    Name        string,         // registry name the consult was dispatched against
+    Inner       MemberSession,  // wraps the child team-lead subprocess
+    Project     Project,        // resolved target project for the modal header
+    TeamName    string,         // resolved target team name for the modal header
+)
+
+// ConsultEvent is what flows through the chunk pump. ConsultChunk
+// carries one stdout line from the child TL; ConsultEnd fires once
+// when the read loop terminates — Err = None means clean EOF, Some
+// means a real read failure (broken stdout, killed process, …).
+sealed type ConsultEvent {
+    case ConsultChunk(Name string, Line string)
+    case ConsultEnd(Name string, Err Option[error])
+}
+
+// SpawnConsult kicks off the child gala_team session and returns a
+// session handle ready to be pumped. All IO (registry lookup, project
+// resolve, team yaml read, subprocess spawn, prompt write) happens
+// synchronously here so the caller gets a clear Try[…] up-front
+// instead of having to thread per-step error events through the
+// chunk pump.
+func SpawnConsult(r Registry, name string, body string) Try[ConsultSession] = Try[ConsultSession](() => {
+    val entry = Get(r, name) match {
+        case None()     => panic(s"no registry entry for '${name}'")
+        case Some(e)    => e
+    }
+    val proj = Resolve(entry.Repo, NoOverrides()) match {
+        case Failure(e) => panic(s"project: ${e.Error()}")
+        case Success(p) => p
+    }
+    val tm = loadTeamFromFile(entry.TeamYaml) match {
+        case Failure(e) => panic(s"team: ${e.Error()}")
+        case Success(c) => c.Team
+    }
+    val lead = tm.Lead
+    val (wrapped, _) = onboarding.WrapPromptSafe(proj, tm, lead, body)
+    val sess = SpawnSession(proj, lead, proj.Repo) match {
+        case Failure(e) => panic(s"spawn: ${e.Error()}")
+        case Success(s) => s
+    }
+    val sendRes = SendFuture(sess, wrapped).Await()
+    if sendRes.IsFailure() {
+        val _ = CloseSession(sess)
+        panic(s"send: ${sendRes.GetError().Error()}")
+    }
+    return ConsultSession(
+        Name     = name,
+        Inner    = sess,
+        Project  = proj,
+        TeamName = tm.Name,
+    )
+})
+
+// NextConsultEventFuture reads one stdout line from the child and
+// maps the runtime.Msg into a ConsultEvent. Re-armed by the UI on
+// every ConsultChunk; the UI stops re-arming once it sees a
+// ConsultEnd.
+func NextConsultEventFuture(s ConsultSession) concurrent.Future[ConsultEvent] {
+    val name = s.Name
+    return NextChunkFuture(s.Inner).Map((rm Msg) => rm match {
+        case RtChunkArrived(_, line) => ConsultChunk(Name = name, Line = line)
+        case RtSessionFailed(_, err) => ConsultEnd(Name = name, Err = Some(err))
+        case _                       => ConsultEnd(Name = name, Err = Some(errors.New("unexpected runtime msg in consult pump")))
+    })
+}
+
+// CloseConsultSession kills the child subprocess and waits for the
+// kernel to reap it — same shape as runtime.CloseSession but kept
+// here so the consult package owns its own lifecycle surface.
+func CloseConsultSession(s ConsultSession) Try[bool] = CloseSession(s.Inner)

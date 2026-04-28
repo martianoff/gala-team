@@ -5,12 +5,15 @@ gala_library(
     srcs = [
         "registry.gala",
         "runner.gala",
+        "streaming.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/consult",
     deps = [
         "//app/config",
         "//app/headless",
+        "//app/onboarding",
         "//app/project",
+        "//app/runtime",
         "//app/team",
         "@gala//collection_immutable",
         "@gala//concurrent",

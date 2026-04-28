@@ -55,18 +55,16 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
     var sawTeam = false
 
     for d.HasMoreFields() {
-        val key = d.ReadKey()
-        if key == "team" {
-            sawTeam = true
-            val (nm, ms) = decodeTeamBlock(d)
-            teamName = nm
-            members = ms
-        } else if key == "workflow" {
-            workflow = decodeWorkflowBlock(d)
-        } else if key == "policy" {
-            pol = decodePolicyBlock(d)
-        } else {
-            d.Skip()
+        d.ReadKey() match {
+            case "team" => {
+                sawTeam = true
+                val (nm, ms) = decodeTeamBlock(d)
+                teamName = nm
+                members = ms
+            }
+            case "workflow" => workflow = decodeWorkflowBlock(d)
+            case "policy"   => pol = decodePolicyBlock(d)
+            case _          => d.Skip()
         }
     }
     d.EndObject()
@@ -82,13 +80,10 @@ func decodeTeamBlock(d *yaml.YamlDecoderImpl) Tuple[string, Array[Member]] {
     var name = ""
     var members = EmptyArray[Member]()
     for d.HasMoreFields() {
-        val key = d.ReadKey()
-        if key == "name" {
-            name = d.ReadString()
-        } else if key == "members" {
-            members = decodeMemberArray(d)
-        } else {
-            d.Skip()
+        d.ReadKey() match {
+            case "name"    => name = d.ReadString()
+            case "members" => members = decodeMemberArray(d)
+            case _         => d.Skip()
         }
     }
     d.EndObject()
@@ -114,29 +109,20 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
     var personality = ""
     var modelOpt = None[string]()
     var extra = ""
-    // NOTE: kept as if-else-if rather than `match` per
-    // docs/private/TRANSPILER_BUGS_LINT_FIXUP_BLOCKERS.md #4 — the
-    // recommended `match`-as-statement form lowers void-returning arms
-    // (d.Skip(), d.ReadNull()) into Go's `_ = void()`, which doesn't
-    // compile.
     for d.HasMoreFields() {
-        val key = d.ReadKey()
-        if key == "role" {
-            roleStr = d.ReadString()
-        } else if key == "name" {
-            name = d.ReadString()
-        } else if key == "personality" {
-            personality = d.ReadString()
-        } else if key == "model" {
-            if d.IsNull() {
-                d.ReadNull()
-            } else {
-                modelOpt = Some(d.ReadString())
+        d.ReadKey() match {
+            case "role"        => roleStr = d.ReadString()
+            case "name"        => name = d.ReadString()
+            case "personality" => personality = d.ReadString()
+            case "model"       => {
+                if d.IsNull() {
+                    d.ReadNull()
+                } else {
+                    modelOpt = Some(d.ReadString())
+                }
             }
-        } else if key == "extra_instructions" {
-            extra = d.ReadString()
-        } else {
-            d.Skip()
+            case "extra_instructions" => extra = d.ReadString()
+            case _                    => d.Skip()
         }
     }
     d.EndObject()
@@ -162,26 +148,21 @@ func decodeWorkflowBlock(d *yaml.YamlDecoderImpl) Workflow {
     var qa = true
     var parallel = true
     var requireConfirm = true
-    // See team_config.gala::decodeMember note about TRANSPILER_BUGS_LINT_FIXUP_BLOCKERS.md #4.
     for d.HasMoreFields() {
-        val key = d.ReadKey()
-        if key == "qa_required" {
-            qa = d.ReadBool()
-        } else if key == "parallel_engineers" {
-            parallel = d.ReadBool()
-        } else if key == "approval" {
-            d.StartObject()
-            for d.HasMoreFields() {
-                val ak = d.ReadKey()
-                if ak == "require_user_confirm" {
-                    requireConfirm = d.ReadBool()
-                } else {
-                    d.Skip()
+        d.ReadKey() match {
+            case "qa_required"        => qa = d.ReadBool()
+            case "parallel_engineers" => parallel = d.ReadBool()
+            case "approval"           => {
+                d.StartObject()
+                for d.HasMoreFields() {
+                    d.ReadKey() match {
+                        case "require_user_confirm" => requireConfirm = d.ReadBool()
+                        case _                      => d.Skip()
+                    }
                 }
+                d.EndObject()
             }
-            d.EndObject()
-        } else {
-            d.Skip()
+            case _ => d.Skip()
         }
     }
     d.EndObject()

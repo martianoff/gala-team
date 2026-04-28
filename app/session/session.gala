@@ -29,14 +29,11 @@ import (
 // on session (and not the other way around) — saves the type from being
 // duplicated and keeps app/session self-contained for the cmd-side load.
 //
-// Implementation note: we drive json.JsonEncoderImpl / JsonDecoderImpl
-// directly rather than `Codec[Snapshot]`. Same reason team_config.gala
-// hand-writes the YAML decoder — neither auto-codec handles struct
-// fields whose type is `Array[T]` for a struct T (only primitives).
-// We work around this by serializing the conversation as two parallel
-// Array[string]s (speakers + texts) and rebuilding ConversationLines at
-// the API boundary. See `JSON_CODEC_NESTED_ARRAY_GAP.md` (private docs)
-// for the upstream fix proposal.
+// Implementation note: drives json.JsonEncoderImpl / JsonDecoderImpl
+// directly rather than `Codec[Snapshot]` because the typed codegen still
+// emits `WriteNull` for non-primitive array elements (the
+// "primitives only" gate in genCollectionWrite). The decoder side
+// supports nested arrays-of-structs since gala 0.39 (FIX-001).
 // ============================================================================
 
 // ConversationLine is a single rendered turn in the Team-Lead conversation
@@ -108,69 +105,65 @@ func encodeSnapshot(w *json.JsonEncoderImpl, projectName string, savedAt int64, 
     w.WriteStartObject()
     w.WriteKey("project_name"); w.WriteString(projectName)
     w.WriteKey("saved_at");     w.WriteInt64(savedAt)
-    w.WriteKey("speakers")
-    writeStringArray(w, convo.Map((cl) => cl.Speaker))
-    w.WriteKey("texts")
-    writeStringArray(w, convo.Map((cl) => cl.Text))
-    w.WriteEndObject()
-}
-
-func writeStringArray(w *json.JsonEncoderImpl, xs Array[string]) {
+    w.WriteKey("conversation")
     w.WriteStartArray()
-    xs.ForEach((s) => w.WriteString(s))
+    convo.ForEach((cl) => {
+        w.WriteStartObject()
+        w.WriteKey("speaker"); w.WriteString(cl.Speaker)
+        w.WriteKey("text");    w.WriteString(cl.Text)
+        w.WriteEndObject()
+    })
     w.WriteEndArray()
+    w.WriteEndObject()
 }
 
 func decodeSnapshot(d *json.JsonDecoderImpl) Snapshot {
     d.StartObject()
     var name = ""
     var savedAt = int64(0)
-    var speakers = EmptyArray[string]()
-    var texts = EmptyArray[string]()
+    var convo = EmptyArray[ConversationLine]()
     for d.HasMoreFields() {
         val key = d.ReadKey()
         if key == "project_name" {
             name = d.ReadString()
         } else if key == "saved_at" {
             savedAt = d.ReadInt64()
-        } else if key == "speakers" {
-            speakers = readStringArray(d)
-        } else if key == "texts" {
-            texts = readStringArray(d)
+        } else if key == "conversation" {
+            convo = decodeConversation(d)
         } else {
             d.Skip()
         }
     }
     d.EndObject()
-    return Snapshot(
-        ProjectName = name,
-        SavedAt = savedAt,
-        Conversation = zipConversation(speakers, texts),
-    )
+    return Snapshot(ProjectName = name, SavedAt = savedAt, Conversation = convo)
 }
 
 // Loop-bound Append intentional: stateful pull-stream from the JSON
 // decoder, no declarative shape fits.
-func readStringArray(d *json.JsonDecoderImpl) Array[string] {
-    var out = EmptyArray[string]()
+func decodeConversation(d *json.JsonDecoderImpl) Array[ConversationLine] {
+    var out = EmptyArray[ConversationLine]()
     d.StartArray()
     for d.HasMoreElements() {
-        out = out.Append(d.ReadString())
+        out = out.Append(decodeLine(d))
     }
     d.EndArray()
     return out
 }
 
-// zipConversation rebuilds the Array[ConversationLine] from the two
-// parallel arrays we use on disk. Truncates to the shorter array so a
-// half-written snapshot doesn't crash the loader.
-func zipConversation(speakers Array[string], texts Array[string]) Array[ConversationLine] {
-    val n = if (speakers.Size() < texts.Size()) speakers.Size() else texts.Size()
-    var out = EmptyArray[ConversationLine]()
-    var i = 0
-    for i < n {
-        out = out.Append(ConversationLine(Speaker = speakers.Get(i), Text = texts.Get(i)))
-        i = i + 1
+func decodeLine(d *json.JsonDecoderImpl) ConversationLine {
+    d.StartObject()
+    var speaker = ""
+    var text = ""
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == "speaker" {
+            speaker = d.ReadString()
+        } else if key == "text" {
+            text = d.ReadString()
+        } else {
+            d.Skip()
+        }
     }
-    return out
+    d.EndObject()
+    return ConversationLine(Speaker = speaker, Text = text)
 }

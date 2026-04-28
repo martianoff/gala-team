@@ -45,10 +45,39 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
     case PrCreated(url)              => onPrCreated(m, url)
     case PrFailed(err)               => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
+    case KeyMerge()                  => onMerge(m)
+    case Merged(url)                 => onMerged(m, url)
+    case MergeFailed(err)            => (m.Copy(LastError = Some(s"gh pr merge: ${err}")), NoCmd[AppMsg]())
+    case PostMergeHooksPassed(url)   => onPostMergeHooksPassed(m, url)
+    case PostMergeHooksFailed(err)   => (m.Copy(LastError = Some(s"post-merge hooks: ${err}")), NoCmd[AppMsg]())
     case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
     case TickMsg()                   => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
-    case QuitMsg()                   => (m, QuitCmd[AppMsg]())
+    case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
+}
+
+// onQuit cleans up live subprocesses before letting the TUI exit. We
+// CloseAllSessions synchronously (the calls are Kill-then-Wait, fast)
+// rather than dispatching a Future-Cmd: the alternative — emit a
+// QuitCmd in parallel with a CloseAll Future — races the runtime
+// shutdown against the kill, which on Windows often leaves the child
+// process group alive after the TUI's terminal restore.
+//
+// Failures are surfaced by appending one conversation line per
+// failed close; the user sees which session leaked. We still let
+// QuitCmd fire either way — refusing to quit because a kill failed
+// would strand the user inside a half-broken UI.
+func onQuit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val failures = CloseAllSessions(m.Sessions)
+    if failures.IsEmpty() {
+        return (m, QuitCmd[AppMsg]())
+    }
+    val withFailureLog = failures.FoldLeft(m, (acc, f) => acc.Copy(
+        Conversation = acc.Conversation.Append(
+            session.ConversationLine(Speaker = "shutdown", Text = s"close ${f.Member}: ${f.Err.Error()}"),
+        ),
+    ))
+    return (withFailureLog, QuitCmd[AppMsg]())
 }
 
 // onSubmit drives the user's prompt into the team. It (a) kicks the FSM
@@ -236,12 +265,70 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (withState, NoCmd[AppMsg]())
 }
 
-// onPrCreated records the URL in the conversation log so the user has
-// a copy-paste-friendly link to open the PR. We don't auto-open the
-// browser because in headless or CI contexts there is none.
+// onPrCreated records the URL in LastPrUrl + the conversation log so
+// the user has a copy-paste-friendly link AND a hint for Ctrl+M to
+// trigger the merge step. We don't auto-open the browser (no browser
+// in headless / CI contexts) and don't auto-merge (the user always
+// gets a confirmation step).
 func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(
-        Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${url}")),
+        LastPrUrl    = Some(url),
+        Conversation = m.Conversation
+            .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${url}"))
+            .Append(session.ConversationLine(Speaker = "gh", Text = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.")),
+    ), NoCmd[AppMsg]())
+}
+
+// onMerge fires when the user presses Ctrl+M after a PrCreated. Only
+// acts when LastPrUrl is set; outside that, the key is a no-op (the
+// user can't merge what hasn't been opened).
+func onMerge(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.LastPrUrl match {
+    case None()    => (m, NoCmd[AppMsg]())
+    case Some(url) => mergeAndKickPostMerge(m, url)
+}
+
+func mergeAndKickPostMerge(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
+    val withLog = m.Copy(
+        Conversation = m.Conversation.Append(
+            session.ConversationLine(Speaker = "you", Text = "/merge"),
+        ),
+    )
+    return (withLog, runtimeFutureToCmd(GhPrMergeFuture(m.Project, url, m.Policy.MergeRule)))
+}
+
+// onMerged echoes the URL into the conversation, clears LastPrUrl
+// (the same PR can't be merged twice), and kicks any PostMerge hooks.
+// On a clean hook run, PostMergeHooksPassed appends the final
+// "✓ all green" line.
+func onMerged(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
+    val withMerge = m.Copy(
+        LastPrUrl    = None[string](),
+        Conversation = m.Conversation.Append(
+            session.ConversationLine(Speaker = "gh", Text = s"merged: ${url}"),
+        ),
+    )
+    if m.Policy.PostMerge.IsEmpty() {
+        return (withMerge, NoCmd[AppMsg]())
+    }
+    val noted = withMerge.Copy(
+        Conversation = withMerge.Conversation.Append(
+            session.ConversationLine(Speaker = "policy", Text = s"running ${m.Policy.PostMerge.Size()} post-merge hook(s)…"),
+        ),
+    )
+    return (noted, postMergeHooksFutureCmd(m.Project, m.Policy.PostMerge, url))
+}
+
+func postMergeHooksFutureCmd(proj Project, hooks Array[policy.Hook], url string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = policy.RunHooksFuture(proj, hooks).Map((res Try[bool]) => res match {
+        case Success(_)   => PostMergeHooksPassed(Url = url)
+        case Failure(err) => PostMergeHooksFailed(ErrText = err.Error())
+    }))
+
+func onPostMergeHooksPassed(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
+    return (m.Copy(
+        Conversation = m.Conversation.Append(
+            session.ConversationLine(Speaker = "policy", Text = s"post-merge hooks: ✓ all green (${url})"),
+        ),
     ), NoCmd[AppMsg]())
 }
 
@@ -262,6 +349,8 @@ func runtimeToAppMsg(rm Msg) AppMsg = rm match {
     case RtWriteSent(name)          => WriteSent(Member = name)
     case RtPrCreated(url)           => PrCreated(Url = url)
     case RtPrFailed(err)            => PrFailed(ErrText = err.Error())
+    case RtMerged(url)              => Merged(Url = url)
+    case RtMergeFailed(err)         => MergeFailed(ErrText = err.Error())
 }
 
 // transitionContext extracts the per-team facts the FSM needs from the

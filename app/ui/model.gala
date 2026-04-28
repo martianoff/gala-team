@@ -40,6 +40,7 @@ struct AppModel(
     Composer     string,                           // current draft prompt text
     Tick         int,                              // monotonic tick counter (drives spinners)
     LastError    Option[string],                   // most recent runtime error, footer
+    LastPrUrl    Option[string],                   // PR awaiting `gh pr merge` after PrCreated
 )
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
@@ -57,6 +58,7 @@ func InitialModel(proj Project, team Team, workflow Workflow, policy Policy) App
     Composer     = "",
     Tick         = 0,
     LastError    = None[string](),
+    LastPrUrl    = None[string](),
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -85,6 +87,15 @@ sealed type AppMsg {
     case PreMergeHooksFailed(ErrText string)
     case PrCreated(Url string)
     case PrFailed(ErrText string)
+    // Merge pipeline. KeyMerge fires `gh pr merge --<rule>` against
+    // LastPrUrl, then runs Policy.PostMerge hooks. Merged carries the
+    // URL so the conversation log can echo a confirmation; MergeFailed
+    // surfaces the gh exit error.
+    case KeyMerge
+    case Merged(Url string)
+    case MergeFailed(ErrText string)
+    case PostMergeHooksPassed(Url string)
+    case PostMergeHooksFailed(ErrText string)
     // Mouse input. Phase 1: routed but unhandled — the layout doesn't
     // yet expose clickable hit-targets. Plumbing is here so when a
     // future component-level click dispatcher lands, the runtime, the

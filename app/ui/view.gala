@@ -128,9 +128,14 @@ func composerWidget(m AppModel) Widget {
 
 func footerWidget(m AppModel) Widget = m.LastError match {
     case Some(err) => TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed()))
-    case None()    => TextStyled(
-        "  Enter send · Backspace delete · Ctrl+A approve · Ctrl+R reject · Ctrl+C quit",
-        DefaultStyle().WithDim())
+    case None()    => TextStyled(footerHints(m), DefaultStyle().WithDim())
+}
+
+// footerHints picks a context-appropriate key legend. After
+// PrCreated, surface Ctrl+M; otherwise show the default legend.
+func footerHints(m AppModel) string = m.LastPrUrl match {
+    case Some(_) => "  Ctrl+M merge · Ctrl+A re-approve · Ctrl+C quit"
+    case None()  => "  Enter send · Backspace delete · Ctrl+A approve · Ctrl+R reject · Ctrl+C quit"
 }
 
 // stateLabel pretty-prints the current AppState for the header line.

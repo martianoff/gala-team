@@ -5,6 +5,7 @@ gala_library(
     srcs = ["runtime_glue.gala"],
     importpath = "github.com/martianoff/gala_team/app/runtime",
     deps = [
+        "//app/policy",
         "//app/project",
         "//app/team",
         "@gala//collection_immutable",

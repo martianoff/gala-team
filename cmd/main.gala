@@ -64,6 +64,7 @@ func keyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+c", "ctrl+q")) { return QuitMsg() }
     if (KeyMatchesAny(ev, "ctrl+a"))           { return KeyApprove() }
     if (KeyMatchesAny(ev, "ctrl+r"))           { return KeyReject() }
+    if (KeyMatchesAny(ev, "ctrl+m"))           { return KeyMerge() }
     return ev.Key match {
         case Backspace()  => KeyBackspace()
         case Enter()      => KeySubmit()

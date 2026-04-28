@@ -8,8 +8,9 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
-    . "github.com/martianoff/gala_team/app/team"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/team"
 )
 
 // ============================================================================
@@ -40,6 +41,8 @@ sealed type Msg {
     case RtWriteSent(Member string)
     case RtPrCreated(Url string)
     case RtPrFailed(Err error)
+    case RtMerged(Url string)
+    case RtMergeFailed(Err error)
 }
 
 // MemberSession pairs a Member with the live subprocess driving them.
@@ -127,8 +130,39 @@ func CloseSession(s MemberSession) Try[bool] = s.Process.Kill() match {
     }
 }
 
+// CloseAllSessions kills every live MemberSession in `sessions` and
+// waits for the OS to reap each one. Returns an Array of pairs
+// (member name, error) for the sessions that didn't close cleanly —
+// empty array on the happy path.
+//
+// Used on shutdown (QuitMsg) so the spawned `claude` subprocesses
+// don't outlive the TUI. Best-effort: a failed Kill on one member
+// does not stop the other Kills from running.
+func CloseAllSessions(sessions HashMap[string, MemberSession]) Array[CloseFailure] {
+    var failures = EmptyArray[CloseFailure]()
+    val pairs = sessions.ToArray()
+    var i = 0
+    val n = pairs.Size()
+    for i < n {
+        val pair = pairs.Get(i)
+        val name = pair.V1
+        val sess = pair.V2
+        CloseSession(sess) match {
+            case Success(_)   => {}
+            case Failure(err) => failures = failures.Append(CloseFailure(Member = name, Err = err))
+        }
+        i = i + 1
+    }
+    return failures
+}
+
+// CloseFailure carries the (member, error) pair for one session that
+// CloseAllSessions couldn't reap. Named struct rather than a Tuple so
+// callers don't trip the std.Tuple[any, error] inference quirk.
+struct CloseFailure(Member string, Err error)
+
 // MsgMember extracts the member name from any runtime Msg variant.
-// PR-related variants don't have a member; they return "" so callers
+// PR / merge variants don't have a member; they return "" so callers
 // can branch on that or pattern-match instead.
 func MsgMember(msg Msg) string = msg match {
     case RtChunkArrived(name, _)    => name
@@ -136,6 +170,8 @@ func MsgMember(msg Msg) string = msg match {
     case RtWriteSent(name)          => name
     case RtPrCreated(_)             => ""
     case RtPrFailed(_)              => ""
+    case RtMerged(_)                => ""
+    case RtMergeFailed(_)           => ""
 }
 
 // ----------------------------------------------------------------------------
@@ -190,6 +226,54 @@ func readGhPrUrl(p subprocess.Process) Msg {
             if (code != 0)           RtPrFailed(Err = errors.New(s"gh pr create exited with code ${code}"))
             else if (lastLine == "") RtPrFailed(Err = errors.New("gh pr create produced no output"))
             else                     RtPrCreated(Url = lastLine)
+    }
+}
+
+// GhPrMergeFuture spawns `gh pr merge <url> --<rule>` against
+// `proj.Repo`. The `rule` argument decides which merge strategy flag is
+// passed: SquashMerge → --squash, RebaseMerge → --rebase, PlainMerge →
+// --merge. We pass `--delete-branch` so the engineer worktrees stay
+// clean after a successful merge.
+//
+// Returns RtMerged(url) on success, RtMergeFailed(err) on any failure.
+// Unlike GhPrCreate, no URL parsing is needed — gh prints assorted
+// progress and we just need the exit code.
+func GhPrMergeFuture(proj Project, url string, rule MergeRule) concurrent.Future[Msg] {
+    val args = ArrayOf("pr", "merge", url, mergeFlag(rule), "--delete-branch")
+    return concurrent.FutureApply[Msg](() => {
+        val opts = subprocess.NewSpawnOpts(
+            "gh",
+            args.ToGoSlice(),
+            SliceEmpty[string](),
+            proj.Repo,
+        )
+        return subprocess.Spawn(opts) match {
+            case Failure(err) => RtMergeFailed(Err = err)
+            case Success(p)   => awaitMergeExit(p, url)
+        }
+    })
+}
+
+func mergeFlag(rule MergeRule) string = rule match {
+    case SquashMerge() => "--squash"
+    case RebaseMerge() => "--rebase"
+    case PlainMerge()  => "--merge"
+}
+
+// awaitMergeExit drains the gh stream and inspects the exit code.
+// Stdout / stderr are read but discarded — gh's user-facing messages
+// don't carry a structured success indicator other than the exit
+// code, so checking the code is enough.
+func awaitMergeExit(p subprocess.Process, url string) Msg {
+    for {
+        val line = p.ReadLine()
+        if line.IsFailure() { break }
+    }
+    return p.Wait() match {
+        case Failure(err)  => RtMergeFailed(Err = err)
+        case Success(code) =>
+            if (code == 0) RtMerged(Url = url)
+            else           RtMergeFailed(Err = errors.New(s"gh pr merge exited with code ${code}"))
     }
 }
 

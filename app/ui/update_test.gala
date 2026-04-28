@@ -242,6 +242,88 @@ func TestPreMergeHooksFailed_StopsPipelineWithError(t T) T {
 }
 
 // ---------------------------------------------------------------------------
+// Merge flow — Ctrl+M after PrCreated
+// ---------------------------------------------------------------------------
+
+func TestPrCreated_StoresUrlInLastPrUrl(t T) T {
+    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7"))
+    return m.LastPrUrl match {
+        case Some(url) => Eq(t, url, "https://x/y/pull/7")
+        case None()    => IsTrue(t, false)
+    }
+}
+
+func TestPrCreated_AppendsBothLogLines(t T) T {
+    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7"))
+    val t1 = Eq(t, m.Conversation.Size(), 2)
+    val t2 = Eq(t1, m.Conversation.Get(0).Text, "PR created: https://x/y/pull/7")
+    return IsTrue(t2, m.Conversation.Get(1).Text == "Press Ctrl+M to merge with --squash.")
+}
+
+func TestKeyMerge_WithoutPriorPr_NoOp(t T) T {
+    val seed = sampleModel()  // LastPrUrl is None
+    val (m, _) = Update(seed, KeyMerge())
+    val t1 = Eq(t, m.Conversation.Size(), 0)
+    return m.LastPrUrl match {
+        case None()  => IsTrue(t1, true)
+        case Some(_) => IsTrue(t1, false)
+    }
+}
+
+func TestKeyMerge_WithLastPrUrl_LogsMergeIntent(t T) T {
+    val seed = sampleModel().Copy(LastPrUrl = Some("https://x/y/pull/7"))
+    val (m, _) = Update(seed, KeyMerge())
+    val t1 = Eq(t, m.Conversation.Size(), 1)
+    return Eq(t1, m.Conversation.Get(0).Text, "/merge")
+}
+
+func TestMerged_ClearsLastPrUrlAndLogs(t T) T {
+    val seed = sampleModel().Copy(LastPrUrl = Some("https://x/y/pull/7"))
+    val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/7"))
+    val t1 = m.LastPrUrl match {
+        case None()  => IsTrue(t, true)
+        case Some(_) => IsTrue(t, false)
+    }
+    val t2 = Eq(t1, m.Conversation.Size(), 1)
+    return Eq(t2, m.Conversation.Get(0).Text, "merged: https://x/y/pull/7")
+}
+
+func TestMerged_WithPostMergeHooks_LogsBanner(t T) T {
+    val pol = DefaultPolicy().Copy(PostMerge = ArrayOf(
+        Hook(Name = "notify", Cmd = "echo", Args = ArrayOf("done")),
+    ))
+    val seed = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow(), pol)
+        .Copy(LastPrUrl = Some("https://x/y/pull/7"))
+    val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/7"))
+    val t1 = Eq(t, m.Conversation.Size(), 2)
+    val t2 = Eq(t1, m.Conversation.Get(0).Speaker, "gh")
+    return Eq(t2, m.Conversation.Get(1).Text, "running 1 post-merge hook(s)…")
+}
+
+func TestPostMergeHooksPassed_LogsConfirmation(t T) T {
+    val (m, _) = Update(sampleModel(), PostMergeHooksPassed(Url = "https://x/y/pull/7"))
+    val t1 = Eq(t, m.Conversation.Size(), 1)
+    val t2 = Eq(t1, m.Conversation.Get(0).Speaker, "policy")
+    return IsTrue(t2, m.Conversation.Get(0).Text == "post-merge hooks: ✓ all green (https://x/y/pull/7)")
+}
+
+func TestMergeFailed_SetsLastErrorWithGhPrefix(t T) T {
+    val (m, _) = Update(sampleModel(), MergeFailed(ErrText = "merge conflict"))
+    return m.LastError match {
+        case Some(s) => Eq(t, s, "gh pr merge: merge conflict")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+func TestPostMergeHooksFailed_SetsLastError(t T) T {
+    val (m, _) = Update(sampleModel(), PostMergeHooksFailed(ErrText = "notify exited 1"))
+    return m.LastError match {
+        case Some(s) => Eq(t, s, "post-merge hooks: notify exited 1")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Keyboard edge cases
 // ---------------------------------------------------------------------------
 

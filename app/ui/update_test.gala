@@ -31,16 +31,19 @@ func sampleTeam() Team {
         Name = "Iris", Role = TeamLead(),
         Personality = "calm",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val felix = Member(
         Name = "Felix", Role = Engineer(),
         Personality = "terse",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     return Team(
-        Name    = "Skunkworks",
-        Members = ArrayOf[Member](iris, felix),
-        Lead    = iris,
+        Name       = "Skunkworks",
+        Members    = ArrayOf[Member](iris, felix),
+        Lead       = iris,
+        Onboarding = EmptyArray[string](),
     )
 }
 

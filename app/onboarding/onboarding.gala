@@ -1,0 +1,84 @@
+package onboarding
+
+import (
+    "os"
+    "path/filepath"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/onboarding — read each team / member's onboarding documents from
+// disk and compose them into the prefix that gets prepended to the
+// member's first prompt.
+//
+// Used in two places:
+//   1. The interactive TUI's onSubmit, when the team lead's session
+//      hasn't been spawned yet.
+//   2. The headless / consult driver's first SendFuture, when an
+//      external team is being asked something via @consult.
+//
+// In both cases the docs are loaded synchronously (small files, fast
+// reads, on-disk cache hot once the user is interacting). Failures
+// surface as Try[string] — caller decides whether a missing doc
+// should panic ("strict" interactive UX) or fall back to a header-
+// only message ("forgiving" CI / consult flow).
+// ============================================================================
+
+// Compose returns the ordered list of paths that should be loaded for
+// `member`. Team-wide docs come first, then member-specific —
+// matches the user's mental model of "general project context, then
+// my role-specific runbook".
+func Compose(team Team, member Member) Array[string] =
+    team.Onboarding.AppendAll(member.Onboarding)
+
+// Load reads each path under `proj.Repo` (relative paths resolve
+// there; absolute paths are taken as-is) and concatenates the
+// contents with `--- <path> ---` separators so the model knows where
+// each doc starts. Returns Failure on any read error — keeping the
+// failure surface narrow (Try[string]) so callers don't have to
+// invent partial-success semantics.
+func Load(proj Project, paths Array[string]) Try[string] = Try[string](() => {
+    var pieces = EmptyArray[string]()
+    var i = 0
+    val n = paths.Size()
+    for i < n {
+        val raw = paths.Get(i)
+        val resolved = if (filepath.IsAbs(raw)) raw
+                       else                     filepath.Join(proj.Repo, raw)
+        val bytes, err = os.ReadFile(resolved)
+        if err != nil {
+            panic(s"onboarding: cannot read '${resolved}': ${err.Error()}")
+        }
+        pieces = pieces.Append(s"--- ${raw} ---")
+        pieces = pieces.Append(string(bytes))
+        i = i + 1
+    }
+    return pieces.MkString("\n\n")
+})
+
+// WrapPrompt prepends the loaded onboarding pack (if any) to `prompt`
+// with a clear header so the model can distinguish onboarding context
+// from the user's actual ask. Empty onboarding list returns `prompt`
+// unchanged.
+func WrapPrompt(proj Project, team Team, member Member, prompt string) Try[string] = Try[string](() => {
+    val paths = Compose(team, member)
+    if paths.IsEmpty() { return prompt }
+    val pack = Load(proj, paths).Get()
+    return s"# Project onboarding\n\n${pack}\n\n# Your task\n\n${prompt}"
+})
+
+// SuppressLoadFailure is the forgiving variant for the consult /
+// headless paths: a missing onboarding doc shouldn't sink an entire
+// cross-team consult, so we degrade to "no onboarding pack" + the
+// raw prompt and surface the error message in the second tuple slot
+// for the caller to log.
+func WrapPromptSafe(proj Project, team Team, member Member, prompt string) Tuple[string, Option[string]] {
+    return WrapPrompt(proj, team, member, prompt) match {
+        case Success(wrapped) => (wrapped, None[string]())
+        case Failure(err)     => (prompt, Some(err.Error()))
+    }
+}

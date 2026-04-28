@@ -14,21 +14,25 @@ func skunkworks() Team {
         Name = "Iris", Role = TeamLead(),
         Personality = "calm",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val felix = Member(
         Name = "Felix", Role = Engineer(),
         Personality = "terse",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val theo = Member(
         Name = "Theo", Role = QA(),
         Personality = "evidence-driven",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     return Team(
-        Name    = "Skunkworks",
-        Members = ArrayOf[Member](iris, felix, theo),
-        Lead    = iris,
+        Name       = "Skunkworks",
+        Members    = ArrayOf[Member](iris, felix, theo),
+        Lead       = iris,
+        Onboarding = EmptyArray[string](),
     )
 }
 
@@ -91,11 +95,13 @@ func TestTeamPanel_SingleMember(t T) T {
         Name = "Iris", Role = TeamLead(),
         Personality = "solo",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val solo = Team(
-        Name    = "Solo",
-        Members = ArrayOf(onlyMember),
-        Lead    = onlyMember,
+        Name       = "Solo",
+        Members    = ArrayOf(onlyMember),
+        Lead       = onlyMember,
+        Onboarding = EmptyArray[string](),
     )
     val w = TeamPanelView(solo, EmptyHashMap[string, Status]())
     val rendered = Snapshot(w, 40, 8)

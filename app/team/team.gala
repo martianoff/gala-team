@@ -52,12 +52,20 @@ func SameRole(a Role, b Role) bool = RoleName(a) == RoleName(b)
 // ----------------------------------------------------------------------------
 
 // Member is one Claude session in the team.
+//
+// Onboarding is a list of file paths (relative to the project repo)
+// the member reads as context BEFORE its first user prompt. Each
+// path's contents get prepended to the very first message sent to
+// the spawned claude process, alongside any team-wide onboarding
+// docs. Subsequent prompts within the same session don't re-send
+// the docs — the model already has them in context.
 struct Member(
     Name        string,
     Role        Role,
     Personality string,
     Model       Option[string],
     Extra       string,
+    Onboarding  Array[string],
 )
 
 // Workflow describes how *this team* operates internally — distinct from
@@ -82,12 +90,18 @@ func DefaultWorkflow() Workflow = Workflow(
 // ----------------------------------------------------------------------------
 
 // Team is the loaded team.yaml: a name plus an ordered list of members
-// plus a precomputed Lead pointer for convenience.  Order is preserved so
+// plus a precomputed Lead pointer for convenience. Order is preserved so
 // the UI shows roles in the user's authored order, not alphabetised.
+//
+// Onboarding is a list of file paths every member reads before its
+// first prompt — typically architecture docs, conventions, the
+// project's CONTRIBUTING.md. Composed with each Member.Onboarding to
+// form the per-member onboarding pack (see app/onboarding.Compose).
 struct Team(
-    Name    string,
-    Members Array[Member],
-    Lead    Member,
+    Name       string,
+    Members    Array[Member],
+    Lead       Member,
+    Onboarding Array[string],
 )
 
 // MembersOf returns the members with the given role, in source order.

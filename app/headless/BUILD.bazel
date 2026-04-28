@@ -1,0 +1,18 @@
+load("@gala//:gala.bzl", "gala_library")
+
+gala_library(
+    name = "headless",
+    srcs = ["headless.gala"],
+    importpath = "github.com/martianoff/gala_team/app/headless",
+    deps = [
+        "//app/directive",
+        "//app/onboarding",
+        "//app/project",
+        "//app/runtime",
+        "//app/session",
+        "//app/team",
+        "@gala//collection_immutable",
+        "@gala//json",
+    ],
+    visibility = ["//visibility:public"],
+)

@@ -1,0 +1,178 @@
+package headless
+
+import (
+    "martianoff/gala/json"
+    "github.com/martianoff/gala_team/app/onboarding"
+    "github.com/martianoff/gala_team/app/session"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/directive"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/runtime"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/headless — non-interactive driver. Spawns the team-lead `claude`
+// session, sends a single prompt, drains the chunk stream until the
+// process closes, returns the captured conversation as a typed value.
+// `cmd/gala_team_headless/main.gala` wraps this with arg parsing and
+// JSON output.
+//
+// Scope: one-shot prompt → capture response. No FSM transitions, no
+// approval / merge — that's for the interactive TUI to drive. The
+// goal here is a primitive scriptable enough that the consult runner
+// (Phase 2 next step) can fan out child gala_team invocations and
+// collect their summaries.
+//
+// Termination: the loop ends when the TL session writes EOF on stdout
+// (claude exited cleanly). A `@summary` directive in the captured
+// text is surfaced as Result.Summary; absence of one means the team
+// produced an open-ended response that the caller has to interpret.
+// ============================================================================
+
+// HeadlessResult is the typed shape returned from RunHeadless. JSON
+// emission is the caller's job (see EncodeJson below).
+struct HeadlessResult(
+    Project      Project,
+    TeamName     string,
+    Prompt       string,
+    Conversation Array[session.ConversationLine],
+    Summary      Option[string],
+    Err          Option[string],
+)
+
+// RunHeadless launches the team lead, sends `prompt`, and drains
+// chunks until the session closes. Synchronous: every Future returned
+// by the runtime is `Await`ed before dispatching the resulting Msg,
+// so the call returns when there's no more work in flight.
+//
+// Returns Right(result) on success — the Conversation is populated
+// even when the team didn't emit a `@summary`, so the caller can do
+// its own analysis. Returns Left(err) only on infrastructure failure
+// (spawn, read of an unreachable repo, etc.). The result's Err field
+// captures non-fatal stream-level errors (a chunk read that didn't
+// land cleanly but the rest of the conversation is intact).
+func RunHeadless(proj Project, tm Team, prompt string) Either[string, HeadlessResult] {
+    val lead = tm.Lead
+    // Wrap the prompt with the team / member's onboarding pack. Headless
+    // uses the safe variant — a missing onboarding doc shouldn't sink an
+    // entire cross-team consult; the failure is logged into Result.Err.
+    val (wrapped, onbErr) = onboarding.WrapPromptSafe(proj, tm, lead, prompt)
+    return SpawnSession(proj, lead, proj.Repo) match {
+        case Failure(e) => Left[string, HeadlessResult](s"spawn ${lead.Name}: ${e.Error()}")
+        case Success(s) => Right[string, HeadlessResult](driveLoop(proj, tm, s, prompt, wrapped, onbErr))
+    }
+}
+
+// driveLoop sends the prompt and walks the chunk stream until the
+// session closes. Each iteration awaits the runtime's read future
+// synchronously, dispatches the resulting Msg, and decides whether
+// to re-arm the pump.
+//
+// `displayPrompt` is what we record in the Conversation log — the
+// raw user prompt without onboarding boilerplate. `wirePrompt` is
+// what actually goes to claude — typically the wrapped version with
+// the onboarding pack prepended.
+func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wirePrompt string, onbErr Option[string]) HeadlessResult {
+    var convo = EmptyArray[session.ConversationLine]()
+        .Append(session.ConversationLine(Speaker = "you", Text = displayPrompt))
+    val name = s.Member.Name
+
+    // Fire the prompt write. We drain its result for completeness but
+    // don't surface it — write outcome is implicit in whether chunks
+    // arrive.
+    val _ = SendFuture(s, wirePrompt).Await()
+
+    var stopped = false
+    var failure = onbErr.Map((e) => s"onboarding: ${e}")
+    for !stopped {
+        val res = NextChunkFuture(s).Await()
+        if res.IsFailure() {
+            failure = Some(s"runtime: ${res.GetError().Error()}")
+            stopped = true
+        } else {
+            res.Get() match {
+                case RtChunkArrived(_, line) => {
+                    convo = convo.Append(session.ConversationLine(Speaker = name, Text = line))
+                }
+                case RtSessionFailed(_, err) => {
+                    val msg = err.Error()
+                    if (msg != "EOF") {
+                        failure = Some(s"${name}: ${msg}")
+                    }
+                    stopped = true
+                }
+                case _ => {}
+            }
+        }
+    }
+
+    val _ = CloseSession(s)
+    return HeadlessResult(
+        Project      = proj,
+        TeamName     = tm.Name,
+        Prompt       = displayPrompt,
+        Conversation = convo,
+        Summary      = extractSummary(convo),
+        Err          = failure,
+    )
+}
+
+// extractSummary joins every member-spoken line of the conversation
+// (skipping the user's prompt), runs the directive parser, and
+// returns the body of the first @summary if one is present.
+func extractSummary(convo Array[session.ConversationLine]) Option[string] {
+    val joined = convo
+        .Filter((cl) => cl.Speaker != "you")
+        .Map((cl) => cl.Text)
+        .MkString("\n")
+    val dirs = Parse(joined)
+    val first = dirs.Find(isSummaryDirective)
+    return first match {
+        case None()  => None[string]()
+        case Some(d) => d match {
+            case Summary(body) => Some(body)
+            case _             => None[string]()
+        }
+    }
+}
+
+func isSummaryDirective(d Directive) bool = d match {
+    case Summary(_) => true
+    case _          => false
+}
+
+// EncodeJson serialises a HeadlessResult to a JSON string suitable for
+// piping into another tool. Conversation is a JSON array of
+// `{speaker, text}` objects; Summary and Err become null when None.
+func EncodeJson(r HeadlessResult) Try[string] = Try[string](() => {
+    val w = json.NewJsonEncoder()
+    w.WriteStartObject()
+    w.WriteKey("project_repo");  w.WriteString(r.Project.Repo)
+    w.WriteKey("team");          w.WriteString(r.TeamName)
+    w.WriteKey("prompt");        w.WriteString(r.Prompt)
+
+    w.WriteKey("conversation")
+    w.WriteStartArray()
+    r.Conversation.ForEach((cl) => {
+        w.WriteStartObject()
+        w.WriteKey("speaker"); w.WriteString(cl.Speaker)
+        w.WriteKey("text");    w.WriteString(cl.Text)
+        w.WriteEndObject()
+    })
+    w.WriteEndArray()
+
+    w.WriteKey("summary")
+    r.Summary match {
+        case Some(s) => w.WriteString(s)
+        case None()  => w.WriteNull()
+    }
+    w.WriteKey("error")
+    r.Err match {
+        case Some(s) => w.WriteString(s)
+        case None()  => w.WriteNull()
+    }
+    w.WriteEndObject()
+    return w.String()
+})

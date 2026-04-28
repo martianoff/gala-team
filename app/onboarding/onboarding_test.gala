@@ -1,0 +1,181 @@
+package main
+
+import (
+    "os"
+    "path/filepath"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/onboarding"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// Per-test fixtures. mkProj creates a temp dir, writes any docs
+// supplied, returns a Project rooted at the temp dir. The temp dir
+// stays around after the test for inspection on failure; tests are
+// cheap enough to not need teardown.
+func mkProj(label string, docs Array[Tuple[string, string]]) Project {
+    val dir, err = os.MkdirTemp("", "gala_team_onboarding_" + label)
+    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    var i = 0
+    val n = docs.Size()
+    for i < n {
+        val pair = docs.Get(i)
+        val full = filepath.Join(dir, pair.V1)
+        val parent = filepath.Dir(full)
+        val mkErr = os.MkdirAll(parent, os.FileMode(0755))
+        if mkErr != nil { panic(mkErr.Error()) }
+        val wErr = os.WriteFile(full, ToBytes(pair.V2), os.FileMode(0644))
+        if wErr != nil { panic(wErr.Error()) }
+        i = i + 1
+    }
+    return Project(
+        Name = "demo", Repo = dir,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+}
+
+func mkMember(name string, role Role, onboarding Array[string]) Member = Member(
+    Name = name, Role = role,
+    Personality = "p",
+    Model = None[string](), Extra = "",
+    Onboarding = onboarding,
+)
+
+func mkTeam(teamOnboarding Array[string], members Array[Member]) Team = Team(
+    Name       = "TestTeam",
+    Members    = members,
+    Lead       = members.Get(0),
+    Onboarding = teamOnboarding,
+)
+
+// Compose interleaves team-wide first then member-specific.
+func TestCompose_TeamThenMember(t T) T {
+    val tm = mkTeam(
+        ArrayOf("a.md", "b.md"),
+        ArrayOf(mkMember("Iris", TeamLead(), ArrayOf("c.md", "d.md"))),
+    )
+    val out = Compose(tm, tm.Lead)
+    val t1 = Eq(t, out.Size(), 4)
+    val t2 = Eq(t1, out.Get(0), "a.md")
+    val t3 = Eq(t2, out.Get(1), "b.md")
+    val t4 = Eq(t3, out.Get(2), "c.md")
+    return Eq(t4, out.Get(3), "d.md")
+}
+
+func TestCompose_EmptyWhenBothEmpty(t T) T {
+    val tm = mkTeam(EmptyArray[string](), ArrayOf(
+        mkMember("Iris", TeamLead(), EmptyArray[string]()),
+    ))
+    return Eq(t, Compose(tm, tm.Lead).Size(), 0)
+}
+
+// Load reads each file in order, concatenates with separators.
+func TestLoad_RelativePathsResolveUnderRepo(t T) T {
+    val proj = mkProj("rel", ArrayOf(
+        ("docs/a.md", "first doc"),
+        ("docs/b.md", "second doc"),
+    ))
+    val res = Load(proj, ArrayOf("docs/a.md", "docs/b.md"))
+    val t1 = IsSuccess(t, res)
+    val text = res.Get()
+    return IsTrue(t1, len(text) > 0)
+}
+
+func TestLoad_PreservesOrderAndContent(t T) T {
+    val proj = mkProj("order", ArrayOf(
+        ("a.md", "AAA"),
+        ("b.md", "BBB"),
+    ))
+    val res = Load(proj, ArrayOf("a.md", "b.md"))
+    val text = res.Get()
+    val aPos = stringFind(text, "AAA")
+    val bPos = stringFind(text, "BBB")
+    val t1 = IsTrue(t, aPos >= 0)
+    val t2 = IsTrue(t1, bPos >= 0)
+    return IsTrue(t2, aPos < bPos)
+}
+
+func TestLoad_HeaderForEachDoc(t T) T {
+    val proj = mkProj("header", ArrayOf(("readme.md", "Hello world.")))
+    val res = Load(proj, ArrayOf("readme.md"))
+    val text = res.Get()
+    return IsTrue(t, stringFind(text, "--- readme.md ---") >= 0)
+}
+
+// Missing file fails the whole load — strict by default.
+func TestLoad_MissingFile_Fails(t T) T {
+    val proj = mkProj("missing", EmptyArray[Tuple[string, string]]())
+    val res = Load(proj, ArrayOf("nonexistent.md"))
+    return IsFailure(t, res)
+}
+
+// WrapPrompt with empty onboarding returns the original prompt.
+func TestWrapPrompt_EmptyOnboarding_ReturnsPromptAsIs(t T) T {
+    val proj = mkProj("empty_onb", EmptyArray[Tuple[string, string]]())
+    val tm = mkTeam(EmptyArray[string](), ArrayOf(
+        mkMember("Iris", TeamLead(), EmptyArray[string]()),
+    ))
+    val res = WrapPrompt(proj, tm, tm.Lead, "do the thing")
+    val t1 = IsSuccess(t, res)
+    return Eq(t1, res.Get(), "do the thing")
+}
+
+func TestWrapPrompt_PrependsOnboardingHeader(t T) T {
+    val proj = mkProj("wrap", ArrayOf(("readme.md", "Hello world.")))
+    val tm = mkTeam(ArrayOf("readme.md"), ArrayOf(
+        mkMember("Iris", TeamLead(), EmptyArray[string]()),
+    ))
+    val res = WrapPrompt(proj, tm, tm.Lead, "ship it")
+    val t1 = IsSuccess(t, res)
+    val text = res.Get()
+    val onbPos = stringFind(text, "# Project onboarding")
+    val taskPos = stringFind(text, "# Your task")
+    val promptPos = stringFind(text, "ship it")
+    val t2 = IsTrue(t1, onbPos >= 0)
+    val t3 = IsTrue(t2, taskPos >= 0)
+    val t4 = IsTrue(t3, promptPos >= 0)
+    return IsTrue(t4, onbPos < taskPos && taskPos < promptPos)
+}
+
+// Forgiving variant: missing doc surfaces in the second slot, prompt
+// flows through unchanged.
+func TestWrapPromptSafe_MissingDoc_DegradesGracefully(t T) T {
+    val proj = mkProj("safe_missing", EmptyArray[Tuple[string, string]]())
+    val tm = mkTeam(ArrayOf("ghost.md"), ArrayOf(
+        mkMember("Iris", TeamLead(), EmptyArray[string]()),
+    ))
+    val (raw, errOpt) = WrapPromptSafe(proj, tm, tm.Lead, "ship it")
+    val t1 = Eq(t, raw, "ship it")
+    return errOpt match {
+        case Some(_) => IsTrue(t1, true)
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+// Helper: simple substring search returns first match index or -1.
+// Avoids depending on stdlib strings just for tests.
+func stringFind(haystack string, needle string) int {
+    val hay = ToBytes(haystack)
+    val nd = ToBytes(needle)
+    val hayN = len(hay)
+    val ndN = len(nd)
+    if ndN == 0 { return 0 }
+    if hayN < ndN { return -1 }
+    var i = 0
+    val limit = hayN - ndN
+    for i <= limit {
+        var j = 0
+        var ok = true
+        for j < ndN {
+            if hay[i + j] != nd[j] { ok = false; j = ndN }
+            else                   { j = j + 1 }
+        }
+        if ok { return i }
+        i = i + 1
+    }
+    return -1
+}

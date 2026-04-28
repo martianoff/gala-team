@@ -2,6 +2,7 @@ package ui
 
 import (
     "martianoff/gala/concurrent"
+    "github.com/martianoff/gala_team/app/onboarding"
     "github.com/martianoff/gala_team/app/policy"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
@@ -102,9 +103,19 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt)),
     )
     val lead = m.Team.Lead
+    val firstSpawn = !m.Sessions.Get(lead.Name).IsDefined()
     return ensureSession(withState, lead) match {
-        case Right(m1)  => (setStatus(m1, lead.Name, StWorking()), sendAndPumpCmd(m1, lead, prompt))
         case Left(err)  => (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
+        case Right(m1)  => {
+            val (effectivePrompt, onboardingErr) =
+                if (firstSpawn) onboarding.WrapPromptSafe(m.Project, m.Team, lead, prompt)
+                else            (prompt, None[string]())
+            val m2 = onboardingErr match {
+                case Some(e) => m1.Copy(LastError = Some(s"onboarding: ${e}"))
+                case None()  => m1
+            }
+            return (setStatus(m2, lead.Name, StWorking()), sendAndPumpCmd(m2, lead, effectivePrompt))
+        }
     }
 }
 

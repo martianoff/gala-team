@@ -50,6 +50,7 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
     d.StartObject()
     var teamName = ""
     var members = EmptyArray[Member]()
+    var teamOnboarding = EmptyArray[string]()
     var workflow = DefaultWorkflow()
     var pol = DefaultPolicy()
     var sawTeam = false
@@ -58,9 +59,10 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
         d.ReadKey() match {
             case "team" => {
                 sawTeam = true
-                val (nm, ms) = decodeTeamBlock(d)
+                val (nm, ms, onb) = decodeTeamBlock(d)
                 teamName = nm
                 members = ms
+                teamOnboarding = onb
             }
             case "workflow" => workflow = decodeWorkflowBlock(d)
             case "policy"   => pol = decodePolicyBlock(d)
@@ -72,22 +74,24 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
     if !sawTeam {
         panic("team.yaml: top-level 'team:' block is required")
     }
-    return validate(teamName, members, workflow, pol)
+    return validate(teamName, members, teamOnboarding, workflow, pol)
 }
 
-func decodeTeamBlock(d *yaml.YamlDecoderImpl) Tuple[string, Array[Member]] {
+func decodeTeamBlock(d *yaml.YamlDecoderImpl) Tuple3[string, Array[Member], Array[string]] {
     d.StartObject()
     var name = ""
     var members = EmptyArray[Member]()
+    var onboarding = EmptyArray[string]()
     for d.HasMoreFields() {
         d.ReadKey() match {
-            case "name"    => name = d.ReadString()
-            case "members" => members = decodeMemberArray(d)
-            case _         => d.Skip()
+            case "name"       => name = d.ReadString()
+            case "members"    => members = decodeMemberArray(d)
+            case "onboarding" => onboarding = decodeStringArray(d)
+            case _            => d.Skip()
         }
     }
     d.EndObject()
-    return (name, members)
+    return (name, members, onboarding)
 }
 
 // Loop-bound Append intentional: yaml.YamlDecoderImpl is a stateful
@@ -109,6 +113,7 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
     var personality = ""
     var modelOpt = None[string]()
     var extra = ""
+    var onboarding = EmptyArray[string]()
     for d.HasMoreFields() {
         d.ReadKey() match {
             case "role"        => roleStr = d.ReadString()
@@ -122,6 +127,7 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
                 }
             }
             case "extra_instructions" => extra = d.ReadString()
+            case "onboarding"         => onboarding = decodeStringArray(d)
             case _                    => d.Skip()
         }
     }
@@ -140,6 +146,7 @@ func decodeMember(d *yaml.YamlDecoderImpl) Member {
         Personality = personality,
         Model       = modelOpt,
         Extra       = extra,
+        Onboarding  = onboarding,
     )
 }
 
@@ -279,7 +286,7 @@ func decodeStringArray(d *yaml.YamlDecoderImpl) Array[string] {
     return xs
 }
 
-func validate(name string, members Array[Member], workflow Workflow, pol Policy) TeamConfig {
+func validate(name string, members Array[Member], onboarding Array[string], workflow Workflow, pol Policy) TeamConfig {
     if name == "" {
         panic("team.yaml: team.name is required and must be non-empty")
     }
@@ -311,9 +318,10 @@ func validate(name string, members Array[Member], workflow Workflow, pol Policy)
 
     return TeamConfig(
         Team = Team(
-            Name    = name,
-            Members = members,
-            Lead    = leads.Get(0),
+            Name       = name,
+            Members    = members,
+            Lead       = leads.Get(0),
+            Onboarding = onboarding,
         ),
         Workflow = workflow,
         Policy   = pol,

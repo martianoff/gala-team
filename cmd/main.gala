@@ -119,21 +119,25 @@ func sampleTeam() Team {
         Name = "Iris",  Role = TeamLead(),
         Personality = "calm",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val felix = Member(
         Name = "Felix", Role = Engineer(),
         Personality = "terse",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val quinn = Member(
         Name = "Quinn", Role = QA(),
         Personality = "skeptical",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     return Team(
-        Name    = "Skunkworks",
-        Members = ArrayOf(iris, felix, quinn),
-        Lead    = iris,
+        Name       = "Skunkworks",
+        Members    = ArrayOf(iris, felix, quinn),
+        Lead       = iris,
+        Onboarding = EmptyArray[string](),
     )
 }
 

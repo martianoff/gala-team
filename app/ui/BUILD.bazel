@@ -13,6 +13,7 @@ gala_library(
     ],
     deps = [
         "//app/fsm",
+        "//app/onboarding",
         "//app/policy",
         "//app/project",
         "//app/runtime",

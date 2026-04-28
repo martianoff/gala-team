@@ -12,21 +12,25 @@ func sampleTeam() Team {
         Name = "Iris", Role = TeamLead(),
         Personality = "Calm, decisive.",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val felix = Member(
         Name = "Felix", Role = Engineer(),
         Personality = "Functional-leaning, terse.",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val theo = Member(
         Name = "Theo", Role = QA(),
         Personality = "Evidence-driven.",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     return Team(
-        Name    = "Skunkworks",
-        Members = ArrayOf[Member](iris, felix, theo),
-        Lead    = iris,
+        Name       = "Skunkworks",
+        Members    = ArrayOf[Member](iris, felix, theo),
+        Lead       = iris,
+        Onboarding = EmptyArray[string](),
     )
 }
 
@@ -103,14 +107,17 @@ func TestMembersOf_EmptyForMissingRole(t T) T {
         Name = "Iris", Role = TeamLead(),
         Personality = "calm",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val felix = Member(
         Name = "Felix", Role = Engineer(),
         Personality = "terse",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val tm = Team(
         Name = "Solo", Members = ArrayOf(iris, felix), Lead = iris,
+        Onboarding = EmptyArray[string](),
     )
     return Eq(t, MembersOf(tm, QA()).Length(), 0)
 }
@@ -147,6 +154,7 @@ func TestMember_DefaultModelOption_IsNone(t T) T {
         Name = "X", Role = Engineer(),
         Personality = "p",
         Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     return IsNone(t, m.Model)
 }
@@ -156,6 +164,7 @@ func TestMember_PinnedModelOption_IsSome(t T) T {
         Name = "X", Role = Engineer(),
         Personality = "p",
         Model = Some("claude-opus-4-7"), Extra = "",
+        Onboarding = EmptyArray[string](),
     )
     val t1 = IsSome(t, m.Model)
     return m.Model match {

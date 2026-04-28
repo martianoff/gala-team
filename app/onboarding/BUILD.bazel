@@ -1,0 +1,26 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "onboarding",
+    srcs = ["onboarding.gala"],
+    importpath = "github.com/martianoff/gala_team/app/onboarding",
+    deps = [
+        "//app/project",
+        "//app/team",
+        "@gala//collection_immutable",
+        "@gala//go_interop",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "onboarding_test",
+    srcs = ["onboarding_test.gala"],
+    deps = [
+        ":onboarding",
+        "//app/project",
+        "//app/team",
+        "@gala//collection_immutable",
+        "@gala//go_interop",
+    ],
+)

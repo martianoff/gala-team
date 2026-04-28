@@ -133,3 +133,136 @@ func TestTLReview_OnDispatch_GoesBackToDelegating(t T) T {
     val s = Transition(TLReview(), TLDone(Directives = dirs), ctxWithQA(true))
     return Eq(t, stateName(s), "Delegating")
 }
+
+// ----- Irrelevant-event guards: every (state, event) pair the FSM
+// sees in production must be defined. The interesting ones land an
+// AppMsg through the runtime that the FSM didn't ask for — e.g. a
+// stray ChunkArrived after we've already moved out of Delegating.
+// Every "wrong event for this state" pair should leave the state
+// unchanged so the orchestrator stays drift-free.
+
+func TestIdle_IgnoresTLDone(t T) T {
+    val s = Transition(Idle(), TLDone(Directives = EmptyArray[Directive]()), ctxWithQA(true))
+    return Eq(t, stateName(s), "Idle")
+}
+
+func TestIdle_IgnoresMemberDone(t T) T {
+    val s = Transition(Idle(), MemberDone(MemberName = "Felix"), ctxWithQA(true))
+    return Eq(t, stateName(s), "Idle")
+}
+
+func TestIdle_IgnoresApprovalAccepted(t T) T {
+    val s = Transition(Idle(), ApprovalAccepted(), ctxWithQA(true))
+    return Eq(t, stateName(s), "Idle")
+}
+
+func TestTLThinking_IgnoresUserPrompted(t T) T {
+    val s = Transition(TLThinking(), UserPrompted(), ctxWithQA(true))
+    return Eq(t, stateName(s), "TLThinking")
+}
+
+func TestTLThinking_IgnoresMemberDone(t T) T {
+    val s = Transition(TLThinking(), MemberDone(MemberName = "Felix"), ctxWithQA(true))
+    return Eq(t, stateName(s), "TLThinking")
+}
+
+func TestTLThinking_IgnoresQADone(t T) T {
+    val s = Transition(TLThinking(), QADone(), ctxWithQA(true))
+    return Eq(t, stateName(s), "TLThinking")
+}
+
+func TestDelegating_IgnoresUserPrompted(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
+    val s = Transition(Delegating(Pending = pending), UserPrompted(), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "Delegating")
+    return s match {
+        case Delegating(rest) => Eq(t1, rest.Size(), 2)  // pending preserved
+        case _                => IsTrue(t1, false)
+    }
+}
+
+func TestDelegating_IgnoresQADone(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val s = Transition(Delegating(Pending = pending), QADone(), ctxWithQA(true))
+    return Eq(t, stateName(s), "Delegating")
+}
+
+func TestDelegating_IgnoresTLDone(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val dirs = ArrayOf[Directive](dispatchTo("Felix"))
+    val s = Transition(Delegating(Pending = pending), TLDone(Directives = dirs), ctxWithQA(true))
+    return Eq(t, stateName(s), "Delegating")  // mid-flight TLDone is ignored
+}
+
+// QAGate × MemberDone — partial QA drain. If multiple QAs are pending,
+// removing one should keep us in QAGate with the rest.
+func TestQAGate_OneQADone_StaysQAGateWithRest(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo").Add("Mira")
+    val s = Transition(QAGate(Pending = pending), MemberDone(MemberName = "Theo"), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "QAGate")
+    return s match {
+        case QAGate(rest) => Eq(t1, rest.Size(), 1)
+        case _            => IsTrue(t1, false)
+    }
+}
+
+func TestQAGate_LastQADone_GoesToTLReview(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo")
+    val s = Transition(QAGate(Pending = pending), MemberDone(MemberName = "Theo"), ctxWithQA(true))
+    return Eq(t, stateName(s), "TLReview")
+}
+
+func TestQAGate_IgnoresUserPrompted(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo")
+    val s = Transition(QAGate(Pending = pending), UserPrompted(), ctxWithQA(true))
+    return Eq(t, stateName(s), "QAGate")
+}
+
+func TestApproval_IgnoresUserPrompted(t T) T {
+    val s = Transition(Approval(SummaryBody = "ship"), UserPrompted(), ctxWithQA(true))
+    return Eq(t, stateName(s), "Approval")
+}
+
+func TestApproval_IgnoresTLDone(t T) T {
+    val dirs = ArrayOf[Directive](summary("ignore me"))
+    val s = Transition(Approval(SummaryBody = "ship"), TLDone(Directives = dirs), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "Approval")
+    return s match {
+        case Approval(body) => Eq(t1, body, "ship")  // SummaryBody preserved
+        case _              => IsTrue(t1, false)
+    }
+}
+
+// QA-required policy interactions. With QARequired=false the
+// Delegating drain skips QAGate entirely; with QARequired=true but
+// QAMembers=[] it also skips (no one to dispatch to).
+
+func TestDelegating_QARequiredButNoQAMembers_GoesToTLReview(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val ctx = TransitionContext(QAMembers = EmptyArray[string](), QARequired = true)
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix"), ctx)
+    return Eq(t, stateName(s), "TLReview")
+}
+
+// TL routes consult / approval-only directives correctly. Multiple
+// summaries: the FIRST one wins (firstSummary semantics).
+
+func TestTLThinking_MultipleSummaries_TakesFirst(t T) T {
+    val dirs = ArrayOf[Directive](summary("first"), summary("second"))
+    val s = Transition(TLThinking(), TLDone(Directives = dirs), ctxWithQA(true))
+    return s match {
+        case Approval(body) => Eq(t, body, "first")
+        case _              => IsTrue(t, false)
+    }
+}
+
+// MemberDone for a member who isn't in pending should be a no-op on
+// Delegating's pending set — Remove of a missing key is idempotent.
+func TestDelegating_MemberDone_UnknownMember_StaysWithFullPending(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Ghost"), ctxWithQA(true))
+    return s match {
+        case Delegating(rest) => Eq(t, rest.Size(), 2)
+        case _                => IsTrue(t, false)
+    }
+}

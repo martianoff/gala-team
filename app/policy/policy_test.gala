@@ -73,3 +73,85 @@ func TestRunHooks_FirstFailureShortCircuits(t T) T {
     val res = RunHooks(sampleProject(), hooks)
     return IsFailure(t, res)
 }
+
+// Spawn-time failure (binary missing entirely) is a different code
+// path from non-zero exit — RunHooks must surface both as Failure
+// without crashing. We use a name that almost certainly isn't on the
+// PATH; on the off chance the host has it, the test still meaningfully
+// asserts "spawn returns; doesn't panic".
+func TestRunHooks_SpawnFailure_SurfacesAsFailure(t T) T {
+    val hooks = ArrayOf(
+        Hook(Name = "missing", Cmd = "this-binary-definitely-does-not-exist-12345", Args = EmptyArray[string]()),
+    )
+    val res = RunHooks(sampleProject(), hooks)
+    return IsFailure(t, res)
+}
+
+// A hook with a multi-arg flag list runs as a single subprocess —
+// args aren't joined into one Cmd. `git config --global --list` would
+// fetch global git config and exit 0 even if there's nothing
+// configured.
+func TestRunHooks_MultiArg_AllArgsPassed(t T) T {
+    val hooks = ArrayOf(
+        Hook(Name = "git-status", Cmd = "git", Args = ArrayOf("--no-pager", "--version")),
+    )
+    val res = RunHooks(sampleProject(), hooks)
+    return IsSuccess(t, res)
+}
+
+// Two successive successful hooks both run — we don't short-circuit
+// on success.
+func TestRunHooks_TwoSuccessfulHooks_BothRun(t T) T {
+    val hooks = ArrayOf(
+        Hook(Name = "first",  Cmd = "git", Args = ArrayOf("--version")),
+        Hook(Name = "second", Cmd = "git", Args = ArrayOf("--version")),
+    )
+    val res = RunHooks(sampleProject(), hooks)
+    return IsSuccess(t, res)
+}
+
+// Hook that exists but exits non-zero — distinguish from spawn
+// failure. `git --bad-flag` returns code 129 with usage on stderr.
+func TestRunHooks_NonZeroExit_IsFailure(t T) T {
+    val hooks = ArrayOf(
+        Hook(Name = "bad-flag", Cmd = "git", Args = ArrayOf("--bad-flag-that-does-not-exist")),
+    )
+    val res = RunHooks(sampleProject(), hooks)
+    return IsFailure(t, res)
+}
+
+// Default policy round-trips through DefaultPolicy() + accessors —
+// guards future struct-field reorderings from accidentally changing
+// what teams without an explicit `policy:` block get.
+
+func TestDefaultPolicy_PreMergeIsEmpty(t T) T {
+    return Eq(t, DefaultPolicy().PreMerge.Size(), 0)
+}
+
+func TestDefaultPolicy_PostMergeIsEmpty(t T) T {
+    return Eq(t, DefaultPolicy().PostMerge.Size(), 0)
+}
+
+func TestPolicy_HookFieldsRoundTrip(t T) T {
+    val h = Hook(Name = "lint", Cmd = "go", Args = ArrayOf("vet", "./..."))
+    val t1 = Eq(t,  h.Name, "lint")
+    val t2 = Eq(t1, h.Cmd,  "go")
+    val t3 = Eq(t2, h.Args.Size(), 2)
+    val t4 = Eq(t3, h.Args.Get(0), "vet")
+    return Eq(t4, h.Args.Get(1), "./...")
+}
+
+func TestPolicy_RoundTripsPreAndPostMerge(t T) T {
+    val pre = ArrayOf(Hook(Name = "lint", Cmd = "go", Args = ArrayOf("vet")))
+    val post = ArrayOf(Hook(Name = "notify", Cmd = "echo", Args = ArrayOf("done")))
+    val p = Policy(
+        WorkspaceMode = WorktreePerEngineer(),
+        PreMerge      = pre,
+        PostMerge     = post,
+        MergeRule     = RebaseMerge(),
+    )
+    val t1 = Eq(t,  p.PreMerge.Size(),  1)
+    val t2 = Eq(t1, p.PostMerge.Size(), 1)
+    val t3 = Eq(t2, p.PreMerge.Get(0).Name,  "lint")
+    return Eq(t3, p.PostMerge.Get(0).Name, "notify")
+}

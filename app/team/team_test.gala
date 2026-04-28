@@ -71,3 +71,95 @@ func TestDefaultWorkflow(t T) T {
     val t2 = IsTrue(t1, w.ParallelEngineers)
     return IsTrue(t2, w.RequireUserConfirm)
 }
+
+// ---------------------------------------------------------------------------
+// Edge cases
+// ---------------------------------------------------------------------------
+
+func TestRoleFromName_KnownVariants(t T) T {
+    val t1 = IsSome(t,  RoleFromName("team_lead"))
+    val t2 = IsSome(t1, RoleFromName("engineer"))
+    return IsSome(t2, RoleFromName("qa"))
+}
+
+func TestRoleFromName_EmptyAndUnknown(t T) T {
+    val t1 = IsNone(t,  RoleFromName(""))
+    val t2 = IsNone(t1, RoleFromName("designer"))
+    return IsNone(t2, RoleFromName("Engineer"))  // case-sensitive
+}
+
+func TestSameRole_AllPairs(t T) T {
+    val t1 = IsTrue(t,   SameRole(TeamLead(), TeamLead()))
+    val t2 = IsTrue(t1,  SameRole(Engineer(), Engineer()))
+    val t3 = IsTrue(t2,  SameRole(QA(), QA()))
+    val t4 = IsFalse(t3, SameRole(TeamLead(), Engineer()))
+    val t5 = IsFalse(t4, SameRole(Engineer(), QA()))
+    return IsFalse(t5,   SameRole(QA(), TeamLead()))
+}
+
+func TestMembersOf_EmptyForMissingRole(t T) T {
+    // Build a team with a TL + Engineer only; QA filter must return empty.
+    val iris = Member(
+        Name = "Iris", Role = TeamLead(),
+        Personality = "calm",
+        Model = None[string](), Extra = "",
+    )
+    val felix = Member(
+        Name = "Felix", Role = Engineer(),
+        Personality = "terse",
+        Model = None[string](), Extra = "",
+    )
+    val tm = Team(
+        Name = "Solo", Members = ArrayOf(iris, felix), Lead = iris,
+    )
+    return Eq(t, MembersOf(tm, QA()).Length(), 0)
+}
+
+func TestMembersOf_PreservesMemberOrder(t T) T {
+    val ts = sampleTeam()
+    val all = MembersOf(ts, TeamLead())
+    val t1 = Eq(t, all.Length(), 1)
+    return Eq(t1, all.Get(0).Name, "Iris")
+}
+
+func TestMemberByName_EmptyName(t T) T {
+    val ts = sampleTeam()
+    return IsNone(t, MemberByName(ts, ""))
+}
+
+func TestMemberByName_CaseSensitive(t T) T {
+    val ts = sampleTeam()
+    return IsNone(t, MemberByName(ts, "felix"))  // member is "Felix"
+}
+
+func TestStatusName_AllVariantsCovered(t T) T {
+    // Locks in the StatusName mapping — refactors that rename a Status
+    // case must also update its display name. Five-variant exhaustive.
+    val t1 = Eq(t,  StatusName(StIdle()),                            "idle")
+    val t2 = Eq(t1, StatusName(StQueued()),                          "queued")
+    val t3 = Eq(t2, StatusName(StWorking()),                         "working")
+    val t4 = Eq(t3, StatusName(StDone()),                            "done")
+    return Eq(t4, StatusName(StFailed(Reason = "any reason here")), "failed")
+}
+
+func TestMember_DefaultModelOption_IsNone(t T) T {
+    val m = Member(
+        Name = "X", Role = Engineer(),
+        Personality = "p",
+        Model = None[string](), Extra = "",
+    )
+    return IsNone(t, m.Model)
+}
+
+func TestMember_PinnedModelOption_IsSome(t T) T {
+    val m = Member(
+        Name = "X", Role = Engineer(),
+        Personality = "p",
+        Model = Some("claude-opus-4-7"), Extra = "",
+    )
+    val t1 = IsSome(t, m.Model)
+    return m.Model match {
+        case Some(name) => Eq(t1, name, "claude-opus-4-7")
+        case None()     => IsTrue(t1, false)
+    }
+}

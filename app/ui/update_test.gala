@@ -324,6 +324,72 @@ func TestPostMergeHooksFailed_SetsLastError(t T) T {
 }
 
 // ---------------------------------------------------------------------------
+// Status state machine — Statuses HashMap reflects who's currently
+// doing what. Sidebar widget reads these.
+// ---------------------------------------------------------------------------
+
+func TestSubmit_MarksTeamLeadWorking(t T) T {
+    val seed = sampleModel().Copy(Composer = "ship it")
+    val (m, _) = Update(seed, KeySubmit())
+    return m.Statuses.Get("Iris") match {
+        case Some(StWorking()) => IsTrue(t, true)
+        case _                 => IsTrue(t, false)
+    }
+}
+
+func TestChunkArrived_MarksSpeakerWorking(t T) T {
+    val (m, _) = Update(sampleModel(), ChunkArrived(Member = "Iris", Line = "thinking"))
+    return m.Statuses.Get("Iris") match {
+        case Some(StWorking()) => IsTrue(t, true)
+        case _                 => IsTrue(t, false)
+    }
+}
+
+func TestSessionFailed_MarksMemberFailedWithReason(t T) T {
+    val (m, _) = Update(sampleModel(), SessionFailed(Member = "Iris", ErrText = "stream closed"))
+    return m.Statuses.Get("Iris") match {
+        case Some(StFailed(reason)) => Eq(t, reason, "stream closed")
+        case _                      => IsTrue(t, false)
+    }
+}
+
+func TestMerged_ResetsAllMembersToIdle(t T) T {
+    // Seed every member as something other than Idle so reset has work
+    // to do. Felix StFailed; Iris StWorking. After Merged, both Idle.
+    val seedStatuses = EmptyHashMap[string, Status]()
+        .Put("Iris",  StWorking())
+        .Put("Felix", StFailed(Reason = "boom"))
+    val seed = sampleModel().Copy(
+        LastPrUrl = Some("https://x/y/pull/9"),
+        Statuses  = seedStatuses,
+    )
+    val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/9"))
+    val t1 = m.Statuses.Get("Iris") match {
+        case Some(StIdle()) => IsTrue(t, true)
+        case _              => IsTrue(t, false)
+    }
+    return m.Statuses.Get("Felix") match {
+        case Some(StIdle()) => IsTrue(t1, true)
+        case _              => IsTrue(t1, false)
+    }
+}
+
+// Subsequent ChunkArrived from a different speaker doesn't downgrade
+// the original speaker — only the new sender's status is touched.
+func TestChunkArrived_OnlyMutatesSpeakerStatus(t T) T {
+    val (m1, _) = Update(sampleModel(), ChunkArrived(Member = "Iris",  Line = "1"))
+    val (m2, _) = Update(m1,            ChunkArrived(Member = "Felix", Line = "2"))
+    val t1 = m2.Statuses.Get("Iris") match {
+        case Some(StWorking()) => IsTrue(t, true)
+        case _                 => IsTrue(t, false)
+    }
+    return m2.Statuses.Get("Felix") match {
+        case Some(StWorking()) => IsTrue(t1, true)
+        case _                 => IsTrue(t1, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Keyboard edge cases
 // ---------------------------------------------------------------------------
 

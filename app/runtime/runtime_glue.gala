@@ -2,6 +2,8 @@ package runtime
 
 import (
     "errors"
+    "os"
+    "path/filepath"
     "strings"
     "martianoff/gala/subprocess"
     "martianoff/gala/concurrent"
@@ -55,18 +57,85 @@ struct MemberSession(
 // Spawning
 // ----------------------------------------------------------------------------
 
-// SpawnSession launches a `claude` CLI process for `m` inside `proj.Repo`,
-// optionally pinned to `m.Model` if set.  Returns Try[MemberSession];
+// SpawnSession launches a `claude` CLI process for `m` with cwd
+// `workspace`. The team lead always uses `proj.Repo`; engineers /
+// QAs may run in their own git worktree (see `EnsureWorkspace`).
+// `m.Model` pins the model when set. Returns Try[MemberSession];
 // failure carries the underlying spawn error.
-func SpawnSession(proj Project, m Member) Try[MemberSession] {
+func SpawnSession(proj Project, m Member, workspace string) Try[MemberSession] {
     val opts = subprocess.NewSpawnOpts(
         "claude",
         claudeArgs(m).ToGoSlice(),
         SliceEmpty[string](),
-        proj.Repo,
+        workspace,
     )
     return subprocess.Spawn(opts).Map((p) => MemberSession(Member = m, Process = p))
 }
+
+// EnsureWorkspace returns the cwd to spawn `m` in, given the team's
+// workspace policy. For Shared mode, every member gets `proj.Repo`.
+// For WorktreePerEngineer, the team lead still gets `proj.Repo` but
+// engineers / QAs get a per-member git worktree at
+// `<proj.Repo>/.gala_team/worktrees/<m.Name>` with a branch named
+// `gala_team/<m.Name>`. The worktree is created on first call;
+// subsequent calls for the same member just return the existing path.
+func EnsureWorkspace(proj Project, m Member, mode WorkspaceMode) Try[string] = mode match {
+    case Shared()              => Success[string](proj.Repo)
+    case WorktreePerEngineer() => m.Role match {
+        case TeamLead() => Success[string](proj.Repo)
+        case _          => ensureWorktree(proj, m)
+    }
+}
+
+// ensureWorktree creates `<proj.Repo>/.gala_team/worktrees/<m.Name>`
+// if it doesn't already exist by shelling out to `git worktree add
+// -B gala_team/<m.Name> <path>`. If the directory already exists,
+// returns the path without re-running git (idempotent).
+func ensureWorktree(proj Project, m Member) Try[string] = Try[string](() => {
+    val wtPath = filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
+    val branch = "gala_team/" + m.Name
+    val info, statErr = os.Stat(wtPath)
+    if statErr == nil && info.IsDir() { return wtPath }
+    val parent = filepath.Dir(wtPath)
+    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
+    if mkErr != nil { panic(s"worktree mkdir ${parent}: ${mkErr.Error()}") }
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("worktree", "add", "-B", branch, wtPath).ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val proc = subprocess.Spawn(opts) match {
+        case Success(p)   => p
+        case Failure(err) => panic(s"git worktree add ${wtPath}: ${err.Error()}")
+    }
+    val code = proc.Wait().Get()
+    if code != 0 { panic(s"git worktree add ${wtPath} exited with code ${code}") }
+    return wtPath
+})
+
+// RemoveWorktree drops the per-engineer worktree on shutdown so the
+// repo doesn't accumulate stale checkouts. Best-effort: a failure
+// here is informational, never fatal — the user can `git worktree
+// prune` manually.
+func RemoveWorktree(proj Project, m Member) Try[bool] = Try[bool](() => {
+    val wtPath = filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
+    val info, statErr = os.Stat(wtPath)
+    if statErr != nil || !info.IsDir() { return true }  // already gone
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("worktree", "remove", "--force", wtPath).ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val proc = subprocess.Spawn(opts) match {
+        case Success(p)   => p
+        case Failure(err) => panic(s"git worktree remove ${wtPath}: ${err.Error()}")
+    }
+    val code = proc.Wait().Get()
+    if code != 0 { panic(s"git worktree remove ${wtPath} exited with code ${code}") }
+    return true
+})
 
 // claudeArgs assembles the standard `claude` CLI flags. We always use
 // stream-json so the FieldDecoder parser can walk chunks line-by-line.

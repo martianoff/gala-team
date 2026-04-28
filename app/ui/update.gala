@@ -103,20 +103,27 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     )
     val lead = m.Team.Lead
     return ensureSession(withState, lead) match {
-        case Right(m1)  => (m1, sendAndPumpCmd(m1, lead, prompt))
+        case Right(m1)  => (setStatus(m1, lead.Name, StWorking()), sendAndPumpCmd(m1, lead, prompt))
         case Left(err)  => (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
     }
 }
 
 // ensureSession looks up `member` in m.Sessions and spawns a new claude
-// session if none is registered. Returns Right(updatedModel) on success
-// (or no-op when already present), Left(errorString) on spawn failure.
+// session if none is registered. The cwd comes from EnsureWorkspace,
+// which honours Policy.WorkspaceMode — Shared puts every member in
+// proj.Repo; WorktreePerEngineer creates `.gala_team/worktrees/<name>`
+// for non-lead members on first spawn. Returns Right(updatedModel) on
+// success (or no-op when already present), Left(errorString) on spawn
+// or workspace-creation failure.
 func ensureSession(m AppModel, member Member) Either[string, AppModel] {
     return m.Sessions.Get(member.Name) match {
         case Some(_) => Right[string, AppModel](m)
-        case None()  => SpawnSession(m.Project, member) match {
-            case Success(s) => Right[string, AppModel](m.Copy(Sessions = m.Sessions.Put(member.Name, s)))
-            case Failure(e) => Left[string, AppModel](s"spawn ${member.Name}: ${e.Error()}")
+        case None()  => EnsureWorkspace(m.Project, member, m.Policy.WorkspaceMode) match {
+            case Failure(e)  => Left[string, AppModel](s"workspace ${member.Name}: ${e.Error()}")
+            case Success(ws) => SpawnSession(m.Project, member, ws) match {
+                case Success(s) => Right[string, AppModel](m.Copy(Sessions = m.Sessions.Put(member.Name, s)))
+                case Failure(e) => Left[string, AppModel](s"spawn ${member.Name}: ${e.Error()}")
+            }
         }
     }
 }
@@ -148,7 +155,7 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 // notices but the TUI keeps running.
 func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
     val nextConvo = m.Conversation.Append(session.ConversationLine(Speaker = name, Text = line))
-    val withLine = persistConversation(m, nextConvo)
+    val withLine = setStatus(persistConversation(m, nextConvo), name, StWorking())
     return withLine.Sessions.Get(name) match {
         case Some(s) => (withLine, runtimeFutureToCmd(NextChunkFuture(s)))
         case None()  => (withLine, NoCmd[AppMsg]())
@@ -168,10 +175,11 @@ func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) 
 // chunks already recorded so the user can read what came through before
 // the failure.
 func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[AppMsg]] {
-    return (m.Copy(
+    val withFailure = setStatus(m.Copy(
         Sessions  = m.Sessions.Remove(name),
         LastError = Some(s"${name}: ${err}"),
-    ), NoCmd[AppMsg]())
+    ), name, StFailed(Reason = err))
+    return (withFailure, NoCmd[AppMsg]())
 }
 
 // onApprove is the Phase-1 approval flow: when the FSM is in Approval,
@@ -193,6 +201,27 @@ func onApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         case Approval(body) => approveAndKickHooks(m, body)
         case _              => (m, NoCmd[AppMsg]())
     }
+}
+
+// setStatus updates m.Statuses[name] in place and returns the new
+// model. Tiny helper so handlers don't have to type the Copy + Put
+// every time.
+func setStatus(m AppModel, name string, st Status) AppModel =
+    m.Copy(Statuses = m.Statuses.Put(name, st))
+
+// resetAllStatuses sets every team member back to StIdle. Called
+// after a successful merge — the team's pipeline is done, the next
+// prompt starts fresh.
+func resetAllStatuses(m AppModel) AppModel {
+    var statuses = m.Statuses
+    val members = m.Team.Members
+    var i = 0
+    val n = members.Size()
+    for i < n {
+        statuses = statuses.Put(members.Get(i).Name, StIdle())
+        i = i + 1
+    }
+    return m.Copy(Statuses = statuses)
 }
 
 func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
@@ -297,16 +326,17 @@ func mergeAndKickPostMerge(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] 
 }
 
 // onMerged echoes the URL into the conversation, clears LastPrUrl
-// (the same PR can't be merged twice), and kicks any PostMerge hooks.
-// On a clean hook run, PostMergeHooksPassed appends the final
-// "✓ all green" line.
+// (the same PR can't be merged twice), resets every member's status
+// to Idle (the pipeline is done — next prompt starts fresh), and
+// kicks any PostMerge hooks. On a clean hook run,
+// PostMergeHooksPassed appends the final "✓ all green" line.
 func onMerged(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
-    val withMerge = m.Copy(
+    val withMerge = resetAllStatuses(m.Copy(
         LastPrUrl    = None[string](),
         Conversation = m.Conversation.Append(
             session.ConversationLine(Speaker = "gh", Text = s"merged: ${url}"),
         ),
-    )
+    ))
     if m.Policy.PostMerge.IsEmpty() {
         return (withMerge, NoCmd[AppMsg]())
     }

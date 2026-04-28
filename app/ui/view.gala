@@ -93,20 +93,43 @@ func sidebarWidget(m AppModel) Widget = Column(ArrayOf[LayoutChild](
     Flex(1, PipelineView(m.Pipeline)),
 ))
 
+// conversationVisibleLines is the soft cap on rendered lines per
+// frame. The underlying conversation log can grow indefinitely
+// (auto-saved to disk via app/session); rendering all of it would
+// overflow off the bottom of the terminal. We render the last N and
+// surface a "(K more lines hidden, scroll history in latest.json)"
+// hint at the top so the user knows older lines exist.
+//
+// Phase-1 fixed value; Phase-2 should pull the actual viewport height
+// from the runtime via a `Sized` wrapper or similar so wide terminals
+// see more.
+val conversationVisibleLines = 20
+
 func conversationPanel(m AppModel) Widget {
     val header = TextStyled("  Conversation with Team Lead", DefaultStyle().WithBold())
-    val lines = m.Conversation.Map((cl session.ConversationLine) => Fixed(
+    val all = m.Conversation
+    val total = all.Size()
+    val visible = if (total <= conversationVisibleLines) all
+                  else                                    all.Drop(total - conversationVisibleLines)
+    val hidden = total - visible.Size()
+    val hiddenLine = if (hidden > 0)
+                         ArrayOf[LayoutChild](Fixed(1, TextStyled(
+                             s"  …${hidden} earlier line(s) hidden — see .gala_team/sessions/latest.json",
+                             DefaultStyle().WithDim())))
+                     else
+                         EmptyArray[LayoutChild]()
+    val lines = visible.Map((cl session.ConversationLine) => Fixed(
         1,
         TextStyled(s"  ${cl.Speaker}: ${cl.Text}",
             speakerStyle(cl.Speaker)),
     ))
-    val body = if (lines.IsEmpty())
+    val body = if (lines.IsEmpty() && hidden == 0)
                    ArrayOf[LayoutChild](
                        Fixed(1, Empty()),
                        Fixed(1, TextStyled("  (no conversation yet — type a prompt below)",
                            DefaultStyle().WithDim())),
                    )
-               else lines
+               else hiddenLine.AppendAll(lines)
     val children = ArrayOf[LayoutChild](Fixed(1, header)).AppendAll(body).Append(Flex(1, Empty()))
     return Column(children)
 }

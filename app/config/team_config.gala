@@ -287,17 +287,17 @@ func validate(name string, members Array[Member], workflow Workflow, pol Policy)
         panic("team.yaml: team.members must contain at least one member")
     }
 
-    val leads = members.Filter((m Member) => SameRole(m.Role, TeamLead()))
+    val leads = members.Filter((m) => SameRole(m.Role, TeamLead()))
     if leads.Length() != 1 {
         panic(s"team.yaml: must declare exactly one team_lead (found ${leads.Length()})")
     }
 
-    val engineers = members.Filter((m Member) => SameRole(m.Role, Engineer()))
+    val engineers = members.Filter((m) => SameRole(m.Role, Engineer()))
     if engineers.IsEmpty() {
         panic("team.yaml: at least one engineer is required")
     }
 
-    val qas = members.Filter((m Member) => SameRole(m.Role, QA()))
+    val qas = members.Filter((m) => SameRole(m.Role, QA()))
     if workflow.QARequired && qas.IsEmpty() {
         panic("team.yaml: workflow.qa_required is true but no qa members declared")
     }

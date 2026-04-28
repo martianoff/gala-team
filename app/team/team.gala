@@ -92,15 +92,11 @@ struct Team(
 
 // MembersOf returns the members with the given role, in source order.
 func MembersOf(t Team, r Role) Array[Member] =
-    t.Members.Filter((m Member) => SameRole(m.Role, r))
+    t.Members.Filter((m) => SameRole(m.Role, r))
 
 // MemberByName looks up a member; None if no match. Names are unique
 // within a team (validated at load time, in app/config).
-func MemberByName(t Team, name string) Option[Member] {
-    val matches = t.Members.Filter((m Member) => m.Name == name)
-    if matches.IsEmpty() { return None[Member]() }
-    return Some[Member](matches.Get(0))
-}
+func MemberByName(t Team, name string) Option[Member] = t.Members.Find((m) => m.Name == name)
 
 // ----------------------------------------------------------------------------
 // Per-member status (drives the team panel pills + spinners)

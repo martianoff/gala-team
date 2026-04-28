@@ -149,8 +149,8 @@ func afterMemberDone(
 // firstSummary returns the body of the first @summary directive in dirs,
 // or None if no summary is present.
 func firstSummary(dirs Array[Directive]) Option[string] =
-    dirs.Find(isSummary).FlatMap((d Directive) => d match {
-        case Summary(body) => Some[string](body)
+    dirs.Find(isSummary).FlatMap((d) => d match {
+        case Summary(body) => Some(body)
         case _             => None[string]()
     })
 
@@ -163,9 +163,8 @@ func isSummary(d Directive) bool = d match {
 // in the given array (preserving source order; consult / summary
 // directives are skipped).
 func directiveTargets(dirs Array[Directive]) Array[string] =
-    dirs.FlatMap((d Directive) => d match {
-        case Dispatch(target, _) => ArrayOf[string](target)
-        case _                    => EmptyArray[string]()
+    dirs.Collect({
+        case Dispatch(target, _) => target
     })
 
 func arrayToHashSet(xs Array[string]) HashSet[string] =

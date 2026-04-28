@@ -40,8 +40,10 @@ func TestSaveThenLoad_RoundTripsConversation(t T) T {
         ConversationLine(Speaker = "Iris", Text = "@summary done"),
     )
     val saved = Save(dir, "demo", convo)
-    var saveErr = "OK"
-    if saved.IsFailure() { saveErr = saved.GetError().Error() }
+    val saveErr = saved match {
+        case Success(_)   => "OK"
+        case Failure(err) => err.Error()
+    }
     val t1 = Eq(t, saveErr, "OK")
     val loaded = Load(dir)
     var loadOK = "OK"

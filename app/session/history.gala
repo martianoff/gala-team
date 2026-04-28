@@ -1,0 +1,161 @@
+package session
+
+import (
+    "os"
+    "path/filepath"
+    "sort"
+    "strings"
+    "time"
+    "martianoff/gala/json"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+)
+
+// ============================================================================
+// app/session/history — read-only browser for past sessions.
+//
+// Where session.gala maintains a single rolling latest.json that the
+// TUI restores on every launch, this module supports archiving point-
+// in-time snapshots into `.gala_team/sessions/archive/` and listing
+// them for retrospective viewing.
+//
+// Trigger: cmd/main flags an archive on every successful merge — the
+// natural "this branch of work is done" boundary. Archives never
+// overwrite each other; the filename embeds the saved-at nanosecond
+// timestamp so chronological sort is just a string sort. Manual
+// archives (e.g. before a destructive force-push) call ArchiveLatest
+// with their own label.
+//
+// Browse path: cmd/main.gala loads ListArchives once at startup so
+// AppModel.Archives is populated; the user toggles history mode with
+// Ctrl+H to see the list and pick one to view in read-only mode.
+// ============================================================================
+
+// SnapshotMeta is the lightweight per-archive header surfaced to the
+// UI. Path is the absolute file path (so LoadArchive can read it
+// without re-deriving); ProjectName / SavedAt mirror the full
+// Snapshot fields for display; LineCount is the rendered conversation
+// length so the list shows "(48 lines)" hints without forcing a full
+// decode.
+struct SnapshotMeta(
+    Path        string,
+    Label       string,
+    ProjectName string,
+    SavedAt     int64,
+    LineCount   int,
+)
+
+// ArchiveDir is the per-project directory holding archived snapshots.
+// Lives alongside latest.json so the user only has to ignore one path
+// in their .gitignore to keep the gala_team output out of source
+// control.
+func ArchiveDir(repoDir string) string =
+    filepath.Join(repoDir, ".gala_team", "sessions", "archive")
+
+// ArchiveLatest copies the current latest.json into a timestamped
+// archive file. Returns the archive path on success. The archive
+// filename shape is `<label>-<savedAt>.json` so:
+//   - Different labels can co-exist for the same moment (e.g.
+//     `merged-…` and `manual-…`)
+//   - Filename sort == chronological sort within one label
+//   - Archives never collide because savedAt is in nanoseconds.
+//
+// If `latest.json` doesn't exist (no session yet), returns
+// Failure with a descriptive error rather than silently no-op'ing.
+func ArchiveLatest(repoDir string, label string) Try[string] = Try[string](() => {
+    val src = SessionPath(repoDir)
+    val raw, err = os.ReadFile(src)
+    if err != nil { panic(s"archive: read ${src}: ${err.Error()}") }
+    val savedAt = time.Now().UnixNano()
+    val dir = ArchiveDir(repoDir)
+    val mkErr = os.MkdirAll(dir, os.FileMode(0755))
+    if mkErr != nil { panic(s"archive: mkdir ${dir}: ${mkErr.Error()}") }
+    val safeLabel = sanitizeLabel(label)
+    val dst = filepath.Join(dir, s"${safeLabel}-${savedAt}.json")
+    val writeErr = os.WriteFile(dst, raw, os.FileMode(0644))
+    if writeErr != nil { panic(s"archive: write ${dst}: ${writeErr.Error()}") }
+    return dst
+})
+
+// ListArchives walks ArchiveDir(repoDir), JSON-decodes each entry's
+// header (ProjectName, SavedAt, ConversationLineCount), and returns
+// the metadata sorted newest-first so the UI can render them as a
+// reverse-chronological list. A missing directory returns an empty
+// array — no archives yet is the steady state on a fresh project.
+//
+// Decoding errors on a single archive are skipped, not propagated:
+// one corrupted file shouldn't hide the rest of the list.
+func ListArchives(repoDir string) Try[Array[SnapshotMeta]] = Try[Array[SnapshotMeta]](() => {
+    val dir = ArchiveDir(repoDir)
+    val info, statErr = os.Stat(dir)
+    if statErr != nil || !info.IsDir() { return EmptyArray[SnapshotMeta]() }
+    val entries, readErr = os.ReadDir(dir)
+    if readErr != nil { panic(s"archive: read ${dir}: ${readErr.Error()}") }
+    val resolved = ArrayOf[os.DirEntry](entries...)
+        .Filter((e os.DirEntry) => !e.IsDir() && strings.HasSuffix(e.Name(), ".json"))
+        .Map((e os.DirEntry) => metaFromFile(filepath.Join(dir, e.Name())))
+        .Collect({ case Success(m) => m })
+    return sortNewestFirst(resolved)
+})
+
+// LoadArchive reads a single archive file and returns the full
+// Snapshot — used by the history view when the user picks one to
+// inspect.
+func LoadArchive(path string) Try[Snapshot] = Try[Snapshot](() => {
+    val raw, err = os.ReadFile(path)
+    if err != nil { panic(s"archive: read ${path}: ${err.Error()}") }
+    return decodeSnapshot(json.NewJsonDecoder(string(raw)))
+})
+
+// ----------------------------------------------------------------------------
+// Internals
+// ----------------------------------------------------------------------------
+
+// metaFromFile decodes only as much of the archive as needed for the
+// list view: ProjectName, SavedAt, and a count of conversation lines.
+// Reuses decodeSnapshot then projects — simpler than writing a partial
+// decoder for the list-only path.
+func metaFromFile(path string) Try[SnapshotMeta] = Try[SnapshotMeta](() => {
+    val raw, err = os.ReadFile(path)
+    if err != nil { panic(s"meta: read ${path}: ${err.Error()}") }
+    val snap = decodeSnapshot(json.NewJsonDecoder(string(raw)))
+    return SnapshotMeta(
+        Path        = path,
+        Label       = labelFromFilename(filepath.Base(path)),
+        ProjectName = snap.ProjectName,
+        SavedAt     = snap.SavedAt,
+        LineCount   = snap.Conversation.Size(),
+    )
+})
+
+// labelFromFilename extracts the leading `<label>` portion of an
+// archive filename (`<label>-<savedAt>.json`). Returns the original
+// basename minus the .json suffix when the shape doesn't match —
+// defensive against archives placed there by other tools.
+func labelFromFilename(base string) string {
+    val noExt = strings.TrimSuffix(base, ".json")
+    val idx = strings.LastIndex(noExt, "-")
+    if idx < 0 { return noExt }
+    return string(SliceTo(ToRunes(noExt), idx))
+}
+
+// sanitizeLabel makes a user-supplied label safe for embedding in a
+// filename: trims whitespace, replaces path separators and dots with
+// dashes. Empty input becomes "manual".
+func sanitizeLabel(label string) string {
+    val trimmed = strings.TrimSpace(label)
+    if trimmed == "" { return "manual" }
+    val replaced = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(trimmed, "/", "-"), "\\", "-"), ".", "-")
+    return replaced
+}
+
+// sortNewestFirst delegates to Go's sort.Slice with a SavedAt-desc
+// comparator. We materialise to a Go slice for the sort call (the
+// stdlib doesn't currently expose an immutable in-place sort) then
+// rebuild the Array — copy is cheap; archive lists are small.
+func sortNewestFirst(metas Array[SnapshotMeta]) Array[SnapshotMeta] {
+    val raw = metas.ToGoSlice()
+    sort.Slice(raw, (i int, j int) => raw[i].SavedAt > raw[j].SavedAt)
+    return ArrayFromSlice(raw)
+}

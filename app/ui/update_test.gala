@@ -2,13 +2,13 @@ package main
 
 import (
     "os"
+    "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
-    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/ui"
 )
@@ -440,7 +440,7 @@ func TestKeyChar_SpaceIsRegularChar(t T) T {
 func TestTickMsg_DoesNotStompComposerOrConversation(t T) T {
     val seed = sampleModel().Copy(
         Composer     = "draft",
-        Conversation = ArrayOf(ConversationLine(Speaker = "you", Text = "earlier")),
+        Conversation = ArrayOf(session.ConversationLine(Speaker = "you", Text = "earlier")),
     )
     val (m, _) = Update(seed, TickMsg())
     val t1 = Eq(t, m.Composer, "draft")
@@ -617,8 +617,8 @@ func TestQuitMsg_NoSessions_ModelStableAndConversationUntouched(t T) T {
     val seed = sampleModel().Copy(
         Composer = "draft",
         Tick     = 9,
-        Conversation = EmptyArray[ConversationLine]().Append(
-            ConversationLine(Speaker = "you", Text = "earlier"),
+        Conversation = EmptyArray[session.ConversationLine]().Append(
+            session.ConversationLine(Speaker = "you", Text = "earlier"),
         ),
     )
     val (m, _) = Update(seed, QuitMsg())
@@ -835,8 +835,8 @@ func TestConsultEnded_RealErrorAlsoCleansState(t T) T {
 // duplicate event delivery.
 func TestConsultEnded_UnknownConsult_NoOp(t T) T {
     val seed = sampleModel().Copy(
-        Conversation = EmptyArray[ConversationLine]().Append(
-            ConversationLine(Speaker = "you", Text = "earlier"),
+        Conversation = EmptyArray[session.ConversationLine]().Append(
+            session.ConversationLine(Speaker = "you", Text = "earlier"),
         ),
     )
     val (m, _) = Update(seed, ConsultEnded(Name = "ghost", ErrText = None[string]()))
@@ -862,12 +862,117 @@ func TestKeyToggleConsultViewer_LeavesOtherStateAlone(t T) T {
     val seed = sampleModel().Copy(
         Composer     = "draft",
         Tick         = 5,
-        Conversation = EmptyArray[ConversationLine]().Append(
-            ConversationLine(Speaker = "you", Text = "earlier"),
+        Conversation = EmptyArray[session.ConversationLine]().Append(
+            session.ConversationLine(Speaker = "you", Text = "earlier"),
         ),
     )
     val (m, _) = Update(seed, KeyToggleConsultViewer())
     val t1 = Eq(t,  m.Composer, "draft")
     val t2 = Eq(t1, m.Tick, 5)
     return Eq(t2, m.Conversation.Size(), 1)
+}
+
+// ---------------------------------------------------------------------------
+// History browser (Phase 3)
+// ---------------------------------------------------------------------------
+
+// Ctrl+H toggles HistoryMode and resets the cursor on open.
+func TestKeyToggleHistory_FlipsMode(t T) T {
+    val seed = sampleModel().Copy(HistoryCursor = 5)
+    val (m1, _) = Update(seed, KeyToggleHistory())
+    val t1 = IsTrue(t, m1.HistoryMode)
+    val t2 = Eq(t1, m1.HistoryCursor, 0)
+    val (m2, _) = Update(m1, KeyToggleHistory())
+    return IsFalse(t2, m2.HistoryMode)
+}
+
+// Up / Down outside HistoryMode are strict no-ops on the cursor.
+func TestHistoryCursor_OutsideHistoryMode_NoOp(t T) T {
+    val seed = sampleModel().Copy(HistoryCursor = 3)
+    val (m, _) = Update(seed, HistoryCursorUp())
+    return Eq(t, m.HistoryCursor, 3)
+}
+
+// Cursor navigates within the bounds of the loaded archives list.
+func TestHistoryCursor_ClampsAtBounds(t T) T {
+    val a1 = sampleArchive(1, "merged")
+    val a2 = sampleArchive(2, "merged")
+    val seed = sampleModel().Copy(
+        HistoryMode = true,
+        Archives    = ArrayOf(a1, a2),
+    )
+    val (m1, _) = Update(seed, HistoryCursorDown())
+    val t1 = Eq(t, m1.HistoryCursor, 1)
+    val (m2, _) = Update(m1, HistoryCursorDown())  // already at end — no further advance
+    val t2 = Eq(t1, m2.HistoryCursor, 1)
+    val (m3, _) = Update(m2, HistoryCursorUp())
+    val t3 = Eq(t2, m3.HistoryCursor, 0)
+    val (m4, _) = Update(m3, HistoryCursorUp())  // already at top — no further retreat
+    return Eq(t3, m4.HistoryCursor, 0)
+}
+
+// HistoryDeselect drops the in-view archive — used by Esc to back out
+// of the detail view to the index.
+func TestHistoryDeselect_ClearsViewingArchive(t T) T {
+    val snap = makeSnap()
+    val seed = sampleModel().Copy(
+        HistoryMode    = true,
+        ViewingArchive = Some(snap),
+    )
+    val (m, _) = Update(seed, HistoryDeselect())
+    return IsFalse(t, m.ViewingArchive.IsDefined())
+}
+
+// HistoryArchiveLoaded populates ViewingArchive — the asynchronous
+// arm of HistorySelect → archiveLoadCmd → HistoryArchiveLoaded.
+func TestHistoryArchiveLoaded_StoresSnapshot(t T) T {
+    val snap = makeSnap()
+    val (m, _) = Update(sampleModel(), HistoryArchiveLoaded(Snap = snap))
+    return IsTrue(t, m.ViewingArchive.IsDefined())
+}
+
+// HistoryArchiveFailed lands a tagged "history: …" entry in LastError
+// so the footer surfaces the disk read failure.
+func TestHistoryArchiveFailed_TagsLastError(t T) T {
+    val (m, _) = Update(sampleModel(), HistoryArchiveFailed(ErrText = "broken json"))
+    return m.LastError match {
+        case Some(s) => IsTrue(t, s == "history: broken json")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// KeySubmit while HistoryMode is open is repurposed to "load the
+// cursored archive" (matches the user's expectation that the visible
+// cursor is what Enter acts on).
+func TestKeySubmit_InHistoryMode_RoutesToSelect(t T) T {
+    val seed = sampleModel().Copy(
+        HistoryMode  = true,
+        Archives     = ArrayOf(sampleArchive(1, "merged")),
+        HistoryCursor = 0,
+        Composer     = "ignored draft",
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    // Submit shouldn't have cleared the composer (it would for a normal
+    // submit) — that's our signal that the Enter was redirected.
+    return Eq(t, m.Composer, "ignored draft")
+}
+
+// Helpers ---
+
+func sampleArchive(savedAt int64, label string) session.SnapshotMeta = session.SnapshotMeta(
+    Path        = s"/fake/archive/${label}-${savedAt}.json",
+    Label       = label,
+    ProjectName = "demo",
+    SavedAt     = savedAt,
+    LineCount   = 0,
+)
+
+// makeSnap builds a Snapshot for tests. Positional args because the
+// transpiler doesn't yet support named-arg construction on qualified
+// cross-package struct types (gala_tui ALSO exports a `Snapshot`
+// helper, so we can't safely dot-import session in the test
+// binary).
+func makeSnap() session.Snapshot {
+    val convo = EmptyArray[session.ConversationLine]()
+    return session.Snapshot("demo", int64(12345), convo)
 }

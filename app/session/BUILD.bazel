@@ -2,7 +2,10 @@ load("@gala//:gala.bzl", "gala_go_test", "gala_library")
 
 gala_library(
     name = "session",
-    srcs = ["session.gala"],
+    srcs = [
+        "history.gala",
+        "session.gala",
+    ],
     importpath = "github.com/martianoff/gala_team/app/session",
     deps = [
         "@gala//collection_immutable",

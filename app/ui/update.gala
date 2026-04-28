@@ -58,6 +58,13 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case ConsultChunkArrived(n, ln)  => onConsultChunkArrived(m, n, ln)
     case ConsultEnded(name, err)     => onConsultEnded(m, name, err)
     case KeyToggleConsultViewer()    => (m.Copy(ConsultViewerOpen = !m.ConsultViewerOpen), NoCmd[AppMsg]())
+    case KeyToggleHistory()          => onToggleHistory(m)
+    case HistoryCursorUp()           => onHistoryCursorMove(m, -1)
+    case HistoryCursorDown()         => onHistoryCursorMove(m, 1)
+    case HistorySelect()             => onHistorySelect(m)
+    case HistoryDeselect()           => (m.Copy(ViewingArchive = None[session.Snapshot]()), NoCmd[AppMsg]())
+    case HistoryArchiveLoaded(snap)  => (m.Copy(ViewingArchive = Some(snap)), NoCmd[AppMsg]())
+    case HistoryArchiveFailed(err)   => (m.Copy(LastError = Some(s"history: ${err}")), NoCmd[AppMsg]())
     case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
     case TickMsg()                   => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
     case QuitMsg()                   => onQuit(m)
@@ -97,7 +104,12 @@ func onQuit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // On spawn failure (claude binary missing, repo path wrong, …) the model
 // records LastError and returns no Cmd, so the user sees a footer message
 // rather than a hung UI.
+//
+// When the history browser is open, Enter is repurposed to "load the
+// cursored archive" instead — matches the user's expectation that
+// the visible cursor is the action target.
 func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if m.HistoryMode { return onHistorySelect(m) }
     if m.Composer == "" {
         return (m, NoCmd[AppMsg]())
     }
@@ -440,10 +452,13 @@ func mergeAndKickPostMerge(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] 
 
 // onMerged echoes the URL into the conversation, clears LastPrUrl
 // (the same PR can't be merged twice), resets every member's status
-// to Idle (the pipeline is done — next prompt starts fresh), and
-// kicks any PostMerge hooks. On a clean hook run,
-// PostMergeHooksPassed appends the final "✓ all green" line.
+// to Idle (the pipeline is done — next prompt starts fresh), kicks
+// any PostMerge hooks, and snapshots the now-immutable conversation
+// log into .gala_team/sessions/archive/ so future `Ctrl+H` runs can
+// pull it back up. On a clean hook run, PostMergeHooksPassed
+// appends the final "✓ all green" line.
 func onMerged(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
+    val _ = session.ArchiveLatest(m.Project.Repo, "merged")  // best-effort; failure is silent
     val withMerge = resetAllStatuses(m.Copy(
         LastPrUrl    = None[string](),
         Conversation = m.Conversation.Append(
@@ -629,3 +644,56 @@ func trimLastRune(s string) string {
     val n = len(rs)
     return if (n == 0) "" else string(SliceTo(rs, n - 1))
 }
+
+// ----------------------------------------------------------------------------
+// History browser handlers
+// ----------------------------------------------------------------------------
+
+// onToggleHistory flips HistoryMode and resets the cursor + viewing
+// state when entering. Closing the browser does NOT clear Archives —
+// they were loaded once at startup and don't go stale during a
+// session (new merges add to the list but the index is rebuilt on
+// next launch).
+func onToggleHistory(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val opening = !m.HistoryMode
+    val next = m.Copy(
+        HistoryMode    = opening,
+        HistoryCursor  = if (opening) 0 else m.HistoryCursor,
+        ViewingArchive = None[session.Snapshot](),
+    )
+    return (next, NoCmd[AppMsg]())
+}
+
+// onHistoryCursorMove shifts the cursor by `delta` (clamped to a
+// valid range) when the history browser is open and no archive is
+// being viewed. Outside that mode it's a no-op so accidental
+// arrow-key presses during normal chat don't disturb the model.
+func onHistoryCursorMove(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] {
+    val canMove = m.HistoryMode && !m.ViewingArchive.IsDefined() && m.Archives.Size() > 0
+    if !canMove { return (m, NoCmd[AppMsg]()) }
+    val raw = m.HistoryCursor + delta
+    val clamped = if (raw < 0) 0
+                  else if (raw >= m.Archives.Size()) m.Archives.Size() - 1
+                  else raw
+    return (m.Copy(HistoryCursor = clamped), NoCmd[AppMsg]())
+}
+
+// onHistorySelect kicks off an asynchronous LoadArchive for the
+// currently-cursored entry. The result lands as
+// HistoryArchiveLoaded / HistoryArchiveFailed so the loader doesn't
+// block the UI thread on slow disks.
+func onHistorySelect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val canSelect = m.HistoryMode && !m.ViewingArchive.IsDefined() && m.HistoryCursor < m.Archives.Size()
+    if !canSelect { return (m, NoCmd[AppMsg]()) }
+    val meta = m.Archives.Get(m.HistoryCursor)
+    return (m, archiveLoadCmd(meta.Path))
+}
+
+// archiveLoadCmd wraps LoadArchive in a Future so the disk read runs
+// off the UI thread; result is mapped to a HistoryArchiveLoaded /
+// HistoryArchiveFailed AppMsg.
+func archiveLoadCmd(path string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() => session.LoadArchive(path) match {
+        case Success(snap) => HistoryArchiveLoaded(Snap = snap)
+        case Failure(err)  => HistoryArchiveFailed(ErrText = err.Error())
+    }))

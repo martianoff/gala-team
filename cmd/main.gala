@@ -67,10 +67,14 @@ func keyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+a"))           { return KeyApprove() }
     if (KeyMatchesAny(ev, "ctrl+r"))           { return KeyReject() }
     if (KeyMatchesAny(ev, "ctrl+m"))           { return KeyMerge() }
+    if (KeyMatchesAny(ev, "ctrl+h"))           { return KeyToggleHistory() }
     if (KeyMatchesAny(ev, "tab"))              { return KeyToggleConsultViewer() }
     return ev.Key match {
         case Backspace()  => KeyBackspace()
         case Enter()      => KeySubmit()
+        case Up()         => HistoryCursorUp()
+        case Down()       => HistoryCursorDown()
+        case Esc()        => HistoryDeselect()
         case Char(c)      => KeyChar(C = c)
         case Space()      => KeyChar(C = ' ')
         case _            => NoOp()
@@ -168,7 +172,9 @@ func main() {
     // Restore the prior conversation log if a snapshot exists under
     // <repo>/.gala_team/sessions/latest.json. None on first launch.
     val registry = loadRegistry(proj)
-    val initial = primeFromSnapshot(InitialModel(proj, cfg.Team, cfg.Workflow, cfg.Policy, registry))
+    val archives = loadArchives(proj)
+    val seeded = primeFromSnapshot(InitialModel(proj, cfg.Team, cfg.Workflow, cfg.Policy, registry))
+    val initial = seeded.Copy(Archives = archives)
     val program = Program[AppModel, AppMsg](
         Initial = initial,
         Update  = (m, msg) => Update(m, msg),
@@ -177,6 +183,13 @@ func main() {
     val tickSub = TickSub[AppMsg](Interval = Milliseconds(int64(120)), Make = () => TickMsg())
     val _ = RunWithMouse[AppModel, AppMsg](program, (ev) => inputToAppMsg(ev), tickSub)
 }
+
+// loadArchives reads .gala_team/sessions/archive/ at startup so the
+// history browser has its index ready. Failures are non-fatal — we
+// fall back to an empty list so the UI launches even on a corrupted
+// archive directory.
+func loadArchives(proj Project) Array[session.SnapshotMeta] =
+    session.ListArchives(proj.Repo).GetOrElse(EmptyArray[session.SnapshotMeta]())
 
 // primeFromSnapshot replays the persisted conversation log into a fresh
 // AppModel. We ignore SavedAt and ProjectName for now — the user's

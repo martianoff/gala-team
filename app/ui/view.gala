@@ -2,6 +2,7 @@ package ui
 
 import (
     "strings"
+    "time"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -33,16 +34,16 @@ import (
 //
 // ============================================================================
 
-// View renders the AppModel as a gala-tui Widget tree. When the
-// consult viewer modal is toggled open, the main conversation pane
-// is replaced by the viewer overlay; the sidebar and composer stay
-// rendered so the user can keep typing into the lead while watching
-// child consults stream in.
+// View renders the AppModel as a gala-tui Widget tree. The main
+// pane shows the live conversation by default; Tab swaps it for the
+// consult viewer overlay; Ctrl+H swaps it for the history browser.
+// Both overlays are mutually exclusive — opening one auto-closes
+// the other isn't necessary because the toggle handlers leave both
+// flags untouched (so the precedence below decides what's shown).
 func View(m AppModel) Widget {
     val header = headerWidget(m)
     val sidebar = sidebarWidget(m)
-    val mainPanel = if (m.ConsultViewerOpen) consultViewerPanel(m)
-                    else                     conversationPanel(m)
+    val mainPanel = mainPanelWidget(m)
     val composer = composerWidget(m)
     val footer = footerWidget(m)
     return Column(ArrayOf[LayoutChild](
@@ -57,6 +58,15 @@ func View(m AppModel) Widget {
         Fixed(3, BorderOf(composer, RoundedBorder())),
         Fixed(1, footer),
     ))
+}
+
+// mainPanelWidget chooses the central pane: history browser takes
+// precedence (it's a dedicated read-only mode the user opted into),
+// then the consult viewer overlay, then the live conversation.
+func mainPanelWidget(m AppModel) Widget {
+    if m.HistoryMode { return historyPanel(m) }
+    if m.ConsultViewerOpen { return consultViewerPanel(m) }
+    return conversationPanel(m)
 }
 
 // approvalBanner shows a Ctrl+A / Ctrl+R hint above the conversation
@@ -252,4 +262,85 @@ func stateLabel(s AppState) string = s match {
     case QAGate(_)        => "state: QA gate"
     case TLReview()       => "state: TL review"
     case Approval(_)      => "state: approval"
+}
+
+// ----------------------------------------------------------------------------
+// History browser
+// ----------------------------------------------------------------------------
+
+// historyPanel renders the read-only browser. With no archive
+// selected, shows the index list (cursor-highlighted entry, savedAt,
+// project name, line count). When ViewingArchive is set, shows that
+// archive's full conversation and a hint to press Esc.
+func historyPanel(m AppModel) Widget = m.ViewingArchive match {
+    case Some(snap) => historyDetailPanel(snap)
+    case None()     => historyIndexPanel(m)
+}
+
+
+
+// historyIndexPanel renders the list of past archives. Empty case
+// surfaces a friendly "no merges yet" so first-time users understand
+// the lifecycle.
+func historyIndexPanel(m AppModel) Widget {
+    val header = TextStyled(
+        "  History  ·  ↑↓ navigate · Enter open · Ctrl+H close",
+        DefaultStyle().WithBold().WithFg(BrightYellow()),
+    )
+    if m.Archives.IsEmpty() {
+        return Column(ArrayOf[LayoutChild](
+            Fixed(1, header),
+            Fixed(1, Empty()),
+            Fixed(1, TextStyled(
+                "  (no archives yet — sessions are saved here on every successful merge)",
+                DefaultStyle().WithDim())),
+            Flex(1, Empty()),
+        ))
+    }
+    val rows = m.Archives.ZipWithIndex().Map((pair) => Fixed(
+        1,
+        archiveRowWidget(pair.V1, pair.V2 == m.HistoryCursor),
+    ))
+    val children = ArrayOf[LayoutChild](Fixed(1, header), Fixed(1, Empty()))
+        .AppendAll(rows)
+        .Append(Flex(1, Empty()))
+    return Column(children)
+}
+
+// archiveRowWidget renders one entry in the history index. The
+// cursor-highlighted row gets a "▶ " prefix and bright styling;
+// other rows are dim.
+func archiveRowWidget(meta session.SnapshotMeta, isCursor bool) Widget {
+    val marker = if (isCursor) "▶ " else "  "
+    val text = s"  ${marker}${formatSavedAt(meta.SavedAt)}  ·  ${meta.Label}  ·  ${meta.ProjectName}  (${meta.LineCount} lines)"
+    val style = if (isCursor) DefaultStyle().WithBold().WithFg(BrightCyan())
+                else          DefaultStyle().WithDim()
+    return TextStyled(text, style)
+}
+
+// historyDetailPanel renders a fully-loaded archive in read-only
+// mode. Mirrors conversationPanel's rendering of the live convo so
+// the user feels at home.
+func historyDetailPanel(snap session.Snapshot) Widget {
+    val header = TextStyled(
+        s"  ${formatSavedAt(snap.SavedAt)}  ·  ${snap.ProjectName}  ·  Esc to return to index",
+        DefaultStyle().WithBold().WithFg(BrightYellow()),
+    )
+    val lines = snap.Conversation.Map((cl session.ConversationLine) => Fixed(
+        1,
+        TextStyled(s"  ${cl.Speaker}: ${cl.Text}", speakerStyle(cl.Speaker)),
+    ))
+    val children = ArrayOf[LayoutChild](Fixed(1, header), Fixed(1, Empty()))
+        .AppendAll(lines)
+        .Append(Flex(1, Empty()))
+    return Column(children)
+}
+
+// formatSavedAt converts a unix-nano timestamp into a friendly
+// "YYYY-MM-DD HH:MM" string so the index doesn't look like a list
+// of `1714233600000000000`.
+func formatSavedAt(ns int64) string {
+    val secs = ns / int64(1000000000)
+    val rem  = ns - secs * int64(1000000000)
+    return time.Unix(secs, rem).Format("2006-01-02 15:04")
 }

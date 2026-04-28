@@ -1,6 +1,7 @@
 package ui
 
 import (
+    "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/consult"
@@ -9,7 +10,6 @@ import (
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/runtime"
-    . "github.com/martianoff/gala_team/app/session"
     . "github.com/martianoff/gala_team/app/view"
 )
 
@@ -38,7 +38,7 @@ struct AppModel(
     Statuses     HashMap[string, Status],
     Pipeline     PipelineState,
     Sessions     HashMap[string, MemberSession],   // live subprocess per member name
-    Conversation Array[ConversationLine],          // rendered log of TL talk + chunks
+    Conversation Array[session.ConversationLine],  // rendered log of TL talk + chunks
     Composer     string,                           // current draft prompt text
     Tick         int,                              // monotonic tick counter (drives spinners)
     LastError    Option[string],                   // most recent runtime error, footer
@@ -64,6 +64,17 @@ struct AppModel(
     // replaced by the consult viewer overlay listing every active
     // consult and its last few streamed lines.
     ConsultViewerOpen bool,
+    // Past sessions archived under .gala_team/sessions/archive/,
+    // loaded once at startup. Browsable via Ctrl+H.
+    Archives Array[session.SnapshotMeta],
+    // Toggled by Ctrl+H. When true the main pane shows the history
+    // browser; when an archive is selected, ViewingArchive carries
+    // the loaded Snapshot for read-only display.
+    HistoryMode    bool,
+    ViewingArchive Option[session.Snapshot],
+    // Cursor position into the archives list — clamped to
+    // 0..Archives.Size()-1 by the navigation handlers.
+    HistoryCursor int,
 )
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
@@ -87,7 +98,7 @@ func InitialModel(
     Statuses     = EmptyHashMap[string, Status](),
     Pipeline     = EmptyPipelineState(),
     Sessions     = EmptyHashMap[string, MemberSession](),
-    Conversation = EmptyArray[ConversationLine](),
+    Conversation = EmptyArray[session.ConversationLine](),
     Composer     = "",
     Tick         = 0,
     LastError    = None[string](),
@@ -97,6 +108,10 @@ func InitialModel(
     ActiveConsults = EmptyHashMap[string, ConsultSession](),
     ConsultBuffers = EmptyHashMap[string, Array[string]](),
     ConsultViewerOpen = false,
+    Archives          = EmptyArray[session.SnapshotMeta](),
+    HistoryMode       = false,
+    ViewingArchive    = None[session.Snapshot](),
+    HistoryCursor     = 0,
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -151,6 +166,22 @@ sealed type AppMsg {
     case ConsultEnded(Name string, ErrText Option[string])
     // Toggles the consult viewer modal overlay (Tab key).
     case KeyToggleConsultViewer
+    // Toggles the session-history browser (Ctrl+H key). When opened
+    // with no archive selected, shows the index. Esc / Ctrl+H again
+    // returns to the live conversation.
+    case KeyToggleHistory
+    // Cursor navigation in the history index — Up / Down keys.
+    case HistoryCursorUp
+    case HistoryCursorDown
+    // Selects the archive at HistoryCursor for read-only viewing.
+    case HistorySelect
+    // Drops the currently-viewing archive and returns to the index.
+    case HistoryDeselect
+    // Result of an asynchronous archive load — the path/savedAt is
+    // looked up in m.Archives so the model can know which entry was
+    // selected.
+    case HistoryArchiveLoaded(Snap session.Snapshot)
+    case HistoryArchiveFailed(ErrText string)
     // Mouse input. Phase 1: routed but unhandled — the layout doesn't
     // yet expose clickable hit-targets. Plumbing is here so when a
     // future component-level click dispatcher lands, the runtime, the

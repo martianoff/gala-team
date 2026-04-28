@@ -39,18 +39,6 @@ func NoOverrides() Overrides = Overrides(
     DefaultBranch = None[string](),
 )
 
-// NewOverrides is a Go-friendly factory for cross-package callers that
-// need to construct Overrides with non-default values.  Same shape as
-// the named-arg constructor but works around the cross-module struct
-// construction transpiler bug (see TRANSPILER_BUG_GALA_TUI_CROSSMODULE.md
-// Issue 3).
-func NewOverrides(name Option[string], github Option[string], defaultBranch Option[string]) Overrides =
-    Overrides(
-        Name          = name,
-        Github        = github,
-        DefaultBranch = defaultBranch,
-    )
-
 // Resolve is the entry point. Returns Try[Project] so failures (missing
 // dir / not a git repo) surface with useful messages.
 func Resolve(dir string, overrides Overrides) Try[Project] = Try[Project](() => {

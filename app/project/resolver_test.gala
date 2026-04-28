@@ -32,10 +32,10 @@ func TestResolve_OverridesWinOverDetection(t T) T {
     val mkErr = os.MkdirAll(gitDir, os.FileMode(0755))
     val _ = mkErr
 
-    val overrides = NewOverrides(
-        Some[string]("my-project"),
-        Some[string]("github.com/acme/my-project"),
-        Some[string]("trunk"),
+    val overrides = Overrides(
+        Name          = Some[string]("my-project"),
+        Github        = Some[string]("github.com/acme/my-project"),
+        DefaultBranch = Some[string]("trunk"),
     )
     val res = Resolve(tmp, overrides)
     val t1 = IsSuccess(t, res)

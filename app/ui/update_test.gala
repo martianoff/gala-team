@@ -751,3 +751,94 @@ func TestChunkArrived_TwoConsults_AppendsTwoDispatchLines(t T) T {
     val t1 = IsTrue(t,  l1.Text == "dispatching → a")
     return IsTrue(t1, l2.Text == "dispatching → b")
 }
+
+// ---------------------------------------------------------------------------
+// Streaming consult events (Phase 2.4)
+// ---------------------------------------------------------------------------
+
+// ConsultChunkArrived appends a `consult/<name>: <line>` entry to the
+// conversation log AND accumulates the raw line in ConsultBuffers
+// keyed by the consult name. No session needs to be live in
+// ActiveConsults for the model update to succeed (the pump just
+// won't re-arm in that case — a no-op Cmd).
+func TestConsultChunkArrived_AppendsAndBuffers(t T) T {
+    val (m, _) = Update(sampleModel(), ConsultChunkArrived(Name = "transpiler", Line = "thinking..."))
+    val last = m.Conversation.Get(m.Conversation.Size() - 1)
+    val t1 = Eq(t,  last.Speaker, "consult/transpiler")
+    val t2 = Eq(t1, last.Text, "thinking...")
+    return Eq(t2, m.ConsultBuffers.Get("transpiler").GetOrElse(EmptyArray[string]()).Size(), 1)
+}
+
+// Multiple chunks for the same consult accumulate in source order
+// — the buffer is what onConsultEnded scans for the @summary block.
+func TestConsultChunkArrived_AccumulatesInOrder(t T) T {
+    val (m1, _) = Update(sampleModel(), ConsultChunkArrived(Name = "transpiler", Line = "first"))
+    val (m2, _) = Update(m1,            ConsultChunkArrived(Name = "transpiler", Line = "second"))
+    val buffer = m2.ConsultBuffers.Get("transpiler").GetOrElse(EmptyArray[string]())
+    val t1 = Eq(t,  buffer.Size(), 2)
+    val t2 = Eq(t1, buffer.Get(0), "first")
+    return Eq(t2, buffer.Get(1), "second")
+}
+
+// Two interleaved consults must stay isolated — chunks for one don't
+// land in the other's buffer.
+func TestConsultChunkArrived_BuffersAreIsolatedPerName(t T) T {
+    val (m1, _) = Update(sampleModel(), ConsultChunkArrived(Name = "a", Line = "1"))
+    val (m2, _) = Update(m1,            ConsultChunkArrived(Name = "b", Line = "2"))
+    val (m3, _) = Update(m2,            ConsultChunkArrived(Name = "a", Line = "3"))
+    val ba = m3.ConsultBuffers.Get("a").GetOrElse(EmptyArray[string]())
+    val bb = m3.ConsultBuffers.Get("b").GetOrElse(EmptyArray[string]())
+    val t1 = Eq(t,  ba.Size(), 2)
+    return Eq(t1, bb.Size(), 1)
+}
+
+// ConsultEnded with no error and a buffer containing an @summary block
+// drops the session and the buffer from the model. The MsgCmd returned
+// is opaque to update_test — but the model-side cleanup is what we
+// verify here.
+func TestConsultEnded_CleanFinish_DropsBufferAndSession(t T) T {
+    val seed = sampleModel().Copy(
+        ConsultBuffers = EmptyHashMap[string, Array[string]]()
+            .Put("transpiler", ArrayOf("@summary", "fix landed", "@end")),
+    )
+    val (m, _) = Update(seed, ConsultEnded(Name = "transpiler", ErrText = None[string]()))
+    val t1 = IsTrue(t, !m.ConsultBuffers.Get("transpiler").IsDefined())
+    return IsTrue(t1, !m.ActiveConsults.Get("transpiler").IsDefined())
+}
+
+// ConsultEnded with ErrText="EOF" is treated as a clean finish (the
+// runtime's NextChunkFuture wraps EOF as a Failure(io.EOF), but EOF
+// is the natural terminator for a child team that's done thinking).
+func TestConsultEnded_EOFTreatedAsCleanFinish(t T) T {
+    val seed = sampleModel().Copy(
+        ConsultBuffers = EmptyHashMap[string, Array[string]]()
+            .Put("transpiler", EmptyArray[string]()),
+    )
+    val (m, _) = Update(seed, ConsultEnded(Name = "transpiler", ErrText = Some("EOF")))
+    return IsTrue(t, !m.ConsultBuffers.Get("transpiler").IsDefined())
+}
+
+// ConsultEnded with a non-EOF error fires the failure path. We can't
+// observe the chained MsgCmd directly here, but we verify that the
+// model's per-consult state is dropped regardless of error or success.
+func TestConsultEnded_RealErrorAlsoCleansState(t T) T {
+    val seed = sampleModel().Copy(
+        ConsultBuffers = EmptyHashMap[string, Array[string]]()
+            .Put("transpiler", ArrayOf("partial output")),
+    )
+    val (m, _) = Update(seed, ConsultEnded(Name = "transpiler", ErrText = Some("broken pipe")))
+    return IsTrue(t, !m.ConsultBuffers.Get("transpiler").IsDefined())
+}
+
+// ConsultEnded for an unknown consult (no live session, no buffer) is
+// a strict no-op on existing state — defensive against stale
+// duplicate event delivery.
+func TestConsultEnded_UnknownConsult_NoOp(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation = EmptyArray[ConversationLine]().Append(
+            ConversationLine(Speaker = "you", Text = "earlier"),
+        ),
+    )
+    val (m, _) = Update(seed, ConsultEnded(Name = "ghost", ErrText = None[string]()))
+    return Eq(t, m.Conversation.Size(), 1)
+}

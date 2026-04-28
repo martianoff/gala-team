@@ -15,6 +15,7 @@ gala_library(
         "//app/consult",
         "//app/directive",
         "//app/fsm",
+        "//app/headless",
         "//app/onboarding",
         "//app/policy",
         "//app/project",
@@ -37,6 +38,7 @@ gala_go_test(
     ],
     deps = [
         ":ui",
+        "//app/consult",
         "//app/fsm",
         "//app/policy",
         "//app/project",

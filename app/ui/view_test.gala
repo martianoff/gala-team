@@ -200,8 +200,9 @@ func TestView_Footer_DefaultLegend(t T) T {
     val t1 = IsTrue(t,  strings.Contains(out, "Enter send"))
     val t2 = IsTrue(t1, strings.Contains(out, "Ctrl+A approve"))
     val t3 = IsTrue(t2, strings.Contains(out, "Ctrl+R reject"))
-    val t4 = IsTrue(t3, strings.Contains(out, "Tab consults"))
-    return IsTrue(t4, strings.Contains(out, "Ctrl+C quit"))
+    val t4 = IsTrue(t3, strings.Contains(out, "Tab sidebar"))
+    val t5 = IsTrue(t4, strings.Contains(out, "Ctrl+T consults"))
+    return IsTrue(t5, strings.Contains(out, "Ctrl+Q quit"))
 }
 
 // After PrCreated, the legend swaps to the merge-prompt hints.
@@ -210,7 +211,8 @@ func TestView_Footer_PostPrCreated_ShowsMergeHint(t T) T {
     val out = render(m)
     val t1 = IsTrue(t,  strings.Contains(out, "Ctrl+M merge"))
     val t2 = IsTrue(t1, strings.Contains(out, "Ctrl+A re-approve"))
-    return IsTrue(t2, strings.Contains(out, "Tab consults"))
+    val t3 = IsTrue(t2, strings.Contains(out, "Tab sidebar"))
+    return IsTrue(t3, strings.Contains(out, "Ctrl+T consults"))
 }
 
 // LastError takes precedence over the legend — even if LastPrUrl is set.
@@ -230,7 +232,7 @@ func TestView_Footer_LastErrorBeatsLegend(t T) T {
 func TestView_Footer_QuitPending_ShowsConfirmation(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(QuitPending = true)
     val out = render(m)
-    val t1 = IsTrue(t,  strings.Contains(out, "Press Ctrl+C again to confirm"))
+    val t1 = IsTrue(t,  strings.Contains(out, "Press Ctrl+Q again to confirm"))
     return IsTrue(t1, strings.Contains(out, "Esc to cancel"))
 }
 
@@ -240,7 +242,7 @@ func TestView_Footer_QuitPending_BeatsLastError(t T) T {
         LastError   = Some("disk full"),
     )
     val out = render(m)
-    val t1 = IsTrue(t,  strings.Contains(out, "Press Ctrl+C again to confirm"))
+    val t1 = IsTrue(t,  strings.Contains(out, "Press Ctrl+Q again to confirm"))
     return IsFalse(t1, strings.Contains(out, "disk full"))
 }
 
@@ -449,6 +451,252 @@ func TestView_Conversation_VeryLongLine_DoesNotCrash(t T) T {
     return IsTrue(t, strings.Contains(out, "Iris:"))
 }
 
+// ---------------------------------------------------------------------------
+// Recovery banner — appears above the conversation pane when a prior
+// session was loaded at startup (cmd/main.gala::primeFromSnapshot
+// sets RecoveryBannerVisible).
+// ---------------------------------------------------------------------------
+
+func TestView_RecoveryBanner_HiddenByDefault(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    return IsFalse(t, strings.Contains(out, "Restored"))
+}
+
+func TestView_RecoveryBanner_ShowsLineAndAgentCounts(t T) T {
+    val convo = ArrayOf(session.ConversationLine(Speaker = "you", Text = "ship"))
+    val m = mkModel(mkTeam("X", "")).Copy(
+        Conversation          = convo,
+        RecoveredMembers      = ArrayOf("Iris", "Felix"),
+        RecoveryBannerVisible = true,
+    )
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "Restored"))
+    val t2 = IsTrue(t1, strings.Contains(out, "1 line"))
+    val t3 = IsTrue(t2, strings.Contains(out, "2 agents pending"))
+    return IsTrue(t3, strings.Contains(out, "type a prompt to continue"))
+}
+
+func TestView_RecoveryBanner_NoAgentsPending_OmitsAgentNote(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        Conversation          = ArrayOf(session.ConversationLine(Speaker = "you", Text = "x")),
+        RecoveredMembers      = EmptyArray[string](),
+        RecoveryBannerVisible = true,
+    )
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "Restored"))
+    return IsFalse(t1, strings.Contains(out, "agent"))
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar focus indicator — the focused panel switches from a
+// rounded border to a thick border. The heading text is identical
+// in both states; the border weight is the only "you are here"
+// signal.
+// ---------------------------------------------------------------------------
+
+func TestView_Sidebar_RoundedBorder_WhenComposerFocused(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    // Rounded corners — the unfocused border kind.
+    val t1 = IsTrue(t,  strings.Contains(out, "╭"))
+    return IsFalse(t1, strings.Contains(splitTopBorder(out), "┏"))
+}
+
+func TestView_Sidebar_ThickBorder_WhenSidebarFocused(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(Focus = FocusSidebar())
+    // A thick top-border glyph appears somewhere on screen.
+    return IsTrue(t, strings.Contains(render(m), "┏"))
+}
+
+// splitTopBorder returns just the top border line so we can assert
+// "no thick glyph in the SIDEBAR border" without false positives
+// from the composer / mainpanel borders below.
+func splitTopBorder(out string) string {
+    val lines = strings.Split(out, "\n")
+    if len(lines) < 4 { return out }
+    return lines[3]  // header is rows 0-2, sidebar top border is row 3
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar fold/unfold — collapsed groups render "▶ <Name>" and hide
+// their member rows; expanded groups render "▼ <Name>" with rows.
+// ---------------------------------------------------------------------------
+
+func TestView_Sidebar_AllGroupsExpandedByDefault(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    val t1 = IsTrue(t, strings.Contains(out, "▼ Lead"))
+    val t2 = IsTrue(t1, strings.Contains(out, "▼ Engineering"))
+    return IsTrue(t2, strings.Contains(out, "▼ QA"))
+}
+
+func TestView_Sidebar_CollapsedGroupShowsCarat(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(CollapsedGroups = ArrayOf("Lead"))
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "▶ Lead"))
+    return IsFalse(t1, strings.Contains(out, "▼ Lead"))
+}
+
+// Member rows under a collapsed group are hidden from render.
+func TestView_Sidebar_CollapsedGroup_HidesMembers(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(CollapsedGroups = ArrayOf("Engineering"))
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "Iris"))   // Lead still visible
+    return IsFalse(t1, strings.Contains(out, "Felix"))  // engineer hidden
+}
+
+// Cursor highlight: the row at SidebarCursor gets a "▶ " lead in
+// addition to whatever glyph the row would normally render.
+func TestView_Sidebar_Cursor_HighlightsCursoredRow(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        Focus         = FocusSidebar(),
+        SidebarCursor = 0,
+    )
+    val out = render(m)
+    return IsTrue(t, strings.Contains(out, "▶ ▼ Lead"))
+}
+
+// When Focus=Composer, the cursor row is NOT highlighted even if
+// SidebarCursor was previously moved (cursor only matters when the
+// sidebar is the active panel).
+func TestView_Sidebar_Cursor_NotHighlightedWhenComposerFocused(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(SidebarCursor = 0)
+    val out = render(m)
+    return IsFalse(t, strings.Contains(out, "▶ ▼ Lead"))
+}
+
+// ---------------------------------------------------------------------------
+// Footer per-focus legend — sidebar mode hides the composer-mode
+// hints and surfaces the navigation keys instead.
+// ---------------------------------------------------------------------------
+
+func TestView_Footer_SidebarFocus_ShowsNavLegend(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(Focus = FocusSidebar())
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "↑↓ navigate"))
+    val t2 = IsTrue(t1, strings.Contains(out, "Space fold/unfold"))
+    return IsTrue(t2, strings.Contains(out, "Esc back to composer"))
+}
+
+func TestView_Footer_ComposerFocus_ShowsCtrlLHint(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    return IsTrue(t, strings.Contains(out, "Tab sidebar"))
+}
+
+// ---------------------------------------------------------------------------
+// Sidebar scrolling — when the row list exceeds SidebarVisibleRows
+// the rendered window slides so the cursor stays in view, with a
+// "N more above/below" hint replacing the edge row.
+// ---------------------------------------------------------------------------
+
+func mkBigTeam() Team {
+    val iris = Member(
+        Name = "Iris", Role = TeamLead(),
+        Personality = "calm", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    var members = ArrayOf(iris)
+    var i = 0
+    for i < 20 {
+        members = members.Append(Member(
+            Name = s"Eng${i}", Role = Engineer(),
+            Personality = "", Model = None[string](), Extra = "",
+            Onboarding = EmptyArray[string](),
+        ))
+        i = i + 1
+    }
+    return Team(
+        Key = "main", Name = "BigTeam", Description = "",
+        Members = members, Lead = iris,
+        Onboarding = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
+    )
+}
+
+// Cursor at row 0 with 20+ members → "more below" hint appears,
+// "more above" doesn't.
+func TestView_Sidebar_Scroll_CursorAtTop_ShowsBelowHint(t T) T {
+    val m = mkModel(mkBigTeam()).Copy(Focus = FocusSidebar(), SidebarCursor = 0)
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "more below"))
+    return IsFalse(t1, strings.Contains(out, "more above"))
+}
+
+// Cursor at the actual last row → "more above" appears, "more
+// below" gone (the cursor IS the bottom). mkBigTeam has 1 lead +
+// 20 engineers + 0 QA → 3 group headers + 21 members = 24 rows;
+// cursor index 23 is the QA group header (the trailing empty
+// group row).
+func TestView_Sidebar_Scroll_CursorAtBottom_ShowsAboveHint(t T) T {
+    val tm = mkBigTeam()
+    val m = mkModel(tm).Copy(
+        Focus         = FocusSidebar(),
+        SidebarCursor = 23,
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "more above"))
+    return IsFalse(t1, strings.Contains(out, "more below"))
+}
+
+// Cursor in the middle → both hints visible; the cursor row is
+// somewhere inside the window between them.
+func TestView_Sidebar_Scroll_CursorMiddle_ShowsBothHints(t T) T {
+    val m = mkModel(mkBigTeam()).Copy(Focus = FocusSidebar(), SidebarCursor = 10)
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "more above"))
+    return IsTrue(t1, strings.Contains(out, "more below"))
+}
+
+// History index also scrolls — at 30 archives with cursor at 0,
+// "more below" appears.
+func TestView_HistoryIndex_Scroll_CursorAtTop_ShowsBelowHint(t T) T {
+    var archives = EmptyArray[session.SnapshotMeta]()
+    var i = 0
+    for i < 30 {
+        archives = archives.Append(sampleArchive(int64(i), "merged", s"proj${i}", i))
+        i = i + 1
+    }
+    val m = mkModel(mkTeam("X", "")).Copy(
+        HistoryMode   = true,
+        Archives      = archives,
+        HistoryCursor = 0,
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "more below"))
+    return IsFalse(t1, strings.Contains(out, "more above"))
+}
+
+func TestView_HistoryIndex_Scroll_CursorAtBottom_ShowsAboveHint(t T) T {
+    var archives = EmptyArray[session.SnapshotMeta]()
+    var i = 0
+    for i < 30 {
+        archives = archives.Append(sampleArchive(int64(i), "merged", s"proj${i}", i))
+        i = i + 1
+    }
+    val m = mkModel(mkTeam("X", "")).Copy(
+        HistoryMode   = true,
+        Archives      = archives,
+        HistoryCursor = 29,
+    )
+    val out = render(m)
+    return IsTrue(t, strings.Contains(out, "more above"))
+}
+
+// History detail panel clips long snapshots, mirroring the live
+// conversation pane's "N earlier hidden" hint.
+func TestView_HistoryDetail_Clipping_LongSnapshot_ShowsHiddenHint(t T) T {
+    var convo = EmptyArray[session.ConversationLine]()
+    var i = 0
+    for i < 50 {
+        convo = convo.Append(session.ConversationLine(Speaker = "Iris", Text = s"line ${i}"))
+        i = i + 1
+    }
+    val snap = session.Snapshot("demo", int64(1714233600000000000), convo, EmptyArray[string]())
+    val m = mkModel(mkTeam("X", "")).Copy(
+        HistoryMode    = true,
+        ViewingArchive = Some(snap),
+    )
+    return IsTrue(t, strings.Contains(render(m), "earlier line(s) hidden"))
+}
+
 // 50-member team — sidebar should still render without overflowing
 // into the conversation pane (the Flex(1) constraint clips members).
 func TestView_Sidebar_FiftyMembers_DoesNotCrash(t T) T {
@@ -585,15 +833,15 @@ func TestFlow_TypeThenBackspace_ComposerShortens(t T) T {
     return IsFalse(t1, strings.Contains(out, "hi▌"))
 }
 
-// Tab opens the consult viewer; the composer is not the visible pane.
-func TestFlow_Tab_RendersConsultViewer(t T) T {
+// Ctrl+T opens the consult viewer; the composer is not the visible pane.
+func TestFlow_CtrlT_RendersConsultViewer(t T) T {
     val seed = mkModel(mkTeam("X", ""))
     val (m, _) = Update(seed, KeyToggleConsultViewer())
     return IsTrue(t, strings.Contains(render(m), "Consult viewer"))
 }
 
-// Tab twice closes it — the consult-viewer header is gone.
-func TestFlow_TabTwice_ClosesConsultViewer(t T) T {
+// Ctrl+T twice closes it — the consult-viewer header is gone.
+func TestFlow_CtrlTTwice_ClosesConsultViewer(t T) T {
     val seed = mkModel(mkTeam("X", ""))
     val (m1, _) = Update(seed, KeyToggleConsultViewer())
     val (m2, _) = Update(m1,   KeyToggleConsultViewer())
@@ -631,16 +879,20 @@ func TestFlow_SessionFailed_FooterWarns(t T) T {
 }
 
 // ---------------------------------------------------------------------------
-// Mouse-driven flows — MouseAt is currently a no-op, so the snapshot
-// after a click is identical to the snapshot before the click. The
-// tests here lock that invariant in so a future change that
-// accidentally mutates the model on click breaks loud and early.
+// Mouse-driven flows — clicks inside the sidebar columns switch
+// Focus to FocusSidebar (and on a group header also toggle fold);
+// clicks outside snap focus back to the composer. Release events
+// are no-ops so a drag from one panel to another doesn't reset
+// focus mid-drag.
 // ---------------------------------------------------------------------------
 
-func TestFlow_MousePress_LeavesRenderUnchanged(t T) T {
+// Press outside the sidebar column with default Focus=Composer
+// changes nothing — the click lands on the conversation pane,
+// which has no hit-targets yet.
+func TestFlow_MousePressOutsideSidebar_LeavesRenderUnchanged(t T) T {
     val seed = mkModel(mkTeam("X", ""))
     val before = render(seed)
-    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 10, Pressed = true))
     return Eq(t, render(m), before)
 }
 
@@ -651,8 +903,10 @@ func TestFlow_MouseRelease_LeavesRenderUnchanged(t T) T {
     return Eq(t, render(m), before)
 }
 
-// Mouse at out-of-bounds coordinates (negative, way past viewport) —
-// still no-op, render unchanged.
+// Out-of-bounds in either direction — negative coords are
+// outside the sidebar column-band; large coords are also outside
+// the sidebar column-band (x > 28 means "right of sidebar").
+// Either way no focus change.
 func TestFlow_MouseOutOfBounds_NoChange(t T) T {
     val seed = mkModel(mkTeam("X", ""))
     val before = render(seed)
@@ -662,18 +916,30 @@ func TestFlow_MouseOutOfBounds_NoChange(t T) T {
     return Eq(t1, render(m2), before)
 }
 
-// Mouse press in history mode doesn't disturb the history panel.
+// Press in the sidebar columns focuses it. The model's Focus
+// switches to FocusSidebar — the visual change is the sidebar's
+// border weight (rounded → thick).
+func TestFlow_MousePressInSidebar_FocusesSidebar(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    return m.Focus match {
+        case FocusSidebar()  => IsTrue(t, true)
+        case FocusComposer() => IsTrue(t, false)
+    }
+}
+
+// Mouse press in history mode keeps the history panel visible —
+// the history overlay sits above the sidebar so a sidebar click
+// shouldn't close the panel.
 func TestFlow_MouseInHistoryMode_DoesNotClosePanel(t T) T {
     val seed = mkModel(mkTeam("X", "")).Copy(HistoryMode = true)
-    val before = render(seed)
     val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
-    val t1 = Eq(t, render(m), before)
-    return IsTrue(t1, strings.Contains(render(m), "History  ·"))
+    return IsTrue(t, strings.Contains(render(m), "History  ·"))
 }
 
 // Mouse press in consult viewer mode doesn't close the modal.
 func TestFlow_MouseInConsultViewer_DoesNotClose(t T) T {
     val seed = mkModel(mkTeam("X", "")).Copy(ConsultViewerOpen = true)
-    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 10, Pressed = true))
     return IsTrue(t, strings.Contains(render(m), "Consult viewer"))
 }

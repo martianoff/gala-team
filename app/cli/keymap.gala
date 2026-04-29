@@ -19,26 +19,39 @@ import (
 
 // InputToAppMsg lifts a unified gala-tui InputEvent (key, mouse,
 // resize, unknown) into an AppMsg. Keyboard dispatches via
-// KeyToAppMsg; mouse clicks/drags become MouseAt. Resize and unknown
-// events are no-ops for now — when a future component-level click
-// dispatcher needs the resize signal, it can branch here.
+// KeyToAppMsg; mouse button presses become MouseAt; scroll-wheel
+// events drop to NoOp (the conversation pane doesn't yet have a
+// scroll viewport, and routing scroll deltas as clicks would
+// flip focus on every wheel tick). Resize / unknown are also
+// no-ops — when a future component-level click dispatcher needs
+// the resize signal, it can branch here.
 func InputToAppMsg(ev InputEvent) AppMsg = ev match {
-    case KeyInput(key)        => KeyToAppMsg(key)
-    case MouseInput(me)       => MouseAt(X = me.X, Y = me.Y, Pressed = me.Pressed)
-    case ResizeInput(_, _)    => NoOp()
-    case UnknownInput()       => NoOp()
+    case KeyInput(key)     => KeyToAppMsg(key)
+    case MouseInput(me)    => mouseToAppMsg(me)
+    case ResizeInput(_, _) => NoOp()
+    case UnknownInput()    => NoOp()
+}
+
+// mouseToAppMsg lifts a MouseEvent to an AppMsg, dropping
+// scroll-wheel events (which would otherwise round-trip as
+// MouseAt and re-flip focus on every tick) but forwarding every
+// real button as MouseAt for the update layer to interpret.
+func mouseToAppMsg(me MouseEvent) AppMsg = me.Btn match {
+    case MouseScrollUp()   => NoOp()
+    case MouseScrollDown() => NoOp()
+    case _                 => MouseAt(X = me.X, Y = me.Y, Pressed = me.Pressed)
 }
 
 // KeyToAppMsg translates one keyboard event into an AppMsg.
 //
 // Keys:
-//   - Ctrl+C / Ctrl+Q  →  QuitMsg              (close all sessions, exit)
+//   - Ctrl+C / Ctrl+Q  →  QuitMsg              (graceful, with confirmation)
 //   - Ctrl+A           →  KeyApprove           (approval pipeline)
 //   - Ctrl+R           →  KeyReject            (back to chat)
 //   - Ctrl+M           →  KeyMerge             (merge after PrCreated)
 //   - Ctrl+H           →  KeyToggleHistory     (history browser)
-//   - Ctrl+L           →  KeyToggleFocus       (composer ↔ sidebar)
-//   - Tab              →  KeyToggleConsultViewer (consult overlay)
+//   - Ctrl+T           →  KeyToggleConsultViewer (consult overlay)
+//   - Tab / Ctrl+L     →  KeyToggleFocus       (composer ↔ sidebar)
 //   - Backspace        →  KeyBackspace
 //   - Enter            →  KeySubmit            (composer or history-select)
 //   - Up / Down        →  HistoryCursorUp/Down (history mode + sidebar)
@@ -47,6 +60,17 @@ func InputToAppMsg(ev InputEvent) AppMsg = ev match {
 //                          treated as ' ' typed into the composer
 //   - Char(c)          →  KeyChar(c)
 //   - any other        →  NoOp
+//
+// gala-tui's runtime previously consumed Ctrl+C as a hard-coded
+// `isForcedQuit` escape hatch, but that's been disabled (see the
+// note in gala-tui/runtime.gala::isForcedQuit) so apps can run the
+// two-press confirmation flow in `onQuit`. Ctrl+C and Ctrl+Q now
+// behave identically.
+//
+// Tab is bound to focus-cycle (the conventional "next pane" key in
+// terminal UIs) rather than the consult viewer so users can reach
+// the sidebar without learning Ctrl+L. The consult viewer overlay
+// moves to Ctrl+T ("toggle consult").
 //
 // Note that Space dispatch depends on AppModel.Focus and so cannot
 // be decided at the keymap layer alone — it's emitted as a
@@ -65,8 +89,8 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+r"))           { return KeyReject() }
     if (KeyMatchesAny(ev, "ctrl+m"))           { return KeyMerge() }
     if (KeyMatchesAny(ev, "ctrl+h"))           { return KeyToggleHistory() }
-    if (KeyMatchesAny(ev, "ctrl+l"))           { return KeyToggleFocus() }
-    if (KeyMatchesAny(ev, "tab"))              { return KeyToggleConsultViewer() }
+    if (KeyMatchesAny(ev, "ctrl+t"))           { return KeyToggleConsultViewer() }
+    if (KeyMatchesAny(ev, "ctrl+l", "tab"))    { return KeyToggleFocus() }
     return ev.Key match {
         case Backspace()  => KeyBackspace()
         case Enter()      => KeySubmit()

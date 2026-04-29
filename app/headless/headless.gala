@@ -85,24 +85,27 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
     val _ = SendFuture(s, wirePrompt).Await()
 
     var stopped = false
-    var failure = onbErr.Map((e) => s"onboarding: ${e}")
+    var failure = onbErr.Map[string]((e) => s"onboarding: ${e}")
     for !stopped {
-        NextChunkFuture(s).Await() match {
+        val res Try[Msg] = NextChunkFuture(s).Await()
+        res match {
             case Failure(err) => {
-                failure = Some(s"runtime: ${err.Error()}")
+                failure = Some[string](s"runtime: ${err.Error()}")
                 stopped = true
             }
-            case Success(RtChunkArrived(_, line)) => {
-                convo = convo.Append(session.ConversationLine(Speaker = name, Text = line))
-            }
-            case Success(RtSessionFailed(_, err)) => {
-                val msg = err.Error()
-                if (msg != "EOF") {
-                    failure = Some(s"${name}: ${msg}")
+            case Success(rt) => rt match {
+                case RtChunkArrived(_, line) => {
+                    convo = convo.Append(session.ConversationLine(Speaker = name, Text = line))
                 }
-                stopped = true
+                case RtSessionFailed(_, err) => {
+                    val msg = err.Error()
+                    if (msg != "EOF") {
+                        failure = Some[string](s"${name}: ${msg}")
+                    }
+                    stopped = true
+                }
+                case _ => {}
             }
-            case _ => {}
         }
     }
 

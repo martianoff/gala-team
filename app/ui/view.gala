@@ -40,6 +40,12 @@ import (
 // Both overlays are mutually exclusive — opening one auto-closes
 // the other isn't necessary because the toggle handlers leave both
 // flags untouched (so the precedence below decides what's shown).
+//
+// Focus indicator: the focused panel gets a thick border; the
+// unfocused panel keeps the rounded border. No text markers, no
+// color tints — the heavier border weight is the only "you are
+// here" signal, and it reads consistently regardless of which
+// pane has focus.
 func View(m AppModel) Widget {
     val header = headerWidget(m)
     val sidebar = sidebarWidget(m)
@@ -49,16 +55,37 @@ func View(m AppModel) Widget {
     return Column(ArrayOf[LayoutChild](
         Fixed(3, header),
         Flex(1, Row(ArrayOf[LayoutChild](
-            Fixed(28, BorderOf(sidebar, RoundedBorder())),
+            Fixed(28, BorderOf(sidebar, panelBorder(m, FocusSidebar()))),
             Flex(1, Column(ArrayOf[LayoutChild](
                 recoveryBanner(m),
                 approvalBanner(m),
                 Flex(1, BorderOf(mainPanel, RoundedBorder())),
             ))),
         ))),
-        Fixed(3, BorderOf(composer, RoundedBorder())),
+        Fixed(3, BorderOf(composer, panelBorder(m, FocusComposer()))),
         Fixed(1, footer),
     ))
+}
+
+// panelBorder returns ThickBorder when this panel is the focused
+// one, RoundedBorder otherwise. Pure dispatch on AppModel.Focus.
+func panelBorder(m AppModel, panel FocusState) BorderKind {
+    val focused = focusEquals(m.Focus, panel)
+    if focused { return ThickBorder() }
+    return RoundedBorder()
+}
+
+// focusEquals avoids a generic equals on the FocusState sealed
+// type — gala doesn't synthesise == for sealed cases by default.
+func focusEquals(a FocusState, b FocusState) bool = a match {
+    case FocusComposer() => b match {
+        case FocusComposer() => true
+        case FocusSidebar()  => false
+    }
+    case FocusSidebar()  => b match {
+        case FocusComposer() => false
+        case FocusSidebar()  => true
+    }
 }
 
 // mainPanelWidget chooses the central pane: history browser takes
@@ -161,18 +188,14 @@ func sidebarWidget(m AppModel) Widget {
     ))
 }
 
-// sidebarHeading toggles a focus marker on the "Team" header
-// label so the user can see at a glance which panel keystrokes
-// will affect.
-func sidebarHeading(m AppModel) string = m.Focus match {
-    case FocusSidebar()  => "  Team  ◀"
-    case FocusComposer() => "  Team"
-}
+// sidebarHeading is just "Team" — focus is communicated through
+// the panel's border weight (see View() / panelBorder), not via
+// in-pane text markers or color tints. Keeping the heading text
+// stable means screen-readers and copy-paste workflows don't get
+// confused by transient suffixes.
+func sidebarHeading(m AppModel) string = "  Team"
 
-func sidebarHeadingStyle(m AppModel) Style = m.Focus match {
-    case FocusSidebar()  => DefaultStyle().WithBold().WithFg(BrightCyan())
-    case FocusComposer() => DefaultStyle().WithBold()
-}
+func sidebarHeadingStyle(m AppModel) Style = DefaultStyle().WithBold()
 
 // conversationVisibleLines is the soft cap on rendered lines per
 // frame. The underlying conversation log can grow indefinitely
@@ -228,12 +251,23 @@ func speakerStyle(speaker string) Style =
 // fighting the main pane for vertical space.
 val consultViewerVisibleLines = 8
 
+// consultViewerMaxEntries caps how many active consults are
+// rendered in the modal at once. Each entry is ~10 rows
+// (title + tail of consultViewerVisibleLines + spacer), so the
+// limit keeps the modal from blowing past a typical 24-row
+// terminal even when the lead has fanned out aggressively. The
+// remaining consults are surfaced with a "↓ N more open"
+// footer-hint row.
+val consultViewerMaxEntries = 3
+
 // consultViewerPanel renders the modal overlay listing every active
 // cross-team consult with its target team / project header and the
 // last few streamed stdout lines. Replaces the main conversation
-// pane when AppModel.ConsultViewerOpen is true.
+// pane when AppModel.ConsultViewerOpen is true. With more consults
+// open than fit, only the first N are rendered with a "N more
+// running" hint below.
 func consultViewerPanel(m AppModel) Widget {
-    val header = TextStyled("  Consult viewer  (Tab to close)",
+    val header = TextStyled("  Consult viewer  (Ctrl+T to close)",
         DefaultStyle().WithBold().WithFg(BrightYellow()))
     val active = m.ActiveConsults
     if active.IsEmpty() {
@@ -241,16 +275,36 @@ func consultViewerPanel(m AppModel) Widget {
             Fixed(1, header),
             Fixed(1, Empty()),
             Fixed(1, TextStyled(
-                "  (no active consults — Tab again or wait for the lead to @consult someone)",
+                "  (no active consults — Ctrl+T again or wait for the lead to @consult someone)",
                 DefaultStyle().WithDim())),
             Flex(1, Empty()),
         ))
     }
-    val rows = active.FoldLeftKV(EmptyArray[LayoutChild](), (acc, name, sess) =>
-        acc.AppendAll(consultEntryRows(m, name, sess))
+    val total = active.Size()
+    val accum = active.FoldLeftKV(
+        Tuple[Array[LayoutChild], int](EmptyArray[LayoutChild](), 0),
+        (state, name, sess) => {
+            val (rows, count) = state
+            if count >= consultViewerMaxEntries {
+                return Tuple[Array[LayoutChild], int](rows, count + 1)
+            }
+            return Tuple[Array[LayoutChild], int](
+                rows.AppendAll(consultEntryRows(m, name, sess)),
+                count + 1,
+            )
+        },
     )
+    val (rows, _) = accum
+    val overflow = total - consultViewerMaxEntries
+    val moreHint = if (overflow > 0)
+                       ArrayOf[LayoutChild](Fixed(1, TextStyled(
+                           s"  ↓ ${overflow} more consult(s) running — see latest.json for full transcripts",
+                           DefaultStyle().WithDim())))
+                   else
+                       EmptyArray[LayoutChild]()
     val children = ArrayOf[LayoutChild](Fixed(1, header), Fixed(1, Empty()))
         .AppendAll(rows)
+        .AppendAll(moreHint)
         .Append(Flex(1, Empty()))
     return Column(children)
 }
@@ -306,7 +360,7 @@ func composerWidget(m AppModel) Widget {
 func footerWidget(m AppModel) Widget {
     if m.QuitPending {
         return TextStyled(
-            "  ⚠ Quit? Press Ctrl+C again to confirm · Esc to cancel",
+            "  ⚠ Quit? Press Ctrl+Q again to confirm · Esc to cancel",
             DefaultStyle().WithBold().WithFg(BrightYellow()),
         )
     }
@@ -318,17 +372,17 @@ func footerWidget(m AppModel) Widget {
 
 // footerHints picks a context-appropriate key legend. After
 // PrCreated, surface Ctrl+M; otherwise show the default legend.
-// Ctrl+C and Ctrl+Q are equivalent quit shortcuts — we only mention
-// Ctrl+C in the hint to keep the legend short. Quit comes first so
-// it survives narrow-terminal clipping; new users always need to
-// know how to exit. Tab toggles the consult viewer modal whenever
-// there are (or might soon be) active cross-team consults to peek
-// at; Ctrl+H opens the saved-archive browser.
+// Quit is bound to Ctrl+Q (with two-press confirmation); Ctrl+C
+// is gala-tui's hard-kill backstop and isn't advertised. Quit
+// comes first so it survives narrow-terminal clipping; new users
+// always need to know how to exit. Tab moves focus to the sidebar
+// (Ctrl+L is the alias); Ctrl+T toggles the consult viewer modal;
+// Ctrl+H opens the saved-archive browser.
 func footerHints(m AppModel) string = m.Focus match {
-    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc back to composer · Ctrl+C quit"
+    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc back to composer · Ctrl+Q quit"
     case FocusComposer() => m.LastPrUrl match {
-        case Some(_) => "  Ctrl+C quit · Ctrl+M merge · Ctrl+A re-approve · Tab consults · Ctrl+L sidebar"
-        case None()  => "  Ctrl+C quit · Enter send · Ctrl+A approve · Ctrl+R reject · Tab consults · Ctrl+L sidebar"
+        case Some(_) => "  Ctrl+Q quit · Ctrl+M merge · Ctrl+A re-approve · Tab sidebar · Ctrl+T consults"
+        case None()  => "  Ctrl+Q quit · Enter send · Ctrl+A approve · Ctrl+R reject · Tab sidebar · Ctrl+T consults"
     }
 }
 
@@ -357,9 +411,18 @@ func historyPanel(m AppModel) Widget = m.ViewingArchive match {
 
 
 
+// historyIndexVisibleRows is the soft cap on rendered archive
+// rows. With more, the window slides so HistoryCursor stays in
+// view (same scrolling treatment as the team sidebar). Picked to
+// fill a reasonable fraction of the main pane without crowding
+// the conversation pane behind it.
+val historyIndexVisibleRows = 18
+
 // historyIndexPanel renders the list of past archives. Empty case
 // surfaces a friendly "no merges yet" so first-time users understand
-// the lifecycle.
+// the lifecycle. When the archive list overflows
+// historyIndexVisibleRows, the window scrolls to keep
+// HistoryCursor on screen with "↑/↓ N more" hints at the edges.
 func historyIndexPanel(m AppModel) Widget {
     val header = TextStyled(
         "  History  ·  ↑↓ navigate · Enter open · Ctrl+H close",
@@ -375,15 +438,59 @@ func historyIndexPanel(m AppModel) Widget {
             Flex(1, Empty()),
         ))
     }
-    val rows = m.Archives.ZipWithIndex().Map((pair) => Fixed(
-        1,
-        archiveRowWidget(pair.V1, pair.V2 == m.HistoryCursor),
-    ))
+    val rows = scrolledHistoryRows(m)
     val children = ArrayOf[LayoutChild](Fixed(1, header), Fixed(1, Empty()))
         .AppendAll(rows)
         .Append(Flex(1, Empty()))
     return Column(children)
 }
+
+// scrolledHistoryRows builds the visible window of archive rows
+// around HistoryCursor. Reuses the same scrollStart / "N more"
+// hint convention as the team sidebar so the two scrollable
+// panels feel consistent.
+func scrolledHistoryRows(m AppModel) Array[LayoutChild] {
+    val total = m.Archives.Size()
+    if total <= historyIndexVisibleRows {
+        return m.Archives.ZipWithIndex().Map((pair) => Fixed(
+            1,
+            archiveRowWidget(pair.V1, pair.V2 == m.HistoryCursor),
+        ))
+    }
+    val start = scrollStartGeneric(m.HistoryCursor, total, historyIndexVisibleRows)
+    val end = start + historyIndexVisibleRows
+    val above = start
+    val below = total - end
+    var out = EmptyArray[LayoutChild]()
+    var i = start
+    for i < end {
+        val widget = if (i == start && above > 0)
+                         scrollEdgeHint(s"  ↑ ${above} more above")
+                     else if (i == end - 1 && below > 0)
+                         scrollEdgeHint(s"  ↓ ${below} more below")
+                     else
+                         archiveRowWidget(m.Archives.Get(i), i == m.HistoryCursor)
+        out = out.Append(Fixed(1, widget))
+        i = i + 1
+    }
+    return out
+}
+
+// scrollStartGeneric is the local copy of app/view's scrollStart
+// — same algorithm, kept here so app/ui doesn't have to depend on
+// app/view's helper. Cursor < 0 anchors the window at 0; cursor
+// past the upper half slides the window down; the result is
+// always within [0, total - windowH].
+func scrollStartGeneric(cursor int, total int, windowH int) int {
+    if cursor < 0 { return 0 }
+    if cursor < windowH { return 0 }
+    val maxStart = total - windowH
+    val want = cursor - windowH + 1
+    if want > maxStart { return maxStart }
+    return want
+}
+
+func scrollEdgeHint(text string) Widget = TextStyled(text, DefaultStyle().WithDim())
 
 // archiveRowWidget renders one entry in the history index. The
 // cursor-highlighted row gets a "▶ " prefix and bright styling;
@@ -397,19 +504,33 @@ func archiveRowWidget(meta session.SnapshotMeta, isCursor bool) Widget {
 }
 
 // historyDetailPanel renders a fully-loaded archive in read-only
-// mode. Mirrors conversationPanel's rendering of the live convo so
-// the user feels at home.
+// mode. Mirrors conversationPanel's tail-clipping so a long
+// archive doesn't blow past the bottom of the pane: render the
+// last `conversationVisibleLines` lines with a "N earlier hidden"
+// hint at the top when the snapshot is taller than the cap.
 func historyDetailPanel(snap session.Snapshot) Widget {
     val header = TextStyled(
         s"  ${formatSavedAt(snap.SavedAt)}  ·  ${snap.ProjectName}  ·  Esc to return to index",
         DefaultStyle().WithBold().WithFg(BrightYellow()),
     )
-    val lines = snap.Conversation.Map((cl session.ConversationLine) => Fixed(
+    val all = snap.Conversation
+    val total = all.Size()
+    val visible = if (total <= conversationVisibleLines) all
+                  else                                    all.Drop(total - conversationVisibleLines)
+    val hidden = total - visible.Size()
+    val hiddenLine = if (hidden > 0)
+                         ArrayOf[LayoutChild](Fixed(1, TextStyled(
+                             s"  …${hidden} earlier line(s) hidden",
+                             DefaultStyle().WithDim())))
+                     else
+                         EmptyArray[LayoutChild]()
+    val lines = visible.Map((cl session.ConversationLine) => Fixed(
         1,
         TextStyled(s"  ${cl.Speaker}: ${cl.Text}", speakerStyle(cl.Speaker)),
     ))
+    val body = hiddenLine.AppendAll(lines)
     val children = ArrayOf[LayoutChild](Fixed(1, header), Fixed(1, Empty()))
-        .AppendAll(lines)
+        .AppendAll(body)
         .Append(Flex(1, Empty()))
     return Column(children)
 }

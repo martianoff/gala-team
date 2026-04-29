@@ -48,8 +48,8 @@ func TestDispatch_MultipleInOneMessage(t T) T {
         "@dispatch(Mira) Session middleware patch.\n@end\n"
     val dirs = Parse(msg)
     val t1 = Eq(t, dirs.Length(), 2)
-    val firstD = dirs.Get(0)
-    val secondD = dirs.Get(1)
+    val firstD  Directive = dirs.Get(0)
+    val secondD Directive = dirs.Get(1)
     val t2 = firstD match {
         case Dispatch(name, _) => Eq(t1, name, "Felix")
         case _                  => IsTrue(t1, false)
@@ -156,11 +156,13 @@ func TestParse_MixedDispatchSummary_PreservesOrder(t T) T {
     val msg = "@dispatch(Felix) work\n@end\n\n@summary\ndone\n@end"
     val dirs = Parse(msg)
     val t1 = Eq(t, dirs.Length(), 2)
-    val t2 = dirs.Get(0) match {
+    val d0 Directive = dirs.Get(0)
+    val d1 Directive = dirs.Get(1)
+    val t2 = d0 match {
         case Dispatch(_, _) => IsTrue(t1, true)
         case _              => IsTrue(t1, false)
     }
-    return dirs.Get(1) match {
+    return d1 match {
         case Summary(_) => IsTrue(t2, true)
         case _          => IsTrue(t2, false)
     }
@@ -170,7 +172,8 @@ func TestParse_SummaryThenDispatch(t T) T {
     val msg = "@summary\nfinal\n@end\n@dispatch(Felix) work\n@end"
     val dirs = Parse(msg)
     val t1 = Eq(t, dirs.Length(), 2)
-    return dirs.Get(0) match {
+    val d0 Directive = dirs.Get(0)
+    return d0 match {
         case Summary(body) => Eq(t1, body, "final")
         case _             => IsTrue(t1, false)
     }
@@ -204,11 +207,13 @@ func TestParse_MultipleConsults(t T) T {
     val msg = "@consult(transpiler) repro 1\n@end\n\n@consult(qa-lib) repro 2\n@end"
     val dirs = Parse(msg)
     val t1 = Eq(t, dirs.Length(), 2)
-    val t2 = dirs.Get(0) match {
+    val d0 Directive = dirs.Get(0)
+    val d1 Directive = dirs.Get(1)
+    val t2 = d0 match {
         case Consult(target, _, _) => Eq(t1, target, "transpiler")
         case _                     => IsTrue(t1, false)
     }
-    return dirs.Get(1) match {
+    return d1 match {
         case Consult(target, _, _) => Eq(t2, target, "qa-lib")
         case _                     => IsTrue(t2, false)
     }

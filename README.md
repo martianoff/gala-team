@@ -28,8 +28,8 @@ Written in [GALA](https://github.com/martianoff/gala) with the
 ├──────────────────┴──────────────────────────────────────────┤
 │ Type to Iris…                                               │
 └─────────────────────────────────────────────────────────────┘
-  Enter send · Backspace · Ctrl+A approve · Ctrl+R reject ·
-  Tab consults · Ctrl+H history · Ctrl+C quit
+  Enter send · Ctrl+A approve · Ctrl+R reject ·
+  Tab sidebar · Ctrl+T consults · Ctrl+H history · Ctrl+Q quit
 ```
 
 A user prompt enters the **Team Lead**'s conversation. The Team Lead can
@@ -251,7 +251,7 @@ consults:
 
 `@consult(transpiler)` now spawns a child `gala_team` against the target
 repo's `team.yaml`. The child team's stdout streams back live; you can watch
-it with **`Tab`** (consult viewer modal).
+it with **`Ctrl+T`** (consult viewer modal).
 
 When the in-project schema and the cross-repo registry both define `<name>`,
 the in-project entry wins.
@@ -264,14 +264,17 @@ the in-project entry wins.
 |-----|--------|
 | `Enter` | Send composer prompt to the lead. In history mode: open the cursored archive. |
 | `Backspace` | Delete last rune from composer. |
-| `Tab` | Toggle the consult viewer modal (live tail of every active consult). |
+| `Tab` / `Ctrl+L` | Toggle focus between composer and the team sidebar. |
+| `↑` / `↓` | When sidebar-focused: move row cursor. In history mode: history cursor. |
+| `Space` | When sidebar-focused, on a group header: fold / unfold the role group. |
+| `Ctrl+T` | Toggle the consult viewer modal (live tail of every active consult). |
 | `Ctrl+A` | Approve the lead's `@summary` → run pre-merge hooks → `gh pr create`. |
 | `Ctrl+R` | Reject the summary → back to live conversation. |
 | `Ctrl+M` | After `PR created` lands: `gh pr merge` with the configured rule. |
 | `Ctrl+H` | Toggle history browser. |
-| `↑` / `↓` | History cursor (only when history mode is open). |
-| `Esc` | History detail view → back to index. |
-| `Ctrl+C` / `Ctrl+Q` | Quit. Closes every live `claude` subprocess first. |
+| `Esc` | Cancels in priority order: quit confirmation, recovery banner, sidebar focus, history detail. |
+| `Ctrl+Q` | Quit gracefully (twice to confirm). Closes every live `claude` subprocess first. |
+| `Ctrl+C` | Force-kill backstop owned by gala-tui's runtime; bypasses the quit confirmation. |
 
 ---
 

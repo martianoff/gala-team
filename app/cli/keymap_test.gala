@@ -16,16 +16,23 @@ import (
 
 // ----- KeyToAppMsg --------------------------------------------------------
 
-func TestKeyToAppMsg_CtrlC_Quit(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('c'))), "QuitMsg")
+// Ctrl+C is consumed by gala-tui's runtime-level force-quit and
+// never reaches the keymap. Ctrl+Q is the graceful path; the app's
+// own QuitMsg handler implements the two-press confirmation.
 func TestKeyToAppMsg_CtrlQ_Quit(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('q'))), "QuitMsg")
 func TestKeyToAppMsg_CtrlA_Approve(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('a'))), "KeyApprove")
 func TestKeyToAppMsg_CtrlR_Reject(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('r'))), "KeyReject")
 func TestKeyToAppMsg_CtrlM_Merge(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('m'))), "KeyMerge")
 func TestKeyToAppMsg_CtrlH_ToggleHistory(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('h'))), "KeyToggleHistory")
 func TestKeyToAppMsg_CtrlL_ToggleFocus(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('l'))), "KeyToggleFocus")
+func TestKeyToAppMsg_CtrlT_ToggleConsultViewer(t T) T =
+    expectMsg(t, KeyToAppMsg(Ctrl(Char('t'))), "KeyToggleConsultViewer")
 
-func TestKeyToAppMsg_Tab_ToggleConsultViewer(t T) T =
-    expectMsg(t, KeyToAppMsg(PlainKey(Tab())), "KeyToggleConsultViewer")
+// Tab is the conventional "next pane" key in TUIs and is bound to
+// focus-cycle so users can reach the sidebar without learning
+// Ctrl+L.
+func TestKeyToAppMsg_Tab_ToggleFocus(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(Tab())), "KeyToggleFocus")
 
 func TestKeyToAppMsg_Backspace_Backspace(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(Backspace())), "KeyBackspace")

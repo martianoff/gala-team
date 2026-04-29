@@ -42,16 +42,29 @@ sealed type SidebarRow {
     case MemberRow(Member Member, MemberStatus Status)
 }
 
+// SidebarVisibleRows is the soft cap on how many sidebar rows we
+// render at once. With more members than this, the renderer
+// scrolls the visible window so the cursor (when sidebar-focused)
+// stays in view. Picked to fit comfortably in a typical 24-row
+// terminal alongside the Pipeline pane below the team panel.
+val SidebarVisibleRows = 10
+
 // TeamPanelView builds the team panel widget. Existing callers
 // pass just (team, statuses); interactive callers thread cursor +
 // collapsed-set so the rendering reflects the current focus and
 // fold state.
 //
 // `cursor` < 0 disables the highlight (e.g. FocusComposer mode);
-// otherwise the row at index `cursor` renders bold-cyan with a
-// "▶ " lead. `collapsed` is the set of group names whose body
-// rows are hidden — the header still renders, with a "▶" glyph
-// instead of "▼".
+// otherwise the row at index `cursor` renders with a "▶ " lead
+// and bold styling. `collapsed` is the set of group names whose
+// body rows are hidden — the header still renders, with a "▶"
+// glyph instead of "▼".
+//
+// When the row count exceeds SidebarVisibleRows, the rendered
+// window slides so the cursor row stays visible. A "↑ N more"
+// or "↓ N more" hint replaces the first / last row of the window
+// when there are off-screen rows in that direction, so the user
+// knows the list is clipped.
 func TeamPanelView(
     team Team,
     statuses HashMap[string, Status],
@@ -59,11 +72,51 @@ func TeamPanelView(
     collapsed Array[string] = EmptyArray[string](),
 ) Widget {
     val rows = sidebarRows(team, statuses, collapsed)
-    val children = rows.ZipWithIndex().Map((pair) =>
-        Fixed(1, renderSidebarRow(pair.V1, pair.V2 == cursor))
-    )
-    return Column(children)
+    val total = rows.Size()
+    if total <= SidebarVisibleRows {
+        val children = rows.ZipWithIndex().Map((pair) =>
+            Fixed(1, renderSidebarRow(pair.V1, pair.V2 == cursor))
+        )
+        return Column(children)
+    }
+    val start = scrollStart(cursor, total, SidebarVisibleRows)
+    val end   = start + SidebarVisibleRows
+    var win   = EmptyArray[LayoutChild]()
+    val above = start
+    val below = total - end
+    var i = start
+    for i < end {
+        val row = rows.Get(i)
+        val isCursor = (i == cursor)
+        // Replace the first / last visible row with an "N more"
+        // hint when off-screen rows exist on that edge.
+        val widget = if (i == start && above > 0) scrollHint(s"  ↑ ${above} more above")
+                     else if (i == end - 1 && below > 0) scrollHint(s"  ↓ ${below} more below")
+                     else renderSidebarRow(row, isCursor)
+        win = win.Append(Fixed(1, widget))
+        i = i + 1
+    }
+    return Column(win)
 }
+
+// scrollStart picks the top-of-window index so `cursor` lands
+// inside [start, start+windowH). When the cursor is unset (-1) or
+// in the upper half of the row list, the window stays anchored at
+// 0; otherwise it slides down. Always clamped so the window
+// doesn't run past the end of the list.
+func scrollStart(cursor int, total int, windowH int) int {
+    if cursor < 0 { return 0 }
+    if cursor < windowH { return 0 }
+    val maxStart = total - windowH
+    val want = cursor - windowH + 1
+    if want > maxStart { return maxStart }
+    return want
+}
+
+// scrollHint renders the "↑ N more" / "↓ N more" placeholder row.
+// Dim styling so it reads as metadata rather than as a clickable
+// row.
+func scrollHint(text string) Widget = TextStyled(text, DefaultStyle().WithDim())
 
 // SidebarRowCount returns how many rows the panel renders for
 // `team` given `collapsed`. Used by app/ui to clamp the cursor
@@ -120,20 +173,36 @@ func appendGroup(
 // `isCursor` flips the row to bold-cyan with a "▶ " lead so the
 // user can see where Space/Enter will act.
 func renderSidebarRow(row SidebarRow, isCursor bool) Widget = row match {
-    case GroupHeader(name, expanded) => {
-        val glyph = if (expanded) "▼" else "▶"
-        val text = if (isCursor) s"▶ ${glyph} ${name}" else s"  ${glyph} ${name}"
-        val style = if (isCursor) DefaultStyle().WithBold().WithFg(BrightCyan())
-                    else          DefaultStyle().WithBold()
-        return TextStyled(text, style)
-    }
-    case MemberRow(m, status) => {
-        val body = memberRowText(m, status)
-        val text = if (isCursor) s"▶   ${body}" else s"    ${body}"
-        val style = if (isCursor) DefaultStyle().WithBold().WithFg(BrightCyan())
-                    else          DefaultStyle()
-        return TextStyled(text, style)
-    }
+    case GroupHeader(name, expanded) =>
+        TextStyled(headerLabel(name, expanded, isCursor), rowStyle(isCursor, true))
+    case MemberRow(m, status) =>
+        TextStyled(memberLabel(memberRowText(m, status), isCursor), rowStyle(isCursor, false))
+}
+
+// headerLabel formats a group header row. Extracted so the
+// if-expression inside doesn't leak into renderSidebarRow's body
+// — gala 0.39.2 emits `func() any` for nested if-as-expressions
+// which then can't be passed where `string` is expected.
+func headerLabel(name string, expanded bool, isCursor bool) string {
+    val glyph = if (expanded) "▼" else "▶"
+    if isCursor { return s"▶ ${glyph} ${name}" }
+    return s"  ${glyph} ${name}"
+}
+
+// memberLabel formats a member row's text — same extraction
+// rationale as headerLabel.
+func memberLabel(body string, isCursor bool) string {
+    if isCursor { return s"▶   ${body}" }
+    return s"    ${body}"
+}
+
+// rowStyle returns the style for a sidebar row. `bold` toggles the
+// always-bold styling that group headers wear; non-cursor member
+// rows render in plain DefaultStyle.
+func rowStyle(isCursor bool, bold bool) Style {
+    if isCursor { return DefaultStyle().WithBold() }
+    if bold     { return DefaultStyle().WithBold() }
+    return DefaultStyle()
 }
 
 // memberRowText is the visual encoding of one member row.  Padded to a

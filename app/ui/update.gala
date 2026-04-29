@@ -47,12 +47,12 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case PreMergeHooksPassed(body)   => onPreMergeHooksPassed(m, body)
     case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
     case PrCreated(url)              => onPrCreated(m, url)
-    case PrFailed(err)               => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
+    case PrFailed(err)               => (m.Copy(LastError = Some[string](s"gh pr create: ${err}")), NoCmd[AppMsg]())
     case KeyMerge()                  => onMerge(m)
     case Merged(url)                 => onMerged(m, url)
-    case MergeFailed(err)            => (m.Copy(LastError = Some(s"gh pr merge: ${err}")), NoCmd[AppMsg]())
+    case MergeFailed(err)            => (m.Copy(LastError = Some[string](s"gh pr merge: ${err}")), NoCmd[AppMsg]())
     case PostMergeHooksPassed(url)   => onPostMergeHooksPassed(m, url)
-    case PostMergeHooksFailed(err)   => (m.Copy(LastError = Some(s"post-merge hooks: ${err}")), NoCmd[AppMsg]())
+    case PostMergeHooksFailed(err)   => (m.Copy(LastError = Some[string](s"post-merge hooks: ${err}")), NoCmd[AppMsg]())
     case ConsultCompleted(name, sum) => onConsultCompleted(m, name, sum)
     case ConsultFailed(name, err)    => onConsultFailed(m, name, err)
     case ConsultChunkArrived(n, ln)  => onConsultChunkArrived(m, n, ln)
@@ -65,9 +65,9 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case HistoryCursorDown()         => onCursorMove(m, 1)
     case HistorySelect()             => onHistorySelect(m)
     case HistoryDeselect()           => onEscOrDeselect(m)
-    case HistoryArchiveLoaded(snap)  => (m.Copy(ViewingArchive = Some(snap)), NoCmd[AppMsg]())
-    case HistoryArchiveFailed(err)   => (m.Copy(LastError = Some(s"history: ${err}")), NoCmd[AppMsg]())
-    case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
+    case HistoryArchiveLoaded(snap)  => (m.Copy(ViewingArchive = Some[session.Snapshot](snap)), NoCmd[AppMsg]())
+    case HistoryArchiveFailed(err)   => (m.Copy(LastError = Some[string](s"history: ${err}")), NoCmd[AppMsg]())
+    case MouseAt(x, y, p)            => onMouseAt(m, x, y, p)
     case TickMsg()                   => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
@@ -113,6 +113,47 @@ func onSidebarCursorMove(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] {
                   else if (raw >= total) total - 1
                   else raw
     return (m.Copy(SidebarCursor = clamped), NoCmd[AppMsg]())
+}
+
+// Layout constants used by onMouseAt for hit-testing. Hardcoded
+// to mirror the column/row split chosen in app/ui/view.gala —
+// sidebar is the leftmost SidebarColWidth columns; the team panel
+// rows start SidebarRowsStart lines down (header rows + the
+// bordered "Team" label). Updating those layout numbers in
+// view.gala requires updating these too.
+val SidebarColWidth  = 28
+val SidebarRowsStart = 5
+
+// onMouseAt routes a click into a focus / cursor change. The
+// release event (Pressed=false) is ignored — only press fires
+// state changes so dragging out of the panel doesn't reset focus
+// to the composer mid-drag.
+//
+// Click in the sidebar columns:
+//   - Below the "Team" label row  →  Focus=Sidebar, cursor moves
+//     to the clicked row, and a click on a group header toggles
+//     fold/unfold (matches the keyboard Space behavior).
+// Click anywhere else:
+//   - Focus snaps back to the composer.
+func onMouseAt(m AppModel, x int, y int, pressed bool) Tuple[AppModel, Cmd[AppMsg]] {
+    if !pressed { return (m, NoCmd[AppMsg]()) }
+    if x >= 0 && x < SidebarColWidth && y >= SidebarRowsStart {
+        val row = y - SidebarRowsStart
+        val total = SidebarRowCount(m.Team, m.CollapsedGroups)
+        if total == 0 { return (m.Copy(Focus = FocusSidebar()), NoCmd[AppMsg]()) }
+        val clamped = if (row < 0) 0
+                      else if (row >= total) total - 1
+                      else row
+        val mFocused = m.Copy(Focus = FocusSidebar(), SidebarCursor = clamped)
+        return SidebarGroupAt(m.Team, m.CollapsedGroups, clamped) match {
+            case Some(_) => onSidebarToggleGroup(mFocused)
+            case None()  => (mFocused, NoCmd[AppMsg]())
+        }
+    }
+    return m.Focus match {
+        case FocusSidebar()  => (m.Copy(Focus = FocusComposer()), NoCmd[AppMsg]())
+        case FocusComposer() => (m, NoCmd[AppMsg]())
+    }
 }
 
 // onSidebarToggleGroup folds or unfolds the role group at
@@ -201,13 +242,13 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val lead = m.Team.Lead
     val firstSpawn = !m.Sessions.Get(lead.Name).IsDefined()
     return ensureSession(withState, lead) match {
-        case Left(err)  => (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
+        case Left(err)  => (withState.Copy(LastError = Some[string](err)), NoCmd[AppMsg]())
         case Right(m1)  => {
             val (effectivePrompt, onboardingErr) =
                 if (firstSpawn) onboarding.WrapPromptSafe(m.Project, m.Team, lead, prompt)
                 else            (prompt, None[string]())
             val m2 = onboardingErr match {
-                case Some(e) => m1.Copy(LastError = Some(s"onboarding: ${e}"))
+                case Some(e) => m1.Copy(LastError = Some[string](s"onboarding: ${e}"))
                 case None()  => m1
             }
             return (setStatus(m2, lead.Name, StWorking()), sendAndPumpCmd(m2, lead, effectivePrompt))
@@ -344,7 +385,7 @@ func dispatchOneConsult(m AppModel, target string, body string) Tuple[AppModel, 
     val siblings = m.Teams.Filter((t) => t.Key != mainKey)
     return DispatchConsult(siblings, m.Project, m.Registry, target, body) match {
         case Failure(e) => {
-            val cmd Cmd[AppMsg] = MsgCmd[AppMsg](Msg = ConsultFailed(Name = target, ErrText = e.Error()))
+            val cmd = MsgCmd[AppMsg](Msg = ConsultFailed(Name = target, ErrText = e.Error()))
             return (withDispatchLog, cmd)
         }
         case Success(s) => {
@@ -393,7 +434,7 @@ func activeMemberNames(m AppModel) Array[string] =
 // LastError — the in-memory transcript stays canonical.
 func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) AppModel = session.Save(m.Project.Repo, m.Project.Name, nextConvo, activeMemberNames(m)) match {
     case Success(_)   => m.Copy(Conversation = nextConvo)
-    case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some(s"session save: ${err.Error()}"))
+    case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some[string](s"session save: ${err.Error()}"))
 }
 
 // onSessionFailed marks the member's session as gone (drops it from
@@ -403,7 +444,7 @@ func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) 
 func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[AppMsg]] {
     val withFailure = setStatus(m.Copy(
         Sessions  = m.Sessions.Remove(name),
-        LastError = Some(s"${name}: ${err}"),
+        LastError = Some[string](s"${name}: ${err}"),
     ), name, StFailed(Reason = err))
     return (withFailure, NoCmd[AppMsg]())
 }
@@ -494,7 +535,7 @@ func onPreMergeHooksPassed(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]]
 // flagged, and re-approve.
 func onPreMergeHooksFailed(m AppModel, err string) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(
-        LastError    = Some(s"pre-merge hooks: ${err}"),
+        LastError    = Some[string](s"pre-merge hooks: ${err}"),
         Conversation = m.Conversation.Append(
             session.ConversationLine(Speaker = "policy", Text = s"pre-merge hooks: ✗ ${err}"),
         ),
@@ -527,7 +568,7 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // gets a confirmation step).
 func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(
-        LastPrUrl    = Some(url),
+        LastPrUrl    = Some[string](url),
         Conversation = m.Conversation
             .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${url}"))
             .Append(session.ConversationLine(Speaker = "gh", Text = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.")),
@@ -677,7 +718,7 @@ func onConsultCompleted(m AppModel, name string, summary Option[string]) Tuple[A
 // back to its own knowledge).
 func onConsultFailed(m AppModel, name string, errText string) Tuple[AppModel, Cmd[AppMsg]] {
     val withLog = m.Copy(
-        LastError    = Some(s"consult ${name}: ${errText}"),
+        LastError    = Some[string](s"consult ${name}: ${errText}"),
         Conversation = m.Conversation.Append(session.ConversationLine(
             Speaker = "consult",
             Text    = s"${name} ✗ ${errText}",

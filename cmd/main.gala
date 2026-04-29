@@ -44,22 +44,98 @@ import (
 // InputToAppMsg) so the dispatch table is unit-testable without
 // spawning the gala-tui runtime.
 
-// flagValue scans `os.Args` for a `--name <value>` pair and returns the
-// value if present, otherwise `dflt`. Simple linear scan is fine for the
-// two flags we expose; we deliberately avoid pulling in `flag` to keep
-// the CLI surface tiny and the error messages friendly.
-func flagValue(name string, dflt string) string {
+// flagValue scans `os.Args` for any of the supplied `--name <value>`
+// pairs and returns the value if present, otherwise `dflt`. Multiple
+// names act as aliases — the first match wins after a left-to-right
+// scan. Simple linear scan is fine for the handful of flags we
+// expose; we deliberately avoid pulling in `flag` to keep the CLI
+// surface tiny and the error messages friendly.
+func flagValue(names Array[string], dflt string) string {
     val args = ArrayOf(os.Args...)
     val n = args.Size()
     var i = 1
     var found = dflt
     for i < n - 1 {
-        if args.Get(i) == name {
+        if names.Contains(args.Get(i)) {
             found = args.Get(i + 1)
         }
         i = i + 1
     }
     return found
+}
+
+// hasFlag reports whether any of the given switch names appear in
+// the argv. Used for boolean flags like --help that don't take a
+// following value.
+func hasFlag(names Array[string]) bool {
+    val args = ArrayOf(os.Args...)
+    return args.Exists((a) => names.Contains(a))
+}
+
+// validateArgs sanity-checks the argv for unrecognized --flags so a
+// typo like `--teams` (instead of `--team`) errors out instead of
+// silently falling back to the demo team. Positional args after the
+// last flag/value are not currently used; we ignore them rather
+// than reject so the user can pipe additional context through if a
+// future flag wants it.
+func validateArgs() {
+    val known = ArrayOf("--help", "-h", "--project", "--team", "--teams", "--team-key")
+    val takesValue = ArrayOf("--project", "--team", "--teams", "--team-key")
+    val args = ArrayOf(os.Args...)
+    val n = args.Size()
+    var i = 1
+    for i < n {
+        val a = args.Get(i)
+        if strings.HasPrefix(a, "-") {
+            if !known.Contains(a) {
+                die(s"unknown flag '${a}'\n  see --help for the supported list")
+            }
+            if takesValue.Contains(a) {
+                if i + 1 >= n {
+                    die(s"flag '${a}' needs a value")
+                }
+                i = i + 2
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// printUsage writes the human-readable help text to stdout. Keep the
+// flag list in sync with validateArgs and the docstring at the top
+// of this file.
+func printUsage() {
+    val usage = "gala_team — TUI orchestrator for a team of Claude CLI sessions\n" +
+        "\n" +
+        "USAGE\n" +
+        "  gala_team --team <yaml> [--project <dir>] [--team-key <key>]\n" +
+        "\n" +
+        "FLAGS\n" +
+        "  --team <yaml>      Path to team.yaml. Required. Alias: --teams.\n" +
+        "  --project <dir>    Project directory (must be a git repo).\n" +
+        "                     Defaults to the current working directory.\n" +
+        "  --team-key <key>   Pick the main team from a multi-team yaml.\n" +
+        "                     Defaults to the first entry under `teams:`.\n" +
+        "                     The remaining teams become @consult targets.\n" +
+        "  -h, --help         Show this message and exit.\n" +
+        "\n" +
+        "EXAMPLES\n" +
+        "  gala_team --project ~/work/auth-service --team ./skunkworks.yaml\n" +
+        "  gala_team --team examples/multi-team.yaml --team-key transpiler\n" +
+        "\n" +
+        "KEYBOARD\n" +
+        "  Ctrl+Q     Quit (twice to confirm; closes every claude subprocess)\n" +
+        "  Ctrl+C     Force-kill (gala-tui escape hatch — no confirmation)\n" +
+        "  Tab        Toggle focus between composer and sidebar (Ctrl+L alias)\n" +
+        "  Ctrl+T     Toggle the consult viewer modal\n" +
+        "  Ctrl+H     Open the session-archive browser\n" +
+        "  Ctrl+A/R   Approve / reject in the approval state\n" +
+        "\n" +
+        "See README.md for the full team.yaml schema and key bindings.\n"
+    val _ = os.Stdout.WriteString(usage)
 }
 
 // die prints a one-line user-facing error to stderr and exits with
@@ -73,10 +149,21 @@ func die(msg string) {
 
 // loadTeamConfig reads `path`, decodes the YAML, and exits cleanly
 // on any failure with a message pointing at the file + the
-// underlying YAML parser error. Common failures we tag specially:
+// underlying YAML parser error. Specifically tagged failures:
+//   - the path doesn't exist                →  "FILE NOT FOUND" diagnostic
 //   - yaml: expected sequence, got mapping  →  hint to use `- ` list items
-func loadTeamConfig(path string) TeamConfig =
-    Try(() => os.ReadFile(path)) match {
+func loadTeamConfig(path string) TeamConfig {
+    val info, statErr = os.Stat(path)
+    if statErr != nil {
+        if os.IsNotExist(statErr) {
+            die(s"--team: FILE NOT FOUND: '${path}'")
+        }
+        die(s"--team: cannot stat '${path}': ${statErr.Error()}")
+    }
+    if info.IsDir() {
+        die(s"--team: '${path}' is a directory, expected a yaml file")
+    }
+    return Try(() => os.ReadFile(path)) match {
         case Failure(err) => {
             die(s"--team: cannot read '${path}': ${err.Error()}")
             sampleTeamConfig()  // unreachable — die() called os.Exit
@@ -89,6 +176,7 @@ func loadTeamConfig(path string) TeamConfig =
             case Success(cfg) => cfg
         }
     }
+}
 
 // yamlHint translates a few common gala-yaml error messages into
 // human-readable suggestions so the user knows how to fix their
@@ -176,12 +264,19 @@ func sampleTeam() Team {
 }
 
 func main() {
-    val projDir  = flagValue("--project", ".")
-    val teamPath = flagValue("--team", "")
-    val teamKey  = flagValue("--team-key", "")
-    val proj     = resolveProject(projDir)
-    val cfgRaw = if (teamPath == "") sampleTeamConfig()
-                 else                 loadTeamConfig(teamPath)
+    if hasFlag(ArrayOf("--help", "-h")) {
+        printUsage()
+        os.Exit(0)
+    }
+    validateArgs()
+    val projDir  = flagValue(ArrayOf("--project"),         ".")
+    val teamPath = flagValue(ArrayOf("--team", "--teams"), "")
+    val teamKey  = flagValue(ArrayOf("--team-key"),        "")
+    if teamPath == "" {
+        die("--team is required (path to team.yaml)\n  see --help for usage")
+    }
+    val proj   = resolveProject(projDir)
+    val cfgRaw = loadTeamConfig(teamPath)
     val cfg = PickMainTeam(cfgRaw, teamKey) match {
         case Success(c) => c
         case Failure(e) => {
@@ -201,6 +296,10 @@ func main() {
         View    = (m) => View(m),
     )
     val tickSub = TickSub[AppMsg](Interval = Milliseconds(int64(120)), Make = () => TickMsg())
+    // Disable gala-tui's runtime-level Ctrl+C escape hatch so the
+    // app's keymap can receive it. onQuit then runs the two-press
+    // confirmation flow + CloseAllSessions cleanup before exit.
+    SetEscapeHatchOnCtrlC(false)
     val _ = RunWithMouse[AppModel, AppMsg](program, (ev) => InputToAppMsg(ev), tickSub)
 }
 

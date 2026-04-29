@@ -767,6 +767,126 @@ func TestFocus_Sidebar_SpaceOnMemberRow_NoOp(t T) T {
     return Eq(t, m.CollapsedGroups.Size(), 0)
 }
 
+// End-to-end focus journey: Tab cycles Composer → Sidebar →
+// Composer; Esc from Sidebar pops back; KeyChar lands in the
+// active panel (composer when default, sidebar fold-toggle when
+// the cursor is on a header). One test exercises the whole
+// flow because the state-machine interactions are easy to
+// regress one at a time.
+func TestFocusFlow_EndToEnd(t T) T {
+    val seed = sampleModel()
+
+    // Start: composer is the default focus.
+    val composerFocused = seed.Focus match {
+        case FocusComposer() => true
+        case FocusSidebar()  => false
+    }
+    val t1 = IsTrue(t, composerFocused)
+
+    // Type 'h' — composer accepts it.
+    val (m1, _) = Update(seed, KeyChar(C = 'h'))
+    val t2 = Eq(t1, m1.Composer, "h")
+
+    // Tab → sidebar focused, cursor at row 0 (Lead header).
+    val (m2, _) = Update(m1, KeyToggleFocus())
+    val sidebarFocused = m2.Focus match {
+        case FocusSidebar()  => true
+        case FocusComposer() => false
+    }
+    val t3 = IsTrue(t2, sidebarFocused)
+    val t4 = Eq(t3, m2.SidebarCursor, 0)
+
+    // Composer text from before is preserved across the focus toggle.
+    val t5 = Eq(t4, m2.Composer, "h")
+
+    // Down moves cursor; Space at row 0 (Lead group header)
+    // would toggle fold — but we're now at row 1, so Space is
+    // a no-op for the collapse set.
+    val (m3, _) = Update(m2, HistoryCursorDown())
+    val t6 = Eq(t5, m3.SidebarCursor, 1)
+    val (m4, _) = Update(m3, KeyChar(C = ' '))
+    val t7 = Eq(t6, m4.CollapsedGroups.Size(), 0)
+    // Composer untouched — Space in sidebar mode never reaches it.
+    val t8 = Eq(t7, m4.Composer, "h")
+
+    // Esc returns to composer focus.
+    val (m5, _) = Update(m4, HistoryDeselect())
+    val backToComposer = m5.Focus match {
+        case FocusComposer() => true
+        case FocusSidebar()  => false
+    }
+    val t9 = IsTrue(t8, backToComposer)
+
+    // After returning to composer, typed chars resume landing
+    // there — confirming the state machine didn't get stuck.
+    val (m6, _) = Update(m5, KeyChar(C = 'i'))
+    return Eq(t9, m6.Composer, "hi")
+}
+
+// Tab from sidebar takes the user back to the composer (round-trip).
+func TestFocusFlow_TabRoundTripsBackToComposer(t T) T {
+    val (m1, _) = Update(sampleModel(), KeyToggleFocus())
+    val (m2, _) = Update(m1, KeyToggleFocus())
+    return m2.Focus match {
+        case FocusComposer() => IsTrue(t, true)
+        case FocusSidebar()  => IsTrue(t, false)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mouse hit-testing — click in the sidebar columns focuses it and
+// snaps the cursor; click outside snaps focus back to the composer.
+// ---------------------------------------------------------------------------
+
+// Click on a sidebar group header focuses the panel, moves the
+// cursor to that row, AND toggles fold (mirroring keyboard Space).
+func TestMouseAt_ClickOnGroupHeader_FocusesAndToggles(t T) T {
+    val seed = sampleModel()
+    val (m, _) = Update(seed, MouseAt(X = 5, Y = 5, Pressed = true))
+    val t1 = m.Focus match {
+        case FocusSidebar()  => IsTrue(t, true)
+        case FocusComposer() => IsTrue(t, false)
+    }
+    return IsTrue(t1, m.CollapsedGroups.Contains("Lead"))
+}
+
+// Click on a member row focuses + moves the cursor but does not
+// touch CollapsedGroups (only headers toggle).
+func TestMouseAt_ClickOnMemberRow_FocusesWithoutCollapsing(t T) T {
+    val seed = sampleModel()
+    val (m, _) = Update(seed, MouseAt(X = 5, Y = 6, Pressed = true))
+    val t1 = m.Focus match {
+        case FocusSidebar()  => IsTrue(t, true)
+        case FocusComposer() => IsTrue(t, false)
+    }
+    val t2 = Eq(t1, m.SidebarCursor, 1)
+    return Eq(t2, m.CollapsedGroups.Size(), 0)
+}
+
+// Click outside the sidebar columns snaps focus back to the
+// composer when the user was previously in the sidebar.
+func TestMouseAt_ClickOutsideSidebar_ReturnsToComposer(t T) T {
+    val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 2)
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 8, Pressed = true))
+    return m.Focus match {
+        case FocusComposer() => IsTrue(t, true)
+        case FocusSidebar()  => IsTrue(t, false)
+    }
+}
+
+// Mouse release events don't move state — only press triggers
+// focus/cursor changes so a drag that ends in another panel
+// doesn't accidentally reset.
+func TestMouseAt_Release_DoesNotMoveState(t T) T {
+    val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 3)
+    val (m, _) = Update(seed, MouseAt(X = 100, Y = 100, Pressed = false))
+    val t1 = m.Focus match {
+        case FocusSidebar()  => IsTrue(t, true)
+        case FocusComposer() => IsTrue(t, false)
+    }
+    return Eq(t1, m.SidebarCursor, 3)
+}
+
 // ---------------------------------------------------------------------------
 // State × key matrix gaps
 // ---------------------------------------------------------------------------

@@ -18,5 +18,6 @@ gala_go_test(
     srcs = ["parser_test.gala"],
     deps = [
         ":directive",
+        "@gala//collection_immutable",
     ],
 )

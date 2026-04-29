@@ -638,6 +638,49 @@ func TestQuitMsg_OnFreshModel_DoesNotPanic(t T) T {
     return Eq(t, m.Conversation.Size(), 0)
 }
 
+// First Ctrl+C arms the quit-confirmation prompt rather than
+// immediately exiting; sessions stay alive until the second press.
+func TestQuitMsg_FirstPress_ArmsConfirmation(t T) T {
+    val (m, _) = Update(sampleModel(), QuitMsg())
+    return IsTrue(t, m.QuitPending)
+}
+
+// Second consecutive Ctrl+C is the destructive path — model still
+// carries QuitPending=true (we don't clear it on the way out, the
+// process is exiting) but the action has executed.
+func TestQuitMsg_SecondPress_StaysArmedAndQuits(t T) T {
+    val (m1, _) = Update(sampleModel(), QuitMsg())
+    val (m2, _) = Update(m1, QuitMsg())
+    return IsTrue(t, m2.QuitPending)
+}
+
+// Esc cancels the confirmation — the user hit Ctrl+C by accident
+// and now wants to keep working. HistoryDeselect is the AppMsg
+// keymap.gala emits for Esc.
+func TestQuitMsg_EscCancelsConfirmation(t T) T {
+    val (m1, _) = Update(sampleModel(), QuitMsg())
+    val t1 = IsTrue(t, m1.QuitPending)
+    val (m2, _) = Update(m1, HistoryDeselect())
+    return IsFalse(t1, m2.QuitPending)
+}
+
+// A typed char must NOT cancel the prompt — auto-dismiss on any
+// keystroke would let a stray buffered key silently re-enable a
+// dangerous quit. Only Esc or a confirming Ctrl+C resolves it.
+func TestQuitMsg_KeyCharLeavesConfirmationArmed(t T) T {
+    val (m1, _) = Update(sampleModel(), QuitMsg())
+    val (m2, _) = Update(m1, KeyChar(C = 'x'))
+    return IsTrue(t, m2.QuitPending)
+}
+
+// TickMsg is background and must not silently dismiss the prompt
+// while the user is reading it.
+func TestQuitMsg_TickDoesNotCancelConfirmation(t T) T {
+    val (m1, _) = Update(sampleModel(), QuitMsg())
+    val (m2, _) = Update(m1, TickMsg())
+    return IsTrue(t, m2.QuitPending)
+}
+
 // ---------------------------------------------------------------------------
 // State × key matrix gaps
 // ---------------------------------------------------------------------------

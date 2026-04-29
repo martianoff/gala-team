@@ -224,6 +224,26 @@ func TestView_Footer_LastErrorBeatsLegend(t T) T {
     return IsFalse(t1, strings.Contains(out, "Ctrl+M merge"))
 }
 
+// QuitPending replaces the regular footer with a confirmation
+// prompt. It even wins over LastError so the user is never confused
+// about what their next keypress will do.
+func TestView_Footer_QuitPending_ShowsConfirmation(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(QuitPending = true)
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "Press Ctrl+C again to confirm"))
+    return IsTrue(t1, strings.Contains(out, "Esc to cancel"))
+}
+
+func TestView_Footer_QuitPending_BeatsLastError(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        QuitPending = true,
+        LastError   = Some("disk full"),
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "Press Ctrl+C again to confirm"))
+    return IsFalse(t1, strings.Contains(out, "disk full"))
+}
+
 // ---------------------------------------------------------------------------
 // Consult viewer modal (Tab toggle)
 // ---------------------------------------------------------------------------
@@ -552,15 +572,17 @@ func TestFlow_TypeChars_ComposerUpdates(t T) T {
 }
 
 // Backspace then render — the composer regresses to the
-// pre-deletion state.
+// pre-deletion state. Anchoring to the trailing cursor caret
+// "▌" keeps the test from picking up unrelated substrings (e.g.
+// "hi" inside "history" in the footer key hints).
 func TestFlow_TypeThenBackspace_ComposerShortens(t T) T {
     val seed = mkModel(mkTeam("X", ""))
     val (m1, _) = Update(seed, KeyChar(C = 'h'))
     val (m2, _) = Update(m1,   KeyChar(C = 'i'))
     val (m3, _) = Update(m2,   KeyBackspace())
     val out = render(m3)
-    val t1 = IsTrue(t, strings.Contains(out, "h"))
-    return IsFalse(t1, strings.Contains(out, "hi"))
+    val t1 = IsTrue(t, strings.Contains(out, "h▌"))
+    return IsFalse(t1, strings.Contains(out, "hi▌"))
 }
 
 // Tab opens the consult viewer; the composer is not the visible pane.

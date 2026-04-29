@@ -93,6 +93,7 @@ struct AppModel(
     // for a fresh start) or by the first chunk that arrives in a
     // recovered member's stream.
     RecoveryBannerVisible bool,
+    QuitPending bool,
 )
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
@@ -146,6 +147,7 @@ func InitialModelWithTeams(
     HistoryCursor     = 0,
     RecoveredMembers  = EmptyArray[string](),
     RecoveryBannerVisible = false,
+    QuitPending = false,
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +

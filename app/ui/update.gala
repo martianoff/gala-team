@@ -71,18 +71,24 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case NoOp()                      => (m, NoCmd[AppMsg]())
 }
 
-// onQuit cleans up live subprocesses before letting the TUI exit. We
-// CloseAllSessions synchronously (the calls are Kill-then-Wait, fast)
-// rather than dispatching a Future-Cmd: the alternative — emit a
-// QuitCmd in parallel with a CloseAll Future — races the runtime
-// shutdown against the kill, which on Windows often leaves the child
-// process group alive after the TUI's terminal restore.
+// onQuit handles Ctrl+C / Ctrl+Q. The first press arms
+// QuitPending, which the footer turns into a "Press Ctrl+C again
+// to confirm · Esc to cancel" prompt; sessions stay alive. The
+// second press is the destructive path: CloseAllSessions
+// synchronously (Kill-then-Wait, fast) before emitting QuitCmd.
+// Synchronous close — rather than dispatching a Future-Cmd — is
+// deliberate: the alternative races the runtime shutdown against
+// the kill, which on Windows often leaves the child process group
+// alive after the TUI's terminal restore.
 //
 // Failures are surfaced by appending one conversation line per
 // failed close; the user sees which session leaked. We still let
 // QuitCmd fire either way — refusing to quit because a kill failed
 // would strand the user inside a half-broken UI.
 func onQuit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if !m.QuitPending {
+        return (m.Copy(QuitPending = true), NoCmd[AppMsg]())
+    }
     val failures = CloseAllSessions(m.Sessions)
     if failures.IsEmpty() {
         return (m, QuitCmd[AppMsg]())
@@ -680,16 +686,18 @@ func trimLastRune(s string) string {
 // History browser handlers
 // ----------------------------------------------------------------------------
 
-// onEscOrDeselect routes Esc to whichever modal is current: the
-// recovery banner takes precedence (it's the most disruptive
-// modal — appearing automatically on launch — so dismissing it is
-// the user's likely intent); then HistoryDeselect closes a viewed
-// archive; otherwise no-op.
+// onEscOrDeselect routes Esc by precedence: the quit-confirmation
+// prompt wins (any-key would be too aggressive — only Esc cancels
+// it, matching the footer hint); then the recovery banner; then
+// HistoryDeselect closes a viewed archive; otherwise no-op.
 //
 // Dismissing the recovery banner clears Conversation +
 // RecoveredMembers so the user gets a clean slate, matching the
 // banner's "Esc to discard" hint.
 func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if m.QuitPending {
+        return (m.Copy(QuitPending = false), NoCmd[AppMsg]())
+    }
     if m.RecoveryBannerVisible {
         return (m.Copy(
             RecoveryBannerVisible = false,

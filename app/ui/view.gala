@@ -117,11 +117,19 @@ func approvalSnippet(body string) string {
 
 // ----- pieces ---------------------------------------------------------------
 
+// headerWidget renders the top three rows of the TUI: a 🍎 (gala
+// apple) brand glyph followed by project + team name (bold cyan),
+// the live state label (dim), then a separator. Intentionally
+// omits the internal tick counter and the literal product name —
+// the header is for what the user is doing, not for what the
+// runtime is doing. Member personality belongs in onboarding, not
+// here.
 func headerWidget(m AppModel) Widget {
-    val title = TextStyled(s"  ⛩  gala_team   ${stateLabel(m.State)}   tick:${m.Tick}",
-        DefaultStyle().WithBold().WithFg(BrightCyan()))
-    val sub = TextStyled(s"     ${m.Team.Name}${teamDescriptionSuffix(m.Team.Description)}",
-        DefaultStyle().WithDim())
+    val title = TextStyled(
+        s"  🍎  ${m.Project.Name}  ·  ${m.Team.Name}${teamDescriptionSuffix(m.Team.Description)}",
+        DefaultStyle().WithBold().WithFg(BrightCyan()),
+    )
+    val sub = TextStyled(s"      ${stateLabel(m.State)}", DefaultStyle().WithDim())
     return Column(ArrayOf[LayoutChild](
         Fixed(1, title),
         Fixed(1, sub),
@@ -130,8 +138,8 @@ func headerWidget(m AppModel) Widget {
 }
 
 // teamDescriptionSuffix appends "  ·  <description>" when the team
-// declared a description; empty otherwise so the header stays clean
-// for legacy team.yaml files that don't set one.
+// declared one; empty otherwise so single-team setups without a
+// description don't render a dangling separator.
 func teamDescriptionSuffix(desc string) string =
     if (desc == "") "" else s"  ·  ${desc}"
 
@@ -266,20 +274,35 @@ func composerWidget(m AppModel) Widget {
     return TextStyled(s"  ${prompt}▌", style)
 }
 
-func footerWidget(m AppModel) Widget = m.LastError match {
-    case Some(err) => TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed()))
-    case None()    => TextStyled(footerHints(m), DefaultStyle().WithDim())
+// footerWidget chooses what one-line legend to render at the
+// bottom of the screen. Quit confirmation wins (a transient,
+// safety-critical prompt — only Esc or a second Ctrl+C resolves
+// it), then any recent error, then the context-appropriate key
+// hints.
+func footerWidget(m AppModel) Widget {
+    if m.QuitPending {
+        return TextStyled(
+            "  ⚠ Quit? Press Ctrl+C again to confirm · Esc to cancel",
+            DefaultStyle().WithBold().WithFg(BrightYellow()),
+        )
+    }
+    return m.LastError match {
+        case Some(err) => TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed()))
+        case None()    => TextStyled(footerHints(m), DefaultStyle().WithDim())
+    }
 }
 
 // footerHints picks a context-appropriate key legend. After
 // PrCreated, surface Ctrl+M; otherwise show the default legend.
 // Ctrl+C and Ctrl+Q are equivalent quit shortcuts — we only mention
-// Ctrl+C in the hint to keep the legend short. Tab toggles the
-// consult viewer modal whenever there are (or might soon be) active
-// cross-team consults to peek at.
+// Ctrl+C in the hint to keep the legend short. Quit comes first so
+// it survives narrow-terminal clipping; new users always need to
+// know how to exit. Tab toggles the consult viewer modal whenever
+// there are (or might soon be) active cross-team consults to peek
+// at; Ctrl+H opens the saved-archive browser.
 func footerHints(m AppModel) string = m.LastPrUrl match {
-    case Some(_) => "  Ctrl+M merge · Ctrl+A re-approve · Tab consults · Ctrl+C quit"
-    case None()  => "  Enter send · Backspace · Ctrl+A approve · Ctrl+R reject · Tab consults · Ctrl+C quit"
+    case Some(_) => "  Ctrl+C quit · Ctrl+M merge · Ctrl+A re-approve · Tab consults · Ctrl+H history"
+    case None()  => "  Ctrl+C quit · Enter send · Ctrl+A approve · Ctrl+R reject · Tab consults · Ctrl+H history"
 }
 
 // stateLabel pretty-prints the current AppState for the header line.

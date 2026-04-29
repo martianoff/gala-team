@@ -280,7 +280,7 @@ func dispatchOneConsult(m AppModel, target string, body string) Tuple[AppModel, 
     val siblings = m.Teams.Filter((t) => t.Key != mainKey)
     return DispatchConsult(siblings, m.Project, m.Registry, target, body) match {
         case Failure(e) => {
-            val cmd = MsgCmd[AppMsg](Msg = ConsultFailed(Name = target, ErrText = e.Error()))
+            val cmd Cmd[AppMsg] = MsgCmd[AppMsg](Msg = ConsultFailed(Name = target, ErrText = e.Error()))
             return (withDispatchLog, cmd)
         }
         case Success(s) => {

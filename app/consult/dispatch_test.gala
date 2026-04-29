@@ -1,0 +1,117 @@
+package main
+
+import (
+    "os"
+    "path/filepath"
+    "strings"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/consult"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// dispatch_test — verifies the routing rule in DispatchConsult: when an
+// in-project sibling team and a registry entry both define the same
+// `name`, the in-project sibling wins.
+//
+// Strategy: register an entry pointing at /nonexistent (so the
+// registry path is guaranteed to fail with a "project:" error) and a
+// sibling team that resolves to a real Project (so the in-project
+// path either spawns successfully — we then close it — or fails with
+// "spawn:"). Whatever the outcome, we assert on the *team identity*:
+//   - Success → ConsultSession.TeamName equals the sibling's
+//     "Transpiler Wizards" (proves the in-project path was taken)
+//   - Failure → error doesn't start with "project:" (proves the
+//     registry path's project-resolve step wasn't reached)
+
+// In-project sibling beats registry entry when both define the same key.
+func TestDispatchConsult_InProjectBeatsRegistry(t T) T {
+    val tmp = mkTempGitRepo(t)
+    defer os.RemoveAll(tmp)
+
+    val sibling = makeSiblingTeam("transpiler")
+    val proj    = Project(
+        Name = "demo", Repo = tmp,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+    val r = Registry(Entries = ArrayOf(ConsultEntry(
+        Name     = "transpiler",
+        Repo     = "/nonexistent/should/not/exist",
+        TeamYaml = "/nonexistent/team.yaml",
+    )))
+
+    val res = DispatchConsult(ArrayOf(sibling), proj, r, "transpiler", "do work")
+    return res match {
+        case Success(s) => {
+            val _ = CloseConsultSession(s)  // best-effort cleanup
+            return IsTrue(t, s.TeamName == "Transpiler Wizards")
+        }
+        case Failure(e) => {
+            // Failed before reaching SpawnSession. Whatever the
+            // failure is, it must NOT be "project:" — the registry
+            // path's first step. "spawn:" is fine (claude unavailable
+            // for some reason), as is anything else.
+            return IsFalse(t, strings.HasPrefix(e.Error(), "project:"))
+        }
+    }
+}
+
+// Without an in-project sibling, DispatchConsult falls through to the
+// registry — so a `name` not in `teams` *should* surface the
+// "project:" error from registry resolution. This is the inverse
+// assertion of the test above and confirms the routing logic isn't a
+// no-op that always picks one branch.
+func TestDispatchConsult_NoSibling_FallsThroughToRegistry(t T) T {
+    val tmp = mkTempGitRepo(t)
+    defer os.RemoveAll(tmp)
+    val proj = Project(
+        Name = "demo", Repo = tmp,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+    val r = Registry(Entries = ArrayOf(ConsultEntry(
+        Name     = "transpiler",
+        Repo     = "/nonexistent/path",
+        TeamYaml = "/nonexistent/team.yaml",
+    )))
+
+    // teams is empty — only the registry can match.
+    val res = DispatchConsult(EmptyArray[Team](), proj, r, "transpiler", "do work")
+
+    val t1 = IsFailure(t, res)
+    return res match {
+        case Failure(e) => IsTrue(t1, strings.HasPrefix(e.Error(), "project:"))
+        case _          => IsTrue(t1, false)
+    }
+}
+
+// ----- helpers ------------------------------------------------------------
+
+func makeSiblingTeam(key string) Team {
+    val theo = Member(
+        Name = "Theo", Role = TeamLead(),
+        Personality = "precise", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val cade = Member(
+        Name = "Cade", Role = Engineer(),
+        Personality = "pragmatic", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    return Team(
+        Key = key, Name = "Transpiler Wizards", Description = "",
+        Members = ArrayOf(theo, cade), Lead = theo,
+        Onboarding = EmptyArray[string](),
+    )
+}
+
+func mkTempGitRepo(t T) string {
+    val dir, err = os.MkdirTemp("", "dispatch_test_")
+    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    val mkErr = os.MkdirAll(filepath.Join(dir, ".git"), os.FileMode(0755))
+    if mkErr != nil { panic(s"fake .git: ${mkErr.Error()}") }
+    return dir
+}

@@ -42,3 +42,14 @@ gala_go_test(
         "@gala//collection_immutable",
     ],
 )
+
+gala_go_test(
+    name = "dispatch_test",
+    srcs = ["dispatch_test.gala"],
+    deps = [
+        ":consult",
+        "//app/project",
+        "//app/team",
+        "@gala//collection_immutable",
+    ],
+)

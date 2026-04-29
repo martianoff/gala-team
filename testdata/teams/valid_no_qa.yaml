@@ -1,13 +1,14 @@
-team:
-  name: "Solo"
-  members:
-    - role: team_lead
-      name: "Iris"
-      personality: "Sole orchestrator."
+teams:
+  - key: main
+    name: "Solo"
+    members:
+      - role: team_lead
+        name: "Iris"
+        personality: "Sole orchestrator."
 
-    - role: engineer
-      name: "Felix"
-      personality: "Implementer."
+      - role: engineer
+        name: "Felix"
+        personality: "Implementer."
 
 workflow:
   qa_required: false

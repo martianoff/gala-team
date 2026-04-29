@@ -43,10 +43,6 @@ func LoadFromString(yamlStr string) Try[TeamConfig] = Try[TeamConfig](() => {
 // Teams are in-project consultancies addressable by key from
 // `@consult(<key>)` directives, and selectable as the main team via
 // the `--team-key <key>` CLI flag.
-//
-// Backwards-compat: a single `team:` block in the yaml produces a
-// Teams list with exactly one entry (Key = "main"), so consumers can
-// always iterate `Teams` without checking for the singular shape.
 struct TeamConfig(
     Team     Team,
     Teams    Array[Team],
@@ -66,14 +62,8 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
 
     for d.HasMoreFields() {
         d.ReadKey() match {
-            case "team" => {
-                // Legacy single-team shape: `team: { name, members, onboarding }`
-                // becomes a one-entry Teams list keyed "main".
-                val one = decodeTeamEntry(d, "main")
-                teams = teams.Append(one)
-            }
             case "teams" => {
-                // New multi-team shape: `teams: [{key, name, description, members, onboarding}, ...]`.
+                // `teams: [{key, name, description, members, onboarding}, ...]`.
                 teams = teams.AppendAll(decodeTeamsArray(d))
             }
             case "workflow" => workflow = decodeWorkflowBlock(d)
@@ -84,7 +74,7 @@ func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
     d.EndObject()
 
     if teams.IsEmpty() {
-        panic("team.yaml: must declare at least one team via top-level 'team:' or 'teams:'")
+        panic("team.yaml: must declare at least one team under top-level 'teams:'")
     }
     return validate(teams, workflow, pol)
 }

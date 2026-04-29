@@ -111,9 +111,6 @@ ignored by the parser.
 # Required. List of one or more teams. The first entry is the "main" team
 # unless --team-key picks another. Sibling entries are addressable from the
 # main team's lead via @consult(<key>).
-#
-# Backwards-compat: the legacy `team:` (singular) block at top level is
-# still accepted and lowered to a one-entry teams list with key="main".
 
 teams:
   - key: main                       # required if multi-team. Used by @consult / --team-key.

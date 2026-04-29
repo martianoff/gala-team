@@ -1,10 +1,11 @@
-team:
-  name: "Conflict"
-  members:
-    - role: team_lead
-      name: "Iris"
-      personality: "First Iris."
+teams:
+  - key: main
+    name: "Conflict"
+    members:
+      - role: team_lead
+        name: "Iris"
+        personality: "First Iris."
 
-    - role: engineer
-      name: "Iris"
-      personality: "Second Iris — duplicate name should fail."
+      - role: engineer
+        name: "Iris"
+        personality: "Second Iris — duplicate name should fail."

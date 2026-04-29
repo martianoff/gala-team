@@ -1,6 +1,7 @@
-team:
-  name: "Headless"
-  members:
-    - role: engineer
-      name: "Felix"
-      personality: "No lead — should fail validation."
+teams:
+  - key: main
+    name: "Headless"
+    members:
+      - role: engineer
+        name: "Felix"
+        personality: "No lead — should fail validation."

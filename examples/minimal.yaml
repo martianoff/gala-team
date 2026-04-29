@@ -1,14 +1,18 @@
 # Smallest legal team — one lead + one engineer, no QA.
-team:
-  name: "Lone"
-  members:
-    - role: team_lead
-      name: "Lead"
-      personality: "Decides and reviews."
+# `gala_team --team examples/minimal.yaml --project .`
 
-    - role: engineer
-      name: "Eng"
-      personality: "Implements."
+teams:
+  - key: main
+    name: "Lone"
+    description: "Solo team — lead + one engineer, no QA"
+    members:
+      - role: team_lead
+        name: "Lead"
+        personality: "Decides and reviews."
+
+      - role: engineer
+        name: "Eng"
+        personality: "Implements."
 
 workflow:
   qa_required: false

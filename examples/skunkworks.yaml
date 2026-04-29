@@ -1,38 +1,85 @@
-# Example team — copy and adapt to your own team.
-# `gala_team --team ./skunkworks.yaml --project ~/work/auth-service`
-team:
-  name: "Skunkworks"
-  members:
-    - role: team_lead
-      name: "Iris"
-      personality: |
-        Calm, decisive. Asks clarifying questions before delegating.
-        Always produces a single PR-shaped summary at the end.
-      extra_instructions: |
-        Prefer two engineers in parallel when the task is decomposable.
+# Full-feature single-team example — every yaml key documented inline.
+# Copy and adapt to your own team.
+# `gala_team --team examples/skunkworks.yaml --project ~/work/auth-service`
 
-    - role: engineer
-      name: "Felix"
-      personality: |
-        Functional-leaning, terse, explains tradeoffs in two lines max.
-      extra_instructions: |
-        Default to GALA pattern matching over if-else chains.
+teams:
+  - key: main                                   # how --team-key / @consult reference this team
+    name: "Skunkworks"                          # display name shown in TUI header
+    description: "Backend microservices team"   # one-liner subtitle in TUI header
 
-    - role: engineer
-      name: "Mira"
-      personality: |
-        Pragmatic, prefers the boring solution, hates premature abstraction.
+    # Off by default. When true, every Claude CLI sub-process this
+    # team spawns is invoked with `--dangerously-skip-permissions`.
+    # Each team is a separate decision — turning this on for `main`
+    # does NOT enable it for sibling consult teams.
+    dangerously_skip_permissions: false
 
-    - role: qa
-      name: "Theo"
-      personality: |
-        Evidence-driven. Reproduces every reported bug before opining.
-      extra_instructions: |
-        Always check: tests exist, edge cases covered, no sentinel returns,
-        no stray prints, lint clean.
+    # Team-wide onboarding — every member reads these BEFORE their
+    # first prompt. Subsequent prompts in the same session don't
+    # re-send (model keeps them in context). Paths are relative to
+    # --project; absolute paths also accepted.
+    onboarding:
+      - docs/CONTRIBUTING.md
+      - docs/ARCHITECTURE.md
 
+    members:
+      # Exactly one team_lead is required. The user types prompts to
+      # the lead; the lead delegates via @dispatch and consults via
+      # @consult.
+      - role: team_lead
+        name: "Iris"
+        personality: |
+          Calm, decisive. Asks clarifying questions before delegating.
+          Always produces a single PR-shaped summary at the end.
+        extra_instructions: |
+          Prefer two engineers in parallel when the task is decomposable.
+        # Optional. Pinned model. Omit to use claude-cli's default.
+        # model: claude-opus-4-7
+
+        # Per-member onboarding, in addition to team-wide.
+        onboarding:
+          - docs/lead-handbook.md
+
+      - role: engineer
+        name: "Felix"
+        personality: |
+          Functional-leaning, terse, explains tradeoffs in two lines max.
+        extra_instructions: |
+          Default to GALA pattern matching over if-else chains.
+
+      - role: engineer
+        name: "Mira"
+        personality: |
+          Pragmatic, prefers the boring solution, hates premature abstraction.
+
+      # QA is required when workflow.qa_required is true (the default).
+      # The orchestration FSM gates approval on QADone.
+      - role: qa
+        name: "Theo"
+        personality: |
+          Evidence-driven. Reproduces every reported bug before opining.
+        extra_instructions: |
+          Always check: tests exist, edge cases covered, no sentinel
+          returns, no stray prints, lint clean.
+
+# How the team operates internally.
 workflow:
-  qa_required: true
-  parallel_engineers: true
+  qa_required: true                  # default true. False allows engineer-only teams.
+  parallel_engineers: true           # default true. Multiple @dispatch run concurrently.
   approval:
-    require_user_confirm: true
+    require_user_confirm: true       # default true. Final @summary opens the Ctrl+A banner.
+
+# Per-project orchestration rules. Top-level sibling of `workflow:`.
+policy:
+  workspace_mode: shared              # `shared` or `worktree-per-engineer`
+  merge_rule: squash                  # `squash` | `rebase` | `merge`
+  pre_merge:                          # blocks `gh pr create` until each succeeds
+    - name: lint
+      cmd: go
+      args: [vet, ./...]
+    - name: test
+      cmd: go
+      args: [test, ./...]
+  post_merge:                         # runs after `gh pr merge` succeeds (best-effort)
+    - name: notify
+      cmd: scripts/notify-slack.sh
+      args: []

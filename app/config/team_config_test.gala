@@ -8,56 +8,60 @@ import (
     . "github.com/martianoff/gala_team/app/team"
 )
 
-val validTeamYaml = "team:\n" +
-    "  name: \"Skunkworks\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n" +
-    "      name: \"Iris\"\n" +
-    "      personality: |\n" +
-    "        Calm, decisive.\n" +
-    "    - role: engineer\n" +
-    "      name: \"Felix\"\n" +
-    "      personality: |\n" +
-    "        Terse.\n" +
-    "      extra_instructions: |\n" +
-    "        Pattern matching.\n" +
-    "    - role: qa\n" +
-    "      name: \"Theo\"\n" +
-    "      personality: \"Evidence-driven.\"\n" +
+val validTeamYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"Skunkworks\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n" +
+    "        name: \"Iris\"\n" +
+    "        personality: |\n" +
+    "          Calm, decisive.\n" +
+    "      - role: engineer\n" +
+    "        name: \"Felix\"\n" +
+    "        personality: |\n" +
+    "          Terse.\n" +
+    "        extra_instructions: |\n" +
+    "          Pattern matching.\n" +
+    "      - role: qa\n" +
+    "        name: \"Theo\"\n" +
+    "        personality: \"Evidence-driven.\"\n" +
     "workflow:\n" +
     "  qa_required: true\n" +
     "  parallel_engineers: true\n" +
     "  approval:\n" +
     "    require_user_confirm: true\n"
 
-val noQaYaml = "team:\n" +
-    "  name: \"Solo\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n" +
-    "      name: \"Iris\"\n" +
-    "      personality: \"Sole orchestrator.\"\n" +
-    "    - role: engineer\n" +
-    "      name: \"Felix\"\n" +
-    "      personality: \"Implementer.\"\n" +
+val noQaYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"Solo\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n" +
+    "        name: \"Iris\"\n" +
+    "        personality: \"Sole orchestrator.\"\n" +
+    "      - role: engineer\n" +
+    "        name: \"Felix\"\n" +
+    "        personality: \"Implementer.\"\n" +
     "workflow:\n" +
     "  qa_required: false\n"
 
-val noLeadYaml = "team:\n" +
-    "  name: \"Headless\"\n" +
-    "  members:\n" +
-    "    - role: engineer\n" +
-    "      name: \"Felix\"\n" +
-    "      personality: \"No lead.\"\n"
+val noLeadYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"Headless\"\n" +
+    "    members:\n" +
+    "      - role: engineer\n" +
+    "        name: \"Felix\"\n" +
+    "        personality: \"No lead.\"\n"
 
-val dupNameYaml = "team:\n" +
-    "  name: \"Conflict\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n" +
-    "      name: \"Iris\"\n" +
-    "      personality: \"First.\"\n" +
-    "    - role: engineer\n" +
-    "      name: \"Iris\"\n" +
-    "      personality: \"Second.\"\n"
+val dupNameYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"Conflict\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n" +
+    "        name: \"Iris\"\n" +
+    "        personality: \"First.\"\n" +
+    "      - role: engineer\n" +
+    "        name: \"Iris\"\n" +
+    "        personality: \"Second.\"\n"
 
 func TestLoadValidTeam(t T) T {
     val res = LoadFromString(validTeamYaml)
@@ -84,23 +88,24 @@ func TestLoadNoLead_Fails(t T) T = IsFailure(t, LoadFromString(noLeadYaml))
 func TestLoadDupName_Fails(t T) T = IsFailure(t, LoadFromString(dupNameYaml))
 
 func TestLoadEmptyMembers_Fails(t T) T {
-    val empty = "team:\n  name: \"X\"\n  members: []\n"
+    val empty = "teams:\n  - key: main\n    name: \"X\"\n    members: []\n"
     return IsFailure(t, LoadFromString(empty))
 }
 
 func TestUnknownRole_Fails(t T) T {
-    val bad = "team:\n  name: \"X\"\n  members:\n" +
-        "    - role: designer\n      name: \"Pia\"\n      personality: \"Unsupported role.\"\n"
+    val bad = "teams:\n  - key: main\n    name: \"X\"\n    members:\n" +
+        "      - role: designer\n        name: \"Pia\"\n        personality: \"Unsupported role.\"\n"
     return IsFailure(t, LoadFromString(bad))
 }
 
 // Policy block parsing -------------------------------------------------------
 
-val withPolicyYaml = "team:\n" +
-    "  name: \"PolicyDemo\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"Calm.\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"Terse.\"\n" +
+val withPolicyYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"PolicyDemo\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"Calm.\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"Terse.\"\n" +
     "workflow:\n" +
     "  qa_required: false\n" +
     "policy:\n" +
@@ -145,57 +150,63 @@ func TestLoadWithoutPolicy_DefaultsApplied(t T) T {
 // Policy block edge cases
 // ---------------------------------------------------------------------------
 
-val policyMergeRuleSquashYaml = "team:\n" +
-    "  name: \"X\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+val policyMergeRuleSquashYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"X\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
     "workflow:\n  qa_required: false\n" +
     "policy:\n" +
     "  merge_rule: squash\n"
 
-val policyMergeRulePlainYaml = "team:\n" +
-    "  name: \"X\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+val policyMergeRulePlainYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"X\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
     "workflow:\n  qa_required: false\n" +
     "policy:\n" +
     "  merge_rule: merge\n"
 
-val policyBadMergeRuleYaml = "team:\n" +
-    "  name: \"X\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+val policyBadMergeRuleYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"X\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
     "workflow:\n  qa_required: false\n" +
     "policy:\n" +
     "  merge_rule: ff-only\n"
 
-val policyBadWorkspaceModeYaml = "team:\n" +
-    "  name: \"X\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+val policyBadWorkspaceModeYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"X\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
     "workflow:\n  qa_required: false\n" +
     "policy:\n" +
     "  workspace_mode: detached\n"
 
-val policyOnlyPostMergeYaml = "team:\n" +
-    "  name: \"X\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+val policyOnlyPostMergeYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"X\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
     "workflow:\n  qa_required: false\n" +
     "policy:\n" +
     "  post_merge:\n" +
     "    - name: notify\n      cmd: echo\n      args:\n        - merged\n"
 
-val policyHookNoArgsYaml = "team:\n" +
-    "  name: \"X\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+val policyHookNoArgsYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"X\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
     "workflow:\n  qa_required: false\n" +
     "policy:\n" +
     "  pre_merge:\n" +
@@ -248,11 +259,12 @@ func TestLoadPolicy_HookWithoutArgs_DefaultsToEmpty(t T) T {
 // Member-shape edge cases
 // ---------------------------------------------------------------------------
 
-val explicitNullModelYaml = "team:\n" +
-    "  name: \"X\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n      model: null\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n      model: \"claude-opus-4-7\"\n" +
+val explicitNullModelYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"X\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n        model: null\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n        model: \"claude-opus-4-7\"\n" +
     "workflow:\n  qa_required: false\n"
 
 func TestLoadMember_ExplicitNullModelIsNone(t T) T {
@@ -277,11 +289,12 @@ func TestLoadMember_PinnedModelIsSome(t T) T {
 
 // Workflow defaults only some fields — verify the rest fall back
 // without forcing every key in every team.yaml.
-val partialWorkflowYaml = "team:\n" +
-    "  name: \"X\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+val partialWorkflowYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"X\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
     "workflow:\n" +
     "  qa_required: false\n"
 
@@ -297,13 +310,14 @@ func TestLoadWorkflow_OmittedKeysDefault(t T) T {
 // Two-engineer team — the validate() lead-uniqueness check is keyed on
 // role count, not name, so duplicates by role need to be allowed when
 // only one is the team_lead.
-val multiEngineerYaml = "team:\n" +
-    "  name: \"BigTeam\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
-    "    - role: engineer\n      name: \"Mira\"\n      personality: \"sharp\"\n" +
-    "    - role: engineer\n      name: \"Zara\"\n      personality: \"thorough\"\n" +
+val multiEngineerYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"BigTeam\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
+    "      - role: engineer\n        name: \"Mira\"\n        personality: \"sharp\"\n" +
+    "      - role: engineer\n        name: \"Zara\"\n        personality: \"thorough\"\n" +
     "workflow:\n  qa_required: false\n"
 
 func TestLoad_ManyEngineersAllowed(t T) T {
@@ -314,12 +328,13 @@ func TestLoad_ManyEngineersAllowed(t T) T {
 }
 
 // Two team leads — must fail (validate enforces exactly one).
-val twoLeadsYaml = "team:\n" +
-    "  name: \"DoubleLead\"\n" +
-    "  members:\n" +
-    "    - role: team_lead\n      name: \"Iris\"\n      personality: \"calm\"\n" +
-    "    - role: team_lead\n      name: \"Otto\"\n      personality: \"firm\"\n" +
-    "    - role: engineer\n      name: \"Felix\"\n      personality: \"terse\"\n" +
+val twoLeadsYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"DoubleLead\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: team_lead\n        name: \"Otto\"\n        personality: \"firm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
     "workflow:\n  qa_required: false\n"
 
 func TestLoad_TwoTeamLeads_Fails(t T) T = IsFailure(t, LoadFromString(twoLeadsYaml))
@@ -364,16 +379,6 @@ func TestLoadMultiTeams_FirstIsMain(t T) T {
     val cfg = res.Get()
     val t2 = Eq(t1, cfg.Team.Key, "main")
     return Eq(t2, cfg.Team.Name, "Skunkworks")
-}
-
-// Backward-compat: the legacy `team:` (singular) shape still works
-// and produces a one-entry Teams list with Key = "main".
-func TestLoadLegacyTeam_PopulatesTeamsListWithOneEntry(t T) T {
-    val res = LoadFromString(validTeamYaml)
-    val t1 = IsSuccess(t, res)
-    val cfg = res.Get()
-    val t2 = Eq(t1, cfg.Teams.Size(), 1)
-    return Eq(t2, cfg.Teams.Get(0).Key, "main")
 }
 
 // Missing `key:` falls back to a slugified `name`.

@@ -113,14 +113,16 @@ func decodeTeamEntry(d *yaml.YamlDecoderImpl, defaultKey string) Team {
     var description = ""
     var members = EmptyArray[Member]()
     var onboarding = EmptyArray[string]()
+    var dangerous = false
     for d.HasMoreFields() {
         d.ReadKey() match {
-            case "key"         => key = d.ReadString()
-            case "name"        => name = d.ReadString()
-            case "description" => description = d.ReadString()
-            case "members"     => members = decodeMemberArray(d)
-            case "onboarding"  => onboarding = decodeStringArray(d)
-            case _             => d.Skip()
+            case "key"                          => key = d.ReadString()
+            case "name"                         => name = d.ReadString()
+            case "description"                  => description = d.ReadString()
+            case "members"                      => members = decodeMemberArray(d)
+            case "onboarding"                   => onboarding = decodeStringArray(d)
+            case "dangerously_skip_permissions" => dangerous = d.ReadBool()
+            case _                              => d.Skip()
         }
     }
     d.EndObject()
@@ -132,12 +134,13 @@ func decodeTeamEntry(d *yaml.YamlDecoderImpl, defaultKey string) Team {
     }
     val effectiveKey = if (key == "") slugify(name) else key
     return Team(
-        Key         = effectiveKey,
-        Name        = name,
-        Description = description,
-        Members     = members,
-        Lead        = leads.Get(0),
-        Onboarding  = onboarding,
+        Key                        = effectiveKey,
+        Name                       = name,
+        Description                = description,
+        Members                    = members,
+        Lead                       = leads.Get(0),
+        Onboarding                 = onboarding,
+        DangerouslySkipPermissions = dangerous,
     )
 }
 

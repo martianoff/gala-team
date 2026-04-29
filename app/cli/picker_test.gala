@@ -78,6 +78,7 @@ func makeTeam(key string, name string) Team {
         Key = key, Name = name, Description = "",
         Members = ArrayOf(iris, felix), Lead = iris,
         Onboarding = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
     )
 }
 

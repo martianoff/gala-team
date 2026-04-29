@@ -165,12 +165,13 @@ func sampleTeam() Team {
         Onboarding = EmptyArray[string](),
     )
     return Team(
-        Key         = "main",
-        Name        = "Skunkworks",
-        Description = "Default product team — calm lead, terse engineer, skeptical QA.",
-        Members     = ArrayOf(iris, felix, quinn),
-        Lead        = iris,
-        Onboarding  = EmptyArray[string](),
+        Key                        = "main",
+        Name                       = "Skunkworks",
+        Description                = "Default product team — calm lead, terse engineer, skeptical QA.",
+        Members                    = ArrayOf(iris, felix, quinn),
+        Lead                       = iris,
+        Onboarding                 = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
     )
 }
 

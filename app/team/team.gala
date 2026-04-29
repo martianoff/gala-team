@@ -105,13 +105,20 @@ func DefaultWorkflow() Workflow = Workflow(
 // first prompt — typically architecture docs, conventions, the
 // project's CONTRIBUTING.md. Composed with each Member.Onboarding to
 // form the per-member onboarding pack (see app/onboarding.Compose).
+//
+// DangerouslySkipPermissions opts the entire team into Claude Code's
+// `--dangerously-skip-permissions` flag — every member of this team
+// runs with the flag, including a child consult team that has it
+// set. Off by default; turning it on is a deliberate per-team
+// decision the user has to make in YAML.
 struct Team(
-    Key         string,
-    Name        string,
-    Description string,
-    Members     Array[Member],
-    Lead        Member,
-    Onboarding  Array[string],
+    Key                        string,
+    Name                       string,
+    Description                string,
+    Members                    Array[Member],
+    Lead                       Member,
+    Onboarding                 Array[string],
+    DangerouslySkipPermissions bool,
 )
 
 // MembersOf returns the members with the given role, in source order.

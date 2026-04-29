@@ -410,3 +410,33 @@ func TestLoadMultiTeams_DuplicateKey_Fails(t T) T =
 val emptyTeamsYaml = "teams: []\nworkflow:\n  qa_required: false\n"
 func TestLoadMultiTeams_Empty_Fails(t T) T =
     IsFailure(t, LoadFromString(emptyTeamsYaml))
+
+// ---------------------------------------------------------------------------
+// dangerously_skip_permissions
+// ---------------------------------------------------------------------------
+
+val dangerousYaml = "teams:\n" +
+    "  - key: main\n    name: Skunkworks\n    dangerously_skip_permissions: true\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: Iris\n        personality: calm\n" +
+    "      - role: engineer\n        name: Felix\n        personality: terse\n" +
+    "workflow:\n  qa_required: false\n"
+
+val safeYaml = "teams:\n" +
+    "  - key: main\n    name: Skunkworks\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: Iris\n        personality: calm\n" +
+    "      - role: engineer\n        name: Felix\n        personality: terse\n" +
+    "workflow:\n  qa_required: false\n"
+
+func TestLoad_DangerouslySkipPermissions_True(t T) T {
+    val res = LoadFromString(dangerousYaml)
+    val t1 = IsSuccess(t, res)
+    return IsTrue(t1, res.Get().Team.DangerouslySkipPermissions)
+}
+
+func TestLoad_DangerouslySkipPermissions_DefaultsFalse(t T) T {
+    val res = LoadFromString(safeYaml)
+    val t1 = IsSuccess(t, res)
+    return IsFalse(t1, res.Get().Team.DangerouslySkipPermissions)
+}

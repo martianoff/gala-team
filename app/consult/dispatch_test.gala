@@ -105,6 +105,7 @@ func makeSiblingTeam(key string) Team {
         Key = key, Name = "Transpiler Wizards", Description = "",
         Members = ArrayOf(theo, cade), Lead = theo,
         Onboarding = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
     )
 }
 

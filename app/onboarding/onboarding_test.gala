@@ -3,6 +3,7 @@ package main
 import (
     "os"
     "path/filepath"
+    "strings"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -46,12 +47,13 @@ func mkMember(name string, role Role, onboarding Array[string]) Member = Member(
 )
 
 func mkTeam(teamOnboarding Array[string], members Array[Member]) Team = Team(
-    Key         = "test",
-    Name        = "TestTeam",
-    Description = "",
-    Members     = members,
-    Lead        = members.Get(0),
-    Onboarding  = teamOnboarding,
+    Key                        = "test",
+    Name                       = "TestTeam",
+    Description                = "",
+    Members                    = members,
+    Lead                       = members.Get(0),
+    Onboarding                 = teamOnboarding,
+    DangerouslySkipPermissions = false,
 )
 
 // Compose interleaves team-wide first then member-specific.
@@ -116,14 +118,62 @@ func TestLoad_MissingFile_Fails(t T) T {
 }
 
 // WrapPrompt with empty onboarding returns the original prompt.
-func TestWrapPrompt_EmptyOnboarding_ReturnsPromptAsIs(t T) T {
+// Even with empty onboarding, the role section is always emitted so
+// the model knows who it's playing. The user's prompt comes after a
+// "# Your task" header.
+func TestWrapPrompt_EmptyOnboarding_StillIncludesRoleHeader(t T) T {
     val proj = mkProj("empty_onb", EmptyArray[Tuple[string, string]]())
     val tm = mkTeam(EmptyArray[string](), ArrayOf(
         mkMember("Iris", TeamLead(), EmptyArray[string]()),
     ))
     val res = WrapPrompt(proj, tm, tm.Lead, "do the thing")
     val t1 = IsSuccess(t, res)
-    return Eq(t1, res.Get(), "do the thing")
+    val out = res.Get()
+    val t2 = IsTrue(t1, strings.Contains(out, "# Your role"))
+    val t3 = IsTrue(t2, strings.Contains(out, "Iris"))
+    val t4 = IsTrue(t3, strings.Contains(out, "team_lead"))
+    val t5 = IsTrue(t4, strings.Contains(out, "TestTeam"))
+    val t6 = IsTrue(t5, strings.Contains(out, "# Your task"))
+    return IsTrue(t6, strings.Contains(out, "do the thing"))
+}
+
+// Personality and extra_instructions are folded into the role
+// section verbatim so the model can take on the configured persona.
+func TestWrapPrompt_IncludesPersonalityAndExtra(t T) T {
+    val proj = mkProj("persona", EmptyArray[Tuple[string, string]]())
+    val iris = Member(
+        Name = "Iris", Role = TeamLead(),
+        Personality = "Calm, decisive.",
+        Model = None[string](),
+        Extra = "Always cite line numbers.",
+        Onboarding = EmptyArray[string](),
+    )
+    val tm = mkTeam(EmptyArray[string](), ArrayOf(iris))
+    val res = WrapPrompt(proj, tm, iris, "ship it")
+    val t1 = IsSuccess(t, res)
+    val out = res.Get()
+    val t2 = IsTrue(t1, strings.Contains(out, "Calm, decisive."))
+    return IsTrue(t2, strings.Contains(out, "Always cite line numbers."))
+}
+
+// A member with truly empty personality / extra still gets a role
+// header but no empty Personality / Additional-instructions sub-
+// headers — so the model doesn't see literal "## Personality\n\n"
+// with nothing under it.
+func TestWrapPrompt_EmptyPersonality_OmitsSubsection(t T) T {
+    val proj = mkProj("blank_pers", EmptyArray[Tuple[string, string]]())
+    val blank = Member(
+        Name = "Iris", Role = TeamLead(),
+        Personality = "",      // intentionally blank — overrides mkMember's "p"
+        Model = None[string](),
+        Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val tm = mkTeam(EmptyArray[string](), ArrayOf(blank))
+    val res = WrapPrompt(proj, tm, tm.Lead, "task")
+    val out = res.Get()
+    val t1 = IsFalse(t, strings.Contains(out, "## Personality"))
+    return IsFalse(t1, strings.Contains(out, "## Additional instructions"))
 }
 
 func TestWrapPrompt_PrependsOnboardingHeader(t T) T {

@@ -60,12 +60,14 @@ struct MemberSession(
 // SpawnSession launches a `claude` CLI process for `m` with cwd
 // `workspace`. The team lead always uses `proj.Repo`; engineers /
 // QAs may run in their own git worktree (see `EnsureWorkspace`).
-// `m.Model` pins the model when set. Returns Try[MemberSession];
-// failure carries the underlying spawn error.
-func SpawnSession(proj Project, m Member, workspace string) Try[MemberSession] {
+// `m.Model` pins the model when set. `dangerouslySkipPermissions`
+// passes through `--dangerously-skip-permissions` to claude — opt-in
+// per-team via the `dangerously_skip_permissions:` yaml field. Returns
+// Try[MemberSession]; failure carries the underlying spawn error.
+func SpawnSession(proj Project, m Member, workspace string, dangerouslySkipPermissions bool) Try[MemberSession] {
     val opts = subprocess.NewSpawnOpts(
         "claude",
-        claudeArgs(m).ToGoSlice(),
+        claudeArgs(m, dangerouslySkipPermissions).ToGoSlice(),
         SliceEmpty[string](),
         workspace,
     )
@@ -137,14 +139,21 @@ func RemoveWorktree(proj Project, m Member) Try[bool] = Try[bool](() => {
     return true
 })
 
-// claudeArgs assembles the standard `claude` CLI flags. We always use
-// stream-json so the FieldDecoder parser can walk chunks line-by-line.
-func claudeArgs(m Member) Array[string] {
+// claudeArgs assembles the `claude` CLI flags for a spawn:
+//   - `--output-format stream-json` always, so the chunk pump can
+//     walk member output line-by-line.
+//   - `--model <name>` when m.Model is Some — pins the model.
+//   - `--dangerously-skip-permissions` when the enclosing team
+//     opted in via team.yaml. Off by default; turning it on is a
+//     deliberate decision the user makes per-team.
+func claudeArgs(m Member, dangerouslySkipPermissions bool) Array[string] {
     val base = ArrayOf("--output-format", "stream-json")
-    return m.Model match {
+    val withModel = m.Model match {
         case Some(name) => base.AppendAll(ArrayOf("--model", name))
         case None()     => base
     }
+    return if (dangerouslySkipPermissions) withModel.Append("--dangerously-skip-permissions")
+           else                            withModel
 }
 
 // ----------------------------------------------------------------------------

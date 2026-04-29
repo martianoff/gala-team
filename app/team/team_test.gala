@@ -27,12 +27,13 @@ func sampleTeam() Team {
         Onboarding = EmptyArray[string](),
     )
     return Team(
-        Key         = "main",
-        Name        = "Skunkworks",
-        Description = "",
-        Members     = ArrayOf[Member](iris, felix, theo),
-        Lead        = iris,
-        Onboarding  = EmptyArray[string](),
+        Key                        = "main",
+        Name                       = "Skunkworks",
+        Description                = "",
+        Members                    = ArrayOf[Member](iris, felix, theo),
+        Lead                       = iris,
+        Onboarding                 = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
     )
 }
 
@@ -121,6 +122,7 @@ func TestMembersOf_EmptyForMissingRole(t T) T {
         Key = "solo", Name = "Solo", Description = "",
         Members = ArrayOf(iris, felix), Lead = iris,
         Onboarding = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
     )
     return Eq(t, MembersOf(tm, QA()).Length(), 0)
 }

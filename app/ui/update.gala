@@ -152,7 +152,7 @@ func ensureSession(m AppModel, member Member) Either[string, AppModel] {
         case Some(_) => Right[string, AppModel](m)
         case None()  => EnsureWorkspace(m.Project, member, m.Policy.WorkspaceMode) match {
             case Failure(e)  => Left[string, AppModel](s"workspace ${member.Name}: ${e.Error()}")
-            case Success(ws) => SpawnSession(m.Project, member, ws) match {
+            case Success(ws) => SpawnSession(m.Project, member, ws, m.Team.DangerouslySkipPermissions) match {
                 case Success(s) => Right[string, AppModel](m.Copy(Sessions = m.Sessions.Put(member.Name, s)))
                 case Failure(e) => Left[string, AppModel](s"spawn ${member.Name}: ${e.Error()}")
             }

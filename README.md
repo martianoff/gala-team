@@ -122,6 +122,14 @@ teams:
     name: "Skunkworks"              # required. Display name shown in the TUI header.
     description: "Product team"     # optional. One-line subtitle shown next to `name`.
 
+    dangerously_skip_permissions: false   # optional. Default false. When true, every
+                                    # spawned `claude` for this team is invoked with
+                                    # `--dangerously-skip-permissions`. Use ONLY when
+                                    # you've already granted the parent permissions
+                                    # and want sub-agents to inherit them without
+                                    # re-prompting. Each team is a separate decision
+                                    # — a sibling consult team's flag is independent.
+
     onboarding:                     # optional. List of file paths (relative to --project,
       - docs/CONTRIBUTING.md        # absolute paths also accepted) read once and prepended
       - docs/ARCHITECTURE.md        # to every member's first prompt. Subsequent prompts
@@ -270,11 +278,50 @@ the in-project entry wins.
 
 ---
 
-## Onboarding docs
+## Onboarding & first-prompt payload
 
-Each team and each member can declare a list of file paths under
-`onboarding:`. Their contents are prepended to the **first** prompt the
-member receives, so the model has the context before its first response.
+The very first message sent to a freshly-spawned `claude` subprocess is
+assembled from four sources:
+
+```
+# Your role
+
+You are <Member.Name>, the <role> on team <Team.Name>.
+
+## Personality
+<Member.personality>
+
+## Additional instructions
+<Member.extra_instructions>
+
+# Project onboarding              ← omitted if no onboarding paths
+
+--- docs/CONTRIBUTING.md ---
+<file contents>
+
+--- docs/lead-handbook.md ---
+<file contents>
+
+# Your task
+
+<the prompt the user typed, or the @consult body, or the @dispatch body>
+```
+
+Sources, in order they're stitched:
+
+| Field | Where in yaml | Always sent? |
+|---|---|---|
+| Member name + role | inferred from `members[].name` / `members[].role` | yes |
+| Team name | `teams[].name` | yes |
+| Personality | `members[].personality` | when non-empty |
+| Extra instructions | `members[].extra_instructions` | when non-empty |
+| Team-wide onboarding docs | `teams[].onboarding` (file paths) | when non-empty |
+| Per-member onboarding docs | `members[].onboarding` (file paths) | when non-empty |
+| The prompt | composer text / `@consult` body / `@dispatch` body | yes |
+
+Subsequent prompts in the same session **do not re-send any of this** —
+the model already has the role + onboarding in its context window. Only
+the bare prompt goes through.
 
 ```yaml
 teams:
@@ -286,12 +333,13 @@ teams:
     members:
       - role: team_lead
         name: Iris
+        personality: |
+          Calm, decisive. Asks clarifying questions before delegating.
+        extra_instructions: |
+          Always cite line numbers when referencing code.
         onboarding:                 # additionally for the lead
           - docs/lead-handbook.md
 ```
-
-Subsequent prompts in the same session don't re-send the docs — the model
-keeps them in its context window.
 
 ---
 

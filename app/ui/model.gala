@@ -82,6 +82,17 @@ struct AppModel(
     // Cursor position into the archives list — clamped to
     // 0..Archives.Size()-1 by the navigation handlers.
     HistoryCursor int,
+    // Names of members whose Claude subprocess was alive in the
+    // prior session and should be re-spawned with `--continue` on
+    // first use. Populated by primeFromSnapshot at startup; drained
+    // by ensureSession as each recovered member is respawned.
+    RecoveredMembers Array[string],
+    // True when a session was restored from latest.json on launch.
+    // Drives the "↻ Restored …" banner above the conversation pane.
+    // Cleared by Esc (also wipes Conversation + RecoveredMembers
+    // for a fresh start) or by the first chunk that arrives in a
+    // recovered member's stream.
+    RecoveryBannerVisible bool,
 )
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
@@ -133,6 +144,8 @@ func InitialModelWithTeams(
     HistoryMode       = false,
     ViewingArchive    = None[session.Snapshot](),
     HistoryCursor     = 0,
+    RecoveredMembers  = EmptyArray[string](),
+    RecoveryBannerVisible = false,
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +

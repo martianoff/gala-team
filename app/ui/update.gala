@@ -62,7 +62,7 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case HistoryCursorUp()           => onHistoryCursorMove(m, -1)
     case HistoryCursorDown()         => onHistoryCursorMove(m, 1)
     case HistorySelect()             => onHistorySelect(m)
-    case HistoryDeselect()           => (m.Copy(ViewingArchive = None[session.Snapshot]()), NoCmd[AppMsg]())
+    case HistoryDeselect()           => onEscOrDeselect(m)
     case HistoryArchiveLoaded(snap)  => (m.Copy(ViewingArchive = Some(snap)), NoCmd[AppMsg]())
     case HistoryArchiveFailed(err)   => (m.Copy(LastError = Some(s"history: ${err}")), NoCmd[AppMsg]())
     case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
@@ -122,6 +122,11 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt)),
         TurnBuffer    = "",
         ConsultsFired = 0,
+        // First user prompt after a recovery dismisses the banner
+        // automatically — the user has signaled they want to
+        // continue, so the "type to resume · Esc to discard" hint
+        // has done its job.
+        RecoveryBannerVisible = false,
     )
     val lead = m.Team.Lead
     val firstSpawn = !m.Sessions.Get(lead.Name).IsDefined()
@@ -147,14 +152,31 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // for non-lead members on first spawn. Returns Right(updatedModel) on
 // success (or no-op when already present), Left(errorString) on spawn
 // or workspace-creation failure.
+//
+// If `member.Name` is in m.RecoveredMembers (populated at startup
+// from the prior session's snapshot), the spawn passes
+// `resume=true` so claude picks up its prior in-process
+// conversation via `--continue`. The name is then drained from
+// RecoveredMembers; once that list goes empty the recovery banner
+// is also dismissed since every pending agent has been respawned.
 func ensureSession(m AppModel, member Member) Either[string, AppModel] {
     return m.Sessions.Get(member.Name) match {
         case Some(_) => Right[string, AppModel](m)
         case None()  => EnsureWorkspace(m.Project, member, m.Policy.WorkspaceMode) match {
             case Failure(e)  => Left[string, AppModel](s"workspace ${member.Name}: ${e.Error()}")
-            case Success(ws) => SpawnSession(m.Project, member, ws, m.Team.DangerouslySkipPermissions) match {
-                case Success(s) => Right[string, AppModel](m.Copy(Sessions = m.Sessions.Put(member.Name, s)))
-                case Failure(e) => Left[string, AppModel](s"spawn ${member.Name}: ${e.Error()}")
+            case Success(ws) => {
+                val resume = m.RecoveredMembers.Contains(member.Name)
+                return SpawnSession(m.Project, member, ws, m.Team.DangerouslySkipPermissions, resume) match {
+                    case Success(s) => {
+                        val nextRecovered = m.RecoveredMembers.FilterNot((n) => n == member.Name)
+                        return Right[string, AppModel](m.Copy(
+                            Sessions              = m.Sessions.Put(member.Name, s),
+                            RecoveredMembers      = nextRecovered,
+                            RecoveryBannerVisible = m.RecoveryBannerVisible && nextRecovered.Size() > 0,
+                        ))
+                    }
+                    case Failure(e) => Left[string, AppModel](s"spawn ${member.Name}: ${e.Error()}")
+                }
             }
         }
     }
@@ -289,10 +311,17 @@ func batchAll(cmds Array[Cmd[AppMsg]]) Cmd[AppMsg] {
     return cmds.FoldLeft(NoCmd[AppMsg](), (acc, c) => Batch[AppMsg](acc, c))
 }
 
+// activeMemberNames returns the names of every member with a live
+// Claude subprocess. Persisted alongside the conversation so the
+// next launch can spawn those members with `--continue` and pick up
+// their prior in-process state.
+func activeMemberNames(m AppModel) Array[string] =
+    m.Sessions.FoldLeftKV(EmptyArray[string](), (acc, name, _) => acc.Append(name))
+
 // persistConversation writes the new conversation log to disk under
 // m.Project.Repo and returns the updated model. Save failures only set
 // LastError — the in-memory transcript stays canonical.
-func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) AppModel = session.Save(m.Project.Repo, m.Project.Name, nextConvo) match {
+func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) AppModel = session.Save(m.Project.Repo, m.Project.Name, nextConvo, activeMemberNames(m)) match {
     case Success(_)   => m.Copy(Conversation = nextConvo)
     case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some(s"session save: ${err.Error()}"))
 }
@@ -650,6 +679,26 @@ func trimLastRune(s string) string {
 // ----------------------------------------------------------------------------
 // History browser handlers
 // ----------------------------------------------------------------------------
+
+// onEscOrDeselect routes Esc to whichever modal is current: the
+// recovery banner takes precedence (it's the most disruptive
+// modal — appearing automatically on launch — so dismissing it is
+// the user's likely intent); then HistoryDeselect closes a viewed
+// archive; otherwise no-op.
+//
+// Dismissing the recovery banner clears Conversation +
+// RecoveredMembers so the user gets a clean slate, matching the
+// banner's "Esc to discard" hint.
+func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if m.RecoveryBannerVisible {
+        return (m.Copy(
+            RecoveryBannerVisible = false,
+            RecoveredMembers      = EmptyArray[string](),
+            Conversation          = EmptyArray[session.ConversationLine](),
+        ), NoCmd[AppMsg]())
+    }
+    return (m.Copy(ViewingArchive = None[session.Snapshot]()), NoCmd[AppMsg]())
+}
 
 // onToggleHistory flips HistoryMode and resets the cursor + viewing
 // state when entering. Closing the browser does NOT clear Archives —

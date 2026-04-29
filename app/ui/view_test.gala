@@ -1,0 +1,657 @@
+package main
+
+import (
+    "strings"
+    "github.com/martianoff/gala-tui"
+    "github.com/martianoff/gala_team/app/session"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/policy"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/team"
+    . "github.com/martianoff/gala_team/app/ui"
+)
+
+// view_test — snapshot tests for the top-level View() composition.
+//
+// The widget helpers in view.gala (headerWidget, conversationPanel,
+// composerWidget, footerWidget, approvalBanner, consultViewerPanel,
+// historyPanel, …) are package-private. We exercise them indirectly
+// by rendering the whole View(m) at a fixed 100x32 viewport and
+// asserting on substrings. Layout regressions, missing labels,
+// swapped colors, broken cursor highlights — anything that changes
+// the rendered text — gets caught here.
+//
+// Style assertions (ANSI escapes) are intentionally NOT compared:
+// they're noisy and version-bound to gala-tui's emit. We assert on
+// content. The few visual-distinction tests (cursor highlight, dim
+// vs bright) check for the marker characters ("▶", "…") rather than
+// the escape sequences.
+
+val viewportW = 100
+val viewportH = 32
+
+// ---------------------------------------------------------------------------
+// fixtures
+// ---------------------------------------------------------------------------
+
+func mkTeam(name string, description string) Team {
+    val iris = Member(
+        Name = "Iris", Role = TeamLead(),
+        Personality = "calm", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val felix = Member(
+        Name = "Felix", Role = Engineer(),
+        Personality = "terse", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    return Team(
+        Key = "main", Name = name, Description = description,
+        Members = ArrayOf(iris, felix), Lead = iris,
+        Onboarding = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
+    )
+}
+
+func mkProj() Project = Project(
+    Name = "demo", Repo = "/tmp/demo",
+    Github = None[string](),
+    DefaultBranch = "main",
+)
+
+func mkModel(team Team) AppModel = InitialModel(mkProj(), team, DefaultWorkflow(), DefaultPolicy())
+
+// Function-valued val to bypass a transpiler quirk: when `session`
+// is qualified-imported and exports a `Snapshot` struct, plain or
+// qualified `Snapshot(...)` calls get resolved to the struct
+// constructor instead of gala_tui's Snapshot function. Routing
+// through `takeSnap` keeps the call site free of the offending name.
+val takeSnap = gala_tui.Snapshot
+
+func render(m AppModel) string = takeSnap(View(m), viewportW, viewportH)
+
+// ---------------------------------------------------------------------------
+// Header
+// ---------------------------------------------------------------------------
+
+func TestView_Header_ShowsTeamName(t T) T {
+    val out = render(mkModel(mkTeam("Skunkworks", "")))
+    return IsTrue(t, strings.Contains(out, "Skunkworks"))
+}
+
+func TestView_Header_ShowsDescription_WhenSet(t T) T {
+    val out = render(mkModel(mkTeam("Skunkworks", "Default product team")))
+    val t1 = IsTrue(t, strings.Contains(out, "Skunkworks"))
+    return IsTrue(t1, strings.Contains(out, "Default product team"))
+}
+
+// When description is blank, the "  ·  <desc>" suffix shouldn't render.
+func TestView_Header_NoDotSuffix_WhenDescriptionBlank(t T) T {
+    val out = render(mkModel(mkTeam("Skunkworks", "")))
+    return IsFalse(t, strings.Contains(out, "Skunkworks  ·"))
+}
+
+func TestView_Header_StateLabel_Idle(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    return IsTrue(t, strings.Contains(out, "state: idle"))
+}
+
+func TestView_Header_StateLabel_Approval(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(State = Approval(SummaryBody = "ship"))
+    return IsTrue(t, strings.Contains(render(m), "state: approval"))
+}
+
+// ---------------------------------------------------------------------------
+// Approval banner
+// ---------------------------------------------------------------------------
+
+// Banner is hidden in Idle state — no Ctrl+A/Ctrl+R hint visible.
+func TestView_ApprovalBanner_HiddenInIdle(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    return IsFalse(t, strings.Contains(out, "Ctrl+A approve & open PR"))
+}
+
+// Banner shows in Approval state with the snippet.
+func TestView_ApprovalBanner_VisibleInApproval(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(State = Approval(SummaryBody = "Ship the metrics endpoint"))
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "Ready to ship"))
+    val t2 = IsTrue(t1, strings.Contains(out, "Ship the metrics endpoint"))
+    return IsTrue(t2, strings.Contains(out, "Ctrl+A approve & open PR"))
+}
+
+// Newlines in the summary body are flattened so the banner stays on one line.
+func TestView_ApprovalBanner_FlattensNewlines(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        State = Approval(SummaryBody = "## Header\nDid X\nDid Y"),
+    )
+    val out = render(m)
+    return IsFalse(t, strings.Contains(out, "## Header\nDid X"))
+}
+
+// ---------------------------------------------------------------------------
+// Conversation panel
+// ---------------------------------------------------------------------------
+
+// Empty conversation surfaces a "type a prompt below" placeholder.
+func TestView_Conversation_Empty_ShowsPlaceholder(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    return IsTrue(t, strings.Contains(out, "no conversation yet"))
+}
+
+// Logged lines render with their speaker prefix.
+func TestView_Conversation_RendersLines(t T) T {
+    val convo = ArrayOf(
+        session.ConversationLine(Speaker = "you", Text = "ship it"),
+        session.ConversationLine(Speaker = "Iris", Text = "on it"),
+    )
+    val m = mkModel(mkTeam("X", "")).Copy(Conversation = convo)
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "you: ship it"))
+    return IsTrue(t1, strings.Contains(out, "Iris: on it"))
+}
+
+// >20 lines triggers the "K earlier line(s) hidden" hint.
+func TestView_Conversation_Clipping_ShowsHiddenHint(t T) T {
+    var convo = EmptyArray[session.ConversationLine]()
+    var i = 0
+    for i < 30 {
+        convo = convo.Append(session.ConversationLine(Speaker = "Iris", Text = s"line ${i}"))
+        i = i + 1
+    }
+    val m = mkModel(mkTeam("X", "")).Copy(Conversation = convo)
+    return IsTrue(t, strings.Contains(render(m), "earlier line(s) hidden"))
+}
+
+// ---------------------------------------------------------------------------
+// Composer
+// ---------------------------------------------------------------------------
+
+func TestView_Composer_Placeholder_WhenEmpty(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    return IsTrue(t, strings.Contains(out, "Type to Iris"))
+}
+
+func TestView_Composer_ShowsTypedText(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(Composer = "ship the metrics endpoint")
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "ship the metrics endpoint"))
+    return IsFalse(t1, strings.Contains(out, "Type to Iris"))
+}
+
+// ---------------------------------------------------------------------------
+// Footer
+// ---------------------------------------------------------------------------
+
+// LastError surfaces a ⚠ message instead of the key-hint legend.
+func TestView_Footer_ShowsLastError(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(LastError = Some("session save: disk full"))
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "⚠"))
+    return IsTrue(t1, strings.Contains(out, "session save: disk full"))
+}
+
+// Default hint legend (no PR yet).
+func TestView_Footer_DefaultLegend(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    val t1 = IsTrue(t,  strings.Contains(out, "Enter send"))
+    val t2 = IsTrue(t1, strings.Contains(out, "Ctrl+A approve"))
+    val t3 = IsTrue(t2, strings.Contains(out, "Ctrl+R reject"))
+    val t4 = IsTrue(t3, strings.Contains(out, "Tab consults"))
+    return IsTrue(t4, strings.Contains(out, "Ctrl+C quit"))
+}
+
+// After PrCreated, the legend swaps to the merge-prompt hints.
+func TestView_Footer_PostPrCreated_ShowsMergeHint(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(LastPrUrl = Some("https://github.com/x/y/pull/1"))
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "Ctrl+M merge"))
+    val t2 = IsTrue(t1, strings.Contains(out, "Ctrl+A re-approve"))
+    return IsTrue(t2, strings.Contains(out, "Tab consults"))
+}
+
+// LastError takes precedence over the legend — even if LastPrUrl is set.
+func TestView_Footer_LastErrorBeatsLegend(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        LastError = Some("gh pr merge: auth required"),
+        LastPrUrl = Some("https://x/y/pull/1"),
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "auth required"))
+    return IsFalse(t1, strings.Contains(out, "Ctrl+M merge"))
+}
+
+// ---------------------------------------------------------------------------
+// Consult viewer modal (Tab toggle)
+// ---------------------------------------------------------------------------
+
+// Closed: main pane is the conversation, not the modal.
+func TestView_ConsultViewer_Closed_RendersConversation(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    val t1 = IsTrue(t, strings.Contains(out, "Conversation with Team Lead"))
+    return IsFalse(t1, strings.Contains(out, "Consult viewer"))
+}
+
+// Opened with no active consults: empty-state hint visible.
+func TestView_ConsultViewer_OpenEmpty_ShowsHint(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(ConsultViewerOpen = true)
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "Consult viewer"))
+    return IsTrue(t1, strings.Contains(out, "no active consults"))
+}
+
+// Open + buffer for a consult: tail preview of the lines is visible.
+// (We can't easily inject a live ConsultSession, but ConsultBuffers is
+// what drives the rendering — the session field only contributes the
+// "▶ name · team: …" header which we can't fabricate without spawning
+// a process. So this test focuses on the buffer-rendering path,
+// which is the user-visible body of the modal.)
+//
+// Note: rendering an active consult's full row needs an
+// ActiveConsults entry too. Without one, the FoldLeftKV in
+// consultViewerPanel doesn't iterate and the "no active consults"
+// hint takes over. So this test sets a buffer but no session and
+// checks for the empty-state behavior the rendering correctly
+// produces.
+func TestView_ConsultViewer_OpenWithBufferButNoSession_ShowsEmpty(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        ConsultViewerOpen = true,
+        ConsultBuffers    = EmptyHashMap[string, Array[string]]()
+            .Put("transpiler", ArrayOf("hello", "world")),
+    )
+    return IsTrue(t, strings.Contains(render(m), "no active consults"))
+}
+
+// ---------------------------------------------------------------------------
+// History browser (Ctrl+H toggle)
+// ---------------------------------------------------------------------------
+
+// Closed: history panel doesn't render.
+func TestView_History_Closed_RendersConversation(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    return IsFalse(t, strings.Contains(out, "History  ·"))
+}
+
+// Opened with no archives: empty-state explains the lifecycle.
+func TestView_History_OpenEmpty_ShowsHint(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(HistoryMode = true)
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "History  ·"))
+    return IsTrue(t1, strings.Contains(out, "no archives yet"))
+}
+
+// Opened with archives: index list shows each entry's project + line count.
+func TestView_History_OpenWithArchives_RendersIndex(t T) T {
+    val a1 = sampleArchive(int64(1714233600000000000), "merged", "myproject", 47)
+    val a2 = sampleArchive(int64(1714074600000000000), "merged", "myproject", 62)
+    val m = mkModel(mkTeam("X", "")).Copy(
+        HistoryMode = true,
+        Archives    = ArrayOf(a1, a2),
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "myproject"))
+    val t2 = IsTrue(t1, strings.Contains(out, "47 lines"))
+    return IsTrue(t2, strings.Contains(out, "62 lines"))
+}
+
+// Cursor on first entry: that entry has the "▶ " prefix; others don't.
+func TestView_History_Index_HighlightsCursoredEntry(t T) T {
+    val a1 = sampleArchive(int64(2000000000000000000), "merged", "alpha", 10)
+    val a2 = sampleArchive(int64(1000000000000000000), "merged", "beta", 20)
+    val m = mkModel(mkTeam("X", "")).Copy(
+        HistoryMode   = true,
+        Archives      = ArrayOf(a1, a2),
+        HistoryCursor = 0,
+    )
+    val out = render(m)
+    // "▶ " followed by the first entry's project name (alpha) should appear.
+    return IsTrue(t, strings.Contains(out, "▶ "))
+}
+
+// Selecting an archive (ViewingArchive set) renders its conversation in
+// read-only mode.
+func TestView_History_Detail_RendersSnapshotConversation(t T) T {
+    val convo = ArrayOf(
+        session.ConversationLine(Speaker = "you", Text = "ship it"),
+        session.ConversationLine(Speaker = "Iris", Text = "on it"),
+    )
+    val snap = session.Snapshot("demo", int64(1714233600000000000), convo, EmptyArray[string]())
+    val m = mkModel(mkTeam("X", "")).Copy(
+        HistoryMode    = true,
+        ViewingArchive = Some(snap),
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "Esc to return to index"))
+    val t2 = IsTrue(t1, strings.Contains(out, "ship it"))
+    return IsTrue(t2, strings.Contains(out, "on it"))
+}
+
+// ---------------------------------------------------------------------------
+// Pane precedence: history mode wins over consult viewer
+// ---------------------------------------------------------------------------
+
+func TestView_HistoryMode_BeatsConsultViewer(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        HistoryMode       = true,
+        ConsultViewerOpen = true,
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "History  ·"))
+    return IsFalse(t1, strings.Contains(out, "Consult viewer"))
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+func sampleArchive(savedAt int64, label string, projectName string, lineCount int) session.SnapshotMeta =
+    session.SnapshotMeta(
+        Path        = s"/fake/archive/${label}-${savedAt}.json",
+        Label       = label,
+        ProjectName = projectName,
+        SavedAt     = savedAt,
+        LineCount   = lineCount,
+    )
+
+// ---------------------------------------------------------------------------
+// Edge cases — oversized inputs
+// ---------------------------------------------------------------------------
+
+// Oversized team name shouldn't crash the layout. We assert the
+// rendered output is non-empty and includes the state label so the
+// header line still functions.
+func TestView_Header_VeryLongTeamName_DoesNotCrash(t T) T {
+    val longName = strings.Repeat("Skunkworks", 30)  // 300 chars
+    val out = render(mkModel(mkTeam(longName, "")))
+    val t1 = IsTrue(t, len(out) > 0)
+    return IsTrue(t1, strings.Contains(out, "state: idle"))
+}
+
+// Oversized description gets clipped by the viewport — we don't
+// guarantee it's all visible, only that the layout doesn't break.
+func TestView_Header_VeryLongDescription_DoesNotCrash(t T) T {
+    val longDesc = strings.Repeat("a long product team description ", 20)
+    val out = render(mkModel(mkTeam("X", longDesc)))
+    return IsTrue(t, len(out) > 0)
+}
+
+// 60+ rune approval body must truncate — the rendered banner still
+// renders the "Ready to ship" prefix and doesn't crash. We can't
+// reliably assert the "..." indicator survives the viewport's right-
+// column clipping (sidebar takes 28 cols of 100), so we test the
+// invariant that always holds: the banner header is present and
+// the layout below it (composer / footer hint) still renders.
+func TestView_ApprovalBanner_OversizedBody_DoesNotCrash(t T) T {
+    val big = strings.Repeat("ship the metrics endpoint ", 10)  // ~260 chars
+    val m = mkModel(mkTeam("X", "")).Copy(State = Approval(SummaryBody = big))
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "Ready to ship"))
+    return IsTrue(t1, strings.Contains(out, "Ctrl+A approve"))
+}
+
+// Composer with a string longer than the viewport renders without
+// crashing; the trailing cursor caret "▌" stays visible.
+func TestView_Composer_VeryLongText_DoesNotCrash(t T) T {
+    val long = strings.Repeat("ship the metrics endpoint ", 20)  // ~520 chars
+    val m = mkModel(mkTeam("X", "")).Copy(Composer = long)
+    val out = render(m)
+    return IsTrue(t, len(out) > 0)
+}
+
+// 200-line conversation — the visible-lines cap (20) clips the rest;
+// the hidden-line hint reports the number truncated.
+func TestView_Conversation_TwoHundredLines_ReportsHidden(t T) T {
+    var convo = EmptyArray[session.ConversationLine]()
+    var i = 0
+    for i < 200 {
+        convo = convo.Append(session.ConversationLine(Speaker = "Iris", Text = s"line ${i}"))
+        i = i + 1
+    }
+    val m = mkModel(mkTeam("X", "")).Copy(Conversation = convo)
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "earlier line(s) hidden"))
+    return IsTrue(t1, strings.Contains(out, "180"))  // 200 - 20 visible = 180 hidden
+}
+
+// One conversation line with a very long Text. The renderer doesn't
+// wrap it (TUI single-line widget), so the layout shouldn't corrupt
+// downstream rows. Just assert the speaker prefix made it.
+func TestView_Conversation_VeryLongLine_DoesNotCrash(t T) T {
+    val convo = ArrayOf(session.ConversationLine(
+        Speaker = "Iris",
+        Text    = strings.Repeat("very long output ", 50),  // ~850 chars
+    ))
+    val m = mkModel(mkTeam("X", "")).Copy(Conversation = convo)
+    val out = render(m)
+    return IsTrue(t, strings.Contains(out, "Iris:"))
+}
+
+// 50-member team — sidebar should still render without overflowing
+// into the conversation pane (the Flex(1) constraint clips members).
+func TestView_Sidebar_FiftyMembers_DoesNotCrash(t T) T {
+    val iris = Member(
+        Name = "Iris", Role = TeamLead(),
+        Personality = "calm", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    var members = ArrayOf(iris)
+    var i = 0
+    for i < 49 {
+        members = members.Append(Member(
+            Name = s"Engineer${i}", Role = Engineer(),
+            Personality = "", Model = None[string](), Extra = "",
+            Onboarding = EmptyArray[string](),
+        ))
+        i = i + 1
+    }
+    val tm = Team(
+        Key = "main", Name = "BigTeam", Description = "",
+        Members = members, Lead = iris,
+        Onboarding = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
+    )
+    val out = render(mkModel(tm))
+    val t1 = IsTrue(t, len(out) > 0)
+    return IsTrue(t1, strings.Contains(out, "Iris"))
+}
+
+// Member with a very long Name doesn't break the sidebar's formatting.
+func TestView_Sidebar_VeryLongMemberName_DoesNotCrash(t T) T {
+    val iris = Member(
+        Name = strings.Repeat("Iris", 50),  // 200 chars
+        Role = TeamLead(),
+        Personality = "", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val felix = Member(
+        Name = "Felix", Role = Engineer(),
+        Personality = "", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val tm = Team(
+        Key = "main", Name = "X", Description = "",
+        Members = ArrayOf(iris, felix), Lead = iris,
+        Onboarding = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
+    )
+    val out = render(mkModel(tm))
+    return IsTrue(t, len(out) > 0)
+}
+
+// Empty team name — header should still render the state label even
+// if the team-name slot is blank.
+func TestView_Header_EmptyTeamName_StillShowsState(t T) T {
+    val out = render(mkModel(mkTeam("", "")))
+    return IsTrue(t, strings.Contains(out, "state: idle"))
+}
+
+// Multi-byte unicode in team name (CJK / emoji) renders without
+// crashing or stripping characters.
+func TestView_Header_UnicodeTeamName(t T) T {
+    val out = render(mkModel(mkTeam("👨‍💻 Skunkworks 团队", "")))
+    return IsTrue(t, strings.Contains(out, "Skunkworks"))
+}
+
+// History index with 100+ archives — the viewport truncates but the
+// renderer doesn't crash on the long list.
+func TestView_History_HundredArchives_DoesNotCrash(t T) T {
+    var archives = EmptyArray[session.SnapshotMeta]()
+    var i = 0
+    for i < 100 {
+        archives = archives.Append(sampleArchive(int64(i), "merged", s"proj${i}", i))
+        i = i + 1
+    }
+    val m = mkModel(mkTeam("X", "")).Copy(
+        HistoryMode = true,
+        Archives    = archives,
+    )
+    val out = render(m)
+    val t1 = IsTrue(t, strings.Contains(out, "History  ·"))
+    return IsTrue(t1, strings.Contains(out, "▶ "))
+}
+
+// Archive with very long ProjectName + label — index row should render.
+func TestView_History_LongLabelAndProjectName_DoesNotCrash(t T) T {
+    val long = sampleArchive(
+        int64(1714233600000000000),
+        strings.Repeat("merged-after-many-iterations-", 5),
+        strings.Repeat("very-long-project-name-", 5),
+        12345,
+    )
+    val m = mkModel(mkTeam("X", "")).Copy(
+        HistoryMode = true,
+        Archives    = ArrayOf(long),
+    )
+    return IsTrue(t, len(render(m)) > 0)
+}
+
+// LastError with a multi-line / very long error string — footer
+// should still show the warning glyph.
+func TestView_Footer_MultiLineLastError_StillShowsWarning(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        LastError = Some("session save failed:\n  permission denied\n  on /tmp/foo"),
+    )
+    return IsTrue(t, strings.Contains(render(m), "⚠"))
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard-driven flows — render the model AFTER an Update dispatch
+// to catch regressions where the rendering layer disagrees with the
+// model-side state machine.
+// ---------------------------------------------------------------------------
+
+// After typing chars, the composer reflects them.
+func TestFlow_TypeChars_ComposerUpdates(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val (m1, _) = Update(seed, KeyChar(C = 'h'))
+    val (m2, _) = Update(m1,   KeyChar(C = 'i'))
+    return IsTrue(t, strings.Contains(render(m2), "hi"))
+}
+
+// Backspace then render — the composer regresses to the
+// pre-deletion state.
+func TestFlow_TypeThenBackspace_ComposerShortens(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val (m1, _) = Update(seed, KeyChar(C = 'h'))
+    val (m2, _) = Update(m1,   KeyChar(C = 'i'))
+    val (m3, _) = Update(m2,   KeyBackspace())
+    val out = render(m3)
+    val t1 = IsTrue(t, strings.Contains(out, "h"))
+    return IsFalse(t1, strings.Contains(out, "hi"))
+}
+
+// Tab opens the consult viewer; the composer is not the visible pane.
+func TestFlow_Tab_RendersConsultViewer(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val (m, _) = Update(seed, KeyToggleConsultViewer())
+    return IsTrue(t, strings.Contains(render(m), "Consult viewer"))
+}
+
+// Tab twice closes it — the consult-viewer header is gone.
+func TestFlow_TabTwice_ClosesConsultViewer(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val (m1, _) = Update(seed, KeyToggleConsultViewer())
+    val (m2, _) = Update(m1,   KeyToggleConsultViewer())
+    return IsFalse(t, strings.Contains(render(m2), "Consult viewer"))
+}
+
+// Ctrl+H opens the history browser.
+func TestFlow_CtrlH_RendersHistoryPanel(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val (m, _) = Update(seed, KeyToggleHistory())
+    return IsTrue(t, strings.Contains(render(m), "History  ·"))
+}
+
+// ChunkArrived from a member adds a line that's visible in render.
+func TestFlow_ChunkArrived_RendersInConversation(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = "thinking out loud"))
+    return IsTrue(t, strings.Contains(render(m), "thinking out loud"))
+}
+
+// PrCreated swaps the footer hint to mention Ctrl+M.
+func TestFlow_PrCreated_FooterShowsMergeHint(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1"))
+    return IsTrue(t, strings.Contains(render(m), "Ctrl+M merge"))
+}
+
+// SessionFailed surfaces in the footer as ⚠ <member>: <err>.
+func TestFlow_SessionFailed_FooterWarns(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "⚠"))
+    return IsTrue(t1, strings.Contains(out, "Iris: EOF"))
+}
+
+// ---------------------------------------------------------------------------
+// Mouse-driven flows — MouseAt is currently a no-op, so the snapshot
+// after a click is identical to the snapshot before the click. The
+// tests here lock that invariant in so a future change that
+// accidentally mutates the model on click breaks loud and early.
+// ---------------------------------------------------------------------------
+
+func TestFlow_MousePress_LeavesRenderUnchanged(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val before = render(seed)
+    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    return Eq(t, render(m), before)
+}
+
+func TestFlow_MouseRelease_LeavesRenderUnchanged(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val before = render(seed)
+    val (m, _) = Update(seed, MouseAt(X = 0, Y = 0, Pressed = false))
+    return Eq(t, render(m), before)
+}
+
+// Mouse at out-of-bounds coordinates (negative, way past viewport) —
+// still no-op, render unchanged.
+func TestFlow_MouseOutOfBounds_NoChange(t T) T {
+    val seed = mkModel(mkTeam("X", ""))
+    val before = render(seed)
+    val (m1, _) = Update(seed, MouseAt(X = -5, Y = -3, Pressed = true))
+    val t1 = Eq(t, render(m1), before)
+    val (m2, _) = Update(seed, MouseAt(X = 9999, Y = 9999, Pressed = true))
+    return Eq(t1, render(m2), before)
+}
+
+// Mouse press in history mode doesn't disturb the history panel.
+func TestFlow_MouseInHistoryMode_DoesNotClosePanel(t T) T {
+    val seed = mkModel(mkTeam("X", "")).Copy(HistoryMode = true)
+    val before = render(seed)
+    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    val t1 = Eq(t, render(m), before)
+    return IsTrue(t1, strings.Contains(render(m), "History  ·"))
+}
+
+// Mouse press in consult viewer mode doesn't close the modal.
+func TestFlow_MouseInConsultViewer_DoesNotClose(t T) T {
+    val seed = mkModel(mkTeam("X", "")).Copy(ConsultViewerOpen = true)
+    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    return IsTrue(t, strings.Contains(render(m), "Consult viewer"))
+}

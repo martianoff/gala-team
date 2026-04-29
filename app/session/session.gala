@@ -43,10 +43,17 @@ struct ConversationLine(Speaker string, Text string)
 // Snapshot is the on-disk shape. ProjectName is informational (lets us
 // detect cross-project mismatches later); SavedAt is unix nanos at the
 // moment Save was called.
+//
+// ActiveMembers carries the names of every team member whose Claude
+// CLI subprocess was alive when the save happened. The recovery flow
+// uses this list to spawn those members with `--continue` so Claude
+// picks up its prior in-process conversation instead of starting a
+// fresh session.
 struct Snapshot(
-    ProjectName  string,
-    SavedAt      int64,
-    Conversation Array[ConversationLine],
+    ProjectName    string,
+    SavedAt        int64,
+    Conversation   Array[ConversationLine],
+    ActiveMembers  Array[string],
 )
 
 // SessionPath returns the canonical save path for a given project repo.
@@ -60,9 +67,19 @@ func SessionPath(repoDir string) string =
 // failure (disk full, permissions, …) should bubble up. Failures are
 // logged via the AppModel's LastError; the running TUI never blocks
 // on Save.
-func Save(repoDir string, projectName string, conversation Array[ConversationLine]) Try[bool] = Try[bool](() => {
+//
+// `activeMembers` is the list of member names whose Claude
+// subprocess is alive at this save. On the next launch, recovery
+// uses this list to spawn those members with `--continue` so the
+// agents pick up where they left off.
+func Save(
+    repoDir string,
+    projectName string,
+    conversation Array[ConversationLine],
+    activeMembers Array[string],
+) Try[bool] = Try[bool](() => {
     val w = json.NewJsonEncoder()
-    encodeSnapshot(w, projectName, time.Now().UnixNano(), conversation)
+    encodeSnapshot(w, projectName, time.Now().UnixNano(), conversation, activeMembers)
     val encoded = w.String()
     val path    = SessionPath(repoDir)
     val parent  = filepath.Dir(path)
@@ -101,7 +118,13 @@ func LoadOrError(repoDir string) Either[string, Snapshot] {
 // Manual encode/decode
 // ----------------------------------------------------------------------------
 
-func encodeSnapshot(w *json.JsonEncoderImpl, projectName string, savedAt int64, convo Array[ConversationLine]) {
+func encodeSnapshot(
+    w *json.JsonEncoderImpl,
+    projectName string,
+    savedAt int64,
+    convo Array[ConversationLine],
+    activeMembers Array[string],
+) {
     w.WriteStartObject()
     w.WriteKey("project_name"); w.WriteString(projectName)
     w.WriteKey("saved_at");     w.WriteInt64(savedAt)
@@ -114,6 +137,10 @@ func encodeSnapshot(w *json.JsonEncoderImpl, projectName string, savedAt int64, 
         w.WriteEndObject()
     })
     w.WriteEndArray()
+    w.WriteKey("active_members")
+    w.WriteStartArray()
+    activeMembers.ForEach((name) => w.WriteString(name))
+    w.WriteEndArray()
     w.WriteEndObject()
 }
 
@@ -122,6 +149,7 @@ func decodeSnapshot(d *json.JsonDecoderImpl) Snapshot {
     var name = ""
     var savedAt = int64(0)
     var convo = EmptyArray[ConversationLine]()
+    var members = EmptyArray[string]()
     for d.HasMoreFields() {
         val key = d.ReadKey()
         if key == "project_name" {
@@ -130,12 +158,33 @@ func decodeSnapshot(d *json.JsonDecoderImpl) Snapshot {
             savedAt = d.ReadInt64()
         } else if key == "conversation" {
             convo = decodeConversation(d)
+        } else if key == "active_members" {
+            members = decodeStringArray(d)
         } else {
             d.Skip()
         }
     }
     d.EndObject()
-    return Snapshot(ProjectName = name, SavedAt = savedAt, Conversation = convo)
+    return Snapshot(
+        ProjectName   = name,
+        SavedAt       = savedAt,
+        Conversation  = convo,
+        ActiveMembers = members,
+    )
+}
+
+// decodeStringArray pull-decodes a JSON array of strings. Used for
+// the active_members list; older snapshot files written before the
+// field was added simply have no `active_members` key, so the field
+// defaults to empty (no members to recover).
+func decodeStringArray(d *json.JsonDecoderImpl) Array[string] {
+    var out = EmptyArray[string]()
+    d.StartArray()
+    for d.HasMoreElements() {
+        out = out.Append(d.ReadString())
+    }
+    d.EndArray()
+    return out
 }
 
 // Loop-bound Append intentional: stateful pull-stream from the JSON

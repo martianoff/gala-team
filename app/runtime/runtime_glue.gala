@@ -60,14 +60,26 @@ struct MemberSession(
 // SpawnSession launches a `claude` CLI process for `m` with cwd
 // `workspace`. The team lead always uses `proj.Repo`; engineers /
 // QAs may run in their own git worktree (see `EnsureWorkspace`).
-// `m.Model` pins the model when set. `dangerouslySkipPermissions`
-// passes through `--dangerously-skip-permissions` to claude — opt-in
-// per-team via the `dangerously_skip_permissions:` yaml field. Returns
-// Try[MemberSession]; failure carries the underlying spawn error.
-func SpawnSession(proj Project, m Member, workspace string, dangerouslySkipPermissions bool) Try[MemberSession] {
+//
+// Flags:
+//   - m.Model pins the model when set (--model <name>).
+//   - dangerouslySkipPermissions adds --dangerously-skip-permissions
+//     when true (opt-in per-team via team.yaml).
+//   - resume=true adds --continue so claude picks up its prior
+//     in-process conversation in this cwd. Used by the recovery
+//     flow when a session was alive in the previous launch.
+//
+// Returns Try[MemberSession]; failure carries the underlying spawn error.
+func SpawnSession(
+    proj Project,
+    m Member,
+    workspace string,
+    dangerouslySkipPermissions bool,
+    resume bool,
+) Try[MemberSession] {
     val opts = subprocess.NewSpawnOpts(
         "claude",
-        claudeArgs(m, dangerouslySkipPermissions).ToGoSlice(),
+        claudeArgs(m, dangerouslySkipPermissions, resume).ToGoSlice(),
         SliceEmpty[string](),
         workspace,
     )
@@ -146,14 +158,19 @@ func RemoveWorktree(proj Project, m Member) Try[bool] = Try[bool](() => {
 //   - `--dangerously-skip-permissions` when the enclosing team
 //     opted in via team.yaml. Off by default; turning it on is a
 //     deliberate decision the user makes per-team.
-func claudeArgs(m Member, dangerouslySkipPermissions bool) Array[string] {
+//   - `--continue` when `resume` is true — claude picks up the
+//     last conversation in this cwd. Used by the recovery flow
+//     when the prior session was alive at shutdown.
+func claudeArgs(m Member, dangerouslySkipPermissions bool, resume bool) Array[string] {
     val base = ArrayOf("--output-format", "stream-json")
     val withModel = m.Model match {
         case Some(name) => base.AppendAll(ArrayOf("--model", name))
         case None()     => base
     }
-    return if (dangerouslySkipPermissions) withModel.Append("--dangerously-skip-permissions")
-           else                            withModel
+    val withDanger = if (dangerouslySkipPermissions) withModel.Append("--dangerously-skip-permissions")
+                     else                            withModel
+    return if (resume) withDanger.Append("--continue")
+           else        withDanger
 }
 
 // ----------------------------------------------------------------------------

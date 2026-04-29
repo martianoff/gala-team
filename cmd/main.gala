@@ -211,10 +211,21 @@ func main() {
 func loadArchives(proj Project) Array[session.SnapshotMeta] =
     session.ListArchives(proj.Repo).GetOrElse(EmptyArray[session.SnapshotMeta]())
 
-// primeFromSnapshot replays the persisted conversation log into a fresh
-// AppModel. We ignore SavedAt and ProjectName for now — the user's
-// next prompt picks up where the prior session left off.
+// primeFromSnapshot replays the persisted conversation log into a
+// fresh AppModel and lifts the prior session's ActiveMembers list
+// into RecoveredMembers so ensureSession spawns those members with
+// `--continue` on first use. The recovery banner is shown above the
+// conversation pane until the user types the next prompt or hits
+// Esc to discard.
+//
+// SavedAt / ProjectName are read but unused for now — they would
+// drive cross-project mismatch detection if a user moved their
+// .gala_team/sessions/ directory between repos.
 func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match {
     case None()       => m
-    case Some(snap)   => m.Copy(Conversation = snap.Conversation)
+    case Some(snap)   => m.Copy(
+        Conversation          = snap.Conversation,
+        RecoveredMembers      = snap.ActiveMembers,
+        RecoveryBannerVisible = true,
+    )
 }

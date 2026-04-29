@@ -44,3 +44,21 @@ gala_go_test(
         "@gala//collection_immutable",
     ],
 )
+
+gala_go_test(
+    name = "view_test",
+    srcs = ["view_test.gala"],
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    deps = [
+        ":ui",
+        "//app/consult",
+        "//app/fsm",
+        "//app/policy",
+        "//app/project",
+        "//app/session",
+        "//app/team",
+        "@gala//collection_immutable",
+    ],
+)

@@ -39,7 +39,7 @@ func TestSaveThenLoad_RoundTripsConversation(t T) T {
         ConversationLine(Speaker = "you",  Text = "ship it"),
         ConversationLine(Speaker = "Iris", Text = "@summary done"),
     )
-    val saved = Save(dir, "demo", convo)
+    val saved = Save(dir, "demo", convo, EmptyArray[string]())
     val saveErr = saved match {
         case Success(_)   => "OK"
         case Failure(err) => err.Error()
@@ -70,9 +70,9 @@ func TestSave_OverwritesPriorSnapshot(t T) T {
         ConversationLine(Speaker = "you", Text = "second"),
         ConversationLine(Speaker = "Iris", Text = "ack"),
     )
-    val s1 = Save(dir, "demo", first)
+    val s1 = Save(dir, "demo", first, EmptyArray[string]())
     val t1 = IsSuccess(t, s1)
-    val s2 = Save(dir, "demo", second)
+    val s2 = Save(dir, "demo", second, EmptyArray[string]())
     val t2 = IsSuccess(t1, s2)
     val loaded = Load(dir)
     return loaded match {
@@ -102,7 +102,7 @@ func TestLoad_CorruptedFileReturnsNone(t T) T {
 
 func TestSaveThenLoad_EmptyConversation(t T) T {
     val dir = mkTempDir("empty_convo")
-    val saved = Save(dir, "demo", EmptyArray[ConversationLine]())
+    val saved = Save(dir, "demo", EmptyArray[ConversationLine](), EmptyArray[string]())
     val t1 = IsSuccess(t, saved)
     return Load(dir) match {
         case Some(snap) => Eq(t1, snap.Conversation.Size(), 0)
@@ -116,7 +116,7 @@ func TestSaveThenLoad_TextWithDoubleQuotes(t T) T {
         ConversationLine(Speaker = "you",  Text = "look at \"quoted\" stuff"),
         ConversationLine(Speaker = "Iris", Text = "{\"key\": \"value\"}"),
     )
-    val saved = Save(dir, "demo", convo)
+    val saved = Save(dir, "demo", convo, EmptyArray[string]())
     val t1 = IsSuccess(t, saved)
     return Load(dir) match {
         case Some(snap) => {
@@ -132,7 +132,7 @@ func TestSaveThenLoad_TextWithBackslashes(t T) T {
     val convo = ArrayOf(
         ConversationLine(Speaker = "you", Text = "C:\\Users\\maxmr\\file.txt"),
     )
-    val saved = Save(dir, "demo", convo)
+    val saved = Save(dir, "demo", convo, EmptyArray[string]())
     val t1 = IsSuccess(t, saved)
     return Load(dir) match {
         case Some(snap) => Eq(t1, snap.Conversation.Get(0).Text, "C:\\Users\\maxmr\\file.txt")
@@ -145,7 +145,7 @@ func TestSaveThenLoad_TextWithEmbeddedNewlines(t T) T {
     val convo = ArrayOf(
         ConversationLine(Speaker = "Iris", Text = "line one\nline two\nline three"),
     )
-    val saved = Save(dir, "demo", convo)
+    val saved = Save(dir, "demo", convo, EmptyArray[string]())
     val t1 = IsSuccess(t, saved)
     return Load(dir) match {
         case Some(snap) => Eq(t1, snap.Conversation.Get(0).Text, "line one\nline two\nline three")
@@ -163,7 +163,7 @@ func TestSaveThenLoad_TextWithUnicode(t T) T {
         ConversationLine(Speaker = "Iris", Text = "café résumé"),
         ConversationLine(Speaker = "Felix", Text = "日本語テスト"),
     )
-    val saved = Save(dir, "demo", convo)
+    val saved = Save(dir, "demo", convo, EmptyArray[string]())
     val t1 = IsSuccess(t, saved)
     return Load(dir) match {
         case Some(snap) => {
@@ -182,7 +182,7 @@ func TestSaveThenLoad_SpeakerWithUnicode(t T) T {
     val convo = ArrayOf(
         ConversationLine(Speaker = "Иван",   Text = "приветствие"),
     )
-    val saved = Save(dir, "demo", convo)
+    val saved = Save(dir, "demo", convo, EmptyArray[string]())
     val t1 = IsSuccess(t, saved)
     return Load(dir) match {
         case Some(snap) => {
@@ -204,7 +204,7 @@ func TestSaveThenLoad_FiftyLineConversation(t T) T {
         convo = convo.Append(ConversationLine(Speaker = "Iris", Text = s"line ${i}"))
         i = i + 1
     }
-    val saved = Save(dir, "demo", convo)
+    val saved = Save(dir, "demo", convo, EmptyArray[string]())
     val t1 = IsSuccess(t, saved)
     return Load(dir) match {
         case Some(snap) => {
@@ -218,7 +218,7 @@ func TestSaveThenLoad_FiftyLineConversation(t T) T {
 
 func TestSave_PreservesProjectName(t T) T {
     val dir = mkTempDir("projname")
-    val saved = Save(dir, "Skunkworks_v2", EmptyArray[ConversationLine]())
+    val saved = Save(dir, "Skunkworks_v2", EmptyArray[ConversationLine](), EmptyArray[string]())
     val t1 = IsSuccess(t, saved)
     return Load(dir) match {
         case Some(snap) => Eq(t1, snap.ProjectName, "Skunkworks_v2")
@@ -228,10 +228,10 @@ func TestSave_PreservesProjectName(t T) T {
 
 func TestSave_RecordsSavedAtMonotonic(t T) T {
     val dir = mkTempDir("savedat")
-    val s1 = Save(dir, "demo", EmptyArray[ConversationLine]())
+    val s1 = Save(dir, "demo", EmptyArray[ConversationLine](), EmptyArray[string]())
     val first = IsSuccess(t, s1)
     val snap1 = Load(dir).Get()
-    val s2 = Save(dir, "demo", EmptyArray[ConversationLine]())
+    val s2 = Save(dir, "demo", EmptyArray[ConversationLine](), EmptyArray[string]())
     val second = IsSuccess(first, s2)
     val snap2 = Load(dir).Get()
     // Second save's timestamp should be >= the first. Equal is allowed

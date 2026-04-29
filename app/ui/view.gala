@@ -51,6 +51,7 @@ func View(m AppModel) Widget {
         Flex(1, Row(ArrayOf[LayoutChild](
             Fixed(28, BorderOf(sidebar, RoundedBorder())),
             Flex(1, Column(ArrayOf[LayoutChild](
+                recoveryBanner(m),
                 approvalBanner(m),
                 Flex(1, BorderOf(mainPanel, RoundedBorder())),
             ))),
@@ -80,6 +81,25 @@ func approvalBanner(m AppModel) LayoutChild = m.State match {
             DefaultStyle().WithDim())),
     )))
     case _ => Fixed(0, Empty())
+}
+
+// recoveryBanner surfaces a "↻ Restored …" indicator on launch when
+// session.Load found a prior snapshot. Hidden in normal use. The
+// banner shows line count + agent count so the user understands
+// what's been brought back, plus the dismiss/continue hints.
+func recoveryBanner(m AppModel) LayoutChild {
+    if !m.RecoveryBannerVisible { return Fixed(0, Empty()) }
+    val lines = m.Conversation.Size()
+    val agents = m.RecoveredMembers.Size()
+    val agentNote = if (agents == 0) ""
+                    else if (agents == 1) s", ${agents} agent pending"
+                    else                  s", ${agents} agents pending"
+    return Fixed(2, Column(ArrayOf[LayoutChild](
+        Fixed(1, TextStyled(s"  ↻ Restored ${lines} line(s) from prior session${agentNote}",
+            DefaultStyle().WithBold().WithFg(BrightCyan()))),
+        Fixed(1, TextStyled("    type a prompt to continue · Esc to discard and start fresh",
+            DefaultStyle().WithDim())),
+    )))
 }
 
 // approvalSnippet picks the first ~60 chars of the summary body for

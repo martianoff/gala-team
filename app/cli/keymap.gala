@@ -1,0 +1,70 @@
+package cli
+
+import (
+    . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/ui"
+)
+
+// ============================================================================
+// app/cli/keymap — pure translation from raw gala-tui InputEvents to
+// AppMsg. Lives in its own package so cmd/main.gala stays a thin
+// `main()` wrapper and the keyboard / mouse routing is unit-testable
+// without spawning the runtime.
+//
+// Every binding is keyed off either KeyMatchesAny ("ctrl+a", "tab", …)
+// or the structural KeyEvent.Key sealed-type (Backspace, Enter, Char,
+// Up, Down, Esc, Space). Adding a new shortcut is a one-line edit
+// here plus a test in keymap_test.gala.
+// ============================================================================
+
+// InputToAppMsg lifts a unified gala-tui InputEvent (key, mouse,
+// resize, unknown) into an AppMsg. Keyboard dispatches via
+// KeyToAppMsg; mouse clicks/drags become MouseAt. Resize and unknown
+// events are no-ops for now — when a future component-level click
+// dispatcher needs the resize signal, it can branch here.
+func InputToAppMsg(ev InputEvent) AppMsg = ev match {
+    case KeyInput(key)        => KeyToAppMsg(key)
+    case MouseInput(me)       => MouseAt(X = me.X, Y = me.Y, Pressed = me.Pressed)
+    case ResizeInput(_, _)    => NoOp()
+    case UnknownInput()       => NoOp()
+}
+
+// KeyToAppMsg translates one keyboard event into an AppMsg.
+//
+// Keys:
+//   - Ctrl+C / Ctrl+Q  →  QuitMsg              (close all sessions, exit)
+//   - Ctrl+A           →  KeyApprove           (approval pipeline)
+//   - Ctrl+R           →  KeyReject            (back to chat)
+//   - Ctrl+M           →  KeyMerge             (merge after PrCreated)
+//   - Ctrl+H           →  KeyToggleHistory     (history browser)
+//   - Tab              →  KeyToggleConsultViewer (consult overlay)
+//   - Backspace        →  KeyBackspace
+//   - Enter            →  KeySubmit            (composer or history-select)
+//   - Up / Down        →  HistoryCursorUp/Down (history mode only)
+//   - Esc              →  HistoryDeselect      (back out of history detail)
+//   - Char(c) / Space  →  KeyChar(c)
+//   - any other        →  NoOp
+//
+// Ctrl-modified keys are checked first (and consume the event before
+// falling through to the structural key match) so that a `Char('a')`
+// arriving with the Ctrl modifier set doesn't end up appended to the
+// composer — KeyMatchesAny resolves the modifier semantics
+// consistently for us.
+func KeyToAppMsg(ev KeyEvent) AppMsg {
+    if (KeyMatchesAny(ev, "ctrl+c", "ctrl+q")) { return QuitMsg() }
+    if (KeyMatchesAny(ev, "ctrl+a"))           { return KeyApprove() }
+    if (KeyMatchesAny(ev, "ctrl+r"))           { return KeyReject() }
+    if (KeyMatchesAny(ev, "ctrl+m"))           { return KeyMerge() }
+    if (KeyMatchesAny(ev, "ctrl+h"))           { return KeyToggleHistory() }
+    if (KeyMatchesAny(ev, "tab"))              { return KeyToggleConsultViewer() }
+    return ev.Key match {
+        case Backspace()  => KeyBackspace()
+        case Enter()      => KeySubmit()
+        case Up()         => HistoryCursorUp()
+        case Down()       => HistoryCursorDown()
+        case Esc()        => HistoryDeselect()
+        case Char(c)      => KeyChar(C = c)
+        case Space()      => KeyChar(C = ' ')
+        case _            => NoOp()
+    }
+}

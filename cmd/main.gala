@@ -3,12 +3,14 @@ package main
 import (
     "os"
     "path/filepath"
+    "strings"
     . "github.com/martianoff/gala-tui"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/time_utils"
     "github.com/martianoff/gala_team/app/consult"
     "github.com/martianoff/gala_team/app/session"
+    . "github.com/martianoff/gala_team/app/cli"
     . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
@@ -38,48 +40,9 @@ import (
 // conversation log.
 // ============================================================================
 
-// inputToAppMsg translates a unified gala-tui InputEvent (key, mouse,
-// resize, unknown) into an AppMsg. We dispatch keyboard via keyToAppMsg
-// and lift mouse clicks/drags into MouseAt; resize and unknown events
-// are no-ops for now.
-//
-// MouseAt is plumbed through Update but doesn't move the model yet —
-// the layout doesn't expose clickable hit-targets. Wiring it here is
-// what lets a future component-level click dispatcher land without
-// touching the runtime.
-func inputToAppMsg(ev InputEvent) AppMsg = ev match {
-    case KeyInput(key)        => keyToAppMsg(key)
-    case MouseInput(me)       => MouseAt(X = me.X, Y = me.Y, Pressed = me.Pressed)
-    case ResizeInput(_, _)    => NoOp()
-    case UnknownInput()       => NoOp()
-}
-
-// keyToAppMsg translates raw keyboard events to AppMsg. Most keys feed
-// the composer; Ctrl+C / Ctrl+Q quits. Approve/reject keys
-// (Ctrl+A / Ctrl+R) are routed to KeyApprove / KeyReject — Update
-// itself no-ops them outside the Approval state, so accidental presses
-// while typing can't fire `gh pr create`.
-//
-// We use Ctrl-modified keys rather than plain 'a'/'r' so the composer
-// stays usable for words containing those letters.
-func keyToAppMsg(ev KeyEvent) AppMsg {
-    if (KeyMatchesAny(ev, "ctrl+c", "ctrl+q")) { return QuitMsg() }
-    if (KeyMatchesAny(ev, "ctrl+a"))           { return KeyApprove() }
-    if (KeyMatchesAny(ev, "ctrl+r"))           { return KeyReject() }
-    if (KeyMatchesAny(ev, "ctrl+m"))           { return KeyMerge() }
-    if (KeyMatchesAny(ev, "ctrl+h"))           { return KeyToggleHistory() }
-    if (KeyMatchesAny(ev, "tab"))              { return KeyToggleConsultViewer() }
-    return ev.Key match {
-        case Backspace()  => KeyBackspace()
-        case Enter()      => KeySubmit()
-        case Up()         => HistoryCursorUp()
-        case Down()       => HistoryCursorDown()
-        case Esc()        => HistoryDeselect()
-        case Char(c)      => KeyChar(C = c)
-        case Space()      => KeyChar(C = ' ')
-        case _            => NoOp()
-    }
-}
+// Keyboard / mouse routing lives in app/cli (KeyToAppMsg,
+// InputToAppMsg) so the dispatch table is unit-testable without
+// spawning the gala-tui runtime.
 
 // flagValue scans `os.Args` for a `--name <value>` pair and returns the
 // value if present, otherwise `dflt`. Simple linear scan is fine for the
@@ -99,24 +62,59 @@ func flagValue(name string, dflt string) string {
     return found
 }
 
-// loadTeamConfig reads `path`, decodes the YAML, and panics with a
-// message that points at the file on any failure. Panics are
-// appropriate at startup — an invalid config is a fatal user error,
-// not something the running TUI should try to recover from.
+// die prints a one-line user-facing error to stderr and exits with
+// code 1. Used instead of `panic` for startup configuration errors
+// — invalid CLI args, unparseable team.yaml, missing project repo —
+// so the user sees a clean diagnostic instead of a Go stack trace.
+func die(msg string) {
+    val _ = os.Stderr.WriteString(s"gala_team: ${msg}\n")
+    os.Exit(1)
+}
+
+// loadTeamConfig reads `path`, decodes the YAML, and exits cleanly
+// on any failure with a message pointing at the file + the
+// underlying YAML parser error. Common failures we tag specially:
+//   - yaml: expected sequence, got mapping  →  hint to use `- ` list items
 func loadTeamConfig(path string) TeamConfig =
     Try(() => os.ReadFile(path)) match {
-        case Failure(err) => panic(s"--team: cannot read '${path}': ${err.Error()}")
+        case Failure(err) => {
+            die(s"--team: cannot read '${path}': ${err.Error()}")
+            sampleTeamConfig()  // unreachable — die() called os.Exit
+        }
         case Success(b)   => LoadFromString(string(b)) match {
-            case Failure(err) => panic(s"--team: '${path}' decode error: ${err.Error()}")
+            case Failure(err) => {
+                die(s"--team: failed to parse '${path}'\n  ${err.Error()}\n  ${yamlHint(err.Error())}")
+                sampleTeamConfig()  // unreachable
+            }
             case Success(cfg) => cfg
         }
     }
 
-// resolveProject runs the resolver and converts its Try into a panic on
-// failure; same rationale as loadTeamConfig.
+// yamlHint translates a few common gala-yaml error messages into
+// human-readable suggestions so the user knows how to fix their
+// team.yaml without reading the parser source.
+func yamlHint(msg string) string {
+    if strings.Contains(msg, "expected sequence, got mapping") {
+        return "hint: a list-shaped field (members:, pre_merge:, onboarding:, teams:) needs `- ` block-style items, not a single inline mapping"
+    }
+    if strings.Contains(msg, "expected sequence, got scalar") {
+        return "hint: this list field is empty or scalar — write `[]` doesn't work either; just omit the key, or list `- entries` underneath"
+    }
+    if strings.Contains(msg, "expected mapping") {
+        return "hint: this field expects a key/value block, not a list or scalar"
+    }
+    return "see README.md for the team.yaml schema"
+}
+
+// resolveProject runs the resolver and exits cleanly on failure
+// (missing dir / not a git repo). Falls back to a placeholder
+// Project on the unreachable path after die() has called Exit.
 func resolveProject(dir string) Project = Resolve(dir, NoOverrides()) match {
     case Success(p)   => p
-    case Failure(err) => panic(s"--project: ${err.Error()}")
+    case Failure(err) => {
+        die(s"--project: ${err.Error()}")
+        Project(Name = "", Repo = "", Github = None[string](), DefaultBranch = "main")  // unreachable
+    }
 }
 
 // loadRegistry reads `<repo>/.gala_team/consults.yaml`, falling back to
@@ -131,6 +129,21 @@ func loadRegistry(proj Project) consult.Registry =
     }
 
 // ----- demo fallback (only used when --team is omitted) ---------------------
+
+// sampleTeamConfig wraps sampleTeam() into a TeamConfig with default
+// workflow/policy and a one-entry Teams list, so the if-as-expression
+// in main() doesn't need an explicit `return` (which currently
+// triggers a transpiler bug — gala issue #289 — emitting a dead
+// `return nil` that fails Go compile).
+func sampleTeamConfig() TeamConfig {
+    val tm = sampleTeam()
+    return TeamConfig(
+        Team     = tm,
+        Teams    = ArrayOf(tm),
+        Workflow = DefaultWorkflow(),
+        Policy   = DefaultPolicy(),
+    )
+}
 
 func sampleTeam() Team {
     val iris = Member(
@@ -166,17 +179,15 @@ func main() {
     val teamPath = flagValue("--team", "")
     val teamKey  = flagValue("--team-key", "")
     val proj     = resolveProject(projDir)
-    val cfgRaw = if (teamPath == "") {
-                     val tm = sampleTeam()
-                     return TeamConfig(
-                         Team     = tm,
-                         Teams    = ArrayOf(tm),
-                         Workflow = DefaultWorkflow(),
-                         Policy   = DefaultPolicy(),
-                     )
-                 }
-                 else loadTeamConfig(teamPath)
-    val cfg = pickMainTeam(cfgRaw, teamKey)
+    val cfgRaw = if (teamPath == "") sampleTeamConfig()
+                 else                 loadTeamConfig(teamPath)
+    val cfg = PickMainTeam(cfgRaw, teamKey) match {
+        case Success(c) => c
+        case Failure(e) => {
+            die(e.Error())
+            sampleTeamConfig()  // unreachable — die() called os.Exit
+        }
+    }
     // Restore the prior conversation log if a snapshot exists under
     // <repo>/.gala_team/sessions/latest.json. None on first launch.
     val registry = loadRegistry(proj)
@@ -189,7 +200,7 @@ func main() {
         View    = (m) => View(m),
     )
     val tickSub = TickSub[AppMsg](Interval = Milliseconds(int64(120)), Make = () => TickMsg())
-    val _ = RunWithMouse[AppModel, AppMsg](program, (ev) => inputToAppMsg(ev), tickSub)
+    val _ = RunWithMouse[AppModel, AppMsg](program, (ev) => InputToAppMsg(ev), tickSub)
 }
 
 // loadArchives reads .gala_team/sessions/archive/ at startup so the
@@ -198,19 +209,6 @@ func main() {
 // archive directory.
 func loadArchives(proj Project) Array[session.SnapshotMeta] =
     session.ListArchives(proj.Repo).GetOrElse(EmptyArray[session.SnapshotMeta]())
-
-// pickMainTeam swaps cfg.Team to the team whose Key matches the
-// `--team-key` flag. When the flag is empty the first team in source
-// order is the main one (already set by team_config.validate); when
-// the flag is non-empty but no team matches we panic with the list
-// of valid keys so the user sees what they typed wrong.
-func pickMainTeam(cfg TeamConfig, key string) TeamConfig {
-    if key == "" { return cfg }
-    return FindTeamByKey(cfg.Teams, key) match {
-        case Some(tm) => cfg.Copy(Team = tm)
-        case None()   => panic(s"--team-key: '${key}' not found (available: ${cfg.Teams.Map((t) => t.Key).MkString(", ")})")
-    }
-}
 
 // primeFromSnapshot replays the persisted conversation log into a fresh
 // AppModel. We ignore SavedAt and ProjectName for now — the user's

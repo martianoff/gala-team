@@ -1,0 +1,39 @@
+package cli
+
+import (
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/config"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/cli/picker — resolves which Team in a TeamConfig.Teams list is
+// the "main" team for this run, given an optional --team-key flag.
+//
+// Lives outside cmd/main.gala so the resolution logic can be tested
+// without spawning the runtime. The picker is intentionally panic-on-
+// not-found rather than returning a Try: a typo'd --team-key is a
+// fatal user-input error, and panicking with the list of valid keys
+// gives the clearest correction signal.
+// ============================================================================
+
+// PickMainTeam swaps cfg.Team to the team whose Key matches `key`.
+//
+// - When `key` is empty, the first team in source order is the main
+//   one (already set by team_config.validate); cfg passes through
+//   unchanged.
+// - When `key` is non-empty and matches a team in cfg.Teams, that
+//   team becomes cfg.Team; cfg.Teams stays in source order so the
+//   sibling-team consult routing still works.
+// - When `key` is non-empty and matches nothing, return Failure
+//   with the list of available keys so the caller can render a
+//   user-facing diagnostic. Tests assert on the failure shape;
+//   cmd/main.gala lifts the failure into a clean stderr + exit.
+func PickMainTeam(cfg TeamConfig, key string) Try[TeamConfig] = Try[TeamConfig](() => {
+    if key == "" { return cfg }
+    return FindTeamByKey(cfg.Teams, key) match {
+        case Some(tm) => cfg.Copy(Team = tm)
+        case None()   => panic(s"--team-key: '${key}' not found (available: ${cfg.Teams.Map((t) => t.Key).MkString(", ")})")
+    }
+})

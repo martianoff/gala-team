@@ -1,0 +1,46 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "cli",
+    srcs = [
+        "keymap.gala",
+        "picker.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/cli",
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    deps = [
+        "//app/config",
+        "//app/team",
+        "//app/ui",
+        "@gala//collection_immutable",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "keymap_test",
+    srcs = ["keymap_test.gala"],
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    deps = [
+        ":cli",
+        "//app/session",
+        "//app/ui",
+        "@gala//collection_immutable",
+    ],
+)
+
+gala_go_test(
+    name = "picker_test",
+    srcs = ["picker_test.gala"],
+    deps = [
+        ":cli",
+        "//app/config",
+        "//app/policy",
+        "//app/team",
+        "@gala//collection_immutable",
+    ],
+)

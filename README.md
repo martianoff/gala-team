@@ -67,7 +67,7 @@ The binary lands at `bazel-bin/cmd/gala_team_/gala_team`.
 
 ## Quickstart
 
-1. **Define your team** in `team.yaml` at the project root:
+1. **Define your team** in `team.yaml` at the project root. Smallest viable file:
 
    ```yaml
    teams:
@@ -86,16 +86,6 @@ The binary lands at `bazel-bin/cmd/gala_team_/gala_team`.
            personality: Evidence-driven. Asks for tests.
    workflow:
      qa_required: true
-   policy:
-     workspace_mode: shared          # or worktree-per-engineer
-     merge_rule: squash              # or rebase / merge
-     pre_merge:
-       - name: lint
-         cmd: go
-         args: [vet, ./...]
-       - name: test
-         cmd: go
-         args: [test, ./...]
    ```
 
 2. **Run** in your project directory:
@@ -111,64 +101,112 @@ The binary lands at `bazel-bin/cmd/gala_team_/gala_team`.
 
 ---
 
-## team.yaml schema
+## team.yaml schema (full reference)
 
-The schema supports **multiple teams in one file**:
+Every field, with defaults and acceptable values. Anything not listed here is
+ignored by the parser.
 
 ```yaml
+# ─── teams ────────────────────────────────────────────────────────────────
+# Required. List of one or more teams. The first entry is the "main" team
+# unless --team-key picks another. Sibling entries are addressable from the
+# main team's lead via @consult(<key>).
+#
+# Backwards-compat: the legacy `team:` (singular) block at top level is
+# still accepted and lowered to a one-entry teams list with key="main".
+
 teams:
-  - key: main                       # how @consult / --team-key reference it
-    name: Skunkworks                # display name (TUI header)
-    description: Product team       # one-liner (TUI header subtitle)
-    onboarding:                     # optional: paths read into TL context
-      - docs/CONTRIBUTING.md        # before the first prompt
-      - docs/ARCHITECTURE.md
-    members:
-      - role: team_lead
-        name: Iris
-        personality: …              # free-form text fed to the system prompt
-        model: claude-opus-4-7      # optional; pins the model
-        extra_instructions: |
-          Strict pattern-matching in pull-request prose.
-        onboarding:
-          - docs/lead-checklist.md  # per-member onboarding, in addition to team-wide
-  - key: transpiler
-    name: Transpiler Wizards
-    description: Compiler / language work
-    members:
-      - role: team_lead
-        name: Theo
-        personality: Precise. Cites specs.
+  - key: main                       # required if multi-team. Used by @consult / --team-key.
+                                    # Falls back to a slug of `name` when omitted.
+                                    # Must be unique across the teams list.
+    name: "Skunkworks"              # required. Display name shown in the TUI header.
+    description: "Product team"     # optional. One-line subtitle shown next to `name`.
+
+    onboarding:                     # optional. List of file paths (relative to --project,
+      - docs/CONTRIBUTING.md        # absolute paths also accepted) read once and prepended
+      - docs/ARCHITECTURE.md        # to every member's first prompt. Subsequent prompts
+                                    # don't re-send.
+
+    members:                        # required. ≥1 entry; exactly one role: team_lead;
+                                    # ≥1 role: engineer; role: qa needed when
+                                    # workflow.qa_required is true.
+      - role: team_lead             # required. one of: team_lead | engineer | qa
+        name: "Iris"                # required. Unique within the team.
+        personality: |              # optional. Free-form text fed into the system prompt.
+          Calm, decisive. Asks clarifying questions before delegating.
+        model: claude-opus-4-7      # optional. Pins the Claude model. Omit to use claude-cli's
+                                    # default. Passed as `--model <name>` to claude.
+        extra_instructions: |       # optional. Appended to the member's system prompt
+          Always cite line numbers.  # below the personality block. Free-form text.
+        onboarding:                 # optional. Per-member paths, in addition to the
+          - docs/lead-handbook.md   # team-wide onboarding above.
+
       - role: engineer
-        name: Cade
-        personality: Pragmatic.
+        name: "Felix"
+        personality: "Terse, functional-leaning."
 
+      - role: qa
+        name: "Theo"
+        personality: "Evidence-driven."
+
+  # Sibling team — addressable as @consult(transpiler) from `main`'s lead.
+  - key: transpiler
+    name: "Transpiler Wizards"
+    description: "Compiler / language work"
+    members:
+      - role: team_lead
+        name: "Theo"
+        personality: "Precise. Cites specs."
+      - role: engineer
+        name: "Cade"
+        personality: "Pragmatic."
+
+# ─── workflow ─────────────────────────────────────────────────────────────
+# How a team operates internally. All keys optional; defaults shown.
 workflow:
-  qa_required: true                  # default true; if false, `qa` members optional
-  parallel_engineers: true           # default true
+  qa_required: true                 # default true. When true, every team must declare ≥1
+                                    # qa member; the orchestration FSM gates approval on
+                                    # QADone. Set false for engineer-only teams.
+  parallel_engineers: true          # default true. When true, multiple @dispatch directives
+                                    # in one TL message run engineers concurrently. When
+                                    # false, the FSM serialises them one at a time.
   approval:
-    require_user_confirm: true       # default true
+    require_user_confirm: true      # default true. Final @summary opens the Approval banner
+                                    # and waits for Ctrl+A. Set false to auto-approve
+                                    # (CI-style headless flows).
 
+# ─── policy ───────────────────────────────────────────────────────────────
+# Per-project orchestration rules. ALL keys optional; defaults shown.
+# IMPORTANT: `policy:` is a top-level sibling of `workflow:` — NOT nested inside it.
 policy:
-  workspace_mode: shared              # `shared` | `worktree-per-engineer`
-  merge_rule: squash                  # `squash` | `rebase` | `merge`
-  pre_merge:                          # blocks `gh pr create` until they pass
-    - {name: lint, cmd: go, args: [vet, ./...]}
-    - {name: test, cmd: go, args: [test, ./...]}
-  post_merge:                         # runs after `gh pr merge` succeeds
-    - {name: notify, cmd: scripts/notify-slack.sh}
+  workspace_mode: shared            # default `shared`. Possible values:
+                                    #   shared                 — every member runs in --project
+                                    #   worktree-per-engineer  — non-lead members get their own
+                                    #                            git worktree under
+                                    #                            .gala_team/worktrees/<name>
+                                    #                            on branch gala_team/<name>
+
+  merge_rule: squash                # default `squash`. Possible values:
+                                    #   squash | rebase | merge
+                                    # Translates to `gh pr merge --<rule> --delete-branch`.
+
+  pre_merge:                        # default `[]`. List of hooks that must succeed before
+                                    # `gh pr create` runs. Each hook spawns a subprocess in
+                                    # the project repo's cwd. First non-zero exit blocks the PR.
+    - name: lint                    # required. Used in the conversation log.
+      cmd: go                       # required. Executable to run.
+      args: [vet, ./...]            # optional. Default `[]` (no args).
+    - name: test
+      cmd: go
+      args: [test, ./...]
+
+  post_merge:                       # default `[]`. Same shape as pre_merge. Run AFTER a
+                                    # successful `gh pr merge`. Failure surfaces in the
+                                    # footer as a warning but doesn't roll back the merge.
+    - name: notify
+      cmd: scripts/notify-slack.sh
+      args: []
 ```
-
-**Backwards compatible** — the legacy single-team shape still works:
-
-```yaml
-team:
-  name: Skunkworks
-  members: [...]
-workflow: {...}
-```
-
-This produces a one-entry `teams` list with `key: main`.
 
 ### Picking the main team
 
@@ -178,7 +216,8 @@ If `teams:` has more than one entry, pick which one drives:
 gala_team --team team.yaml --team-key transpiler
 ```
 
-The default is the first team in source order.
+The default is the first team in source order. If `--team-key` doesn't match any
+team in the file, the binary exits with the list of valid keys.
 
 ---
 

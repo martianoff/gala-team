@@ -1,0 +1,173 @@
+package main
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "github.com/martianoff/gala-tui"
+    . "github.com/martianoff/gala_team/app/cli"
+    . "github.com/martianoff/gala_team/app/ui"
+)
+
+// ============================================================================
+// keymap_test — every binding in KeyToAppMsg + every InputEvent variant
+// in InputToAppMsg. The whole point of the extraction was so this
+// table is testable; one case per shortcut, one per event variant.
+// ============================================================================
+
+// ----- KeyToAppMsg --------------------------------------------------------
+
+func TestKeyToAppMsg_CtrlC_Quit(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('c'))), "QuitMsg")
+func TestKeyToAppMsg_CtrlQ_Quit(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('q'))), "QuitMsg")
+func TestKeyToAppMsg_CtrlA_Approve(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('a'))), "KeyApprove")
+func TestKeyToAppMsg_CtrlR_Reject(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('r'))), "KeyReject")
+func TestKeyToAppMsg_CtrlM_Merge(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('m'))), "KeyMerge")
+func TestKeyToAppMsg_CtrlH_ToggleHistory(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('h'))), "KeyToggleHistory")
+
+func TestKeyToAppMsg_Tab_ToggleConsultViewer(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(Tab())), "KeyToggleConsultViewer")
+
+func TestKeyToAppMsg_Backspace_Backspace(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(Backspace())), "KeyBackspace")
+
+func TestKeyToAppMsg_Enter_Submit(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(Enter())), "KeySubmit")
+
+func TestKeyToAppMsg_Up_HistoryCursorUp(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(Up())), "HistoryCursorUp")
+
+func TestKeyToAppMsg_Down_HistoryCursorDown(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(Down())), "HistoryCursorDown")
+
+func TestKeyToAppMsg_Esc_HistoryDeselect(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(Esc())), "HistoryDeselect")
+
+// Char keys go to the composer. The exact rune is preserved.
+func TestKeyToAppMsg_Char_KeyChar(t T) T {
+    val m = KeyToAppMsg(PlainKey(Char('h')))
+    return m match {
+        case KeyChar(c) => Eq(t, c, 'h')
+        case _          => IsTrue(t, false)
+    }
+}
+
+// Multi-byte runes (emoji, accented Latin) survive the round-trip too.
+func TestKeyToAppMsg_MultiByteRune_KeyChar(t T) T {
+    val m = KeyToAppMsg(PlainKey(Char('é')))
+    return m match {
+        case KeyChar(c) => Eq(t, c, 'é')
+        case _          => IsTrue(t, false)
+    }
+}
+
+// Space arrives as its own Key variant (the ANSI parser strips it from
+// printable-ASCII early); we map it back to KeyChar(' ') so the composer
+// inserts a literal space.
+func TestKeyToAppMsg_Space_KeyChar(t T) T {
+    val m = KeyToAppMsg(PlainKey(Space()))
+    return m match {
+        case KeyChar(c) => Eq(t, c, ' ')
+        case _          => IsTrue(t, false)
+    }
+}
+
+// Unknown / unmapped keys (FKey, Home, PageUp, ArrowLeft/Right, Delete, Insert,
+// the explicit Unknown case) all collapse to NoOp so the runtime keeps
+// dispatching events without flooding the model.
+func TestKeyToAppMsg_FKey_NoOp(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 5))), "NoOp")
+
+func TestKeyToAppMsg_ArrowLeft_NoOp(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(ArrowLeft())), "NoOp")
+
+func TestKeyToAppMsg_ArrowRight_NoOp(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(ArrowRight())), "NoOp")
+
+func TestKeyToAppMsg_Home_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Home())), "NoOp")
+func TestKeyToAppMsg_End_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(End())), "NoOp")
+func TestKeyToAppMsg_PageUp_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(PageUp())), "NoOp")
+func TestKeyToAppMsg_PageDown_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(PageDown())), "NoOp")
+func TestKeyToAppMsg_Delete_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Delete())), "NoOp")
+func TestKeyToAppMsg_Insert_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Insert())), "NoOp")
+func TestKeyToAppMsg_Unknown_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Unknown())), "NoOp")
+
+// ----- InputToAppMsg ------------------------------------------------------
+
+// KeyInput delegates to KeyToAppMsg — verify with one representative key.
+func TestInputToAppMsg_KeyInput_DelegatesToKeyToAppMsg(t T) T =
+    expectMsg(t, InputToAppMsg(KeyInput(Ev = Ctrl(Char('q')))), "QuitMsg")
+
+// MouseInput lifts to MouseAt with X/Y/Pressed forwarded verbatim.
+func TestInputToAppMsg_MouseInput_LiftsToMouseAt(t T) T {
+    val ev = MouseEvent(Btn = MouseLeft(), X = 7, Y = 13, Pressed = true)
+    val m = InputToAppMsg(MouseInput(Ev = ev))
+    return m match {
+        case MouseAt(x, y, p) => {
+            val t1 = Eq(t, x, 7)
+            val t2 = Eq(t1, y, 13)
+            return IsTrue(t2, p)
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+// MouseInput release forwards Pressed=false.
+func TestInputToAppMsg_MouseInput_PreservesReleasePressed(t T) T {
+    val ev = MouseEvent(Btn = MouseLeft(), X = 0, Y = 0, Pressed = false)
+    val m = InputToAppMsg(MouseInput(Ev = ev))
+    return m match {
+        case MouseAt(_, _, p) => IsFalse(t, p)
+        case _                => IsTrue(t, false)
+    }
+}
+
+// Resize and Unknown are routed to NoOp until a future component-level
+// dispatcher consumes them.
+func TestInputToAppMsg_Resize_NoOp(t T) T =
+    expectMsg(t, InputToAppMsg(ResizeInput(W = 80, H = 24)), "NoOp")
+
+func TestInputToAppMsg_Unknown_NoOp(t T) T =
+    expectMsg(t, InputToAppMsg(UnknownInput()), "NoOp")
+
+// ----- helpers ------------------------------------------------------------
+
+// expectMsg checks that the AppMsg variant name matches `expected`.
+// We compare the variant name rather than the full value because some
+// variants carry payloads (KeyChar(c), MouseAt(x,y,p)) that aren't
+// relevant to the mapping itself — those are tested separately above.
+func expectMsg(t T, msg AppMsg, expected string) T = Eq(t, appMsgVariant(msg), expected)
+
+func appMsgVariant(msg AppMsg) string = msg match {
+    case KeyChar(_)                  => "KeyChar"
+    case KeyBackspace()              => "KeyBackspace"
+    case KeySubmit()                 => "KeySubmit"
+    case KeyApprove()                => "KeyApprove"
+    case KeyReject()                 => "KeyReject"
+    case KeyMerge()                  => "KeyMerge"
+    case KeyToggleHistory()          => "KeyToggleHistory"
+    case KeyToggleConsultViewer()    => "KeyToggleConsultViewer"
+    case HistoryCursorUp()           => "HistoryCursorUp"
+    case HistoryCursorDown()         => "HistoryCursorDown"
+    case HistorySelect()             => "HistorySelect"
+    case HistoryDeselect()           => "HistoryDeselect"
+    case HistoryArchiveLoaded(_)     => "HistoryArchiveLoaded"
+    case HistoryArchiveFailed(_)     => "HistoryArchiveFailed"
+    case ChunkArrived(_, _)          => "ChunkArrived"
+    case SessionFailed(_, _)         => "SessionFailed"
+    case WriteSent(_)                => "WriteSent"
+    case PreMergeHooksPassed(_)      => "PreMergeHooksPassed"
+    case PreMergeHooksFailed(_)      => "PreMergeHooksFailed"
+    case PrCreated(_)                => "PrCreated"
+    case PrFailed(_)                 => "PrFailed"
+    case Merged(_)                   => "Merged"
+    case MergeFailed(_)              => "MergeFailed"
+    case PostMergeHooksPassed(_)     => "PostMergeHooksPassed"
+    case PostMergeHooksFailed(_)     => "PostMergeHooksFailed"
+    case ConsultCompleted(_, _)      => "ConsultCompleted"
+    case ConsultFailed(_, _)         => "ConsultFailed"
+    case ConsultChunkArrived(_, _)   => "ConsultChunkArrived"
+    case ConsultEnded(_, _)          => "ConsultEnded"
+    case MouseAt(_, _, _)            => "MouseAt"
+    case TickMsg()                   => "TickMsg"
+    case QuitMsg()                   => "QuitMsg"
+    case NoOp()                      => "NoOp"
+}

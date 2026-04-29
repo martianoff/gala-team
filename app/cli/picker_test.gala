@@ -1,0 +1,83 @@
+package main
+
+import (
+    "strings"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/cli"
+    . "github.com/martianoff/gala_team/app/config"
+    . "github.com/martianoff/gala_team/app/policy"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// picker_test — PickMainTeam's three branches.
+// ============================================================================
+
+// Empty --team-key passes cfg through untouched.
+func TestPickMainTeam_EmptyKey_ReturnsCfgUnchanged(t T) T {
+    val cfg = twoTeamCfg()
+    val res = PickMainTeam(cfg, "")
+    val t1 = IsSuccess(t, res)
+    return Eq(t1, res.Get().Team.Key, "main")
+}
+
+// Matching key swaps cfg.Team to that team but leaves cfg.Teams alone.
+func TestPickMainTeam_MatchingKey_SwapsTeam(t T) T {
+    val cfg = twoTeamCfg()
+    val res = PickMainTeam(cfg, "transpiler")
+    val t1 = IsSuccess(t, res)
+    val swapped = res.Get()
+    val t2 = Eq(t1, swapped.Team.Key, "transpiler")
+    return Eq(t2, swapped.Teams.Size(), 2)  // teams list unchanged
+}
+
+// Non-matching key returns Failure with a message that includes the
+// available keys, so cmd/main can render it as a clean stderr line.
+func TestPickMainTeam_UnknownKey_FailsWithAvailableKeys(t T) T {
+    val cfg = twoTeamCfg()
+    val res = PickMainTeam(cfg, "ghost")
+    val t1 = IsFailure(t, res)
+    return res match {
+        case Failure(err) => {
+            val msg = err.Error()
+            val t2 = IsTrue(t1, strings.Contains(msg, "ghost"))
+            val t3 = IsTrue(t2, strings.Contains(msg, "main"))
+            return IsTrue(t3, strings.Contains(msg, "transpiler"))
+        }
+        case _ => IsTrue(t1, false)
+    }
+}
+
+// ----- helpers ------------------------------------------------------------
+
+func twoTeamCfg() TeamConfig {
+    val main = makeTeam("main", "Skunkworks")
+    val transpiler = makeTeam("transpiler", "Transpiler Wizards")
+    return TeamConfig(
+        Team     = main,
+        Teams    = ArrayOf(main, transpiler),
+        Workflow = DefaultWorkflow(),
+        Policy   = DefaultPolicy(),
+    )
+}
+
+func makeTeam(key string, name string) Team {
+    val iris = Member(
+        Name = "Iris", Role = TeamLead(),
+        Personality = "calm", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val felix = Member(
+        Name = "Felix", Role = Engineer(),
+        Personality = "terse", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    return Team(
+        Key = key, Name = name, Description = "",
+        Members = ArrayOf(iris, felix), Lead = iris,
+        Onboarding = EmptyArray[string](),
+    )
+}
+

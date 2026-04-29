@@ -87,24 +87,22 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
     var stopped = false
     var failure = onbErr.Map((e) => s"onboarding: ${e}")
     for !stopped {
-        val res = NextChunkFuture(s).Await()
-        if res.IsFailure() {
-            failure = Some(s"runtime: ${res.GetError().Error()}")
-            stopped = true
-        } else {
-            res.Get() match {
-                case RtChunkArrived(_, line) => {
-                    convo = convo.Append(session.ConversationLine(Speaker = name, Text = line))
-                }
-                case RtSessionFailed(_, err) => {
-                    val msg = err.Error()
-                    if (msg != "EOF") {
-                        failure = Some(s"${name}: ${msg}")
-                    }
-                    stopped = true
-                }
-                case _ => {}
+        NextChunkFuture(s).Await() match {
+            case Failure(err) => {
+                failure = Some(s"runtime: ${err.Error()}")
+                stopped = true
             }
+            case Success(RtChunkArrived(_, line)) => {
+                convo = convo.Append(session.ConversationLine(Speaker = name, Text = line))
+            }
+            case Success(RtSessionFailed(_, err)) => {
+                val msg = err.Error()
+                if (msg != "EOF") {
+                    failure = Some(s"${name}: ${msg}")
+                }
+                stopped = true
+            }
+            case _ => {}
         }
     }
 
@@ -123,7 +121,7 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
 // (skipping the user's prompt), runs the directive parser, and
 // returns the body of the first @summary if one is present.
 func extractSummary(convo Array[session.ConversationLine]) Option[string] =
-    Parse(convo.Filter((cl) => cl.Speaker != "you").Map((cl) => cl.Text).MkString("\n"))
+    Parse(convo.Collect({ case cl if cl.Speaker != "you" => cl.Text }).MkString("\n"))
         .Collect({ case Summary(body) => body })
         .HeadOption()
 

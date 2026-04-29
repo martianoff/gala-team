@@ -206,12 +206,10 @@ func loadArchives(proj Project) Array[session.SnapshotMeta] =
 // of valid keys so the user sees what they typed wrong.
 func pickMainTeam(cfg TeamConfig, key string) TeamConfig {
     if key == "" { return cfg }
-    val match_ = FindTeamByKey(cfg.Teams, key)
-    if !match_.IsDefined() {
-        val keys = cfg.Teams.Map((t) => t.Key).MkString(", ")
-        panic(s"--team-key: '${key}' not found (available: ${keys})")
+    return FindTeamByKey(cfg.Teams, key) match {
+        case Some(tm) => cfg.Copy(Team = tm)
+        case None()   => panic(s"--team-key: '${key}' not found (available: ${cfg.Teams.Map((t) => t.Key).MkString(", ")})")
     }
-    return cfg.Copy(Team = match_.Get())
 }
 
 // primeFromSnapshot replays the persisted conversation log into a fresh

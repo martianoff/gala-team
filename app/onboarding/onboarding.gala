@@ -42,22 +42,15 @@ func Compose(team Team, member Member) Array[string] =
 // failure surface narrow (Try[string]) so callers don't have to
 // invent partial-success semantics.
 func Load(proj Project, paths Array[string]) Try[string] = Try[string](() => {
-    var pieces = EmptyArray[string]()
-    var i = 0
-    val n = paths.Size()
-    for i < n {
-        val raw = paths.Get(i)
+    return paths.FoldLeft(EmptyArray[string](), (acc, raw) => {
         val resolved = if (filepath.IsAbs(raw)) raw
                        else                     filepath.Join(proj.Repo, raw)
         val bytes, err = os.ReadFile(resolved)
         if err != nil {
             panic(s"onboarding: cannot read '${resolved}': ${err.Error()}")
         }
-        pieces = pieces.Append(s"--- ${raw} ---")
-        pieces = pieces.Append(string(bytes))
-        i = i + 1
-    }
-    return pieces.MkString("\n\n")
+        return acc.Append(s"--- ${raw} ---").Append(string(bytes))
+    }).MkString("\n\n")
 })
 
 // WrapPrompt prepends the loaded onboarding pack (if any) to `prompt`

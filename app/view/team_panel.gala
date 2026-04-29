@@ -10,47 +10,131 @@ import (
 // ============================================================================
 // app/view/team_panel — left-side panel showing the crew, grouped by role.
 //
+// Static layout:
+//
 //   ▼ Lead
 //     ⠋ Iris       working
 //   ▼ Engineering
 //     ⠋ Felix      working
 //     ◇ Mira       idle
-//   ▼ QA
-//     ◇ Theo       idle
+//   ▶ QA            (collapsed — body hidden)
+//
+// Group headers can fold via the cursor + Space, controlled by
+// AppModel.CollapsedGroups in app/ui. The cursor row (when the
+// caller passes cursor >= 0) renders bold-cyan with a "▶" lead;
+// non-cursor rows are plain text.
 //
 // Status glyphs follow DESIGN.md §8.1.2:
 //   ◇ idle   ⠋ working   ✓ done   ✗ failed   ○ queued
 //
-// Pure rendering: takes a Team value + a per-member status map and emits
-// a gala_tui.Widget.  No state, no IO, no side effects — testable via
-// the gala_tui Snapshot helper.
+// Pure rendering: takes a Team value + a per-member status map +
+// optional cursor / collapsed-set and emits a gala_tui.Widget.
+// No state, no IO, no side effects — testable via the gala_tui
+// Snapshot helper.
 // ============================================================================
 
-// TeamPanelView builds the team panel widget for the given team + status
-// snapshot.  Members whose status isn't in `statuses` render as Idle.
-//
-// Phase-1 form is a static Tree (always expanded, no cursor / clicks).
-// Interactive variants (focus highlight, click-to-follow) layer on top
-// in the wire-update-view step.
-func TeamPanelView(team Team, statuses HashMap[string, Status]) Widget {
-    val leadGroup = NewTreeBranchExpanded("Lead",
-        rolePanelRows(team, TeamLead(), statuses))
-    val engGroup = NewTreeBranchExpanded("Engineering",
-        rolePanelRows(team, Engineer(), statuses))
-    val qaGroup = NewTreeBranchExpanded("QA",
-        rolePanelRows(team, QA(), statuses))
-    val root = NewTreeBranchExpanded("Team", ArrayOf[TreeNode](
-        leadGroup, engGroup, qaGroup,
-    ))
-    return Tree(root)
+// SidebarRow is one logical line in the rendered team panel:
+// either a group header (with name + expanded flag) or a member
+// row. The flat row list lets app/ui address rows by index for
+// cursor / fold-toggle dispatch without recomputing the tree.
+sealed type SidebarRow {
+    case GroupHeader(Name string, Expanded bool)
+    case MemberRow(Member Member, MemberStatus Status)
 }
 
-// rolePanelRows produces one TreeLeaf per member of the given role,
-// formatted as "<glyph> <name>    <status>".  Empty role renders no
-// rows (the parent branch becomes empty but still shows its label).
-func rolePanelRows(team Team, role Role, statuses HashMap[string, Status]) Array[TreeNode] =
-    MembersOf(team, role).Map((m Member) =>
-        NewTreeLeaf(memberRowText(m, statuses.Get(m.Name).GetOrElse(StIdle()))))
+// TeamPanelView builds the team panel widget. Existing callers
+// pass just (team, statuses); interactive callers thread cursor +
+// collapsed-set so the rendering reflects the current focus and
+// fold state.
+//
+// `cursor` < 0 disables the highlight (e.g. FocusComposer mode);
+// otherwise the row at index `cursor` renders bold-cyan with a
+// "▶ " lead. `collapsed` is the set of group names whose body
+// rows are hidden — the header still renders, with a "▶" glyph
+// instead of "▼".
+func TeamPanelView(
+    team Team,
+    statuses HashMap[string, Status],
+    cursor int = -1,
+    collapsed Array[string] = EmptyArray[string](),
+) Widget {
+    val rows = sidebarRows(team, statuses, collapsed)
+    val children = rows.ZipWithIndex().Map((pair) =>
+        Fixed(1, renderSidebarRow(pair.V1, pair.V2 == cursor))
+    )
+    return Column(children)
+}
+
+// SidebarRowCount returns how many rows the panel renders for
+// `team` given `collapsed`. Used by app/ui to clamp the cursor
+// against the visible row count.
+func SidebarRowCount(team Team, collapsed Array[string]) int =
+    sidebarRows(team, EmptyHashMap[string, Status](), collapsed).Size()
+
+// SidebarGroupAt returns the group name at row `idx` if that row
+// is a group header; None when `idx` lands on a member row or
+// out-of-bounds. Used by app/ui's Space-toggle handler.
+func SidebarGroupAt(team Team, collapsed Array[string], idx int) Option[string] {
+    val rows = sidebarRows(team, EmptyHashMap[string, Status](), collapsed)
+    if idx < 0 || idx >= rows.Size() { return None[string]() }
+    return rows.Get(idx) match {
+        case GroupHeader(name, _) => Some(name)
+        case MemberRow(_, _)      => None[string]()
+    }
+}
+
+// sidebarRows assembles the flat row list for the three role
+// groups in canonical order: Lead → Engineering → QA. A
+// collapsed group's member rows are omitted (header still
+// rendered with the "▶" glyph).
+func sidebarRows(team Team, statuses HashMap[string, Status], collapsed Array[string]) Array[SidebarRow] {
+    var out = EmptyArray[SidebarRow]()
+    out = appendGroup(out, "Lead",        team, TeamLead(),  statuses, collapsed)
+    out = appendGroup(out, "Engineering", team, Engineer(),  statuses, collapsed)
+    out = appendGroup(out, "QA",          team, QA(),        statuses, collapsed)
+    return out
+}
+
+// appendGroup adds the header for `name` plus member rows when
+// the group isn't in `collapsed`. Empty groups still render the
+// header — collapsing an empty group is a no-op visually but
+// keeps the row index stable across yaml shape changes.
+func appendGroup(
+    acc Array[SidebarRow],
+    name string,
+    team Team,
+    role Role,
+    statuses HashMap[string, Status],
+    collapsed Array[string],
+) Array[SidebarRow] {
+    val isCollapsed = collapsed.Contains(name)
+    val withHeader = acc.Append(GroupHeader(Name = name, Expanded = !isCollapsed))
+    if isCollapsed { return withHeader }
+    val members = MembersOf(team, role)
+    return members.FoldLeft(withHeader, (a, m) => a.Append(MemberRow(
+        Member = m, MemberStatus = statuses.Get(m.Name).GetOrElse(StIdle()),
+    )))
+}
+
+// renderSidebarRow turns one SidebarRow into a styled single-line widget.
+// `isCursor` flips the row to bold-cyan with a "▶ " lead so the
+// user can see where Space/Enter will act.
+func renderSidebarRow(row SidebarRow, isCursor bool) Widget = row match {
+    case GroupHeader(name, expanded) => {
+        val glyph = if (expanded) "▼" else "▶"
+        val text = if (isCursor) s"▶ ${glyph} ${name}" else s"  ${glyph} ${name}"
+        val style = if (isCursor) DefaultStyle().WithBold().WithFg(BrightCyan())
+                    else          DefaultStyle().WithBold()
+        return TextStyled(text, style)
+    }
+    case MemberRow(m, status) => {
+        val body = memberRowText(m, status)
+        val text = if (isCursor) s"▶   ${body}" else s"    ${body}"
+        val style = if (isCursor) DefaultStyle().WithBold().WithFg(BrightCyan())
+                    else          DefaultStyle()
+        return TextStyled(text, style)
+    }
+}
 
 // memberRowText is the visual encoding of one member row.  Padded to a
 // stable column width so the right-side status text aligns regardless

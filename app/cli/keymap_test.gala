@@ -22,6 +22,7 @@ func TestKeyToAppMsg_CtrlA_Approve(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('
 func TestKeyToAppMsg_CtrlR_Reject(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('r'))), "KeyReject")
 func TestKeyToAppMsg_CtrlM_Merge(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('m'))), "KeyMerge")
 func TestKeyToAppMsg_CtrlH_ToggleHistory(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('h'))), "KeyToggleHistory")
+func TestKeyToAppMsg_CtrlL_ToggleFocus(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('l'))), "KeyToggleFocus")
 
 func TestKeyToAppMsg_Tab_ToggleConsultViewer(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(Tab())), "KeyToggleConsultViewer")
@@ -167,6 +168,8 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case ConsultChunkArrived(_, _)   => "ConsultChunkArrived"
     case ConsultEnded(_, _)          => "ConsultEnded"
     case MouseAt(_, _, _)            => "MouseAt"
+    case KeyToggleFocus()            => "KeyToggleFocus"
+    case KeySidebarToggleGroup()     => "KeySidebarToggleGroup"
     case TickMsg()                   => "TickMsg"
     case QuitMsg()                   => "QuitMsg"
     case NoOp()                      => "NoOp"

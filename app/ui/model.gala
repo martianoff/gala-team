@@ -94,7 +94,26 @@ struct AppModel(
     // recovered member's stream.
     RecoveryBannerVisible bool,
     QuitPending bool,
+    // Which panel keystrokes target. FocusComposer is the default
+    // (typing → composer); FocusSidebar redirects Up/Down to move
+    // SidebarCursor and Space to fold/unfold the role group at the
+    // cursor. Toggled by Ctrl+L; Esc always returns to composer.
+    Focus FocusState,
+    // Cursor index into the visible sidebar tree (0 = first row).
+    // Only meaningful when Focus = FocusSidebar.
+    SidebarCursor int,
+    // Names of role groups currently collapsed in the team panel.
+    // Default is empty (everything expanded). Toggled with Space
+    // when SidebarCursor lands on a group header.
+    CollapsedGroups Array[string],
 )
+
+// FocusState selects which panel handles directional / activation
+// keys. Mouse and global shortcuts are unaffected.
+sealed type FocusState {
+    case FocusComposer
+    case FocusSidebar
+}
 
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
 // start Idle, no pipeline, no sessions, empty composer. `registry`
@@ -147,7 +166,10 @@ func InitialModelWithTeams(
     HistoryCursor     = 0,
     RecoveredMembers  = EmptyArray[string](),
     RecoveryBannerVisible = false,
-    QuitPending = false,
+    QuitPending           = false,
+    Focus                 = FocusComposer(),
+    SidebarCursor         = 0,
+    CollapsedGroups       = EmptyArray[string](),
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -223,6 +245,15 @@ sealed type AppMsg {
     // future component-level click dispatcher lands, the runtime, the
     // event vocabulary, and the model state are all already wired.
     case MouseAt(X int, Y int, Pressed bool)
+    // Cycles Focus between Composer and Sidebar. Bound to Ctrl+L
+    // ("left panel") in keymap.gala. When Focus=Sidebar, Up/Down
+    // move SidebarCursor; Space toggles fold on a group header;
+    // Esc returns to Composer.
+    case KeyToggleFocus
+    // Toggles fold state of the role group at SidebarCursor. Only
+    // meaningful when Focus=Sidebar and the cursor lands on a
+    // group header (not a member row).
+    case KeySidebarToggleGroup
     // Lifecycle
     case TickMsg
     case QuitMsg

@@ -37,13 +37,22 @@ func InputToAppMsg(ev InputEvent) AppMsg = ev match {
 //   - Ctrl+R           →  KeyReject            (back to chat)
 //   - Ctrl+M           →  KeyMerge             (merge after PrCreated)
 //   - Ctrl+H           →  KeyToggleHistory     (history browser)
+//   - Ctrl+L           →  KeyToggleFocus       (composer ↔ sidebar)
 //   - Tab              →  KeyToggleConsultViewer (consult overlay)
 //   - Backspace        →  KeyBackspace
 //   - Enter            →  KeySubmit            (composer or history-select)
-//   - Up / Down        →  HistoryCursorUp/Down (history mode only)
-//   - Esc              →  HistoryDeselect      (back out of history detail)
-//   - Char(c) / Space  →  KeyChar(c)
+//   - Up / Down        →  HistoryCursorUp/Down (history mode + sidebar)
+//   - Esc              →  HistoryDeselect      (close modal / leave focus)
+//   - Space            →  KeySidebarToggleGroup if sidebar-focused, else
+//                          treated as ' ' typed into the composer
+//   - Char(c)          →  KeyChar(c)
 //   - any other        →  NoOp
+//
+// Note that Space dispatch depends on AppModel.Focus and so cannot
+// be decided at the keymap layer alone — it's emitted as a
+// dual-purpose KeyChar(' ') which the update handler interprets
+// based on focus. Folding the sidebar group is wired through a
+// dedicated KeySidebarToggleGroup case in update.gala.
 //
 // Ctrl-modified keys are checked first (and consume the event before
 // falling through to the structural key match) so that a `Char('a')`
@@ -56,6 +65,7 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+r"))           { return KeyReject() }
     if (KeyMatchesAny(ev, "ctrl+m"))           { return KeyMerge() }
     if (KeyMatchesAny(ev, "ctrl+h"))           { return KeyToggleHistory() }
+    if (KeyMatchesAny(ev, "ctrl+l"))           { return KeyToggleFocus() }
     if (KeyMatchesAny(ev, "tab"))              { return KeyToggleConsultViewer() }
     return ev.Key match {
         case Backspace()  => KeyBackspace()

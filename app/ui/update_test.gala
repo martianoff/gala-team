@@ -682,6 +682,92 @@ func TestQuitMsg_TickDoesNotCancelConfirmation(t T) T {
 }
 
 // ---------------------------------------------------------------------------
+// Sidebar focus + fold/unfold (Ctrl+L flow)
+// ---------------------------------------------------------------------------
+
+// Default focus is the composer; KeyChar lands in the composer
+// text rather than triggering a sidebar action.
+func TestFocus_Default_IsComposer_KeyCharGoesToComposer(t T) T {
+    val (m, _) = Update(sampleModel(), KeyChar(C = 'a'))
+    return Eq(t, m.Composer, "a")
+}
+
+// Ctrl+L (KeyToggleFocus) flips focus into the sidebar; the
+// SidebarCursor resets to 0 so the user lands on the first row.
+func TestFocus_Toggle_EntersSidebarAndResetsCursor(t T) T {
+    val seed = sampleModel().Copy(SidebarCursor = 5)
+    val (m, _) = Update(seed, KeyToggleFocus())
+    val t1 = m.Focus match {
+        case FocusSidebar()  => IsTrue(t, true)
+        case FocusComposer() => IsTrue(t, false)
+    }
+    return Eq(t1, m.SidebarCursor, 0)
+}
+
+// Two presses round-trip back to the composer.
+func TestFocus_TogglesBackToComposer(t T) T {
+    val (m1, _) = Update(sampleModel(), KeyToggleFocus())
+    val (m2, _) = Update(m1, KeyToggleFocus())
+    return m2.Focus match {
+        case FocusComposer() => IsTrue(t, true)
+        case FocusSidebar()  => IsTrue(t, false)
+    }
+}
+
+// While Focus=Sidebar, typed characters do NOT extend the
+// composer — keystrokes belong to the panel that has focus.
+func TestFocus_Sidebar_KeyCharDoesNotTouchComposer(t T) T {
+    val seed = sampleModel().Copy(Focus = FocusSidebar())
+    val (m, _) = Update(seed, KeyChar(C = 'z'))
+    return Eq(t, m.Composer, "")
+}
+
+// Esc returns the user to the composer from the sidebar without
+// affecting any other modal state.
+func TestFocus_Sidebar_EscReturnsToComposer(t T) T {
+    val seed = sampleModel().Copy(Focus = FocusSidebar())
+    val (m, _) = Update(seed, HistoryDeselect())
+    return m.Focus match {
+        case FocusComposer() => IsTrue(t, true)
+        case FocusSidebar()  => IsTrue(t, false)
+    }
+}
+
+// Up/Down move SidebarCursor, clamped at 0 / row count.
+func TestFocus_Sidebar_DownAdvancesCursor(t T) T {
+    val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 0)
+    val (m, _) = Update(seed, HistoryCursorDown())
+    return Eq(t, m.SidebarCursor, 1)
+}
+
+func TestFocus_Sidebar_UpClampsAtZero(t T) T {
+    val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 0)
+    val (m, _) = Update(seed, HistoryCursorUp())
+    return Eq(t, m.SidebarCursor, 0)
+}
+
+// Space on a group header collapses the group; pressing Space
+// again expands it back. SampleModel's first row (cursor=0) is
+// the "Lead" group header.
+func TestFocus_Sidebar_SpaceTogglesGroupCollapse(t T) T {
+    val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 0)
+    val (m1, _) = Update(seed, KeyChar(C = ' '))
+    val t1 = IsTrue(t, m1.CollapsedGroups.Contains("Lead"))
+    val (m2, _) = Update(m1, KeyChar(C = ' '))
+    return IsFalse(t1, m2.CollapsedGroups.Contains("Lead"))
+}
+
+// Space on a member row is a no-op for the collapse set —
+// only group headers respond. SampleModel row 1 is "Iris" (the
+// only Lead) so row 2 is a member row of Engineering... actually
+// let's land on row 1 which is the lead member.
+func TestFocus_Sidebar_SpaceOnMemberRow_NoOp(t T) T {
+    val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 1)
+    val (m, _) = Update(seed, KeyChar(C = ' '))
+    return Eq(t, m.CollapsedGroups.Size(), 0)
+}
+
+// ---------------------------------------------------------------------------
 // State × key matrix gaps
 // ---------------------------------------------------------------------------
 

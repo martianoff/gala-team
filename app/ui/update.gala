@@ -36,7 +36,7 @@ import (
 // ============================================================================
 
 func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
-    case KeyChar(c)                  => (m.Copy(Composer = m.Composer + string(c)),    NoCmd[AppMsg]())
+    case KeyChar(c)                  => onKeyChar(m, c)
     case KeyBackspace()              => (m.Copy(Composer = trimLastRune(m.Composer)),  NoCmd[AppMsg]())
     case KeySubmit()                 => onSubmit(m)
     case KeyApprove()                => onApprove(m)
@@ -59,8 +59,10 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case ConsultEnded(name, err)     => onConsultEnded(m, name, err)
     case KeyToggleConsultViewer()    => (m.Copy(ConsultViewerOpen = !m.ConsultViewerOpen), NoCmd[AppMsg]())
     case KeyToggleHistory()          => onToggleHistory(m)
-    case HistoryCursorUp()           => onHistoryCursorMove(m, -1)
-    case HistoryCursorDown()         => onHistoryCursorMove(m, 1)
+    case KeyToggleFocus()            => onToggleFocus(m)
+    case KeySidebarToggleGroup()     => onSidebarToggleGroup(m)
+    case HistoryCursorUp()           => onCursorMove(m, -1)
+    case HistoryCursorDown()         => onCursorMove(m, 1)
     case HistorySelect()             => onHistorySelect(m)
     case HistoryDeselect()           => onEscOrDeselect(m)
     case HistoryArchiveLoaded(snap)  => (m.Copy(ViewingArchive = Some(snap)), NoCmd[AppMsg]())
@@ -69,6 +71,68 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case TickMsg()                   => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
+}
+
+// onKeyChar dispatches typed characters. Default destination is
+// the composer; while Focus=Sidebar, a literal Space (' ') folds
+// or unfolds the role group at SidebarCursor instead — matches
+// Midnight-Commander-style "tree pane" UX without burning another
+// global shortcut.
+func onKeyChar(m AppModel, c rune) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
+    case FocusSidebar() => if (c == ' ') onSidebarToggleGroup(m)
+                           else          (m, NoCmd[AppMsg]())
+    case FocusComposer() => (m.Copy(Composer = m.Composer + string(c)), NoCmd[AppMsg]())
+}
+
+// onCursorMove routes Up/Down to whichever cursor is "live": the
+// sidebar cursor when Focus=Sidebar, otherwise the history index
+// cursor (which itself no-ops outside HistoryMode). Keeps a single
+// pair of arrow-key bindings doing the right thing in both modes.
+func onCursorMove(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
+    case FocusSidebar()  => onSidebarCursorMove(m, delta)
+    case FocusComposer() => onHistoryCursorMove(m, delta)
+}
+
+// onToggleFocus cycles between the composer and the sidebar.
+// SidebarCursor resets to 0 on each *entry* into FocusSidebar so
+// the user always lands on a predictable row instead of the
+// position from the last visit.
+func onToggleFocus(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
+    case FocusComposer() => (m.Copy(Focus = FocusSidebar(), SidebarCursor = 0), NoCmd[AppMsg]())
+    case FocusSidebar()  => (m.Copy(Focus = FocusComposer()),                   NoCmd[AppMsg]())
+}
+
+// onSidebarCursorMove moves SidebarCursor by delta, clamped to
+// [0, sidebarRowCount-1]. Group headers and member rows are both
+// addressable; the cursor wraps neither end.
+func onSidebarCursorMove(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] {
+    val total = SidebarRowCount(m.Team, m.CollapsedGroups)
+    if total == 0 { return (m, NoCmd[AppMsg]()) }
+    val raw = m.SidebarCursor + delta
+    val clamped = if (raw < 0) 0
+                  else if (raw >= total) total - 1
+                  else raw
+    return (m.Copy(SidebarCursor = clamped), NoCmd[AppMsg]())
+}
+
+// onSidebarToggleGroup folds or unfolds the role group at
+// SidebarCursor. No-op when the cursor lands on a member row
+// (only group headers are toggleable). After toggling, the cursor
+// stays on the same header — which is reasonable since member
+// rows below may have appeared/disappeared and re-anchoring would
+// surprise the user.
+func onSidebarToggleGroup(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val name = SidebarGroupAt(m.Team, m.CollapsedGroups, m.SidebarCursor)
+    return name match {
+        case Some(g) => {
+            val next = if (m.CollapsedGroups.Contains(g))
+                           m.CollapsedGroups.FilterNot((x) => x == g)
+                       else
+                           m.CollapsedGroups.Append(g)
+            return (m.Copy(CollapsedGroups = next), NoCmd[AppMsg]())
+        }
+        case None() => (m, NoCmd[AppMsg]())
+    }
 }
 
 // onQuit handles Ctrl+C / Ctrl+Q. The first press arms
@@ -689,7 +753,9 @@ func trimLastRune(s string) string {
 // onEscOrDeselect routes Esc by precedence: the quit-confirmation
 // prompt wins (any-key would be too aggressive — only Esc cancels
 // it, matching the footer hint); then the recovery banner; then
-// HistoryDeselect closes a viewed archive; otherwise no-op.
+// FocusSidebar pops back to FocusComposer so the user can resume
+// typing; then HistoryDeselect closes a viewed archive; otherwise
+// no-op.
 //
 // Dismissing the recovery banner clears Conversation +
 // RecoveredMembers so the user gets a clean slate, matching the
@@ -704,6 +770,13 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             RecoveredMembers      = EmptyArray[string](),
             Conversation          = EmptyArray[session.ConversationLine](),
         ), NoCmd[AppMsg]())
+    }
+    val focusedSidebar = m.Focus match {
+        case FocusSidebar()  => true
+        case FocusComposer() => false
+    }
+    if focusedSidebar {
+        return (m.Copy(Focus = FocusComposer()), NoCmd[AppMsg]())
     }
     return (m.Copy(ViewingArchive = None[session.Snapshot]()), NoCmd[AppMsg]())
 }

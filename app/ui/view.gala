@@ -143,12 +143,36 @@ func headerWidget(m AppModel) Widget {
 func teamDescriptionSuffix(desc string) string =
     if (desc == "") "" else s"  ·  ${desc}"
 
-func sidebarWidget(m AppModel) Widget = Column(ArrayOf[LayoutChild](
-    Fixed(1, TextStyled("  Team", DefaultStyle().WithBold())),
-    Flex(1, TeamPanelView(m.Team, m.Statuses)),
-    Fixed(1, TextStyled("  Pipeline", DefaultStyle().WithBold())),
-    Flex(1, PipelineView(m.Pipeline)),
-))
+// sidebarWidget renders the left-hand "Team / Pipeline" pane.
+// When Focus=Sidebar, the team panel receives the live cursor so
+// the user can see where Space/Enter will toggle; when
+// Focus=Composer, cursor=-1 disables the highlight (the panel is
+// purely informational).
+func sidebarWidget(m AppModel) Widget {
+    val cursor = m.Focus match {
+        case FocusSidebar()  => m.SidebarCursor
+        case FocusComposer() => -1
+    }
+    return Column(ArrayOf[LayoutChild](
+        Fixed(1, TextStyled(sidebarHeading(m), sidebarHeadingStyle(m))),
+        Flex(1, TeamPanelView(m.Team, m.Statuses, cursor, m.CollapsedGroups)),
+        Fixed(1, TextStyled("  Pipeline", DefaultStyle().WithBold())),
+        Flex(1, PipelineView(m.Pipeline)),
+    ))
+}
+
+// sidebarHeading toggles a focus marker on the "Team" header
+// label so the user can see at a glance which panel keystrokes
+// will affect.
+func sidebarHeading(m AppModel) string = m.Focus match {
+    case FocusSidebar()  => "  Team  ◀"
+    case FocusComposer() => "  Team"
+}
+
+func sidebarHeadingStyle(m AppModel) Style = m.Focus match {
+    case FocusSidebar()  => DefaultStyle().WithBold().WithFg(BrightCyan())
+    case FocusComposer() => DefaultStyle().WithBold()
+}
 
 // conversationVisibleLines is the soft cap on rendered lines per
 // frame. The underlying conversation log can grow indefinitely
@@ -300,9 +324,12 @@ func footerWidget(m AppModel) Widget {
 // know how to exit. Tab toggles the consult viewer modal whenever
 // there are (or might soon be) active cross-team consults to peek
 // at; Ctrl+H opens the saved-archive browser.
-func footerHints(m AppModel) string = m.LastPrUrl match {
-    case Some(_) => "  Ctrl+C quit · Ctrl+M merge · Ctrl+A re-approve · Tab consults · Ctrl+H history"
-    case None()  => "  Ctrl+C quit · Enter send · Ctrl+A approve · Ctrl+R reject · Tab consults · Ctrl+H history"
+func footerHints(m AppModel) string = m.Focus match {
+    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc back to composer · Ctrl+C quit"
+    case FocusComposer() => m.LastPrUrl match {
+        case Some(_) => "  Ctrl+C quit · Ctrl+M merge · Ctrl+A re-approve · Tab consults · Ctrl+L sidebar"
+        case None()  => "  Ctrl+C quit · Enter send · Ctrl+A approve · Ctrl+R reject · Tab consults · Ctrl+L sidebar"
+    }
 }
 
 // stateLabel pretty-prints the current AppState for the header line.

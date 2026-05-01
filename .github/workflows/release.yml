@@ -126,11 +126,15 @@ jobs:
       - name: Build binary
         working-directory: gala_team
         shell: bash
-        # --jobs=2 caps parallelism so the 16-GB Linux runner doesn't
-        # OOM under bazel + gala transpiler + Go compile concurrency.
+        # --jobs=1 + the JVM heap cap keep the 16-GB Linux runner from
+        # OOMing the bazel server. macOS / Windows runners have similar
+        # memory budgets, so apply across the matrix.
         run: |
-          bazel build //cmd:gala_team \
-            --jobs=2 \
+          bazel \
+            --host_jvm_args=-Xmx2g \
+            build //cmd:gala_team \
+            --jobs=1 \
+            --local_resources=memory=10000 \
             --platforms=${{ matrix.platform }} \
             --override_module=gala=../gala_simple \
             --override_module=gala_tui=../gala_tui

@@ -63,15 +63,18 @@ jobs:
         working-directory: gala_team
         # `bazel test` builds whatever its deps need, including //app/...
         # and the test binaries — the previous separate `bazel build`
-        # step was redundant. --jobs=2 caps action parallelism so the
-        # 16-GB Linux runner doesn't OOM under bazel + gala transpiler
-        # + Go compile concurrency.
-        # local_path_override paths in MODULE.bazel point at dev-only
-        # paths (gala_simple's worktree); the --override_module flags
-        # repoint them at the sibling clones we just checked out.
+        # step was redundant. --jobs=1 + the JVM heap cap keep the 16-GB
+        # Linux runner from OOMing the bazel server (prior runs hit
+        # 'Server terminated abruptly: Socket closed' around the 25-min
+        # mark). local_path_override paths in MODULE.bazel point at
+        # dev-only paths; the --override_module flags repoint them at
+        # the sibling clones we just checked out.
         run: |
-          bazel test //app/... //cmd:gala_team \
-            --jobs=2 \
+          bazel \
+            --host_jvm_args=-Xmx2g \
+            test //app/... //cmd:gala_team \
+            --jobs=1 \
             --build_tests_only=false \
+            --local_resources=memory=10000 \
             --override_module=gala=../gala_simple \
             --override_module=gala_tui=../gala_tui

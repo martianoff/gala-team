@@ -40,6 +40,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Add swap space (Linux only)
+        # `gala build` exceeds the 16-GB Linux runner during the final
+        # `go build`; swap lets it spill instead of OOM-kill. macOS /
+        # Windows runners have different memory profiles and don't
+        # support this action, so skip there.
+        if: matrix.os == 'linux'
+        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c
+        with:
+          swap-size-gb: 10
+
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25.5"

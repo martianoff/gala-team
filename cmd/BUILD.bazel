@@ -15,6 +15,7 @@ gala_binary(
         "//app/project",
         "//app/session",
         "//app/team",
+        "//app/testdriver",
         "//app/ui",
         "@gala//collection_immutable",
         "@gala//time_utils",

@@ -155,13 +155,34 @@ sealed type Status {
     case StQueued
     case StWorking
     case StDone
+    // StSlow: member has been silent past the slow threshold
+    // (default 30s). Spinner stays but in a yellow style; no
+    // protocol action yet.
+    case StSlow
+    // StStuck: silent past the stuck threshold (default 120s).
+    // Heartbeat will open a TL nudge turn; sidebar shows
+    // "nudge in 0:NN" countdown via NudgeAt.
+    case StStuck
+    // StRecovering: a non-EOF crash was observed and the
+    // orchestrator is auto-respawning the member. Note carries the
+    // human-readable retry counter (e.g. "1/2") for the sidebar.
+    // Single-arg shape to dodge FIX-013 (multi-arg named-args
+    // sealed-case widening regression) while it's still open.
+    case StRecovering(Note string)
+    // StHelpWaiting: member emitted `@help(...)` and is paused
+    // awaiting a TL clarification turn.
+    case StHelpWaiting(Question string)
     case StFailed(Reason string)
 }
 
 func StatusName(s Status) string = s match {
-    case StIdle()    => "idle"
-    case StQueued()  => "queued"
-    case StWorking() => "working"
-    case StDone()    => "done"
-    case StFailed(_) => "failed"
+    case StIdle()           => "idle"
+    case StQueued()         => "queued"
+    case StWorking()        => "working"
+    case StDone()           => "done"
+    case StSlow()           => "slow"
+    case StStuck()          => "stuck"
+    case StRecovering(_) => "recovering"
+    case StHelpWaiting(_)   => "help-waiting"
+    case StFailed(_)        => "failed"
 }

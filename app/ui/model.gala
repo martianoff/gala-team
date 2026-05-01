@@ -4,6 +4,8 @@ import (
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/time_utils"
+    . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/consult"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/fsm"
@@ -87,6 +89,13 @@ struct AppModel(
     // first use. Populated by primeFromSnapshot at startup; drained
     // by ensureSession as each recovered member is respawned.
     RecoveredMembers Array[string],
+    // Per-member claude session id (UUID-shaped hex string). The
+    // first spawn for a member generates a fresh id and records it
+    // here; subsequent spawns pass it as `--resume` so claude
+    // threads conversation context across turns. Persisted in the
+    // snapshot so the ids survive a restart. Empty until the
+    // member's first turn.
+    SessionIds HashMap[string, string],
     // True when a session was restored from latest.json on launch.
     // Drives the "↻ Restored …" banner above the conversation pane.
     // Cleared by Esc (also wipes Conversation + RecoveredMembers
@@ -94,6 +103,11 @@ struct AppModel(
     // recovered member's stream.
     RecoveryBannerVisible bool,
     QuitPending bool,
+    // Two-press-confirmation flag for the erase-session shortcut
+    // (Ctrl+N). First press arms; the footer flips to a yellow
+    // "Erase session?" prompt; a second Ctrl+N within the next
+    // few keystrokes performs the erase. Esc cancels.
+    EraseSessionPending bool,
     // Which panel keystrokes target. FocusComposer is the default
     // (typing → composer); FocusSidebar redirects Up/Down to move
     // SidebarCursor and Space to fold/unfold the role group at the
@@ -106,6 +120,50 @@ struct AppModel(
     // Default is empty (everything expanded). Toggled with Space
     // when SidebarCursor lands on a group header.
     CollapsedGroups Array[string],
+    // Wall clock observed at the most recent TickMsg. Drives all
+    // elapsed-time and countdown rendering in the sidebar / header
+    // / toasts. UnixEpoch() until the first tick fires.
+    NowAt Instant,
+    // Per-member timestamp of the most recent ChunkArrived. Empty
+    // for members with no activity yet. The heartbeat compares
+    // (NowAt - LastChunkAt[name]) against thresholds to derive
+    // StSlow / StStuck / StAbandoned transitions.
+    LastChunkAt HashMap[string, Instant],
+    // Per-member timestamp of when the orchestrator's next nudge
+    // (TL relay turn) or auto-respawn fires. Sidebar shows
+    // "nudge in 0:NN" / "retry in 0:NN" countdown when an entry
+    // exists. Removed once the action fires.
+    NudgeAt HashMap[string, Instant],
+    // Wall clock observed when the FSM most recently transitioned.
+    // Footer shows time-since-state-entered. UnixEpoch() at
+    // construction; updated whenever Update() returns a model with
+    // a different State.
+    StateEnteredAt Instant,
+    // Per-member crash retry counter. Incremented by onSessionFailed
+    // for non-EOF errors; reset on successful chunk delivery. Used
+    // by auto-recovery to escalate after maxRetries.
+    RetryCount HashMap[string, int],
+    // Transient notifications surfaced to the user when liveness
+    // status escalates (member slow / stuck / crashed / recovered).
+    // Pruned by onTick once each toast's TTL expires. Rendered via
+    // gala_tui's ToastStackView in an overlay band above the
+    // conversation pane.
+    Toasts ToastQueue,
+    // Per-member accumulator of streamed lines, mirrors the TL-side
+    // TurnBuffer. Used by maybeHandleMemberDirectives to find newly-
+    // completed @done / @help / @blocked blocks each chunk. Cleared
+    // when the member's session ends.
+    MemberBuffers HashMap[string, string],
+    // Per-member watermark of how many directives the buffer parser
+    // has already dispatched. Same shape as ConsultsFired but for
+    // member-emitted directives. The parser returns directives in
+    // source order so anything past index N is new.
+    MemberDirectivesFired HashMap[string, int],
+    // Captured @done body per member from the most recent dispatched
+    // turn. Drained by buildRelayPrompt when the orchestrator opens a
+    // TL relay turn (#28). Empty string if a member finished via EOF
+    // without an explicit @done block.
+    MemberDoneBodies HashMap[string, string],
 )
 
 // FocusState selects which panel handles directional / activation
@@ -167,9 +225,20 @@ func InitialModelWithTeams(
     RecoveredMembers  = EmptyArray[string](),
     RecoveryBannerVisible = false,
     QuitPending           = false,
+    EraseSessionPending   = false,
     Focus                 = FocusComposer(),
     SidebarCursor         = 0,
     CollapsedGroups       = EmptyArray[string](),
+    SessionIds            = EmptyHashMap[string, string](),
+    NowAt                 = UnixEpoch(),
+    LastChunkAt           = EmptyHashMap[string, Instant](),
+    NudgeAt               = EmptyHashMap[string, Instant](),
+    StateEnteredAt        = UnixEpoch(),
+    RetryCount            = EmptyHashMap[string, int](),
+    Toasts                = NewToastQueue(5),
+    MemberBuffers         = EmptyHashMap[string, string](),
+    MemberDirectivesFired = EmptyHashMap[string, int](),
+    MemberDoneBodies      = EmptyHashMap[string, string](),
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -240,11 +309,25 @@ sealed type AppMsg {
     // selected.
     case HistoryArchiveLoaded(Snap session.Snapshot)
     case HistoryArchiveFailed(ErrText string)
-    // Mouse input. Phase 1: routed but unhandled — the layout doesn't
-    // yet expose clickable hit-targets. Plumbing is here so when a
-    // future component-level click dispatcher lands, the runtime, the
-    // event vocabulary, and the model state are all already wired.
+    // Mouse input. Fallback for clicks that miss every registered
+    // gala-tui HitRegistry entry — the wrapped panels (sidebar /
+    // composer) dispatch FocusSidebarClicked / FocusComposerClicked
+    // / SidebarRowClicked through the framework's auto-routing,
+    // so MouseAt only fires for clicks on the conversation pane
+    // and other unwrapped regions. Currently a no-op there.
     case MouseAt(X int, Y int, Pressed bool)
+    // Dispatched by gala-tui when the user clicks on the bordered
+    // sidebar panel (anywhere — header, body, or border). Switches
+    // Focus to FocusSidebar without disturbing the cursor.
+    case FocusSidebarClicked
+    // Dispatched per-row by gala-tui's OnPickRow on the team
+    // panel. Brings focus to the sidebar AND moves the cursor to
+    // the clicked row; group-header rows additionally toggle
+    // fold/unfold (matches the keyboard Space binding).
+    case SidebarRowClicked(VisibleIdx int)
+    // Dispatched by gala-tui on a click in the composer's
+    // bordered band — switches Focus back to FocusComposer.
+    case FocusComposerClicked
     // Cycles Focus between Composer and Sidebar. Bound to Ctrl+L
     // ("left panel") in keymap.gala. When Focus=Sidebar, Up/Down
     // move SidebarCursor; Space toggles fold on a group header;
@@ -254,6 +337,11 @@ sealed type AppMsg {
     // meaningful when Focus=Sidebar and the cursor lands on a
     // group header (not a member row).
     case KeySidebarToggleGroup
+    // Erase the active session — Ctrl+N. Two-press confirmation:
+    // first press flips EraseSessionPending; second press wipes the
+    // conversation, member buffers, status, and persisted snapshot,
+    // killing live subprocesses on the way out. Esc cancels.
+    case KeyEraseSession
     // Lifecycle
     case TickMsg
     case QuitMsg

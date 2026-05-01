@@ -70,33 +70,94 @@ func TeamPanelView(
     statuses HashMap[string, Status],
     cursor int = -1,
     collapsed Array[string] = EmptyArray[string](),
+    tick int = 0,
+    rightFields HashMap[string, string] = EmptyHashMap[string, string](),
 ) Widget {
+    val (column, start, _) = sidebarColumn(team, statuses, cursor, collapsed, tick, rightFields)
+    val rows = sidebarRows(team, statuses, collapsed)
+    return wrapWithScrollbar(column, rows.Size(), start)
+}
+
+// TeamPanelViewClickable is the click-aware sibling: each visible
+// row registers a hit through gala-tui's HitRegistry and dispatches
+// `onRowClick(absoluteIdx)` on left-click. The callback receives
+// the absolute row index in the unscrolled list (i.e. it has
+// already been translated past the scroll offset), so the caller
+// doesn't need to know the window's start position.
+//
+// Apps that don't care about row-level clicks (snapshot / test
+// rendering) keep using `TeamPanelView`; the interactive shell
+// uses this variant and wires the row dispatcher into its
+// AppMsg. `tick` drives the working-spinner animation; pass
+// AppModel.Tick.
+func TeamPanelViewClickable[T any](
+    team Team,
+    statuses HashMap[string, Status],
+    cursor int,
+    collapsed Array[string],
+    tick int,
+    onRowClick func(int) T,
+    rightFields HashMap[string, string] = EmptyHashMap[string, string](),
+) Widget {
+    val (column, start, visibleCount) = sidebarColumn(team, statuses, cursor, collapsed, tick, rightFields)
+    val clickable = column.OnPickRow[T](visibleCount, (visibleIdx) => onRowClick(start + visibleIdx))
+    val rows = sidebarRows(team, statuses, collapsed)
+    return wrapWithScrollbar(clickable, rows.Size(), start)
+}
+
+// wrapWithScrollbar pairs the rendered column with a 1-column
+// scrollbar on the right. Always rendered — gala-tui's Scrollbar
+// fills the track when `total <= visible` (so a small team still
+// sees the bar; nothing implies "you can scroll" unnecessarily,
+// since the thumb fills the entire track). Reserving the column
+// keeps layout stable when the row count crosses the visible
+// threshold.
+func wrapWithScrollbar(column Widget, total int, offset int) Widget {
+    val visible = if (total < SidebarVisibleRows) total else SidebarVisibleRows
+    val safeTotal = if (total == 0) 1 else total
+    val safeVisible = if (visible == 0) 1 else visible
+    val bar = Scrollbar(safeTotal, safeVisible, offset)
+    return Row(ArrayOf[LayoutChild](
+        Flex(1, column),
+        Fixed(1, bar),
+    ))
+}
+
+// sidebarColumn renders the visible window of sidebar rows and
+// returns the Column widget along with the start offset and
+// visible-row count — both needed by the clickable variant to
+// wire OnPickRow with absolute-row-index dispatch. Splitting the
+// rendering out of the public entry points lets each one make a
+// different call to `.OnPickRow`-or-not without duplicating the
+// row-build / scroll-window logic.
+func sidebarColumn(
+    team Team,
+    statuses HashMap[string, Status],
+    cursor int,
+    collapsed Array[string],
+    tick int,
+    rightFields HashMap[string, string],
+) Tuple3[Widget, int, int] {
     val rows = sidebarRows(team, statuses, collapsed)
     val total = rows.Size()
-    if total <= SidebarVisibleRows {
-        val children = rows.ZipWithIndex().Map((pair) =>
-            Fixed(1, renderSidebarRow(pair.V1, pair.V2 == cursor))
-        )
-        return Column(children)
-    }
-    val start = scrollStart(cursor, total, SidebarVisibleRows)
-    val end   = start + SidebarVisibleRows
-    var win   = EmptyArray[LayoutChild]()
+    val start = if (total <= SidebarVisibleRows) 0
+                else                              scrollStart(cursor, total, SidebarVisibleRows)
+    val end   = if (total <= SidebarVisibleRows) total
+                else                              start + SidebarVisibleRows
+    var win = EmptyArray[LayoutChild]()
     val above = start
     val below = total - end
     var i = start
     for i < end {
         val row = rows.Get(i)
         val isCursor = (i == cursor)
-        // Replace the first / last visible row with an "N more"
-        // hint when off-screen rows exist on that edge.
         val widget = if (i == start && above > 0) scrollHint(s"  ↑ ${above} more above")
                      else if (i == end - 1 && below > 0) scrollHint(s"  ↓ ${below} more below")
-                     else renderSidebarRow(row, isCursor)
+                     else renderSidebarRow(row, isCursor, tick, rightFields)
         win = win.Append(Fixed(1, widget))
         i = i + 1
     }
-    return Column(win)
+    return Tuple3[Widget, int, int](Column(win), start, end - start)
 }
 
 // scrollStart picks the top-of-window index so `cursor` lands
@@ -169,36 +230,54 @@ func appendGroup(
     )))
 }
 
-// renderSidebarRow turns one SidebarRow into a styled single-line widget.
-// `isCursor` flips the row to bold-cyan with a "▶ " lead so the
-// user can see where Space/Enter will act.
-func renderSidebarRow(row SidebarRow, isCursor bool) Widget = row match {
+// renderSidebarRow turns one SidebarRow into a styled single-line
+// widget. The cursor row is marked with a `▎` left-edge bar (a
+// thin vertical glyph distinct from the `▼`/`▶` group-fold
+// triangles, so users don't read "▶ ▼" as a doubled arrow).
+// `tick` drives the spinner animation for `StWorking` status.
+// renderSidebarRow now optionally renders a right-aligned `rightFields[name]`
+// column for member rows. Headers never carry timer text. When `rightFields`
+// has no entry for a member (or the entry is ""), falls back to the simple
+// single-line label (preserves existing snapshot tests that don't pass a
+// timer map).
+val SidebarRightWidth = 14
+
+func renderSidebarRow(row SidebarRow, isCursor bool, tick int, rightFields HashMap[string, string]) Widget = row match {
     case GroupHeader(name, expanded) =>
         TextStyled(headerLabel(name, expanded, isCursor), rowStyle(isCursor, true))
-    case MemberRow(m, status) =>
-        TextStyled(memberLabel(memberRowText(m, status), isCursor), rowStyle(isCursor, false))
+    case MemberRow(m, status) => {
+        val style = rowStyle(isCursor, false)
+        val left  = TextStyled(memberLabel(memberRowText(m, status, tick), isCursor), style)
+        val right = rightFields.GetOrElse(m.Name, "")
+        if right == "" { return left }
+        val rightW = TextStyled(padLeft(right, SidebarRightWidth), DefaultStyle().WithDim())
+        return Row(ArrayOf[LayoutChild](
+            Flex(1, left),
+            Fixed(SidebarRightWidth, rightW),
+        ))
+    }
 }
 
-// headerLabel formats a group header row. Extracted so the
-// if-expression inside doesn't leak into renderSidebarRow's body
-// — gala 0.39.2 emits `func() any` for nested if-as-expressions
-// which then can't be passed where `string` is expected.
+// headerLabel formats a group header row. The `▎` (left-edge
+// vertical bar) prefix marks the cursor without colliding
+// visually with the `▼`/`▶` fold triangles.
 func headerLabel(name string, expanded bool, isCursor bool) string {
     val glyph = if (expanded) "▼" else "▶"
-    if isCursor { return s"▶ ${glyph} ${name}" }
+    if isCursor { return s"▎ ${glyph} ${name}" }
     return s"  ${glyph} ${name}"
 }
 
 // memberLabel formats a member row's text — same extraction
 // rationale as headerLabel.
 func memberLabel(body string, isCursor bool) string {
-    if isCursor { return s"▶   ${body}" }
+    if isCursor { return s"▎   ${body}" }
     return s"    ${body}"
 }
 
 // rowStyle returns the style for a sidebar row. `bold` toggles the
 // always-bold styling that group headers wear; non-cursor member
-// rows render in plain DefaultStyle.
+// rows render in plain DefaultStyle. The cursor row is bold (and
+// the left-edge `▎` from headerLabel/memberLabel does the rest).
 func rowStyle(isCursor bool, bold bool) Style {
     if isCursor { return DefaultStyle().WithBold() }
     if bold     { return DefaultStyle().WithBold() }
@@ -207,22 +286,44 @@ func rowStyle(isCursor bool, bold bool) Style {
 
 // memberRowText is the visual encoding of one member row.  Padded to a
 // stable column width so the right-side status text aligns regardless
-// of name length.
-func memberRowText(m Member, status Status) string {
-    val glyph = statusGlyph(status)
+// of name length. `tick` rotates the working-spinner glyph so the
+// user can see the row is alive; the other states are static.
+func memberRowText(m Member, status Status, tick int) string {
+    val glyph = statusGlyph(status, tick)
     val padded = padRight(m.Name, 10)
     return s"${glyph} ${padded} ${StatusName(status)}"
 }
 
-// statusGlyph picks the visual marker for a status.  Spinner (working)
-// is the canonical braille frame; live animation is the caller's job
-// (drive a Tick subscription and pass the current frame's glyph).
-func statusGlyph(status Status) string = status match {
-    case StIdle()    => "◇"
-    case StQueued()  => "○"
-    case StWorking() => "⠋"
-    case StDone()    => "✓"
-    case StFailed(_) => "✗"
+// spinnerFrames is the canonical braille spinner — the same set
+// gala-tui's status_widgets uses, so the visual cadence matches
+// any other gala-tui app the user runs alongside.
+val spinnerFrames = ArrayOf("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+// statusGlyph picks the visual marker for a status. The Working
+// state cycles through `spinnerFrames` as `tick` advances — a
+// 120ms Tick subscription drives roughly 8fps, fast enough to
+// look alive without being distracting.
+func statusGlyph(status Status, tick int) string = status match {
+    case StIdle()           => "◇"
+    case StQueued()         => "○"
+    case StWorking()        => spinnerFrames.Get(spinnerIdx(tick))
+    case StSlow()           => spinnerFrames.Get(spinnerIdx(tick / 2))  // half-speed spin
+    case StStuck()          => "!"
+    case StRecovering(_) => "↻"
+    case StHelpWaiting(_)   => "?"
+    case StDone()           => "✓"
+    case StFailed(_)        => "✗"
+}
+
+// spinnerIdx clamps `tick` into the [0, len(frames)) range,
+// handling negative ticks defensively (happens in tests with
+// hand-built models).
+func spinnerIdx(tick int) int {
+    val n = spinnerFrames.Size()
+    if n == 0 { return 0 }
+    val raw = tick % n
+    if raw < 0 { return raw + n }
+    return raw
 }
 
 // padRight space-pads `s` on the right up to `width`.  Truncates if
@@ -231,6 +332,15 @@ func padRight(s string, width int) string {
     val deficit = width - len(s)
     if deficit <= 0 { return s }
     return s + spacesOf(deficit)
+}
+
+// padLeft space-pads `s` on the left up to `width`. When `s` already
+// exceeds `width` it's returned unchanged — the sidebar gives up
+// alignment rather than dropping characters from a status string.
+func padLeft(s string, width int) string {
+    val n = len(s)
+    if n >= width { return s }
+    return spacesOf(width - n) + s
 }
 
 // spacesOf returns a string of `n` spaces.  Implemented via FoldLeft

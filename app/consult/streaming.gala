@@ -83,7 +83,7 @@ func DispatchConsult(
 func SpawnInProjectConsult(tm Team, proj Project, name string, body string) Try[ConsultSession] = Try[ConsultSession](() => {
     val lead = tm.Lead
     val (wrapped, _) = onboarding.WrapPromptSafe(proj, tm, lead, body)
-    val sess = SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, false) match {
+    val sess = SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
         case Failure(e) => panic(s"spawn: ${e.Error()}")
         case Success(s) => s
     }
@@ -120,7 +120,7 @@ func SpawnConsult(r Registry, name string, body string) Try[ConsultSession] = Tr
     }
     val lead = tm.Lead
     val (wrapped, _) = onboarding.WrapPromptSafe(proj, tm, lead, body)
-    val sess = SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, false) match {
+    val sess = SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
         case Failure(e) => panic(s"spawn: ${e.Error()}")
         case Success(s) => s
     }

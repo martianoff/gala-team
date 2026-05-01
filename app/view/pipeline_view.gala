@@ -65,7 +65,7 @@ func PipelineView(state PipelineState) Widget {
 // glyph next to the name.  Failed nodes render in red; working nodes
 // in cyan; everything else default.
 func pipelineBox(event PipelineEvent) Widget {
-    val glyph = statusGlyph(event.Status)
+    val glyph = statusGlyph(event.Status, 0)
     val text = s"  [${glyph} ${event.Member}]"
     return TextStyled(text, pipelineNodeStyle(event.Status))
 }

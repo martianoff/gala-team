@@ -84,13 +84,20 @@ func Load(proj Project, paths Array[string]) Try[string] = Try[string](() => {
 // Failure the caller can either propagate (interactive UX panics
 // on first-prompt setup errors) or degrade (consult / headless
 // flow falls back to the raw prompt — see WrapPromptSafe).
-func WrapPrompt(proj Project, team Team, member Member, prompt string) Try[string] = Try[string](() => {
+func WrapPrompt(proj Project, team Team, member Member, prompt string) Try[string] {
     val role = roleSection(team, member)
     val paths = Compose(team, member)
-    val onbSection = if (paths.IsEmpty()) ""
-                     else                 s"# Project onboarding\n\n${Load(proj, paths).Get()}\n\n"
-    return s"${role}\n\n${onbSection}# Your task\n\n${prompt}"
-})
+    if paths.IsEmpty() {
+        return Success[string](s"${role}\n\n# Your task\n\n${prompt}")
+    }
+    // Map directly off Load's Try so the underlying read error
+    // propagates verbatim — calling `.Get()` here would surface as
+    // a "Try.Get on Failure: <inner error>" double-wrap that
+    // makes the LastError banner unreadable.
+    return Load(proj, paths).Map[string]((loaded) =>
+        s"${role}\n\n# Project onboarding\n\n${loaded}\n\n# Your task\n\n${prompt}"
+    )
+}
 
 // roleSection renders the persona block for `member` on `team`. We
 // always emit "# Your role" so the model knows who it's playing,

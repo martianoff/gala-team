@@ -1,0 +1,30 @@
+package runtime
+
+import (
+    "github.com/google/uuid"
+)
+
+// ============================================================================
+// app/runtime/session_id — claude session identifier helpers.
+//
+// claude's `--session-id <uuid>` and `--resume <uuid>` flags let the
+// caller supply the conversation id rather than relying on the
+// implicit "most recent in cwd" semantics of `--continue`. That's
+// the only safe way to run multiple member subprocesses in parallel
+// in the same project repo: Felix and Mira fanned out at the same
+// time would otherwise both grab whichever session ended last under
+// `--continue`.
+//
+// claude's `--resume` validation explicitly checks for **UUID format**
+// when used with `--print` (see runtime error: "is not a UUID and
+// does not match any session title"). Plain 32-char hex without
+// dashes is rejected. So we emit RFC 4122-shaped strings:
+//   xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+// where x is random hex and y is one of 8/9/a/b. Version 4 / variant 1.
+// ============================================================================
+
+// NewSessionId returns a fresh RFC 4122 v4 UUID string suitable for
+// `claude --session-id <uuid>` / `--resume <uuid>`. Backed by
+// google/uuid, which is the canonical implementation across the Go
+// ecosystem and matches claude's `--print --resume` UUID validator.
+func NewSessionId() string = uuid.NewString()

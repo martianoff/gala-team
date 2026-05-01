@@ -120,12 +120,13 @@ func TestChunkArrived_PreservesEarlierLines(t T) T {
 
 func TestSessionFailed_SetsLastErrorAndDropsSession(t T) T {
     // Sessions starts empty; SessionFailed should leave it empty (Remove of
-    // a missing key is a no-op) and set LastError.
+    // a missing key is a no-op) and set LastError. With auto-retry (#26)
+    // the LastError now also carries "retry N/M" so the user sees the
+    // orchestrator is working through the recovery, not silently swallowing.
     val (m, _) = Update(sampleModel(), SessionFailed(Member = "Iris", ErrText = "stream closed"))
-    val t1 = Eq(t, m.Sessions.Size(), 0)
     return m.LastError match {
-        case Some(s) => Eq(t1, s, "Iris: stream closed")
-        case None()  => IsTrue(t1, false)
+        case Some(s) => IsTrue(t, s == "Iris: stream closed — retry 1/2")
+        case None()  => IsTrue(t, false)
     }
 }
 
@@ -354,7 +355,12 @@ func TestChunkArrived_MarksSpeakerWorking(t T) T {
 }
 
 func TestSessionFailed_MarksMemberFailedWithReason(t T) T {
-    val (m, _) = Update(sampleModel(), SessionFailed(Member = "Iris", ErrText = "stream closed"))
+    // With auto-retry (#26) a single SessionFailed event now produces
+    // StRecovering(1, 2) — the orchestrator is mid-respawn. After
+    // exhausting retries, the next failure escalates to StFailed. This
+    // test exercises the after-exhaustion path by seeding RetryCount.
+    val seed = sampleModel().Copy(RetryCount = EmptyHashMap[string, int]().Put("Iris", 2))
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "stream closed"))
     return m.Statuses.Get("Iris") match {
         case Some(StFailed(reason)) => Eq(t, reason, "stream closed")
         case _                      => IsTrue(t, false)
@@ -465,9 +471,13 @@ func TestKeySubmit_DoubleSubmitIsIdempotentOnEmpty(t T) T {
 // crash; Remove on a missing key is a no-op and LastError still
 // gets the wrapped message.
 func TestSessionFailed_OnUnknownMember_LogsAnyway(t T) T {
-    val (m, _) = Update(sampleModel(), SessionFailed(Member = "Ghost", ErrText = "EOF"))
+    // EOF is now the normal turn-end success signal — doesn't log.
+    // Use a real error so the unknown-member-still-logs path is
+    // exercised. With auto-retry (#26) the LastError appends the
+    // retry counter.
+    val (m, _) = Update(sampleModel(), SessionFailed(Member = "Ghost", ErrText = "stream closed"))
     return m.LastError match {
-        case Some(s) => Eq(t, s, "Ghost: EOF")
+        case Some(s) => IsTrue(t, s == "Ghost: stream closed — retry 1/2")
         case None()  => IsTrue(t, false)
     }
 }
@@ -834,15 +844,20 @@ func TestFocusFlow_TabRoundTripsBackToComposer(t T) T {
 }
 
 // ---------------------------------------------------------------------------
-// Mouse hit-testing — click in the sidebar columns focuses it and
-// snaps the cursor; click outside snaps focus back to the composer.
+// Mouse hit-testing — gala-tui's HitRegistry auto-routes clicks
+// to the bordered sidebar / composer panels (FocusSidebarClicked
+// / FocusComposerClicked) and to per-row hits inside the sidebar
+// (SidebarRowClicked). Apps don't compute coordinates; the tests
+// here exercise the AppMsg-level handlers the framework dispatches
+// to.
 // ---------------------------------------------------------------------------
 
-// Click on a sidebar group header focuses the panel, moves the
-// cursor to that row, AND toggles fold (mirroring keyboard Space).
-func TestMouseAt_ClickOnGroupHeader_FocusesAndToggles(t T) T {
+// SidebarRowClicked at row 0 (the "Lead" group header) focuses
+// the sidebar, moves the cursor, AND toggles fold — mirroring
+// the keyboard Space binding.
+func TestSidebarRowClicked_OnGroupHeader_FocusesAndToggles(t T) T {
     val seed = sampleModel()
-    val (m, _) = Update(seed, MouseAt(X = 5, Y = 5, Pressed = true))
+    val (m, _) = Update(seed, SidebarRowClicked(VisibleIdx = 0))
     val t1 = m.Focus match {
         case FocusSidebar()  => IsTrue(t, true)
         case FocusComposer() => IsTrue(t, false)
@@ -850,11 +865,11 @@ func TestMouseAt_ClickOnGroupHeader_FocusesAndToggles(t T) T {
     return IsTrue(t1, m.CollapsedGroups.Contains("Lead"))
 }
 
-// Click on a member row focuses + moves the cursor but does not
-// touch CollapsedGroups (only headers toggle).
-func TestMouseAt_ClickOnMemberRow_FocusesWithoutCollapsing(t T) T {
+// SidebarRowClicked on a member row (idx 1 = "Iris") focuses the
+// sidebar and moves the cursor, but doesn't touch the fold set.
+func TestSidebarRowClicked_OnMemberRow_FocusesWithoutCollapsing(t T) T {
     val seed = sampleModel()
-    val (m, _) = Update(seed, MouseAt(X = 5, Y = 6, Pressed = true))
+    val (m, _) = Update(seed, SidebarRowClicked(VisibleIdx = 1))
     val t1 = m.Focus match {
         case FocusSidebar()  => IsTrue(t, true)
         case FocusComposer() => IsTrue(t, false)
@@ -863,23 +878,36 @@ func TestMouseAt_ClickOnMemberRow_FocusesWithoutCollapsing(t T) T {
     return Eq(t2, m.CollapsedGroups.Size(), 0)
 }
 
-// Click outside the sidebar columns snaps focus back to the
-// composer when the user was previously in the sidebar.
-func TestMouseAt_ClickOutsideSidebar_ReturnsToComposer(t T) T {
+// FocusComposerClicked snaps focus back to the composer (used by
+// the framework when the user clicks the composer panel from
+// FocusSidebar).
+func TestFocusComposerClicked_ReturnsFocusToComposer(t T) T {
     val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 2)
-    val (m, _) = Update(seed, MouseAt(X = 50, Y = 8, Pressed = true))
+    val (m, _) = Update(seed, FocusComposerClicked())
     return m.Focus match {
         case FocusComposer() => IsTrue(t, true)
         case FocusSidebar()  => IsTrue(t, false)
     }
 }
 
-// Mouse release events don't move state — only press triggers
-// focus/cursor changes so a drag that ends in another panel
-// doesn't accidentally reset.
-func TestMouseAt_Release_DoesNotMoveState(t T) T {
+// FocusSidebarClicked focuses the sidebar without moving the
+// cursor — a click on the bordered panel itself (above/below the
+// rows) should land here.
+func TestFocusSidebarClicked_FocusesWithoutCursorChange(t T) T {
+    val seed = sampleModel().Copy(SidebarCursor = 5)
+    val (m, _) = Update(seed, FocusSidebarClicked())
+    val t1 = m.Focus match {
+        case FocusSidebar()  => IsTrue(t, true)
+        case FocusComposer() => IsTrue(t, false)
+    }
+    return Eq(t1, m.SidebarCursor, 5)
+}
+
+// MouseAt is now the no-op fallback for clicks that miss every
+// registered HitRegistry entry. Render shouldn't change.
+func TestMouseAt_FallthroughIsNoOp(t T) T {
     val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 3)
-    val (m, _) = Update(seed, MouseAt(X = 100, Y = 100, Pressed = false))
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 8, Pressed = true))
     val t1 = m.Focus match {
         case FocusSidebar()  => IsTrue(t, true)
         case FocusComposer() => IsTrue(t, false)

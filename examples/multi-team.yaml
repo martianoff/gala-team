@@ -67,7 +67,11 @@ policy:
   pre_merge:
     - name: lint
       cmd: go
-      args: [vet, ./...]
+      args:
+        - vet
+        - ./...
     - name: test
       cmd: go
-      args: [test, ./...]
+      args:
+        - test
+        - ./...

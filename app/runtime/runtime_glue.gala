@@ -65,9 +65,22 @@ struct MemberSession(
 //   - m.Model pins the model when set (--model <name>).
 //   - dangerouslySkipPermissions adds --dangerously-skip-permissions
 //     when true (opt-in per-team via team.yaml).
-//   - resume=true adds --continue so claude picks up its prior
-//     in-process conversation in this cwd. Used by the recovery
-//     flow when a session was alive in the previous launch.
+//   - sessionId pairs with isNewSession to control the
+//     `--session-id` / `--resume` flag: a fresh session uses
+//     `--session-id <id>` (claude creates the conversation under
+//     that id); a returning session uses `--resume <id>` (claude
+//     loads the prior conversation by id). Per-member ids let
+//     multiple members run concurrently in the same cwd without
+//     racing on `--continue`'s "most recent" semantics.
+//
+// The prompt itself is delivered through stdin (see SendFuture +
+// CloseStdinFuture), not as an argv element — Windows caps argv
+// length around 32 KB and the onboarding pack alone can blow that
+// limit on the first turn.
+//
+// `claude --print` exits after responding, so a "session" here is
+// per-turn — the orchestrator threads conversation context across
+// turns via the session id.
 //
 // Returns Try[MemberSession]; failure carries the underlying spawn error.
 func SpawnSession(
@@ -75,11 +88,12 @@ func SpawnSession(
     m Member,
     workspace string,
     dangerouslySkipPermissions bool,
-    resume bool,
+    sessionId string,
+    isNewSession bool,
 ) Try[MemberSession] {
     val opts = subprocess.NewSpawnOpts(
         "claude",
-        claudeArgs(m, dangerouslySkipPermissions, resume).ToGoSlice(),
+        claudeArgs(m, dangerouslySkipPermissions, sessionId, isNewSession).ToGoSlice(),
         SliceEmpty[string](),
         workspace,
     )
@@ -152,25 +166,34 @@ func RemoveWorktree(proj Project, m Member) Try[bool] = Try[bool](() => {
 })
 
 // claudeArgs assembles the `claude` CLI flags for a spawn:
+//   - `--print` always, so claude reads the prompt from stdin
+//     and exits after responding instead of starting a TTY-bound
+//     REPL. Without this, claude hangs on piped stdin.
 //   - `--output-format stream-json` always, so the chunk pump can
-//     walk member output line-by-line.
+//     walk member output line-by-line. claude requires
+//     `--verbose` alongside it under `--print` (otherwise it
+//     errors with "stream-json requires --verbose").
+//   - `--verbose` always — required by `--print +
+//     --output-format=stream-json`.
 //   - `--model <name>` when m.Model is Some — pins the model.
 //   - `--dangerously-skip-permissions` when the enclosing team
 //     opted in via team.yaml. Off by default; turning it on is a
 //     deliberate decision the user makes per-team.
-//   - `--continue` when `resume` is true — claude picks up the
-//     last conversation in this cwd. Used by the recovery flow
-//     when the prior session was alive at shutdown.
-func claudeArgs(m Member, dangerouslySkipPermissions bool, resume bool) Array[string] {
-    val base = ArrayOf("--output-format", "stream-json")
+//   - `--session-id <id>` on the first turn, `--resume <id>` on
+//     subsequent turns. Per-member ids keep concurrent fan-outs
+//     (Felix and Mira dispatched in parallel) from racing on
+//     claude's implicit "most recent in cwd" `--continue`
+//     semantics.
+func claudeArgs(m Member, dangerouslySkipPermissions bool, sessionId string, isNewSession bool) Array[string] {
+    val base = ArrayOf("--print", "--output-format", "stream-json", "--verbose")
     val withModel = m.Model match {
         case Some(name) => base.AppendAll(ArrayOf("--model", name))
         case None()     => base
     }
     val withDanger = if (dangerouslySkipPermissions) withModel.Append("--dangerously-skip-permissions")
                      else                            withModel
-    return if (resume) withDanger.Append("--continue")
-           else        withDanger
+    val sessionFlag = if (isNewSession) "--session-id" else "--resume"
+    return withDanger.AppendAll(ArrayOf(sessionFlag, sessionId))
 }
 
 // ----------------------------------------------------------------------------
@@ -192,14 +215,29 @@ func NextChunkFuture(s MemberSession) concurrent.Future[Msg] {
     })
 }
 
-// SendFuture writes `prompt` + "\n" to the session's stdin and returns
-// a Future that resolves to WriteSent (success) or SessionFailed
-// (write error — usually means the child closed stdin or exited).
+// SendFuture writes `prompt` + "\n" to the session's stdin AND
+// closes stdin afterward. claude with `--print` reads stdin to
+// EOF before producing output — without an explicit close, the
+// child waits forever for more input.
+//
+// The combined "write then close" lives in one Future so the read
+// pump can be started in parallel without an interleaving worry:
+// the child sees the prompt + EOF as a single transaction.
+//
+// Returns WriteSent on success, SessionFailed on a write or
+// close error (rare; usually means claude already exited).
 func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => s.Process.WriteLine(prompt) match {
-        case Success(_)   => RtWriteSent(Member = name)
-        case Failure(err) => RtSessionFailed(Member = name, Err = err)
+    return concurrent.FutureApply[Msg](() => {
+        val w = s.Process.WriteLine(prompt)
+        if w.IsFailure() {
+            return RtSessionFailed(Member = name, Err = w.GetError())
+        }
+        val c = s.Process.CloseStdin()
+        if c.IsFailure() {
+            return RtSessionFailed(Member = name, Err = c.GetError())
+        }
+        return RtWriteSent(Member = name)
     })
 }
 

@@ -33,22 +33,41 @@ import (
 // `i = next` jumps past the matched directive's @end, so the cursor
 // movement isn't expressible as Map / Collect / FoldLeft over the lines
 // (each directive consumes a variable number of source lines).
-func Parse(msg string) Array[Directive] {
+func Parse(msg string) Array[Directive] = parseImpl(msg, false)
+
+// ParseClosed is the streaming-friendly variant: only emits a
+// directive when its `@end` line has actually been seen. Used by
+// the member-chunk handler so we don't fire a Blocked / Help /
+// Finished directive on the very first line of an in-progress
+// block before its body has arrived.
+func ParseClosed(msg string) Array[Directive] = parseImpl(msg, true)
+
+func parseImpl(msg string, requireClose bool) Array[Directive] {
     var out = EmptyArray[Directive]()
     val lines = strings.Split(msg, "\n")
     var i = 0
     val n = len(lines)
-    for i < n {
+    var done = false
+    for !done && i < n {
         val line = lines[i]
         parseOpeningTag(line) match {
             case Some(o) => {
                 val (kind, target, projectOverride, sameLineRest) = unpackOpening(o)
-                val (body, next) = collectBody(lines, i, n, sameLineRest)
-                buildDirective(kind, target, projectOverride, body) match {
-                    case Some(d) => out = out.Append(d)
-                    case None()  => {}
+                val (body, next, closed) = collectBody(lines, i, n, sameLineRest)
+                if requireClose && !closed {
+                    // Stop at the first unclosed block — its successors
+                    // can't be parsed deterministically until @end arrives.
+                    // Break via a flag because gala lowers a bare `return`
+                    // inside a match-arm to an IIFE return, not a function
+                    // return — that would leave i unchanged and spin.
+                    done = true
+                } else {
+                    buildDirective(kind, target, projectOverride, body) match {
+                        case Some(d) => out = out.Append(d)
+                        case None()  => {}
+                    }
+                    i = next
                 }
-                i = next
             }
             case None() => i = i + 1
         }
@@ -80,15 +99,31 @@ func parseOpeningTag(line string) Option[openingTag] {
         return parseDispatchOrConsult("consult", strings.TrimPrefix(trimmed, "@consult("))
     }
     if strings.HasPrefix(trimmed, "@summary") {
-        val rest = strings.TrimLeft(strings.TrimPrefix(trimmed, "@summary"), " \t")
-        return Some[openingTag](openingTag{
-            Kind:            "summary",
-            Target:          "",
-            ProjectOverride: None[string](),
-            SameLineRest:    rest,
-        })
+        return parseBodyOnlyTag("summary", strings.TrimPrefix(trimmed, "@summary"))
+    }
+    if strings.HasPrefix(trimmed, "@done") {
+        return parseBodyOnlyTag("done", strings.TrimPrefix(trimmed, "@done"))
+    }
+    if strings.HasPrefix(trimmed, "@help") {
+        return parseBodyOnlyTag("help", strings.TrimPrefix(trimmed, "@help"))
+    }
+    if strings.HasPrefix(trimmed, "@blocked") {
+        return parseBodyOnlyTag("blocked", strings.TrimPrefix(trimmed, "@blocked"))
     }
     return None[openingTag]()
+}
+
+// parseBodyOnlyTag handles tags that take no argument list (@summary,
+// @done, @help, @blocked). Body lives on the rest of the same line
+// (left-trimmed) plus subsequent lines until @end.
+func parseBodyOnlyTag(kind string, afterTag string) Option[openingTag] {
+    val rest = strings.TrimLeft(afterTag, " \t")
+    return Some[openingTag](openingTag{
+        Kind:            kind,
+        Target:          "",
+        ProjectOverride: None[string](),
+        SameLineRest:    rest,
+    })
 }
 
 // parseDispatchOrConsult takes the line content AFTER the opening
@@ -138,7 +173,16 @@ func splitKVPair(seg string) Tuple3[string, string, bool] {
 
 // Loop-bound Append is intentional: we need an early-return on @end (not
 // just take-while), and Array doesn't currently expose IndexOfFirst.
-func collectBody(lines []string, start int, n int, sameLineRest string) Tuple[string, int] {
+//
+// Returns (body, nextIndex, closed). `closed` is true when an `@end`
+// line was found; false when the loop walked off the end of `lines`
+// without seeing one. The original `Parse` accepts either case (EOF
+// is treated as an implicit @end for the TL stream); `ParseClosed`
+// rejects unclosed blocks (used for member-stream directives that
+// arrive line-by-line — we don't want to fire a Blocked / Help /
+// Finished directive on the very first line before the body and @end
+// have arrived).
+func collectBody(lines []string, start int, n int, sameLineRest string) Tuple3[string, int, bool] {
     var bodyParts = EmptyArray[string]()
     if sameLineRest != "" {
         bodyParts = bodyParts.Append(sameLineRest)
@@ -148,12 +192,12 @@ func collectBody(lines []string, start int, n int, sameLineRest string) Tuple[st
         val line = lines[i]
         val trimmed = strings.TrimSpace(line)
         if trimmed == "@end" {
-            return (joinBody(bodyParts), i + 1)
+            return (joinBody(bodyParts), i + 1, true)
         }
         bodyParts = bodyParts.Append(line)
         i = i + 1
     }
-    return (joinBody(bodyParts), n)
+    return (joinBody(bodyParts), n, false)
 }
 
 func joinBody(parts Array[string]) string =
@@ -177,6 +221,15 @@ func buildDirective(
     }
     if kind == "summary" {
         return Some[Directive](Summary(Body = body))
+    }
+    if kind == "done" {
+        return Some[Directive](Finished(Body = body))
+    }
+    if kind == "help" {
+        return Some[Directive](Help(Question = body))
+    }
+    if kind == "blocked" {
+        return Some[Directive](Blocked(Reason = body))
     }
     return None[Directive]()
 }

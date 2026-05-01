@@ -258,6 +258,7 @@ func decodePolicyBlock(d *yaml.YamlDecoderImpl) Policy {
     var rule MergeRule = SquashMerge()
     var pre = EmptyArray[Hook]()
     var post = EmptyArray[Hook]()
+    var hb = DefaultHeartbeat()
     for d.HasMoreFields() {
         val key = d.ReadKey()
         if key == "workspace_mode" {
@@ -268,12 +269,52 @@ func decodePolicyBlock(d *yaml.YamlDecoderImpl) Policy {
             pre = decodeHooks(d)
         } else if key == "post_merge" {
             post = decodeHooks(d)
+        } else if key == "heartbeat" {
+            hb = decodeHeartbeat(d)
         } else {
             d.Skip()
         }
     }
     d.EndObject()
-    return Policy(WorkspaceMode = mode, MergeRule = rule, PreMerge = pre, PostMerge = post)
+    return Policy(WorkspaceMode = mode, MergeRule = rule, PreMerge = pre, PostMerge = post, Heartbeat = hb)
+}
+
+// decodeHeartbeat parses the `policy.heartbeat:` sub-block. Each
+// field is optional; missing keys keep the default value from
+// DefaultHeartbeat. Accepted keys (all integers; seconds for the
+// timing thresholds, count for max_retries):
+//   slow_after_seconds
+//   stuck_after_seconds
+//   abandon_after_seconds
+//   max_retries
+func decodeHeartbeat(d *yaml.YamlDecoderImpl) Heartbeat {
+    d.StartObject()
+    val defaults = DefaultHeartbeat()
+    var slow = defaults.SlowAfterSeconds
+    var stuck = defaults.StuckAfterSeconds
+    var abandon = defaults.AbandonAfterSeconds
+    var retries = defaults.MaxRetries
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == "slow_after_seconds" {
+            slow = int64(d.ReadInt())
+        } else if key == "stuck_after_seconds" {
+            stuck = int64(d.ReadInt())
+        } else if key == "abandon_after_seconds" {
+            abandon = int64(d.ReadInt())
+        } else if key == "max_retries" {
+            retries = d.ReadInt()
+        } else {
+            d.Skip()
+        }
+    }
+    d.EndObject()
+    return Heartbeat(
+        SlowAfterSeconds    = slow,
+        StuckAfterSeconds   = stuck,
+        AbandonAfterSeconds = abandon,
+        MaxRetries          = retries,
+    )
 }
 
 func decodeWorkspaceMode(s string) WorkspaceMode {

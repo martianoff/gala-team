@@ -24,6 +24,7 @@ func stateName(s AppState) string = s match {
     case Delegating(_)    => "Delegating"
     case QAGate(_)        => "QAGate"
     case TLReview()       => "TLReview"
+    case TLNudging(_)     => "TLNudging"
     case Approval(_)      => "Approval"
 }
 
@@ -76,7 +77,7 @@ func TestTLThinking_SummaryBeatsDispatch(t T) T {
 
 func TestDelegating_OneMemberDone_StaysDelegating(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix"), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix", Body = ""), ctxWithQA(true))
     val t1 = Eq(t, stateName(s), "Delegating")
     return s match {
         case Delegating(rest) => Eq(t1, rest.Size(), 1)
@@ -86,7 +87,7 @@ func TestDelegating_OneMemberDone_StaysDelegating(t T) T {
 
 func TestDelegating_AllDone_QARequired_GoesToQAGate(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix"), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix", Body = ""), ctxWithQA(true))
     val t1 = Eq(t, stateName(s), "QAGate")
     return s match {
         case QAGate(qaPending) => Eq(t1, qaPending.Size(), 1)
@@ -96,7 +97,7 @@ func TestDelegating_AllDone_QARequired_GoesToQAGate(t T) T {
 
 func TestDelegating_AllDone_NoQA_GoesToTLReview(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix"), ctxNoQA())
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix", Body = ""), ctxNoQA())
     return Eq(t, stateName(s), "TLReview")
 }
 
@@ -147,7 +148,7 @@ func TestIdle_IgnoresTLDone(t T) T {
 }
 
 func TestIdle_IgnoresMemberDone(t T) T {
-    val s = Transition(Idle(), MemberDone(MemberName = "Felix"), ctxWithQA(true))
+    val s = Transition(Idle(), MemberDone(MemberName = "Felix", Body = ""), ctxWithQA(true))
     return Eq(t, stateName(s), "Idle")
 }
 
@@ -162,7 +163,7 @@ func TestTLThinking_IgnoresUserPrompted(t T) T {
 }
 
 func TestTLThinking_IgnoresMemberDone(t T) T {
-    val s = Transition(TLThinking(), MemberDone(MemberName = "Felix"), ctxWithQA(true))
+    val s = Transition(TLThinking(), MemberDone(MemberName = "Felix", Body = ""), ctxWithQA(true))
     return Eq(t, stateName(s), "TLThinking")
 }
 
@@ -198,7 +199,7 @@ func TestDelegating_IgnoresTLDone(t T) T {
 // removing one should keep us in QAGate with the rest.
 func TestQAGate_OneQADone_StaysQAGateWithRest(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo").Add("Mira")
-    val s = Transition(QAGate(Pending = pending), MemberDone(MemberName = "Theo"), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending), MemberDone(MemberName = "Theo", Body = ""), ctxWithQA(true))
     val t1 = Eq(t, stateName(s), "QAGate")
     return s match {
         case QAGate(rest) => Eq(t1, rest.Size(), 1)
@@ -208,7 +209,7 @@ func TestQAGate_OneQADone_StaysQAGateWithRest(t T) T {
 
 func TestQAGate_LastQADone_GoesToTLReview(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo")
-    val s = Transition(QAGate(Pending = pending), MemberDone(MemberName = "Theo"), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending), MemberDone(MemberName = "Theo", Body = ""), ctxWithQA(true))
     return Eq(t, stateName(s), "TLReview")
 }
 
@@ -240,7 +241,7 @@ func TestApproval_IgnoresTLDone(t T) T {
 func TestDelegating_QARequiredButNoQAMembers_GoesToTLReview(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val ctx = TransitionContext(QAMembers = EmptyArray[string](), QARequired = true)
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix"), ctx)
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix", Body = ""), ctx)
     return Eq(t, stateName(s), "TLReview")
 }
 
@@ -260,7 +261,7 @@ func TestTLThinking_MultipleSummaries_TakesFirst(t T) T {
 // Delegating's pending set — Remove of a missing key is idempotent.
 func TestDelegating_MemberDone_UnknownMember_StaysWithFullPending(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Ghost"), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Ghost", Body = ""), ctxWithQA(true))
     return s match {
         case Delegating(rest) => Eq(t, rest.Size(), 2)
         case _                => IsTrue(t, false)

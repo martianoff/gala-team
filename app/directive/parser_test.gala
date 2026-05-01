@@ -48,8 +48,8 @@ func TestDispatch_MultipleInOneMessage(t T) T {
         "@dispatch(Mira) Session middleware patch.\n@end\n"
     val dirs = Parse(msg)
     val t1 = Eq(t, dirs.Length(), 2)
-    val firstD  Directive = dirs.Get(0)
-    val secondD Directive = dirs.Get(1)
+    val firstD  = dirs.Get(0)
+    val secondD = dirs.Get(1)
     val t2 = firstD match {
         case Dispatch(name, _) => Eq(t1, name, "Felix")
         case _                  => IsTrue(t1, false)
@@ -156,8 +156,8 @@ func TestParse_MixedDispatchSummary_PreservesOrder(t T) T {
     val msg = "@dispatch(Felix) work\n@end\n\n@summary\ndone\n@end"
     val dirs = Parse(msg)
     val t1 = Eq(t, dirs.Length(), 2)
-    val d0 Directive = dirs.Get(0)
-    val d1 Directive = dirs.Get(1)
+    val d0 = dirs.Get(0)
+    val d1 = dirs.Get(1)
     val t2 = d0 match {
         case Dispatch(_, _) => IsTrue(t1, true)
         case _              => IsTrue(t1, false)
@@ -172,7 +172,7 @@ func TestParse_SummaryThenDispatch(t T) T {
     val msg = "@summary\nfinal\n@end\n@dispatch(Felix) work\n@end"
     val dirs = Parse(msg)
     val t1 = Eq(t, dirs.Length(), 2)
-    val d0 Directive = dirs.Get(0)
+    val d0 = dirs.Get(0)
     return d0 match {
         case Summary(body) => Eq(t1, body, "final")
         case _             => IsTrue(t1, false)
@@ -207,8 +207,8 @@ func TestParse_MultipleConsults(t T) T {
     val msg = "@consult(transpiler) repro 1\n@end\n\n@consult(qa-lib) repro 2\n@end"
     val dirs = Parse(msg)
     val t1 = Eq(t, dirs.Length(), 2)
-    val d0 Directive = dirs.Get(0)
-    val d1 Directive = dirs.Get(1)
+    val d0 = dirs.Get(0)
+    val d1 = dirs.Get(1)
     val t2 = d0 match {
         case Consult(target, _, _) => Eq(t1, target, "transpiler")
         case _                     => IsTrue(t1, false)
@@ -226,5 +226,77 @@ func TestDispatch_TargetWithUnderscore(t T) T {
     return first(t, msg) match {
         case Dispatch(target, _) => Eq(t, target, "frontend_dev")
         case _                   => IsTrue(t, false)
+    }
+}
+
+// ----- @done / @help / @blocked (member → orchestrator) ---------------------
+
+// Members emit @done when their dispatched task is complete. Body
+// (deliverable summary) is what the orchestrator routes back to the TL
+// in the relay turn, so multi-line bodies must round-trip cleanly.
+func TestDone_MultiLineBody(t T) T {
+    val msg = "@done\n" +
+        "Token store implementation complete.\n" +
+        "  - tests added\n" +
+        "  - lint clean\n" +
+        "@end"
+    return first(t, msg) match {
+        case Finished(body) => IsTrue(t, body == "Token store implementation complete.\n  - tests added\n  - lint clean")
+        case _          => IsTrue(t, false)
+    }
+}
+
+// @done can carry the deliverable body on the same line as the tag,
+// mirroring the @summary same-line shorthand. Empty body is allowed
+// — sometimes a member just signals "I'm done" with no commentary.
+func TestDone_SameLineBodyAndEmptyBody(t T) T {
+    val msg1 = "@done shipped it\n@end"
+    val msg2 = "@done\n@end"
+    val t1 = first(t, msg1) match {
+        case Finished(body) => Eq(t, body, "shipped it")
+        case _          => IsTrue(t, false)
+    }
+    return first(t1, msg2) match {
+        case Finished(body) => Eq(t1, body, "")
+        case _          => IsTrue(t1, false)
+    }
+}
+
+// @help carries a clarification question. Question is the full body —
+// orchestrator splices it into the TL clarification turn verbatim.
+func TestHelp_QuestionBody(t T) T {
+    val msg = "@help\nWhich auth flow — JWT or session cookies?\n@end"
+    return first(t, msg) match {
+        case Help(question) => Eq(t, question, "Which auth flow — JWT or session cookies?")
+        case _              => IsTrue(t, false)
+    }
+}
+
+// @blocked surfaces an external-environment failure the TL can't fix.
+// Reason becomes user-visible LastError text.
+func TestBlocked_ReasonBody(t T) T {
+    val msg = "@blocked\ngh CLI not installed and PR creation requires it\n@end"
+    return first(t, msg) match {
+        case Blocked(reason) => Eq(t, reason, "gh CLI not installed and PR creation requires it")
+        case _               => IsTrue(t, false)
+    }
+}
+
+// Mixed member directives — a member can both ask for help AND emit a
+// partial deliverable in the same turn. Source order matters; both
+// must surface to the orchestrator so the TL sees the full picture.
+func TestParse_MixedDoneAndHelp_PreservesOrder(t T) T {
+    val msg = "@done partial: scaffold landed\n@end\n\n@help\nshould I proceed with auth or wait?\n@end"
+    val dirs = Parse(msg)
+    val t1 = Eq(t, dirs.Length(), 2)
+    val d0 = dirs.Get(0)
+    val d1 = dirs.Get(1)
+    val t2 = d0 match {
+        case Finished(_) => IsTrue(t1, true)
+        case _       => IsTrue(t1, false)
+    }
+    return d1 match {
+        case Help(_) => IsTrue(t2, true)
+        case _       => IsTrue(t2, false)
     }
 }

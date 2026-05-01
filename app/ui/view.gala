@@ -3,6 +3,7 @@ package ui
 import (
     "strings"
     "time"
+    "martianoff/gala/time_utils"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -10,6 +11,7 @@ import (
     . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/consult"
     . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/view"
 )
 
@@ -46,23 +48,36 @@ import (
 // color tints — the heavier border weight is the only "you are
 // here" signal, and it reads consistently regardless of which
 // pane has focus.
+//
+// Click handling: gala-tui's HitRegistry auto-routes clicks to
+// the bordered sidebar / composer panels (FocusSidebarClicked /
+// FocusComposerClicked) and to individual sidebar rows
+// (SidebarRowClicked). No hand-rolled coordinate hit-testing — the
+// runtime uses the widgets' actually-rendered rectangles, so a
+// resize / scroll / fold doesn't desync clicks from visuals.
 func View(m AppModel) Widget {
     val header = headerWidget(m)
     val sidebar = sidebarWidget(m)
     val mainPanel = mainPanelWidget(m)
     val composer = composerWidget(m)
     val footer = footerWidget(m)
+    val sidebarPanel  = BorderOf(sidebar, panelBorder(m, FocusSidebar()))
+        .OnClick(FocusSidebarClicked())
+    val composerPanel = BorderOf(composer, panelBorder(m, FocusComposer()))
+        .OnClick(FocusComposerClicked())
     return Column(ArrayOf[LayoutChild](
         Fixed(3, header),
         Flex(1, Row(ArrayOf[LayoutChild](
-            Fixed(28, BorderOf(sidebar, panelBorder(m, FocusSidebar()))),
+            Fixed(28, sidebarPanel),
             Flex(1, Column(ArrayOf[LayoutChild](
                 recoveryBanner(m),
+                livenessBanner(m),
+                toastBanner(m.Toasts),
                 approvalBanner(m),
                 Flex(1, BorderOf(mainPanel, RoundedBorder())),
             ))),
         ))),
-        Fixed(3, BorderOf(composer, panelBorder(m, FocusComposer()))),
+        Fixed(3, composerPanel),
         Fixed(1, footer),
     ))
 }
@@ -152,15 +167,21 @@ func approvalSnippet(body string) string {
 // runtime is doing. Member personality belongs in onboarding, not
 // here.
 func headerWidget(m AppModel) Widget {
-    val title = TextStyled(
-        s"  🍎  ${m.Project.Name}  ·  ${m.Team.Name}${teamDescriptionSuffix(m.Team.Description)}",
-        DefaultStyle().WithBold().WithFg(BrightCyan()),
-    )
+    // PowerShell / Windows Terminal sometimes drops the very first
+    // visible row (top status line, prompt artifacts). Putting the
+    // branding ONLY on row 0 means it disappears in those terminals.
+    // Combine apple + gala_team + project + team name on a single
+    // bold cyan line that we ALSO emit on row 1 — at least one of
+    // the two will survive any terminal weirdness, and on a clean
+    // terminal the duplication just reads as a styled banner.
+    val appPrefix = if (m.Project.Name == "gala_team") "" else " | gala_team"
+    val brand = s"  🍎  gala_team${appPrefix} | ${m.Project.Name} | ${m.Team.Name}${teamDescriptionSuffix(m.Team.Description)}"
+    val brandLine = TextStyled(brand, DefaultStyle().WithFg(BrightCyan()))
     val sub = TextStyled(s"      ${stateLabel(m.State)}", DefaultStyle().WithDim())
     return Column(ArrayOf[LayoutChild](
-        Fixed(1, title),
+        Fixed(1, brandLine),
         Fixed(1, sub),
-        Fixed(1, FillCh('─')),
+        Fixed(1, FillCh('-')),
     ))
 }
 
@@ -175,17 +196,203 @@ func teamDescriptionSuffix(desc string) string =
 // the user can see where Space/Enter will toggle; when
 // Focus=Composer, cursor=-1 disables the highlight (the panel is
 // purely informational).
+//
+// Each visible team-panel row is wired through gala-tui's
+// HitRegistry via TeamPanelViewClickable so a row click dispatches
+// SidebarRowClicked with the absolute row index, regardless of the
+// scroll offset — the framework hands the visible-row index back,
+// and the panel translates it to absolute internally.
 func sidebarWidget(m AppModel) Widget {
     val cursor = m.Focus match {
         case FocusSidebar()  => m.SidebarCursor
         case FocusComposer() => -1
     }
+    val rightFields = buildSidebarRightFields(m, m.Team.Members)
+    val teamPanel = TeamPanelViewClickable[AppMsg](
+        m.Team, m.Statuses, cursor, m.CollapsedGroups, m.Tick,
+        (idx) => SidebarRowClicked(VisibleIdx = idx),
+        rightFields,
+    )
+    // Pipeline gets a fixed band sized to its actual content so it
+    // can't claim half the sidebar when empty. Team panel is Flex(1)
+    // — it absorbs every remaining row, including the slack the
+    // old 50/50 split was wasting.
+    val pipelineRows = pipelineHeight(m.Pipeline)
     return Column(ArrayOf[LayoutChild](
         Fixed(1, TextStyled(sidebarHeading(m), sidebarHeadingStyle(m))),
-        Flex(1, TeamPanelView(m.Team, m.Statuses, cursor, m.CollapsedGroups)),
+        Flex(1, teamPanel),
         Fixed(1, TextStyled("  Pipeline", DefaultStyle().WithBold())),
-        Flex(1, PipelineView(m.Pipeline)),
+        Fixed(pipelineRows, PipelineView(m.Pipeline)),
     ))
+}
+
+// buildSidebarRightFields computes the per-member right-aligned text
+// rendered next to the member name in the sidebar — elapsed M:SS for
+// active members, "recov n/m" for recovering, "✗ failed" for failed,
+// etc. Members with no notable status (StIdle / StQueued / StDone)
+// get no entry, so the sidebar stays clean during quiescence.
+//
+// Takes `members` as a typed parameter so the auto-unwrap from
+// `Immutable[Array[Member]]` to `Array[Member]` happens at the call
+// boundary — sidesteps the chained-accessor / method-on-Immutable
+// regressions documented in `GALA_TEAM_0_39_2_REGRESSIONS.md` (FIX-010
+// / 011 / 012). Same pattern used elsewhere in the file.
+func buildSidebarRightFields(m AppModel, members Array[Member]) HashMap[string, string] {
+    return members.FoldLeft(EmptyHashMap[string, string](), (acc, mem) => {
+        val txt = sidebarRightField(m, mem.Name)
+        if txt == "" { return acc }
+        return acc.Put(mem.Name, txt)
+    })
+}
+
+// sidebarRightField formats one member's right-side timer text from the
+// current model. Status-driven: only StWorking/StSlow/StStuck show an
+// elapsed timer (since LastChunkAt); StRecovering shows the retry
+// counter; StFailed / StHelpWaiting show static labels.
+func sidebarRightField(m AppModel, name string) string {
+    val status = m.Statuses.Get(name).GetOrElse(StIdle())
+    return status match {
+        case StIdle()           => ""
+        case StQueued()         => ""
+        case StDone()           => ""
+        case StFailed(_)        => "✗ failed"
+        case StRecovering(note) => s"recov ${note}"
+        case StHelpWaiting(_)   => "help"
+        case StWorking()        => lastChunkElapsedFor(m, name)
+        case StSlow()           => lastChunkElapsedFor(m, name)
+        case StStuck()          => lastChunkElapsedFor(m, name)
+    }
+}
+
+// lastChunkElapsedFor formats "M:SS" since the most recent chunk for
+// `name`. Empty string when no chunk has been observed yet (member just
+// spawned, or the ChunkArrived stream hasn't kicked off).
+func lastChunkElapsedFor(m AppModel, name string) string {
+    val opt = m.LastChunkAt.Get(name)
+    return opt match {
+        case None()   => ""
+        case Some(at) => formatElapsedSince(m.NowAt, at)
+    }
+}
+
+// formatElapsedSince computes (now - last) and renders it as M:SS.
+// Returns "0:00" if the clock somehow went backwards (skew) or the
+// inputs match — defensive, the timer never shows a negative number.
+//
+// Takes both Instants by value so auto-unwrap fires at the call
+// boundary — methods on plain `Instant` are well-defined; methods
+// on `Immutable[Instant]` may not lower in the current 0.39.x line.
+func formatElapsedSince(now time_utils.Instant, last time_utils.Instant) string {
+    val nanosNow = now.UnixNanos()
+    val nanosLast = last.UnixNanos()
+    if nanosNow <= nanosLast { return "0:00" }
+    val secs = (nanosNow - nanosLast) / int64(1000000000)
+    return formatMSS(secs)
+}
+
+func formatMSS(secs int64) string {
+    val mins = secs / int64(60)
+    val rem  = secs - mins * int64(60)
+    if rem < int64(10) { return s"${mins}:0${rem}" }
+    return s"${mins}:${rem}"
+}
+
+// LivenessCounts is the per-status tally used by the aggregate
+// liveness header banner. One pass over the team members fills in
+// every counter; formatting is a separate step so tests can
+// assert on raw counts.
+struct LivenessCounts(
+    Working    int,
+    Slow       int,
+    Stuck      int,
+    Recovering int,
+    Failed     int,
+)
+
+// livenessBanner renders a one-line summary of how the team is doing
+// when the orchestrator has dispatched work. Hidden in Idle / Approval
+// (no active member work to summarise). When all members are still
+// in StWorking, shows just "N working"; once any escalation kicks in
+// (slow/stuck/recovering/failed), the breakdown appears.
+func livenessBanner(m AppModel) LayoutChild {
+    val show = m.State match {
+        case Delegating(_) => true
+        case QAGate(_)     => true
+        case TLReview()    => true
+        case _             => false
+    }
+    if !show { return Fixed(0, Empty()) }
+    return Fixed(1, livenessBannerWidget(m, m.Team.Members))
+}
+
+// livenessBannerWidget builds the actual banner Widget. Takes
+// `members` as a typed parameter so auto-unwrap fires at the call
+// boundary (same pattern as buildSidebarRightFields).
+func livenessBannerWidget(m AppModel, members Array[Member]) Widget {
+    val counts = countLiveness(m, members)
+    return TextStyled(formatLivenessCounts(counts), DefaultStyle().WithDim())
+}
+
+// countLiveness tallies each member's current status into the five
+// liveness buckets. StIdle / StQueued / StDone / StHelpWaiting are
+// not surfaced in the banner — keeps the line short.
+func countLiveness(m AppModel, members Array[Member]) LivenessCounts =
+    members.FoldLeft(
+        LivenessCounts(Working = 0, Slow = 0, Stuck = 0, Recovering = 0, Failed = 0),
+        (acc, mem) => tallyOne(acc, m.Statuses.Get(mem.Name).GetOrElse(StIdle())),
+    )
+
+// tallyOne increments the counter for the given status. Statuses
+// outside the liveness vocabulary (Idle/Queued/Done/HelpWaiting)
+// pass through untouched.
+func tallyOne(c LivenessCounts, s Status) LivenessCounts = s match {
+    case StWorking()        => c.Copy(Working    = c.Working    + 1)
+    case StSlow()           => c.Copy(Slow       = c.Slow       + 1)
+    case StStuck()          => c.Copy(Stuck      = c.Stuck      + 1)
+    case StRecovering(_) => c.Copy(Recovering = c.Recovering + 1)
+    case StFailed(_)        => c.Copy(Failed     = c.Failed     + 1)
+    case _                  => c
+}
+
+// formatLivenessCounts builds the dim "  N working · M slow · ..."
+// header line. Always five segments so the layout stays stable as
+// counts shift.
+func formatLivenessCounts(c LivenessCounts) string {
+    val parts = ArrayOf[string](
+        s"  ${c.Working} working",
+        s"${c.Slow} slow",
+        s"${c.Stuck} stuck",
+        s"${c.Recovering} recovering",
+        s"${c.Failed} failed",
+    )
+    return parts.MkString(" · ")
+}
+
+// toastBanner mounts the live toast queue as a Fixed-height column at
+// the top of the conversation pane. Sized to the queue length so the
+// rows don't squeeze each other, hidden entirely when the queue is
+// empty (most of the session). Pruning happens in onTick — by the
+// time this renders, expired toasts are already gone.
+//
+// Takes `q` as a typed parameter so auto-unwrap fires at the call
+// boundary (`m.Toasts` is Immutable[ToastQueue], `.IsEmpty()` /
+// `.Length()` work on plain ToastQueue).
+func toastBanner(q ToastQueue) LayoutChild {
+    if q.IsEmpty() { return Fixed(0, Empty()) }
+    return Fixed(q.Length(), ToastStackView(q))
+}
+
+// pipelineHeight returns the fixed row count the Pipeline pane
+// occupies. Empty state is the single "(no active turn)" line;
+// active state is two rows per dispatched node (connector + box).
+// Capped at 8 rows so a wide fan-out doesn't crowd out the team
+// panel either.
+func pipelineHeight(p PipelineState) int {
+    val nodes = p.Nodes.Size()
+    if nodes == 0 { return 1 }
+    val raw = nodes * 2
+    if raw > 8 { return 8 }
+    return raw
 }
 
 // sidebarHeading is just "Team" — focus is communicated through
@@ -222,11 +429,18 @@ func conversationPanel(m AppModel) Widget {
                              DefaultStyle().WithDim())))
                      else
                          EmptyArray[LayoutChild]()
-    val lines = visible.Map((cl session.ConversationLine) => Fixed(
-        1,
-        TextStyled(s"  ${cl.Speaker}: ${cl.Text}",
-            speakerStyle(cl.Speaker)),
-    ))
+    // Each line is rendered as a Paragraph (wraps automatically to the
+    // pane's width) wrapped in Fixed sized to its intrinsic row count.
+    // Computing intrinsic height needs the actual width of the
+    // conversation pane; conversationPaneWidth is an estimate (term
+    // width minus sidebar 28 + borders 4 + padding 2). Within ~5 cells
+    // it's accurate enough that wrapping is visible without edge clip.
+    val lines = visible.Map((cl session.ConversationLine) => {
+        val raw = s"  ${cl.Speaker}: ${cl.Text}"
+        val widget = ParagraphStyled(raw, speakerStyle(cl.Speaker))
+        val rows   = paragraphHeight(raw, conversationPaneWidth(m))
+        return Fixed(rows, widget)
+    })
     val body = if (lines.IsEmpty() && hidden == 0)
                    ArrayOf[LayoutChild](
                        Fixed(1, Empty()),
@@ -243,6 +457,28 @@ func conversationPanel(m AppModel) Widget {
 func speakerStyle(speaker string) Style =
     if (speaker == "you") DefaultStyle().WithFg(BrightWhite())
     else                  DefaultStyle().WithFg(BrightCyan())
+
+// conversationPaneWidth estimates how many cells the conversation
+// pane gets at runtime. Term width minus the 28-cell sidebar and the
+// border / padding on both panes. The value is an estimate because
+// the actual layout is computed by gala-tui at draw time; for
+// wrapping purposes a small undercount is fine (lines wrap a row or
+// two earlier than necessary; never clip).
+func conversationPaneWidth(m AppModel) int {
+    val cols = if (m.NowAt.UnixNanos() == int64(0)) 80 else 80
+    return cols - 28 - 6
+}
+
+// paragraphHeight returns the row count `content` will occupy when
+// rendered as a Paragraph at the given pane width. Wraps on word
+// boundaries, splits on explicit \n. Always at least 1 row even for
+// empty content (the `(no conversation yet)` placeholder).
+func paragraphHeight(content string, width int) int {
+    if width < 1 { return 1 }
+    val rows = WrapParagraph(content, width).Size()
+    if rows < 1 { return 1 }
+    return rows
+}
 
 // consultViewerVisibleLines is how many of each consult's most-
 // recent stdout lines we render in the modal — the full transcript
@@ -344,7 +580,7 @@ func consultEntryRows(m AppModel, name string, sess ConsultSession) Array[Layout
 }
 
 func composerWidget(m AppModel) Widget {
-    val prompt = if (m.Composer == "") "Type to Iris…" else m.Composer
+    val prompt = if (m.Composer == "") s"Type to ${m.Team.Lead.Name}…" else m.Composer
     val style = if (m.Composer == "")
                     DefaultStyle().WithDim()
                 else
@@ -364,6 +600,12 @@ func footerWidget(m AppModel) Widget {
             DefaultStyle().WithBold().WithFg(BrightYellow()),
         )
     }
+    if m.EraseSessionPending {
+        return TextStyled(
+            "  ⚠ Erase session? Press Ctrl+N again to confirm · Esc to cancel",
+            DefaultStyle().WithBold().WithFg(BrightYellow()),
+        )
+    }
     return m.LastError match {
         case Some(err) => TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed()))
         case None()    => TextStyled(footerHints(m), DefaultStyle().WithDim())
@@ -379,10 +621,10 @@ func footerWidget(m AppModel) Widget {
 // (Ctrl+L is the alias); Ctrl+T toggles the consult viewer modal;
 // Ctrl+H opens the saved-archive browser.
 func footerHints(m AppModel) string = m.Focus match {
-    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc back to composer · Ctrl+Q quit"
+    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc back to composer · Ctrl+Q quit · Ctrl+N new"
     case FocusComposer() => m.LastPrUrl match {
-        case Some(_) => "  Ctrl+Q quit · Ctrl+M merge · Ctrl+A re-approve · Tab sidebar · Ctrl+T consults"
-        case None()  => "  Ctrl+Q quit · Enter send · Ctrl+A approve · Ctrl+R reject · Tab sidebar · Ctrl+T consults"
+        case Some(_) => "  Ctrl+Q quit · Ctrl+M merge · Ctrl+A re-approve · Tab sidebar · Ctrl+N new"
+        case None()  => "  Ctrl+Q quit · Enter send · Ctrl+A approve · Ctrl+R reject · Tab sidebar · Ctrl+N new"
     }
 }
 
@@ -393,6 +635,7 @@ func stateLabel(s AppState) string = s match {
     case Delegating(_)    => "state: delegating"
     case QAGate(_)        => "state: QA gate"
     case TLReview()       => "state: TL review"
+    case TLNudging(why)   => s"state: TL nudging (${why})"
     case Approval(_)      => "state: approval"
 }
 

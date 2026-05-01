@@ -55,6 +55,27 @@ struct Hook(
     Args Array[string],
 )
 
+// Heartbeat carries the per-team thresholds the orchestrator's
+// liveness watchdog uses to decide when a member is slow / stuck /
+// abandoned, plus the auto-respawn budget on crashes. All values are
+// in seconds (or count, for MaxRetries). Defaults match the design's
+// 30/120/300/2 trio.
+struct Heartbeat(
+    SlowAfterSeconds    int64,
+    StuckAfterSeconds   int64,
+    AbandonAfterSeconds int64,
+    MaxRetries          int,
+)
+
+// DefaultHeartbeat returns the design defaults — gentle 30s slow
+// nudge, escalate-to-TL after 2min, abandon at 5min, two crash retries.
+func DefaultHeartbeat() Heartbeat = Heartbeat(
+    SlowAfterSeconds    = int64(30),
+    StuckAfterSeconds   = int64(120),
+    AbandonAfterSeconds = int64(300),
+    MaxRetries          = 2,
+)
+
 // Policy is the full per-team orchestration ruleset. Parsed from the
 // optional `policy:` block in team.yaml.
 struct Policy(
@@ -62,16 +83,18 @@ struct Policy(
     PreMerge      Array[Hook],
     PostMerge     Array[Hook],
     MergeRule     MergeRule,
+    Heartbeat     Heartbeat,
 )
 
 // DefaultPolicy returns the most permissive shape — shared workspace,
-// no hooks, squash merge. This is what a team gets if they omit the
-// `policy:` block entirely.
+// no hooks, squash merge, design-default heartbeat. This is what a
+// team gets if they omit the `policy:` block entirely.
 func DefaultPolicy() Policy = Policy(
     WorkspaceMode = Shared(),
     PreMerge      = EmptyArray[Hook](),
     PostMerge     = EmptyArray[Hook](),
     MergeRule     = SquashMerge(),
+    Heartbeat     = DefaultHeartbeat(),
 )
 
 // MergeRuleName pretty-prints a MergeRule for UI / log surfaces.

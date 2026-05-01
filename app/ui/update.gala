@@ -1,10 +1,13 @@
 package ui
 
 import (
+    "strings"
     "martianoff/gala/concurrent"
+    "martianoff/gala/json"
     "github.com/martianoff/gala_team/app/onboarding"
     "github.com/martianoff/gala_team/app/policy"
     "github.com/martianoff/gala_team/app/session"
+    "martianoff/gala/time_utils"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
@@ -12,6 +15,7 @@ import (
     . "github.com/martianoff/gala_team/app/consult"
     . "github.com/martianoff/gala_team/app/directive"
     . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
 )
@@ -35,7 +39,233 @@ import (
 // IO-bearing ones so they remain test-friendly without a real subprocess.
 // ============================================================================
 
-func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
+// Update wraps dispatchMsg with a generic state-change detector that
+// updates StateEnteredAt whenever the FSM transitions. It also fires
+// the **TL relay turn** on the specific Delegating → TLReview edge —
+// that's the moment the orchestrator's bi-directional loop closes,
+// when every dispatched member has reported and the lead needs to
+// decide what comes next.
+func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
+    val (m1, cmd) = dispatchMsg(m, msg)
+    val sameTag = stateTag(m.State) == stateTag(m1.State)
+    val m2 = if (sameTag) m1 else m1.Copy(StateEnteredAt = m1.NowAt)
+    if !sameTag && stateTag(m.State) == "Delegating" && stateTag(m1.State) == "TLReview" {
+        val (m3, relayCmds) = spawnTLRelay(m2)
+        return (m3, batchAll(ArrayOf[Cmd[AppMsg]](cmd).Append(batchAll(relayCmds))))
+    }
+    return (m2, cmd)
+}
+
+// spawnTLRelay opens a TL relay turn — synthesises a system prompt
+// containing each dispatched member's @finished body and asks the lead
+// to decide follow-up. After firing, MemberDoneBodies is cleared so
+// the next round of dispatches starts with a clean slate.
+func spawnTLRelay(m AppModel) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    val prompt = buildRelayPrompt(m, m.Team.Members)
+    val (m1, cmds) = spawnTLNudge(m, "relay", prompt)
+    val m2 = m1.Copy(MemberDoneBodies = EmptyHashMap[string, string]())
+    return (m2, cmds)
+}
+
+// buildRelayPrompt formats the per-member deliverable list. Members
+// without an explicit @finished body (i.e. those that just hit EOF)
+// are omitted from the bullet list — TL gets clear signal about who
+// said what vs who silently exited. Falls back to a generic prompt
+// when every member returned silently.
+func buildRelayPrompt(m AppModel, members Array[Member]) string {
+    val parts = members.FoldLeft(EmptyArray[string](), (acc, mem) => {
+        val name = mem.Name
+        if name == m.Team.Lead.Name { return acc }
+        val body = m.MemberDoneBodies.Get(name).GetOrElse("")
+        if body == "" { return acc }
+        return acc.Append(s"  • ${name} said: ${body}")
+    })
+    if parts.IsEmpty() {
+        return "System: dispatched members all reported back without explicit @finished bodies. Decide whether to @summary the turn for the user, or follow up with another @dispatch."
+    }
+    val joined = parts.MkString("\n")
+    return s"System: dispatched members have reported back.\n${joined}\nDecide: send follow-up @dispatch(name) directives, request QA, or @summary the turn for the user."
+}
+
+// stateTag projects an AppState to a stable string so the wrapper can
+// detect FSM transitions without comparing payloads (Pending HashSet
+// shifts inside Delegating/QAGate are NOT transitions for our purposes
+// — only top-level case changes count).
+func stateTag(s AppState) string = s match {
+    case Idle()         => "Idle"
+    case TLThinking()   => "TLThinking"
+    case Delegating(_)  => "Delegating"
+    case QAGate(_)      => "QAGate"
+    case TLReview()     => "TLReview"
+    case TLNudging(_)   => "TLNudging"
+    case Approval(_)    => "Approval"
+}
+
+// Heartbeat thresholds are now driven by m.Policy.Heartbeat (#29).
+// The bandFor / livenessStatus helpers below take the typed Heartbeat
+// argument so threshold tweaks per-team take effect on the next tick.
+
+// onTick advances Tick + NowAt, prunes expired toasts, re-derives
+// liveness statuses for every member currently in Working/Slow/Stuck,
+// and — when a member newly transitions to Stuck or Failed — emits the
+// matching FSM event (MemberStuck / MemberAbandoned) so the FSM moves
+// from Delegating into TLNudging. Returns any Cmds produced (e.g. the
+// TL nudge turn spawn) batched.
+func onTick(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val now = time_utils.Now()
+    val pruned = pruneToasts(m.Toasts, now)
+    val m1 = m.Copy(Tick = m.Tick + 1, NowAt = now, Toasts = pruned)
+    val (m2, cmds) = updateLivenessStatuses(m1, m1.Team.Members, now)
+    return (m2, batchAll(cmds))
+}
+
+// pruneToasts is a typed-arg shim around ToastQueue.Prune so the
+// auto-unwrap from Immutable[ToastQueue] happens at the boundary.
+func pruneToasts(q ToastQueue, now time_utils.Instant) ToastQueue = q.Prune(now)
+
+// updateLivenessStatuses walks `members` and maps each to a derived
+// status from LastChunkAt. On a band transition, three things happen
+// simultaneously: (1) status flipped in m.Statuses; (2) toast pushed
+// for the user; (3) FSM event emitted so Delegating advances toward
+// TLNudging (stuck) or past the dead member (abandoned). The returned
+// Cmd array carries any orchestrator-level work the FSM transition
+// triggered — typically a TL nudge spawn.
+func updateLivenessStatuses(
+    m AppModel, members Array[Member], now time_utils.Instant,
+) Tuple[AppModel, Array[Cmd[AppMsg]]] = members.FoldLeft(
+    (m, EmptyArray[Cmd[AppMsg]]()),
+    (acc, mem) => {
+        val (m1, cmds) = (acc.V1, acc.V2)
+        val name = mem.Name
+        val current = m1.Statuses.Get(name).GetOrElse(StIdle())
+        val derived = livenessStatus(m1, name, current, now)
+        if statusTag(current) == statusTag(derived) { return (m1, cmds) }
+        val m2 = m1.Copy(
+            Statuses = m1.Statuses.Put(name, derived),
+            Toasts   = pushTransitionToast(m1.Toasts, name, derived, now),
+        )
+        val (m3, transitionCmds) = onLivenessTransition(m2, name, derived)
+        return (m3, transitionCmds.FoldLeft(cmds, (a, c) => a.Append(c)))
+    },
+)
+
+// onLivenessTransition fires when a member's status crossed a band.
+// Stuck → emit MemberStuck event (FSM enters TLNudging) + spawn TL
+// nudge turn. Failed (heartbeat-driven, i.e. abandoned) → emit
+// MemberAbandoned and let the FSM advance the pending set without TL
+// involvement. Other transitions (Working ↔ Slow) are status-only
+// with no FSM consequence.
+func onLivenessTransition(m AppModel, name string, derived Status) Tuple[AppModel, Array[Cmd[AppMsg]]] = derived match {
+    case StStuck() => {
+        val nextState = Transition(m.State, MemberStuck(MemberName = name), transitionContext(m))
+        val m1 = m.Copy(State = nextState)
+        return spawnTLNudge(m1, s"stuck-${name}", buildStuckNudgePrompt(m1, name, m1.NowAt))
+    }
+    case StFailed(_) => {
+        val nextState = Transition(m.State, MemberAbandoned(MemberName = name), transitionContext(m))
+        return (m.Copy(State = nextState), EmptyArray[Cmd[AppMsg]]())
+    }
+    case _ => (m, EmptyArray[Cmd[AppMsg]]())
+}
+
+// spawnTLNudge fires a fresh TL turn with the given system prompt.
+// Reuses the existing ensureSession + sendAndPumpCmd path so the TL
+// session is resumed (same SessionId) and the prompt is delivered as
+// the next user turn. Failure to spawn lands in LastError; no retries
+// — TL nudges that fail just leave the team paused until the user
+// types another prompt.
+func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    val lead = m.Team.Lead
+    return ensureSession(m, lead) match {
+        case Left(err) => (m.Copy(LastError = Some(s"TL nudge spawn (${reason}): ${err}")), EmptyArray[Cmd[AppMsg]]())
+        case Right(m1) => {
+            val withStatus = setStatus(m1, lead.Name, StWorking())
+            return (withStatus, ArrayOf[Cmd[AppMsg]](sendAndPumpCmd(withStatus, lead, prompt)))
+        }
+    }
+}
+
+// buildStuckNudgePrompt formats the system message the TL gets when
+// a member goes stuck. Includes elapsed seconds so the lead can
+// decide whether to re-prompt the same member, reassign the work, or
+// abandon the task.
+func buildStuckNudgePrompt(m AppModel, name string, now time_utils.Instant) string {
+    val elapsed = m.LastChunkAt.Get(name) match {
+        case None()   => int64(0)
+        case Some(at) => elapsedSeconds(now, at)
+    }
+    return s"System: ${name} has been silent for ${elapsed}s past the stuck threshold. Decide what to do — re-prompt them via @dispatch(${name}), reassign the work to another member, or @summary the turn as-is. Reply with the directive(s) you want me to execute."
+}
+
+// pushTransitionToast maps a status escalation to a toast and pushes
+// it onto the queue. StWorking is the baseline (no toast); only the
+// upward bands surface to the user. Slow → 4s info, Stuck → 6s warn,
+// Failed → 8s error. Recovery / Help / Done get their own toasts
+// from the (future) protocol-level handlers — not from the heartbeat.
+func pushTransitionToast(q ToastQueue, name string, derived Status, now time_utils.Instant) ToastQueue = derived match {
+    case StSlow()    => q.PushInfo(s"${name} is slow", now, time_utils.Seconds(int64(4)))
+    case StStuck()   => q.PushWarn(s"${name} stuck — TL will nudge", now, time_utils.Seconds(int64(6)))
+    case StFailed(_) => q.PushError(s"${name} abandoned", now, time_utils.Seconds(int64(8)))
+    case _           => q
+}
+
+// livenessStatus derives the next status from the current one + elapsed
+// time since LastChunkAt. Only Working/Slow/Stuck escalate via the
+// heartbeat; everything else is sticky and returned unchanged.
+func livenessStatus(m AppModel, name string, current Status, now time_utils.Instant) Status = current match {
+    case StWorking() => escalateByElapsed(m, name, now, StWorking())
+    case StSlow()    => escalateByElapsed(m, name, now, StSlow())
+    case StStuck()   => escalateByElapsed(m, name, now, StStuck())
+    case _           => current
+}
+
+// escalateByElapsed returns Failed/Stuck/Slow when the member has been
+// silent past the matching threshold. `fallback` is the current
+// Working-family status to keep when below the slowness band.
+// Thresholds come from m.Policy.Heartbeat — per-team configurable via
+// the policy.heartbeat: yaml block (or defaults from DefaultHeartbeat).
+func escalateByElapsed(m AppModel, name string, now time_utils.Instant, fallback Status) Status {
+    val opt = m.LastChunkAt.Get(name)
+    return opt match {
+        case None()   => fallback
+        case Some(at) => bandFor(elapsedSeconds(now, at), fallback, m.Policy.Heartbeat)
+    }
+}
+
+// bandFor maps elapsed seconds to a status using the per-team
+// heartbeat thresholds. Failed for >= AbandonAfterSeconds, Stuck for
+// >= StuckAfterSeconds, Slow for >= SlowAfterSeconds, otherwise the
+// caller's fallback (Working / Slow / Stuck preserved).
+func bandFor(secs int64, fallback Status, hb policy.Heartbeat) Status {
+    if secs >= hb.AbandonAfterSeconds { return StFailed(Reason = s"abandoned: silent ${hb.AbandonAfterSeconds}s+") }
+    if secs >= hb.StuckAfterSeconds   { return StStuck() }
+    if secs >= hb.SlowAfterSeconds    { return StSlow() }
+    return fallback
+}
+
+func elapsedSeconds(now time_utils.Instant, last time_utils.Instant) int64 {
+    val nanosNow = now.UnixNanos()
+    val nanosLast = last.UnixNanos()
+    if nanosNow <= nanosLast { return int64(0) }
+    return (nanosNow - nanosLast) / int64(1000000000)
+}
+
+// statusTag projects Status to a stable string label so the heartbeat
+// can detect transitions without comparing payloads (StRecovering's
+// Attempt/Max bumps are NOT transitions for our purposes).
+func statusTag(s Status) string = s match {
+    case StIdle()           => "idle"
+    case StQueued()         => "queued"
+    case StWorking()        => "working"
+    case StSlow()           => "slow"
+    case StStuck()          => "stuck"
+    case StRecovering(_) => "recovering"
+    case StHelpWaiting(_)   => "help-waiting"
+    case StDone()           => "done"
+    case StFailed(_)        => "failed"
+}
+
+func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case KeyChar(c)                  => onKeyChar(m, c)
     case KeyBackspace()              => (m.Copy(Composer = trimLastRune(m.Composer)),  NoCmd[AppMsg]())
     case KeySubmit()                 => onSubmit(m)
@@ -47,12 +277,12 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case PreMergeHooksPassed(body)   => onPreMergeHooksPassed(m, body)
     case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
     case PrCreated(url)              => onPrCreated(m, url)
-    case PrFailed(err)               => (m.Copy(LastError = Some[string](s"gh pr create: ${err}")), NoCmd[AppMsg]())
+    case PrFailed(err)               => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
     case KeyMerge()                  => onMerge(m)
     case Merged(url)                 => onMerged(m, url)
-    case MergeFailed(err)            => (m.Copy(LastError = Some[string](s"gh pr merge: ${err}")), NoCmd[AppMsg]())
+    case MergeFailed(err)            => (m.Copy(LastError = Some(s"gh pr merge: ${err}")), NoCmd[AppMsg]())
     case PostMergeHooksPassed(url)   => onPostMergeHooksPassed(m, url)
-    case PostMergeHooksFailed(err)   => (m.Copy(LastError = Some[string](s"post-merge hooks: ${err}")), NoCmd[AppMsg]())
+    case PostMergeHooksFailed(err)   => (m.Copy(LastError = Some(s"post-merge hooks: ${err}")), NoCmd[AppMsg]())
     case ConsultCompleted(name, sum) => onConsultCompleted(m, name, sum)
     case ConsultFailed(name, err)    => onConsultFailed(m, name, err)
     case ConsultChunkArrived(n, ln)  => onConsultChunkArrived(m, n, ln)
@@ -65,10 +295,14 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
     case HistoryCursorDown()         => onCursorMove(m, 1)
     case HistorySelect()             => onHistorySelect(m)
     case HistoryDeselect()           => onEscOrDeselect(m)
-    case HistoryArchiveLoaded(snap)  => (m.Copy(ViewingArchive = Some[session.Snapshot](snap)), NoCmd[AppMsg]())
-    case HistoryArchiveFailed(err)   => (m.Copy(LastError = Some[string](s"history: ${err}")), NoCmd[AppMsg]())
-    case MouseAt(x, y, p)            => onMouseAt(m, x, y, p)
-    case TickMsg()                   => (m.Copy(Tick = m.Tick + 1),                    NoCmd[AppMsg]())
+    case HistoryArchiveLoaded(snap)  => (m.Copy(ViewingArchive = Some(snap)), NoCmd[AppMsg]())
+    case HistoryArchiveFailed(err)   => (m.Copy(LastError = Some(s"history: ${err}")), NoCmd[AppMsg]())
+    case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
+    case FocusSidebarClicked()       => (m.Copy(Focus = FocusSidebar()), NoCmd[AppMsg]())
+    case FocusComposerClicked()      => (m.Copy(Focus = FocusComposer()), NoCmd[AppMsg]())
+    case SidebarRowClicked(idx)      => onSidebarRowClicked(m, idx)
+    case KeyEraseSession()           => onEraseSession(m)
+    case TickMsg()                   => onTick(m)
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
 }
@@ -115,44 +349,26 @@ func onSidebarCursorMove(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(SidebarCursor = clamped), NoCmd[AppMsg]())
 }
 
-// Layout constants used by onMouseAt for hit-testing. Hardcoded
-// to mirror the column/row split chosen in app/ui/view.gala —
-// sidebar is the leftmost SidebarColWidth columns; the team panel
-// rows start SidebarRowsStart lines down (header rows + the
-// bordered "Team" label). Updating those layout numbers in
-// view.gala requires updating these too.
-val SidebarColWidth  = 28
-val SidebarRowsStart = 5
-
-// onMouseAt routes a click into a focus / cursor change. The
-// release event (Pressed=false) is ignored — only press fires
-// state changes so dragging out of the panel doesn't reset focus
-// to the composer mid-drag.
+// onSidebarRowClicked handles a per-row click dispatched from
+// gala-tui's OnPickRow registration on the team panel. The
+// `visibleIdx` is the index within the currently-rendered window
+// (which may be a sliced-and-scrolled view of the full row list);
+// translating it to an absolute row index is left to the panel
+// itself by passing the scroll offset through.
 //
-// Click in the sidebar columns:
-//   - Below the "Team" label row  →  Focus=Sidebar, cursor moves
-//     to the clicked row, and a click on a group header toggles
-//     fold/unfold (matches the keyboard Space behavior).
-// Click anywhere else:
-//   - Focus snaps back to the composer.
-func onMouseAt(m AppModel, x int, y int, pressed bool) Tuple[AppModel, Cmd[AppMsg]] {
-    if !pressed { return (m, NoCmd[AppMsg]()) }
-    if x >= 0 && x < SidebarColWidth && y >= SidebarRowsStart {
-        val row = y - SidebarRowsStart
-        val total = SidebarRowCount(m.Team, m.CollapsedGroups)
-        if total == 0 { return (m.Copy(Focus = FocusSidebar()), NoCmd[AppMsg]()) }
-        val clamped = if (row < 0) 0
-                      else if (row >= total) total - 1
-                      else row
-        val mFocused = m.Copy(Focus = FocusSidebar(), SidebarCursor = clamped)
-        return SidebarGroupAt(m.Team, m.CollapsedGroups, clamped) match {
-            case Some(_) => onSidebarToggleGroup(mFocused)
-            case None()  => (mFocused, NoCmd[AppMsg]())
-        }
-    }
-    return m.Focus match {
-        case FocusSidebar()  => (m.Copy(Focus = FocusComposer()), NoCmd[AppMsg]())
-        case FocusComposer() => (m, NoCmd[AppMsg]())
+// Brings Focus to FocusSidebar, snaps the cursor to the clicked
+// row, and — when the row is a group header — toggles fold so a
+// click on "▼ Engineering" does the same as keyboard Space.
+func onSidebarRowClicked(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
+    val total = SidebarRowCount(m.Team, m.CollapsedGroups)
+    if total == 0 { return (m.Copy(Focus = FocusSidebar()), NoCmd[AppMsg]()) }
+    val clamped = if (idx < 0) 0
+                  else if (idx >= total) total - 1
+                  else idx
+    val mFocused = m.Copy(Focus = FocusSidebar(), SidebarCursor = clamped)
+    return SidebarGroupAt(m.Team, m.CollapsedGroups, clamped) match {
+        case Some(_) => onSidebarToggleGroup(mFocused)
+        case None()  => (mFocused, NoCmd[AppMsg]())
     }
 }
 
@@ -206,6 +422,62 @@ func onQuit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (withFailureLog, QuitCmd[AppMsg]())
 }
 
+// onEraseSession is the two-press confirmation handler for Ctrl+N
+// ("new"). Mirrors the onQuit shape:
+//   - first press → flip EraseSessionPending; footer shows yellow
+//     "Erase session? Press Ctrl+N again to confirm · Esc to cancel"
+//   - second press → wipe Conversation, MemberBuffers,
+//     MemberDirectivesFired, MemberDoneBodies, RetryCount,
+//     LastChunkAt, NudgeAt, RecoveredMembers, RecoveryBannerVisible,
+//     and Sessions (kills any live subprocesses on the way out).
+//     Resets every member's status to StIdle. Persists the cleared
+//     transcript so a reload picks up the empty state.
+//   - Esc cancels — handled separately by the existing QuitPending
+//     reset path which will be extended below.
+func onEraseSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if !m.EraseSessionPending {
+        return (m.Copy(EraseSessionPending = true), NoCmd[AppMsg]())
+    }
+    val _ = CloseAllSessions(m.Sessions)
+    val cleared = clearSessionState(m)
+    val saved = persistConversation(cleared, cleared.Conversation)
+    return (saved, NoCmd[AppMsg]())
+}
+
+// clearSessionState wipes every per-conversation field back to its
+// initial state. Pure data reset — no IO. Status map gets a fresh
+// StIdle for every team member so the sidebar shows a clean slate
+// instead of stale "working" / "failed" pills.
+func clearSessionState(m AppModel) AppModel {
+    val freshStatuses = m.Team.Members.FoldLeft(
+        EmptyHashMap[string, Status](),
+        (acc, mem) => acc.Put(mem.Name, StIdle()),
+    )
+    return m.Copy(
+        Conversation          = EmptyArray[session.ConversationLine](),
+        Sessions              = EmptyHashMap[string, MemberSession](),
+        SessionIds            = EmptyHashMap[string, string](),
+        Statuses              = freshStatuses,
+        TurnBuffer            = "",
+        ConsultsFired         = 0,
+        ActiveConsults        = EmptyHashMap[string, ConsultSession](),
+        ConsultBuffers        = EmptyHashMap[string, Array[string]](),
+        ConsultViewerOpen     = false,
+        RecoveredMembers      = EmptyArray[string](),
+        RecoveryBannerVisible = false,
+        LastChunkAt           = EmptyHashMap[string, time_utils.Instant](),
+        NudgeAt               = EmptyHashMap[string, time_utils.Instant](),
+        RetryCount            = EmptyHashMap[string, int](),
+        MemberBuffers         = EmptyHashMap[string, string](),
+        MemberDirectivesFired = EmptyHashMap[string, int](),
+        MemberDoneBodies      = EmptyHashMap[string, string](),
+        EraseSessionPending   = false,
+        QuitPending           = false,
+        Composer              = "",
+        LastError             = None[string](),
+    )
+}
+
 // onSubmit drives the user's prompt into the team. It (a) kicks the FSM
 // with UserPrompted, (b) ensures the Team Lead has a live claude session
 // (spawns one if not), (c) appends the user line to the conversation
@@ -240,15 +512,18 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         RecoveryBannerVisible = false,
     )
     val lead = m.Team.Lead
-    val firstSpawn = !m.Sessions.Get(lead.Name).IsDefined()
+    // First-turn detection keys on whether we have a SessionId for
+    // the lead — claude with `--print` doesn't keep processes alive
+    // across turns, so the SessionId map is the source of truth.
+    val firstTurn = !m.SessionIds.Get(lead.Name).IsDefined()
     return ensureSession(withState, lead) match {
-        case Left(err)  => (withState.Copy(LastError = Some[string](err)), NoCmd[AppMsg]())
+        case Left(err)  => (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
         case Right(m1)  => {
             val (effectivePrompt, onboardingErr) =
-                if (firstSpawn) onboarding.WrapPromptSafe(m.Project, m.Team, lead, prompt)
-                else            (prompt, None[string]())
+                if (firstTurn) onboarding.WrapPromptSafe(m.Project, m.Team, lead, prompt)
+                else           (prompt, None[string]())
             val m2 = onboardingErr match {
-                case Some(e) => m1.Copy(LastError = Some[string](s"onboarding: ${e}"))
+                case Some(e) => m1.Copy(LastError = Some(s"onboarding: ${e}"))
                 case None()  => m1
             }
             return (setStatus(m2, lead.Name, StWorking()), sendAndPumpCmd(m2, lead, effectivePrompt))
@@ -256,47 +531,56 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     }
 }
 
-// ensureSession looks up `member` in m.Sessions and spawns a new claude
-// session if none is registered. The cwd comes from EnsureWorkspace,
-// which honours Policy.WorkspaceMode — Shared puts every member in
-// proj.Repo; WorktreePerEngineer creates `.gala_team/worktrees/<name>`
-// for non-lead members on first spawn. Returns Right(updatedModel) on
-// success (or no-op when already present), Left(errorString) on spawn
-// or workspace-creation failure.
+// ensureSession spawns a fresh claude turn for `member`. Each spawn
+// is one-shot — claude with `--print` exits after responding, so
+// the runtime treats every prompt as its own subprocess and threads
+// conversation context across turns via the per-member session id
+// in `m.SessionIds`.
 //
-// If `member.Name` is in m.RecoveredMembers (populated at startup
-// from the prior session's snapshot), the spawn passes
-// `resume=true` so claude picks up its prior in-process
-// conversation via `--continue`. The name is then drained from
-// RecoveredMembers; once that list goes empty the recovery banner
-// is also dismissed since every pending agent has been respawned.
+//   - First turn: generate a new session id, pass it as
+//     `--session-id <id>`; record the id so future turns resume it.
+//   - Subsequent turns: look up the recorded id, pass it as
+//     `--resume <id>`. claude reloads the prior conversation.
+//
+// The cwd comes from EnsureWorkspace, which honours
+// Policy.WorkspaceMode — Shared puts every member in proj.Repo;
+// WorktreePerEngineer creates `.gala_team/worktrees/<name>` for
+// non-lead members on first spawn. Returns Right(updatedModel) on
+// success, Left(errorString) on spawn or workspace-creation
+// failure.
+//
+// Note: this function ALWAYS spawns. claude with `--print` exits
+// after responding, so there's never a live process to reuse —
+// every prompt is a fresh subprocess threading conversation
+// context across turns via the per-member session id.
 func ensureSession(m AppModel, member Member) Either[string, AppModel] {
-    return m.Sessions.Get(member.Name) match {
-        case Some(_) => Right[string, AppModel](m)
-        case None()  => EnsureWorkspace(m.Project, member, m.Policy.WorkspaceMode) match {
-            case Failure(e)  => Left[string, AppModel](s"workspace ${member.Name}: ${e.Error()}")
-            case Success(ws) => {
-                val resume = m.RecoveredMembers.Contains(member.Name)
-                return SpawnSession(m.Project, member, ws, m.Team.DangerouslySkipPermissions, resume) match {
-                    case Success(s) => {
-                        val nextRecovered = m.RecoveredMembers.FilterNot((n) => n == member.Name)
-                        return Right[string, AppModel](m.Copy(
-                            Sessions              = m.Sessions.Put(member.Name, s),
-                            RecoveredMembers      = nextRecovered,
-                            RecoveryBannerVisible = m.RecoveryBannerVisible && nextRecovered.Size() > 0,
-                        ))
-                    }
-                    case Failure(e) => Left[string, AppModel](s"spawn ${member.Name}: ${e.Error()}")
+    return EnsureWorkspace(m.Project, member, m.Policy.WorkspaceMode) match {
+        case Failure(e)  => Left[string, AppModel](s"workspace ${member.Name}: ${e.Error()}")
+        case Success(ws) => {
+            val existingSid = m.SessionIds.Get(member.Name)
+            val sid = existingSid.GetOrElse(NewSessionId())
+            val isNew = !existingSid.IsDefined()
+            return SpawnSession(m.Project, member, ws, m.Team.DangerouslySkipPermissions, sid, isNew) match {
+                case Success(s) => {
+                    val nextRecovered = m.RecoveredMembers.FilterNot((n) => n == member.Name)
+                    return Right[string, AppModel](m.Copy(
+                        Sessions              = m.Sessions.Put(member.Name, s),
+                        SessionIds            = m.SessionIds.Put(member.Name, sid),
+                        RecoveredMembers      = nextRecovered,
+                        RecoveryBannerVisible = m.RecoveryBannerVisible && nextRecovered.Size() > 0,
+                    ))
                 }
+                case Failure(e) => Left[string, AppModel](s"spawn ${member.Name}: ${e.Error()}")
             }
         }
     }
 }
 
-// sendAndPumpCmd batches: (1) write the prompt to the member's stdin,
-// (2) start the read-pump that produces ChunkArrived per stdout line.
-// Both Futures live in runtime.Msg space; they're mapped to AppMsg via
-// runtimeFutureToCmd.
+// sendAndPumpCmd batches: (1) write the prompt to claude's stdin
+// AND close stdin (the combined "write then close" is what makes
+// `--print` actually start producing output — claude reads stdin
+// to EOF before responding); (2) start the read pump that
+// produces ChunkArrived per stdout line.
 func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
     return m.Sessions.Get(member.Name) match {
         case Some(s) => Batch[AppMsg](
@@ -325,14 +609,164 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 // the same transcript). Failures are stuck in LastError so the user
 // notices but the TUI keeps running.
 func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
-    val nextConvo = m.Conversation.Append(session.ConversationLine(Speaker = name, Text = line))
-    val withLine = setStatus(persistConversation(m, nextConvo), name, StWorking())
+    val displayText = filterClaudeStreamJson(line)
+    if displayText == "" {
+        // Init/result/tool-use chunks are noise — keep the read pump
+        // alive but don't append to the transcript.
+        val pumpCmd = m.Sessions.Get(name) match {
+            case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
+            case None()  => NoCmd[AppMsg]()
+        }
+        return (m.Copy(LastChunkAt = m.LastChunkAt.Put(name, time_utils.Now())), pumpCmd)
+    }
+    val nextConvo = m.Conversation.Append(session.ConversationLine(Speaker = name, Text = displayText))
+    val withLastSeen = m.Copy(
+        LastChunkAt = m.LastChunkAt.Put(name, time_utils.Now()),
+        RetryCount  = m.RetryCount.Remove(name),
+    )
+    // Only flip to StWorking if the member isn't already in a sticky
+    // "needs attention" state. StFailed (after retries / @blocked) and
+    // StHelpWaiting (paused awaiting TL clarification) must persist
+    // even if a stray late chunk arrives — otherwise the UI silently
+    // moves on past the user's blocker.
+    val current = withLastSeen.Statuses.Get(name).GetOrElse(StIdle())
+    val nextStatus = if (isStickyStatus(current)) current else mkWorkingStatus()
+    val withLine = setStatus(persistConversation(withLastSeen, nextConvo), name, nextStatus)
     val (m1, consultCmds) = maybeDispatchConsults(withLine, name, line)
-    val pumpCmd = m1.Sessions.Get(name) match {
+    val (m2, memberCmds)  = maybeHandleMemberDirectives(m1, name, line)
+    val pumpCmd = m2.Sessions.Get(name) match {
         case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
         case None()  => NoCmd[AppMsg]()
     }
-    return (m1, batchAll(consultCmds.Append(pumpCmd)))
+    val allCmds = memberCmds.FoldLeft(consultCmds, (a, c) => a.Append(c)).Append(pumpCmd)
+    return (m2, batchAll(allCmds))
+}
+
+// maybeHandleMemberDirectives parses non-TL streams for newly-completed
+// @done / @help / @blocked blocks (the member-emitted directives). The
+// TL has its own block-handling path (maybeDispatchConsults); this is
+// the symmetric path for downstream members. Same buffer / watermark
+// shape so directives fire exactly once per stream regardless of how
+// chunks arrive.
+//
+// @done captures the body for the eventual TL relay turn (#28); status
+// flips to StIdle so the heartbeat doesn't keep escalating timers.
+// @help pauses the member (StHelpWaiting) and (in #28) opens a TL
+// clarification turn. @blocked surfaces a user-visible failure.
+func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    if speaker == m.Team.Lead.Name {
+        return (m, EmptyArray[Cmd[AppMsg]]())
+    }
+    val priorBuffer = m.MemberBuffers.Get(speaker).GetOrElse("")
+    val nextBuffer = if (priorBuffer == "") line else priorBuffer + "\n" + line
+    // ParseClosed: don't fire member-side directives until @end is seen.
+    // Streamed chunks arrive line-by-line; firing on the bare opening
+    // tag would emit a Blocked/Help/Finished with empty body before the
+    // user's actual reason / question / deliverable text arrived.
+    val dirs = ParseClosed(nextBuffer)
+    val total = dirs.Size()
+    val fired = m.MemberDirectivesFired.Get(speaker).GetOrElse(0)
+    val withBuffer = m.Copy(
+        MemberBuffers         = m.MemberBuffers.Put(speaker, nextBuffer),
+        MemberDirectivesFired = m.MemberDirectivesFired.Put(speaker, total),
+    )
+    if total <= fired {
+        return (withBuffer, EmptyArray[Cmd[AppMsg]]())
+    }
+    return dirs.Drop(fired).FoldLeft(
+        (withBuffer, EmptyArray[Cmd[AppMsg]]()),
+        (acc, d) => {
+            val (m1, cmd) = applyMemberDirective(acc.V1, speaker, d)
+            return (m1, acc.V2.Append(cmd))
+        },
+    )
+}
+
+// applyMemberDirective handles one parsed member directive. @consult
+// and @dispatch from members are ignored (only the TL emits those);
+// @summary too — members can't summarise the user-facing turn.
+//
+// The Help / Blocked cases are routed via the partial-function `Collect`
+// shape rather than direct match because gala's analyzer mis-resolves
+// the bare `Done` extractor name in this file (collides with some
+// internal `state.Done` reference). Splitting into per-case helpers
+// keeps each match arm small enough that gala's resolver lands on the
+// directive package.
+func applyMemberDirective(m AppModel, speaker string, d Directive) Tuple[AppModel, Cmd[AppMsg]] {
+    val doneBody = extractDoneBody(d)
+    val helpQ    = extractHelpQuestion(d)
+    val blocked  = extractBlockedReason(d)
+    if doneBody.IsDefined() { return onMemberDone(m, speaker, doneBody.GetOrElse("")) }
+    if helpQ.IsDefined()    { return onMemberHelp(m, speaker, helpQ.GetOrElse("")) }
+    if blocked.IsDefined()  { return onMemberBlocked(m, speaker, blocked.GetOrElse("")) }
+    return (m, NoCmd[AppMsg]())
+}
+
+func extractDoneBody(d Directive) Option[string] = d match {
+    case Finished(body) => Some(body)
+    case _              => None[string]()
+}
+
+func extractHelpQuestion(d Directive) Option[string] = d match {
+    case Help(q) => Some(q)
+    case _       => None[string]()
+}
+
+func extractBlockedReason(d Directive) Option[string] = d match {
+    case Blocked(r) => Some(r)
+    case _          => None[string]()
+}
+
+// onMemberDone records the @done body for the relay turn (#28) and
+// drops the member back to StIdle without raising LastError. EOF on
+// the underlying session is the actual session-handle cleanup; this
+// just captures the deliverable text.
+func onMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppMsg]] {
+    val toast = m.Toasts.PushSuccess(s"${name} done", time_utils.Now(), time_utils.Seconds(int64(3)))
+    val m1 = m.Copy(
+        MemberDoneBodies = m.MemberDoneBodies.Put(name, body),
+        Toasts           = toast,
+    )
+    return (setStatus(m1, name, StIdle()), NoCmd[AppMsg]())
+}
+
+// onMemberHelp pauses the member and opens a TL clarification turn
+// with the member's question synthesised into a system prompt. The
+// TL's response is parsed normally — it can re-dispatch with new
+// instructions, abandon the task, or escalate further.
+func onMemberHelp(m AppModel, name string, question string) Tuple[AppModel, Cmd[AppMsg]] {
+    val nextState = Transition(m.State, MemberHelpRequested(MemberName = name, Question = question), transitionContext(m))
+    val toast = m.Toasts.PushInfo(s"${name} needs help", time_utils.Now(), time_utils.Seconds(int64(5)))
+    val m1 = m.Copy(State = nextState, Toasts = toast)
+    val m2 = setStatus(m1, name, mkHelpWaitingStatus(question))
+    val (m3, cmds) = spawnTLNudge(m2, s"help-${name}", buildHelpNudgePrompt(name, question))
+    return (m3, batchAll(cmds))
+}
+
+// buildHelpNudgePrompt formats the system message the TL gets when a
+// member emits @help. The lead is asked to issue a follow-up
+// @dispatch with an answer — TL is the source of truth for cross-
+// member clarification.
+func buildHelpNudgePrompt(name string, question string) string =
+    s"System: ${name} requested clarification — they asked: \"${question}\". Reply with a follow-up @dispatch(${name}) directive containing the guidance, or @summary if the team should abandon the task."
+
+// mkHelpWaitingStatus widens StHelpWaiting to Status (FIX-013
+// workaround — multi-arg sealed cases need a typed helper).
+func mkHelpWaitingStatus(question string) Status = StHelpWaiting(question)
+
+// onMemberBlocked surfaces the external-environment failure to the
+// user via LastError + StFailed status. Advances the FSM as if the
+// member completed (so the rest of the team doesn't deadlock).
+func onMemberBlocked(m AppModel, name string, reason string) Tuple[AppModel, Cmd[AppMsg]] {
+    val nextState = Transition(m.State, MemberBlocked(MemberName = name, Reason = reason), transitionContext(m))
+    val toast = m.Toasts.PushError(s"${name} blocked: ${reason}", time_utils.Now(), time_utils.Seconds(int64(8)))
+    val failedStatus Status = StFailed(Reason = reason)
+    val m1 = m.Copy(
+        State     = nextState,
+        Toasts    = toast,
+        LastError = Some(s"${name} blocked: ${reason}"),
+    )
+    return (setStatus(m1, name, failedStatus), NoCmd[AppMsg]())
 }
 
 // maybeDispatchConsults inspects the latest TL chunk for newly-
@@ -434,20 +868,208 @@ func activeMemberNames(m AppModel) Array[string] =
 // LastError — the in-memory transcript stays canonical.
 func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) AppModel = session.Save(m.Project.Repo, m.Project.Name, nextConvo, activeMemberNames(m)) match {
     case Success(_)   => m.Copy(Conversation = nextConvo)
-    case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some[string](s"session save: ${err.Error()}"))
+    case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some(s"session save: ${err.Error()}"))
 }
 
-// onSessionFailed marks the member's session as gone (drops it from
-// Sessions, sets LastError) and stops the pump. The transcript keeps the
-// chunks already recorded so the user can read what came through before
-// the failure.
+// MaxAutoRetries is sourced from m.Policy.Heartbeat.MaxRetries (#29).
+// Kept as a function shim so call sites stay readable.
+func maxAutoRetriesOf(m AppModel) int = m.Policy.Heartbeat.MaxRetries
+
+// onSessionFailed handles the read pump's terminal event.
+//
+//   - EOF: normal turn completion (claude with --print exits when
+//     finished). Status flips to StIdle; SessionId persists for
+//     the next --resume turn.
+//
+//   - Non-EOF + RetryCount[name] < MaxAutoRetries: the runtime
+//     died unexpectedly (network blip, claude segfault, etc.).
+//     Auto-respawn via the same SpawnSession+SendFuture path,
+//     send a "Continue your previous task." prompt over the
+//     resumed session id so claude picks up where it left off.
+//     Status flips to StRecovering(attempt, max) for the duration.
+//
+//   - Non-EOF + retries exhausted: give up. Surface the original
+//     error in LastError, mark member StFailed.
+//
+// RetryCount resets on the next successful ChunkArrived (in onChunk),
+// so transient crashes don't permanently stick a member in the
+// retry-budget penalty box.
 func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[AppMsg]] {
-    val withFailure = setStatus(m.Copy(
-        Sessions  = m.Sessions.Remove(name),
-        LastError = Some[string](s"${name}: ${err}"),
-    ), name, StFailed(Reason = err))
-    return (withFailure, NoCmd[AppMsg]())
+    val cleaned = m.Copy(Sessions = m.Sessions.Remove(name))
+    if isCleanCloseError(err) {
+        // Clean turn end. Two shapes depending on who finished:
+        //   - Team Lead → TLDone(directives parsed from the lead's
+        //     accumulated TurnBuffer). FSM uses these to route the
+        //     turn (Approval on @summary, Delegating on @dispatch,
+        //     Idle on plain chat).
+        //   - Other member → MemberDone(name, body). FSM drains the
+        //     pending set and advances to QAGate / TLReview / relay.
+        val nextState = if (name == cleaned.Team.Lead.Name) {
+            val dirs = Parse(cleaned.TurnBuffer)
+            Transition(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
+        } else {
+            val body = cleaned.MemberDoneBodies.Get(name).GetOrElse("")
+            Transition(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
+        }
+        return (setStatus(cleaned.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
+    }
+    val maxRetries = maxAutoRetriesOf(m)
+    val retries = m.RetryCount.Get(name).GetOrElse(0)
+    if retries >= maxRetries {
+        val withFailure = setStatus(
+            cleaned.Copy(LastError = Some(s"${name}: ${err} (gave up after ${retries} retries)")),
+            name,
+            StFailed(Reason = err),
+        )
+        return (withFailure, NoCmd[AppMsg]())
+    }
+    val attempt = retries + 1
+    val recovering = cleaned.Copy(
+        RetryCount = cleaned.RetryCount.Put(name, attempt),
+        LastError  = Some(s"${name}: ${err} — retry ${attempt}/${maxRetries}"),
+    )
+    val withStatus = setStatus(recovering, name, mkRecoveringStatus(attempt, maxRetries))
+    return respawnMember(withStatus, name)
 }
+
+// respawnMember performs the actual auto-respawn: looks up the Member
+// record by name, calls ensureSession (which creates a fresh subprocess
+// using the saved SessionId for `--resume`), and fires a "continue"
+// prompt to wake claude back up. Synchronous failure (e.g. workspace
+// missing) lands in LastError without further retries — we only retry
+// the same path once per crash event.
+func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
+    return findMemberByName(m.Team.Members, name) match {
+        case None() => (m, NoCmd[AppMsg]())
+        case Some(mem) => ensureSession(m, mem) match {
+            case Left(err)  => (m.Copy(LastError = Some(s"respawn ${name}: ${err}")), NoCmd[AppMsg]())
+            case Right(m1)  => (setStatus(m1, name, StWorking()), sendAndPumpCmd(m1, mem, "Continue your previous task."))
+        }
+    }
+}
+
+// findMemberByName scans the team for a Member whose Name matches.
+// Typed-array param so auto-unwrap fires at the call boundary.
+func findMemberByName(members Array[Member], name string) Option[Member] =
+    members.Find((mem) => mem.Name == name)
+
+// isStickyStatus identifies "don't auto-overwrite me" states. A late
+// stray chunk arriving while a member is StFailed (e.g. @blocked) or
+// StHelpWaiting (paused for TL guidance) shouldn't silently demote
+// them to StWorking — the user needs the original signal to persist
+// until the orchestrator (or TL) explicitly resolves it.
+func isStickyStatus(s Status) bool = s match {
+    case StFailed(_)      => true
+    case StHelpWaiting(_) => true
+    case _                => false
+}
+
+// mkWorkingStatus is a typed shim — wrapping case construction in a
+// return-typed helper sidesteps the FIX-013 widening regression for
+// any future cases that need it.
+func mkWorkingStatus() Status = StWorking()
+
+// ----------------------------------------------------------------------------
+// Claude stream-json filtering — typed Codec[T] for each event shape.
+// claude --output-format stream-json --verbose emits one JSON line
+// per event. The Codec generates a zero-reflection decoder from the
+// struct shape and the transpiler auto-injects the StructMeta. We
+// pick the smallest sub-shape we need for each event type.
+// ----------------------------------------------------------------------------
+
+// ClaudeStreamEvent captures just the discriminator (`type`). We
+// decode this first to dispatch; the body-bearing decoders only run
+// when the discriminator matches.
+struct ClaudeStreamEvent(Type string)
+
+// ClaudeAssistantEvent shape: the only event we actually display.
+//   {"type":"assistant","message":{"content":[ContentPart]}}
+struct ClaudeAssistantEvent(
+    Type    string,
+    Message ClaudeAssistantMessage,
+)
+
+struct ClaudeAssistantMessage(
+    Content Array[ClaudeContentPart],
+)
+
+// ClaudeContentPart covers the two content shapes we render: plain
+// text from the model, and tool-use markers shown as bracketed names
+// so the user sees that a tool was invoked.
+struct ClaudeContentPart(
+    Type string,
+    Text string,
+    Name string,
+)
+
+// filterClaudeStreamJson returns the visible text for one stream-json
+// line, or "" when the chunk is noise. Uses Codec[T] decoders — no
+// hand-rolled string parsing — so structural changes upstream surface
+// as decode errors we can fall back on.
+func filterClaudeStreamJson(line string) string {
+    val trimmed = strings.TrimSpace(line)
+    if trimmed == "" { return "" }
+    if !strings.HasPrefix(trimmed, "{") { return line }
+    val ev = json.Codec[ClaudeStreamEvent](json.SnakeCase()).Decode(trimmed)
+    return ev match {
+        case Failure(_) => line
+        case Success(e) => filterByType(e.Type, trimmed, line)
+    }
+}
+
+// filterByType dispatches on the event type. system / user / result
+// events are noise — we return "" so onChunk drops them. assistant
+// events get a second decode pass into the typed nested shape so we
+// can pull the content[].text parts cleanly.
+func filterByType(kind string, trimmed string, raw string) string {
+    if kind == "system" || kind == "user" || kind == "result" {
+        return ""
+    }
+    if kind == "assistant" {
+        return json.Codec[ClaudeAssistantEvent](json.SnakeCase()).Decode(trimmed) match {
+            case Failure(_) => raw
+            case Success(e) => renderAssistantContent(e.Message.Content)
+        }
+    }
+    return raw
+}
+
+// renderAssistantContent joins every text part with newlines and
+// inlines tool-use markers as `[tool: <name>]`. Empty result means
+// the assistant chunk had no displayable content (rare — usually
+// just a tool_use without text), and we drop it via the empty-string
+// path in onChunk.
+func renderAssistantContent(parts Array[ClaudeContentPart]) string =
+    parts.Collect({
+        case ClaudeContentPart(Type = t, Text = txt, Name = _)  if t == "text"     => txt
+        case ClaudeContentPart(Type = t, Text = _,   Name = nm) if t == "tool_use" => s"[tool: ${nm}]"
+    }).MkString("\n")
+
+// isCleanCloseError matches errors that mean "the subprocess finished
+// naturally" rather than "the subprocess crashed". On Windows, when
+// claude exits cleanly its stdin pipe closes, and any in-flight write
+// from gala_team's SendFuture surfaces as `write |1: The pipe has been
+// ended.` even though nothing is actually broken — claude already
+// produced its output and exited. Treating these errors the same as
+// EOF avoids spurious auto-retry loops.
+func isCleanCloseError(err string) bool {
+    if err == "EOF"                                            { return true }
+    if strings.Contains(err, "The pipe has been ended")        { return true }
+    if strings.Contains(err, "broken pipe")                    { return true }
+    if strings.Contains(err, "file already closed")            { return true }
+    return false
+}
+
+// mkRecoveringStatus constructs a StRecovering case and returns it
+// typed as the parent Status. Sealed-case widening fires on `return`
+// statements (FIX-007) but not on function-call argument sites for
+// multi-arg cases — wrapping the construction in a return-typed
+// helper sidesteps that. Same workaround for any other multi-arg
+// sealed-case argument site.
+// FIX-013 workaround: positional construction widens to parent type
+// where named (`StRecovering(Attempt = a, Max = m)`) does not.
+// Pre-formatting the note string to "N/M" sidesteps multi-arg cases.
+func mkRecoveringStatus(attempt int, max int) Status = StRecovering(s"${attempt}/${max}")
 
 // onApprove is the Phase-1 approval flow: when the FSM is in Approval,
 // the user pressed Ctrl+A. We transition the FSM via ApprovalAccepted,
@@ -535,7 +1157,7 @@ func onPreMergeHooksPassed(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]]
 // flagged, and re-approve.
 func onPreMergeHooksFailed(m AppModel, err string) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(
-        LastError    = Some[string](s"pre-merge hooks: ${err}"),
+        LastError    = Some(s"pre-merge hooks: ${err}"),
         Conversation = m.Conversation.Append(
             session.ConversationLine(Speaker = "policy", Text = s"pre-merge hooks: ✗ ${err}"),
         ),
@@ -568,7 +1190,7 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // gets a confirmation step).
 func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(
-        LastPrUrl    = Some[string](url),
+        LastPrUrl    = Some(url),
         Conversation = m.Conversation
             .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${url}"))
             .Append(session.ConversationLine(Speaker = "gh", Text = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.")),
@@ -718,7 +1340,7 @@ func onConsultCompleted(m AppModel, name string, summary Option[string]) Tuple[A
 // back to its own knowledge).
 func onConsultFailed(m AppModel, name string, errText string) Tuple[AppModel, Cmd[AppMsg]] {
     val withLog = m.Copy(
-        LastError    = Some[string](s"consult ${name}: ${errText}"),
+        LastError    = Some(s"consult ${name}: ${errText}"),
         Conversation = m.Conversation.Append(session.ConversationLine(
             Speaker = "consult",
             Text    = s"${name} ✗ ${errText}",
@@ -804,6 +1426,9 @@ func trimLastRune(s string) string {
 func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if m.QuitPending {
         return (m.Copy(QuitPending = false), NoCmd[AppMsg]())
+    }
+    if m.EraseSessionPending {
+        return (m.Copy(EraseSessionPending = false), NoCmd[AppMsg]())
     }
     if m.RecoveryBannerVisible {
         return (m.Copy(

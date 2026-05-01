@@ -1,0 +1,20 @@
+load("@gala//:gala.bzl", "gala_library")
+
+gala_library(
+    name = "testdriver",
+    srcs = ["testdriver.gala"],
+    importpath = "github.com/martianoff/gala_team/app/testdriver",
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    deps = [
+        "//app/fsm",
+        "//app/session",
+        "//app/team",
+        "//app/ui",
+        "@gala//collection_immutable",
+        "@gala//go_interop",
+        "@gala//json",
+    ],
+    visibility = ["//visibility:public"],
+)

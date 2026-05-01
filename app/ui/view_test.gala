@@ -166,6 +166,19 @@ func TestView_Conversation_Clipping_ShowsHiddenHint(t T) T {
     return IsTrue(t, strings.Contains(render(m), "earlier line(s) hidden"))
 }
 
+// Long chunks must wrap inside the conversation pane — otherwise long
+// claude responses get clipped at the right edge (see UI_AUDIT_BUGS.md
+// bug A). Sends a 200-char chunk and asserts the rendered output spans
+// multiple rows containing the latter half of the text.
+func TestView_Conversation_LongLineWraps(t T) T {
+    val longLine = "this is an extremely long line that should overflow the conversation pane width and either wrap or get truncated — we need to verify which behavior the renderer picks"
+    val seed = mkModel(mkTeam("X", ""))
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = longLine))
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "extremely"))
+    return IsTrue(t1, strings.Contains(out, "renderer"))
+}
+
 // ---------------------------------------------------------------------------
 // Composer
 // ---------------------------------------------------------------------------
@@ -543,15 +556,16 @@ func TestView_Sidebar_CollapsedGroup_HidesMembers(t T) T {
     return IsFalse(t1, strings.Contains(out, "Felix"))  // engineer hidden
 }
 
-// Cursor highlight: the row at SidebarCursor gets a "▶ " lead in
-// addition to whatever glyph the row would normally render.
+// Cursor highlight: the row at SidebarCursor gets a `▎` (left-edge
+// bar) lead — distinct from the `▼`/`▶` group-fold glyphs so users
+// don't read "▶ ▼" as a doubled arrow.
 func TestView_Sidebar_Cursor_HighlightsCursoredRow(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(
         Focus         = FocusSidebar(),
         SidebarCursor = 0,
     )
     val out = render(m)
-    return IsTrue(t, strings.Contains(out, "▶ ▼ Lead"))
+    return IsTrue(t, strings.Contains(out, "▎ ▼ Lead"))
 }
 
 // When Focus=Composer, the cursor row is NOT highlighted even if
@@ -871,11 +885,16 @@ func TestFlow_PrCreated_FooterShowsMergeHint(t T) T {
 
 // SessionFailed surfaces in the footer as ⚠ <member>: <err>.
 func TestFlow_SessionFailed_FooterWarns(t T) T {
+    // EOF is the normal turn-end signal under spawn-per-turn — it
+    // doesn't surface a warning. Use a real error string so the footer
+    // exercises the LastError path. With auto-retry (#26) the message
+    // includes "retry N/M" so the user sees the orchestrator working
+    // through recovery.
     val seed = mkModel(mkTeam("X", ""))
-    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "stream closed"))
     val out = render(m)
     val t1 = IsTrue(t,  strings.Contains(out, "⚠"))
-    return IsTrue(t1, strings.Contains(out, "Iris: EOF"))
+    return IsTrue(t1, strings.Contains(out, "Iris: stream closed"))
 }
 
 // ---------------------------------------------------------------------------
@@ -920,8 +939,13 @@ func TestFlow_MouseOutOfBounds_NoChange(t T) T {
 // switches to FocusSidebar — the visual change is the sidebar's
 // border weight (rounded → thick).
 func TestFlow_MousePressInSidebar_FocusesSidebar(t T) T {
+    // Sidebar clicks come through gala-tui's HitRegistry as a typed
+    // FocusSidebarClicked AppMsg (BorderOf(...).OnClick wires it),
+    // NOT as a raw MouseAt. MouseAt is the fallback path for clicks
+    // that miss every registered hit-target. This test exercises the
+    // typed-click → focus-switch path the framework actually uses.
     val seed = mkModel(mkTeam("X", ""))
-    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    val (m, _) = Update(seed, FocusSidebarClicked())
     return m.Focus match {
         case FocusSidebar()  => IsTrue(t, true)
         case FocusComposer() => IsTrue(t, false)

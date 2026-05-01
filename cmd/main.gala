@@ -10,6 +10,7 @@ import (
     . "martianoff/gala/time_utils"
     "github.com/martianoff/gala_team/app/consult"
     "github.com/martianoff/gala_team/app/session"
+    "github.com/martianoff/gala_team/app/testdriver"
     . "github.com/martianoff/gala_team/app/cli"
     . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/policy"
@@ -79,7 +80,7 @@ func hasFlag(names Array[string]) bool {
 // than reject so the user can pipe additional context through if a
 // future flag wants it.
 func validateArgs() {
-    val known = ArrayOf("--help", "-h", "--project", "--team", "--teams", "--team-key")
+    val known = ArrayOf("--help", "-h", "--project", "--team", "--teams", "--team-key", "--test-mode")
     val takesValue = ArrayOf("--project", "--team", "--teams", "--team-key")
     val args = ArrayOf(os.Args...)
     val n = args.Size()
@@ -295,6 +296,15 @@ func main() {
         Update  = (m, msg) => Update(m, msg),
         View    = (m) => View(m),
     )
+    if hasFlag(ArrayOf("--test-mode")) {
+        // Skip the gala-tui terminal runtime entirely — the harness
+        // reads JSON commands from stdin and emits frames on stdout.
+        // All Cmds returned by Update are discarded so the test stays
+        // deterministic; the driver injects whatever runtime events
+        // it wants to simulate.
+        testdriver.RunTestDriver(initial)
+        return
+    }
     val tickSub = TickSub[AppMsg](Interval = Milliseconds(int64(120)), Make = () => TickMsg())
     // Disable gala-tui's runtime-level Ctrl+C escape hatch so the
     // app's keymap can receive it. onQuit then runs the two-press

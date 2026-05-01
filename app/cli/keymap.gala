@@ -91,6 +91,7 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+h"))           { return KeyToggleHistory() }
     if (KeyMatchesAny(ev, "ctrl+t"))           { return KeyToggleConsultViewer() }
     if (KeyMatchesAny(ev, "ctrl+l", "tab"))    { return KeyToggleFocus() }
+    if (KeyMatchesAny(ev, "ctrl+n"))           { return KeyEraseSession() }
     return ev.Key match {
         case Backspace()  => KeyBackspace()
         case Enter()      => KeySubmit()

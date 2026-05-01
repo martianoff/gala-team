@@ -1,0 +1,352 @@
+package testdriver
+
+import (
+    "os"
+    "bufio"
+    "strings"
+    "martianoff/gala/json"
+    gala_tui "github.com/martianoff/gala-tui"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/ui"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/testdriver — JSON-over-stdio harness for scripted UI testing.
+//
+// Replaces gala-tui's TTY runtime when gala_team is launched with
+// `--test-mode`. Reads one JSON command per line from stdin, translates
+// to an AppMsg, runs Update, and emits one JSON frame per line on
+// stdout. All Cmds returned by Update are discarded — the driver
+// supplies any events that real Cmds would have produced (ChunkArrived,
+// SessionFailed, etc.) via direct `msg` injection.
+//
+// Designed for two consumers:
+//   1. Integration tests that script a flow end-to-end and assert on
+//      the rendered snapshot or model state.
+//   2. Visual-glitch hunting: a driver pipes a sequence and diffs the
+//      per-frame styled snapshots against a golden record.
+//
+// Frame layout (one JSON object per line):
+//   {
+//     "type":   "frame",
+//     "tick":   42,
+//     "state":  "Delegating",
+//     "term":   {"cols": 80, "rows": 24},
+//     "statuses":   {"Iris": "working", "Felix": "slow"},
+//     "lastError":  "Felix: stream closed — retry 1/2",
+//     "plain":      "<rendered text grid>",
+//     "styled":     "<rendered text with ANSI escapes>" (only on snapshot detail=styled)
+//   }
+//
+// Driver commands (one per line on stdin):
+//   {"type":"key","key":"Enter"}
+//   {"type":"key","char":"h"}
+//   {"type":"key","key":"Backspace"} | "CtrlL" | "CtrlA" | "CtrlR" | "CtrlQ"
+//   {"type":"tick"}
+//   {"type":"msg","name":"ChunkArrived","member":"Iris","line":"hi"}
+//   {"type":"msg","name":"SessionFailed","member":"Felix","err":"EOF"}
+//   {"type":"resize","cols":80,"rows":24}
+//   {"type":"snapshot","detail":"plain"}     // or "styled"
+//   {"type":"quit"}
+// ============================================================================
+
+// TermDims carries the terminal dimensions used for snapshot rendering.
+// Driver overrides via the "resize" command; default is 80x24.
+struct TermDims(Cols int, Rows int)
+
+func DefaultTermDims() TermDims = TermDims(Cols = 80, Rows = 24)
+
+// RunTestDriver drives the test-mode read/eval/print loop. Returns when
+// stdin closes or a {"type":"quit"} command arrives. Never reads from
+// gala-tui runtime input or writes to terminal — purely stdio JSON.
+func RunTestDriver(initial AppModel) {
+    var model = initial
+    var term  = DefaultTermDims()
+    val scanner = bufio.NewScanner(os.Stdin)
+    // Default scanner buffer is 64KB; bump to 1MB so big chunk-line
+    // injections (claude prompts) don't truncate.
+    val bigBuf = SliceWithSize[byte](1024 * 1024)
+    scanner.Buffer(bigBuf, 1024 * 1024)
+    emitFrame(model, term, None[string]())
+    var stopped = false
+    for !stopped && scanner.Scan() {
+        val raw = strings.TrimSpace(scanner.Text())
+        if raw == "" { continue }
+        val step = applyOneCommand(model, term, raw)
+        step match {
+            case ContinueDriver(m1, t1) => {
+                model = m1
+                term  = t1
+            }
+            case StopDriver() => stopped = true
+        }
+    }
+}
+
+// DriverStep is the result of processing one command — either continue
+// with an updated model + term, or stop the loop entirely.
+sealed type DriverStep {
+    case ContinueDriver(M AppModel, T TermDims)
+    case StopDriver
+}
+
+// applyOneCommand decodes the JSON, dispatches by "type", runs Update
+// when the command resolves to an AppMsg, and emits a frame. Errors
+// (malformed JSON, unknown type) are surfaced via emitError but the
+// loop continues — driver scripts shouldn't crash the harness.
+func applyOneCommand(m AppModel, term TermDims, raw string) DriverStep {
+    val d = json.NewJsonDecoder(raw)
+    val (kind, ok) = readType(d)
+    if !ok {
+        emitError("missing or invalid 'type' field")
+        return ContinueDriver(M = m, T = term)
+    }
+    if kind == "quit" { return StopDriver() }
+    if kind == "snapshot" {
+        val detail = readOptionalString(d, "detail").GetOrElse("plain")
+        emitSnapshot(m, term, detail)
+        return ContinueDriver(M = m, T = term)
+    }
+    if kind == "resize" {
+        val cols = readOptionalInt(d, "cols").GetOrElse(80)
+        val rows = readOptionalInt(d, "rows").GetOrElse(24)
+        val t1 = TermDims(Cols = cols, Rows = rows)
+        emitFrame(m, t1, None[string]())
+        return ContinueDriver(M = m, T = t1)
+    }
+    val maybeMsg = decodeAppMsg(kind, d)
+    return maybeMsg match {
+        case None() => {
+            emitError(s"unknown command type '${kind}'")
+            return ContinueDriver(M = m, T = term)
+        }
+        case Some(msg) => {
+            val (m1, _) = Update(m, msg)
+            emitFrame(m1, term, None[string]())
+            return ContinueDriver(M = m1, T = term)
+        }
+    }
+}
+
+// readType pulls the "type" field from the decoder, leaving the rest of
+// the object in the decoder's stream so subsequent reads can fetch
+// per-command fields. Returns ("", false) if the input isn't an object
+// or "type" is absent.
+func readType(d *json.JsonDecoderImpl) Tuple[string, bool] {
+    // The decoder API is sequential; we don't peek. Convention: every
+    // command starts with "type" as the first key. If a command sends
+    // type after other fields, the dispatch below will misread it.
+    d.StartObject()
+    if !d.HasMoreFields() { return ("", false) }
+    val key = d.ReadKey()
+    if key != "type" { return ("", false) }
+    return (d.ReadString(), true)
+}
+
+// readOptionalString reads a remaining string field by name. Returns
+// None if the field is missing or comes in a different order than
+// expected. Decoder is positionally consumed, so out-of-order field
+// reads silently drop subsequent fields.
+func readOptionalString(d *json.JsonDecoderImpl, target string) Option[string] {
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == target { return Some(d.ReadString()) }
+        d.ReadString()  // consume any value type best-effort
+    }
+    return None[string]()
+}
+
+func readOptionalInt(d *json.JsonDecoderImpl, target string) Option[int] {
+    for d.HasMoreFields() {
+        val key = d.ReadKey()
+        if key == target { return Some(d.ReadInt()) }
+        d.ReadString()
+    }
+    return None[int]()
+}
+
+// decodeAppMsg translates a typed command into an AppMsg. Returns None
+// when the command type isn't recognised (or doesn't correspond to a
+// driver-injectable AppMsg — keys/mouse/tick/msg are; resize/snapshot
+// are handled out-of-band above).
+func decodeAppMsg(kind string, d *json.JsonDecoderImpl) Option[AppMsg] {
+    if kind == "key"   { return decodeKey(d) }
+    if kind == "tick"  { return Some[AppMsg](TickMsg()) }
+    if kind == "mouse" { return decodeMouse(d) }
+    if kind == "msg"   { return decodeNamedMsg(d) }
+    return None[AppMsg]()
+}
+
+// decodeKey reads {"key":"Enter"} or {"char":"h"} etc. and maps to
+// the matching AppMsg case.
+func decodeKey(d *json.JsonDecoderImpl) Option[AppMsg] {
+    var keyName = ""
+    var keyChar = ""
+    for d.HasMoreFields() {
+        val k = d.ReadKey()
+        if k == "key"  { keyName = d.ReadString() }
+        else if k == "char" { keyChar = d.ReadString() }
+        else { d.ReadString() }
+    }
+    if keyChar != "" {
+        val rs = ToRunes(keyChar)
+        if len(rs) == 0 { return None[AppMsg]() }
+        return Some[AppMsg](KeyChar(C = rs[0]))
+    }
+    if keyName == "Enter"     { return Some[AppMsg](KeySubmit()) }
+    if keyName == "Backspace" { return Some[AppMsg](KeyBackspace()) }
+    if keyName == "Esc"       { return Some[AppMsg](HistoryDeselect()) }
+    if keyName == "CtrlA"     { return Some[AppMsg](KeyApprove()) }
+    if keyName == "CtrlR"     { return Some[AppMsg](KeyReject()) }
+    if keyName == "CtrlL"     { return Some[AppMsg](KeyToggleFocus()) }
+    if keyName == "CtrlQ"     { return Some[AppMsg](QuitMsg()) }
+    if keyName == "CtrlN"     { return Some[AppMsg](KeyEraseSession()) }
+    if keyName == "CtrlM"     { return Some[AppMsg](KeyMerge()) }
+    if keyName == "CtrlH"     { return Some[AppMsg](KeyToggleHistory()) }
+    if keyName == "Tab"       { return Some[AppMsg](KeyToggleConsultViewer()) }
+    return None[AppMsg]()
+}
+
+func decodeMouse(d *json.JsonDecoderImpl) Option[AppMsg] {
+    var x = 0
+    var y = 0
+    var pressed = false
+    for d.HasMoreFields() {
+        val k = d.ReadKey()
+        if k == "x"           { x = d.ReadInt() }
+        else if k == "y"      { y = d.ReadInt() }
+        else if k == "pressed" { pressed = d.ReadBool() }
+        else                  { d.ReadString() }
+    }
+    return Some[AppMsg](MouseAt(X = x, Y = y, Pressed = pressed))
+}
+
+// decodeNamedMsg reads {"name":"ChunkArrived","member":"Iris","line":"..."}.
+// Each known msg name pulls the additional fields it needs.
+func decodeNamedMsg(d *json.JsonDecoderImpl) Option[AppMsg] {
+    var name   = ""
+    var member = ""
+    var line   = ""
+    var err    = ""
+    for d.HasMoreFields() {
+        val k = d.ReadKey()
+        if k == "name"        { name = d.ReadString() }
+        else if k == "member" { member = d.ReadString() }
+        else if k == "line"   { line = d.ReadString() }
+        else if k == "err"    { err = d.ReadString() }
+        else                  { d.ReadString() }
+    }
+    if name == "ChunkArrived"  { return Some[AppMsg](ChunkArrived(Member = member, Line = line)) }
+    if name == "SessionFailed" { return Some[AppMsg](SessionFailed(Member = member, ErrText = err)) }
+    if name == "WriteSent"     { return Some[AppMsg](WriteSent(Member = member)) }
+    return None[AppMsg]()
+}
+
+// ============================================================================
+// Frame emission
+// ============================================================================
+
+// emitFrame writes a {"type":"frame", ...} JSON line to stdout. The
+// rendering happens via the gala-tui Snapshot helper at the current
+// terminal size — driver gets to see exactly what the user would.
+//
+// `errOverride` lets explicit error-frame paths inject a reason
+// without having to mutate the model.
+func emitFrame(m AppModel, term TermDims, errOverride Option[string]) {
+    val rendered = gala_tui.Snapshot(View(m), term.Cols, term.Rows)
+    val w = json.NewJsonEncoder()
+    w.WriteStartObject()
+    w.WriteKey("type");  w.WriteString("frame")
+    w.WriteKey("tick");  w.WriteInt(m.Tick)
+    w.WriteKey("state"); w.WriteString(stateName(m))
+    w.WriteKey("term")
+    w.WriteStartObject()
+    w.WriteKey("cols"); w.WriteInt(term.Cols)
+    w.WriteKey("rows"); w.WriteInt(term.Rows)
+    w.WriteEndObject()
+    w.WriteKey("statuses")
+    w.WriteStartObject()
+    m.Statuses.ForEachKV((name, st) => {
+        w.WriteKey(name)
+        w.WriteString(StatusName(st))
+    })
+    w.WriteEndObject()
+    w.WriteKey("lastError")
+    errOverride.OrElse(m.LastError) match {
+        case Some(e) => w.WriteString(e)
+        case None()  => w.WriteNull()
+    }
+    w.WriteKey("turnBuffer"); w.WriteString(m.TurnBuffer)
+    w.WriteKey("plain"); w.WriteString(rendered)
+    w.WriteEndObject()
+    val _ = os.Stdout.WriteString(w.String() + "\n")
+}
+
+// emitSnapshot writes a frame including styled rendering at the
+// detail level the driver requested. Same shape as emitFrame plus a
+// "detail" field and (for "styled") an extra "styled" string with
+// ANSI escapes. Driver scripts get the same model-state fields whether
+// the frame is auto-emitted or explicitly snapshotted.
+func emitSnapshot(m AppModel, term TermDims, detail string) {
+    val v = View(m)
+    val plain = gala_tui.Snapshot(v, term.Cols, term.Rows)
+    val w = json.NewJsonEncoder()
+    w.WriteStartObject()
+    w.WriteKey("type");   w.WriteString("frame")
+    w.WriteKey("tick");   w.WriteInt(m.Tick)
+    w.WriteKey("state");  w.WriteString(stateName(m))
+    w.WriteKey("detail"); w.WriteString(detail)
+    w.WriteKey("term")
+    w.WriteStartObject()
+    w.WriteKey("cols"); w.WriteInt(term.Cols)
+    w.WriteKey("rows"); w.WriteInt(term.Rows)
+    w.WriteEndObject()
+    w.WriteKey("statuses")
+    w.WriteStartObject()
+    m.Statuses.ForEachKV((name, st) => {
+        w.WriteKey(name)
+        w.WriteString(StatusName(st))
+    })
+    w.WriteEndObject()
+    w.WriteKey("lastError")
+    m.LastError match {
+        case Some(e) => w.WriteString(e)
+        case None()  => w.WriteNull()
+    }
+    w.WriteKey("plain");  w.WriteString(plain)
+    if detail == "styled" {
+        val styled = gala_tui.SnapshotStyled(v, term.Cols, term.Rows)
+        w.WriteKey("styled"); w.WriteString(styled)
+    }
+    w.WriteEndObject()
+    val _ = os.Stdout.WriteString(w.String() + "\n")
+}
+
+// emitError writes a {"type":"error","reason":"..."} JSON line. Used
+// when a command can't be parsed so the driver can correlate the
+// failure with its input.
+func emitError(reason string) {
+    val w = json.NewJsonEncoder()
+    w.WriteStartObject()
+    w.WriteKey("type");   w.WriteString("error")
+    w.WriteKey("reason"); w.WriteString(reason)
+    w.WriteEndObject()
+    val _ = os.Stdout.WriteString(w.String() + "\n")
+}
+
+// stateName projects AppState to the matching JSON-friendly string.
+// Mirrors stateTag in update.gala (kept local here to avoid a public
+// export from app/ui).
+func stateName(m AppModel) string = m.State match {
+    case Idle()         => "Idle"
+    case TLThinking()   => "TLThinking"
+    case Delegating(_)  => "Delegating"
+    case QAGate(_)      => "QAGate"
+    case TLReview()     => "TLReview"
+    case TLNudging(_)   => "TLNudging"
+    case Approval(_)    => "Approval"
+}

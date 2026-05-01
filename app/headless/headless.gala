@@ -59,7 +59,7 @@ func RunHeadless(proj Project, tm Team, prompt string) Either[string, HeadlessRe
     // uses the safe variant — a missing onboarding doc shouldn't sink an
     // entire cross-team consult; the failure is logged into Result.Err.
     val (wrapped, onbErr) = onboarding.WrapPromptSafe(proj, tm, lead, prompt)
-    return SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, false) match {
+    return SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
         case Failure(e) => Left[string, HeadlessResult](s"spawn ${lead.Name}: ${e.Error()}")
         case Success(s) => Right[string, HeadlessResult](driveLoop(proj, tm, s, prompt, wrapped, onbErr))
     }
@@ -79,33 +79,30 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
         .Append(session.ConversationLine(Speaker = "you", Text = displayPrompt))
     val name = s.Member.Name
 
-    // Fire the prompt write. We drain its result for completeness but
-    // don't surface it — write outcome is implicit in whether chunks
-    // arrive.
+    // Fire the prompt write — SendFuture writes the prompt and
+    // closes stdin so claude (running with --print) sees the
+    // request as a complete transaction and produces output.
     val _ = SendFuture(s, wirePrompt).Await()
 
     var stopped = false
-    var failure = onbErr.Map[string]((e) => s"onboarding: ${e}")
+    var failure = onbErr.Map((e) => s"onboarding: ${e}")
     for !stopped {
-        val res Try[Msg] = NextChunkFuture(s).Await()
-        res match {
+        NextChunkFuture(s).Await() match {
             case Failure(err) => {
-                failure = Some[string](s"runtime: ${err.Error()}")
+                failure = Some(s"runtime: ${err.Error()}")
                 stopped = true
             }
-            case Success(rt) => rt match {
-                case RtChunkArrived(_, line) => {
-                    convo = convo.Append(session.ConversationLine(Speaker = name, Text = line))
-                }
-                case RtSessionFailed(_, err) => {
-                    val msg = err.Error()
-                    if (msg != "EOF") {
-                        failure = Some[string](s"${name}: ${msg}")
-                    }
-                    stopped = true
-                }
-                case _ => {}
+            case Success(RtChunkArrived(_, line)) => {
+                convo = convo.Append(session.ConversationLine(Speaker = name, Text = line))
             }
+            case Success(RtSessionFailed(_, err)) => {
+                val msg = err.Error()
+                if (msg != "EOF") {
+                    failure = Some(s"${name}: ${msg}")
+                }
+                stopped = true
+            }
+            case _ => {}
         }
     }
 

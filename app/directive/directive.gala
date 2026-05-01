@@ -30,14 +30,35 @@ import (
 // Directive values to decide what to do next.
 // ============================================================================
 
-// Directive is one orchestration action the TL has asked for.
+// Directive is one orchestration action the TL has asked for —
+// or, in the bi-directional protocol additions, a member's self-
+// signal back to the orchestrator.
 sealed type Directive {
-    // Dispatch a task to a member of the local team.
+    // Dispatch a task to a member of the local team. (TL → orchestrator)
     case Dispatch(Target string, Body string)
     // Consult an external team (see DESIGN.md §6.2). ProjectOverride is
     // the optional `project="..."` arg; the registry's default is used
-    // when None.
+    // when None. (TL → orchestrator)
     case Consult(Target string, ProjectOverride Option[string], Body string)
-    // Final summary block — triggers the approval modal.
+    // Final summary block — triggers the approval modal. (TL → orchestrator)
     case Summary(Body string)
+    // Member signals it has finished its dispatched task. Body is what
+    // the member wants the TL to know about the deliverable; orchestrator
+    // routes it into the next TL relay turn so the lead can decide
+    // follow-up. EOF still works as an implicit completion signal —
+    // @done is for explicit deliverable summaries. (Member → orchestrator)
+    //
+    // Named `Finished` rather than `Done` because the bare-`Done` case
+    // name collides with a transpiler-internal `state.Done` resolver
+    // entry in gala 0.39.x — see FIX-014 in the regression doc.
+    case Finished(Body string)
+    // Member needs clarification from the TL before continuing. The
+    // orchestrator pauses the member (StHelpWaiting) and opens a TL
+    // clarification turn with Question as the prompt. (Member → orchestrator)
+    case Help(Question string)
+    // Member is blocked by something outside the orchestrator's control
+    // (missing tool, environment misconfiguration, external service
+    // down). User-visible failure — the TL can't unblock it.
+    // (Member → orchestrator)
+    case Blocked(Reason string)
 }

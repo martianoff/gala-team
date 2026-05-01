@@ -75,11 +75,16 @@ policy:
   pre_merge:                          # blocks `gh pr create` until each succeeds
     - name: lint
       cmd: go
-      args: [vet, ./...]
+      args:
+        - vet
+        - ./...
     - name: test
       cmd: go
-      args: [test, ./...]
+      args:
+        - test
+        - ./...
   post_merge:                         # runs after `gh pr merge` succeeds (best-effort)
     - name: notify
       cmd: scripts/notify-slack.sh
-      args: []
+      # NOTE: flow-style empty sequences (`args: []`) aren't supported
+      # by gala's yaml decoder — omit the key when the list is empty.

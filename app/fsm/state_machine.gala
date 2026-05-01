@@ -36,6 +36,12 @@ sealed type AppState {
     case Delegating(Pending HashSet[string])
     case QAGate(Pending HashSet[string])
     case TLReview
+    // TLNudging is a system-driven TL turn, distinct from TLThinking
+    // (user-driven) and TLReview (post-delegation pre-summary).
+    // Reason is the trigger ("relay", "stuck-${name}", "help-${name}",
+    // "crash-${name}") so the UI can label the spinner appropriately
+    // and analytics can distinguish nudge causes.
+    case TLNudging(Reason string)
     case Approval(SummaryBody string)
 }
 
@@ -43,7 +49,32 @@ sealed type AppState {
 sealed type Event {
     case UserPrompted
     case TLDone(Directives Array[Directive])
-    case MemberDone(MemberName string)
+    // MemberDone now carries the deliverable body so the TL relay turn
+    // can be assembled with each member's report. Body is the @done
+    // directive's payload, or the empty string when EOF arrived without
+    // an explicit @done.
+    case MemberDone(MemberName string, Body string)
+    // MemberHelpRequested fires when a member emits @help(question).
+    // Pauses the member and triggers a TL clarification turn.
+    case MemberHelpRequested(MemberName string, Question string)
+    // MemberBlocked fires when a member emits @blocked(reason). Marks
+    // the member StFailed; the TL can't unblock external-environment
+    // failures so this doesn't auto-trigger a nudge — user surface only.
+    case MemberBlocked(MemberName string, Reason string)
+    // MemberStuck fires when the heartbeat detects a member silent
+    // past the stuck threshold. Triggers a TL nudge turn so the lead
+    // can decide: re-prompt, reassign, or abandon.
+    case MemberStuck(MemberName string)
+    // MemberAbandoned fires when the heartbeat detects a member
+    // silent past the abandon threshold. Member becomes StFailed; the
+    // FSM advances as if MemberDone fired (so the rest of the team
+    // doesn't deadlock waiting on the dead one).
+    case MemberAbandoned(MemberName string)
+    // MemberCrashed fires when the runtime sees a non-EOF SessionFailed.
+    // RetryCount is the number of respawn attempts so far; when this
+    // crosses Policy.MaxRetries the member becomes StFailed and the
+    // FSM advances same as MemberAbandoned.
+    case MemberCrashed(MemberName string, Err string, RetryCount int)
     case QADone
     case ApprovalAccepted
     case ApprovalRejected
@@ -69,6 +100,7 @@ func Transition(state AppState, event Event, ctx TransitionContext) AppState = s
     case Delegating(pending)   => onDelegating(pending, event, ctx)
     case QAGate(pending)       => onQAGate(pending, event, ctx)
     case TLReview()            => onTLReview(event, ctx)
+    case TLNudging(reason)     => onTLNudging(reason, event, ctx)
     case Approval(_)           => onApproval(state, event)
 }
 
@@ -92,14 +124,31 @@ func onTLReview(event Event, ctx TransitionContext) AppState = event match {
 }
 
 func onDelegating(pending HashSet[string], event Event, ctx TransitionContext) AppState = event match {
-    case MemberDone(name) => afterMemberDone(pending, name, ctx, true)
-    case _                => Delegating(Pending = pending)
+    case MemberDone(name, _)         => afterMemberDone(pending, name, ctx, true)
+    case MemberAbandoned(name)       => afterMemberDone(pending, name, ctx, true)
+    case MemberCrashed(name, _, _)   => afterMemberDone(pending, name, ctx, true)
+    case MemberBlocked(name, _)      => afterMemberDone(pending, name, ctx, true)
+    case MemberStuck(_)              => TLNudging(Reason = "stuck")
+    case MemberHelpRequested(_, _)   => TLNudging(Reason = "help")
+    case _                           => Delegating(Pending = pending)
 }
 
 func onQAGate(pending HashSet[string], event Event, ctx TransitionContext) AppState = event match {
-    case MemberDone(name) => afterMemberDone(pending, name, ctx, false)
-    case QADone()         => TLReview()
-    case _                => QAGate(Pending = pending)
+    case MemberDone(name, _)         => afterMemberDone(pending, name, ctx, false)
+    case MemberAbandoned(name)       => afterMemberDone(pending, name, ctx, false)
+    case MemberCrashed(name, _, _)   => afterMemberDone(pending, name, ctx, false)
+    case MemberBlocked(name, _)      => afterMemberDone(pending, name, ctx, false)
+    case QADone()                    => TLReview()
+    case _                           => QAGate(Pending = pending)
+}
+
+// onTLNudging routes nudge-turn TL responses the same way as TLThinking
+// / TLReview. After the lead's TLDone, the orchestrator re-enters the
+// pre-nudge state via afterTLDone (which decides Delegating / Approval
+// / Idle based on what directives the TL emitted).
+func onTLNudging(reason string, event Event, ctx TransitionContext) AppState = event match {
+    case TLDone(dirs) => afterTLDone(dirs, ctx)
+    case _            => TLNudging(Reason = reason)
 }
 
 func onApproval(state AppState, event Event) AppState = event match {

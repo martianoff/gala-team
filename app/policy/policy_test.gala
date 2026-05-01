@@ -149,6 +149,7 @@ func TestPolicy_RoundTripsPreAndPostMerge(t T) T {
         PreMerge      = pre,
         PostMerge     = post,
         MergeRule     = RebaseMerge(),
+        Heartbeat     = DefaultHeartbeat(),
     )
     val t1 = Eq(t,  p.PreMerge.Size(),  1)
     val t2 = Eq(t1, p.PostMerge.Size(), 1)

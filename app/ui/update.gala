@@ -483,8 +483,18 @@ func onEraseSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if !m.EraseSessionPending {
         return (m.Copy(EraseSessionPending = true), NoCmd[AppMsg]())
     }
+    // Bump PendingClosures for every live session BEFORE we kill +
+    // clear Sessions. Killed subprocesses still emit one final
+    // ChunkArrived / SessionFailed event from their queued read
+    // pumps; without the closure counter those events sneak past
+    // and re-populate the just-cleared conversation. Same shape as
+    // closeLiveSession (used by onSubmit's respawn path).
+    val withPending = m.Sessions.FoldLeftKV(m.PendingClosures, (acc, name, _sess) => {
+        val curr = acc.Get(name).GetOrElse(0)
+        return acc.Put(name, curr + 1)
+    })
     val _ = CloseAllSessions(m.Sessions)
-    val cleared = clearSessionState(m)
+    val cleared = clearSessionState(m.Copy(PendingClosures = withPending))
     val saved = persistConversation(cleared, cleared.Conversation)
     return (saved, NoCmd[AppMsg]())
 }
@@ -1247,20 +1257,25 @@ func buildHelpNudgePrompt(name string, question string) string =
 // workaround — multi-arg sealed cases need a typed helper).
 func mkHelpWaitingStatus(question string) Status = StHelpWaiting(question)
 
-// onMemberBlocked surfaces the external-environment failure to the
-// user via LastError + StFailed status. Advances the FSM as if the
-// member completed (so the rest of the team doesn't deadlock).
+// onMemberBlocked surfaces the external-environment failure as a
+// chat entry the user can scroll, plus a short toast for transient
+// awareness. Status flips to StFailed; FSM advances as if the
+// member completed so the rest of the team doesn't deadlock.
+//
+// We deliberately don't set LastError here — the footer's
+// LastError-takes-precedence path would render the multi-paragraph
+// @blocked body over the keybind hints and the user couldn't see
+// the hotkeys. The full reason already lives in the conversation
+// (members' @blocked block streams through onChunk just like any
+// other text), and the StFailed sidebar badge keeps the situation
+// glanceable.
 func onMemberBlocked(m AppModel, name string, reason string) Tuple[AppModel, Cmd[AppMsg]] {
     val nextState = Transition(m.State, MemberBlocked(MemberName = name, Reason = reason), transitionContext(m))
-    // Truncate the toast so a multi-paragraph @blocked body doesn't
-    // wrap into the footer's row and hide the keybind hint. Full
-    // reason still lives in LastError + the conversation transcript.
-    val toast = m.Toasts.PushError(s"${name} blocked: ${truncateForToast(reason)}", time_utils.Now(), time_utils.Seconds(int64(8)))
-    val failedStatus Status = StFailed(Reason = reason)
+    val toast = m.Toasts.PushError(s"${name} blocked", time_utils.Now(), time_utils.Seconds(int64(5)))
+    val failedStatus Status = StFailed(Reason = truncateForToast(reason))
     val m1 = m.Copy(
-        State     = nextState,
-        Toasts    = toast,
-        LastError = Some(s"${name} blocked: ${reason}"),
+        State  = nextState,
+        Toasts = toast,
     )
     return (setStatus(m1, name, failedStatus), NoCmd[AppMsg]())
 }

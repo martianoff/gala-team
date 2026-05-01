@@ -74,6 +74,39 @@ jobs:
           disk-cache: ${{ github.workflow }}-${{ matrix.os }}-${{ matrix.arch }}
           repository-cache: true
 
+      - name: Stamp version (Unix)
+        if: matrix.os != 'windows'
+        working-directory: gala_team
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # Rewrite the literal in app/version/version.gala so the
+          # binary's header reads "Gala Team v<release tag>" instead
+          # of the dev placeholder "0.0.1". sed -i differs between
+          # GNU and BSD; the empty-string -i argument is the
+          # portable form.
+          python3 -c "
+          import pathlib, re, os
+          p = pathlib.Path('app/version/version.gala')
+          tag = os.environ.get('RELEASE_TAG', 'dev').lstrip('v')
+          p.write_text(re.sub(r'Version\\(\\) string = \"[^\"]+\"',
+                              f'Version() string = \"{tag}\"',
+                              p.read_text()))
+          "
+
+      - name: Stamp version (Windows)
+        if: matrix.os == 'windows'
+        working-directory: gala_team
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $tag = $env:RELEASE_TAG -replace '^v',''
+          if (-not $tag) { $tag = 'dev' }
+          $path = 'app/version/version.gala'
+          (Get-Content $path) -replace 'Version\(\) string = "[^"]+"', "Version() string = `"$tag`"" | Set-Content $path
+
       - name: Build binary
         working-directory: gala_team
         shell: bash

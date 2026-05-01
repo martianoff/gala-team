@@ -111,7 +111,10 @@ jobs:
         working-directory: gala_team
         shell: bash
         run: |
-          bazel build //cmd:gala_team --platforms=${{ matrix.platform }}
+          bazel build //cmd:gala_team \
+            --platforms=${{ matrix.platform }} \
+            --override_module=gala=../gala_simple \
+            --override_module=gala_tui=../gala_tui
 
       - name: Prepare binary (Unix)
         if: matrix.os != 'windows'

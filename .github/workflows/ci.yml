@@ -44,8 +44,19 @@ jobs:
 
       - name: Build
         working-directory: gala_team
-        run: bazel build //cmd:gala_team //app/...
+        # Override the dev-only local_path_override paths in
+        # MODULE.bazel to the sibling clones we just checked out.
+        # Locally these point at gala_simple's worktree
+        # (.claude/worktrees/release-0.41.0); in CI we clone the
+        # tag straight into gala_simple/.
+        run: |
+          bazel build //cmd:gala_team //app/... \
+            --override_module=gala=../gala_simple \
+            --override_module=gala_tui=../gala_tui
 
       - name: Test
         working-directory: gala_team
-        run: bazel test //app/...
+        run: |
+          bazel test //app/... \
+            --override_module=gala=../gala_simple \
+            --override_module=gala_tui=../gala_tui

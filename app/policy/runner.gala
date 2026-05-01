@@ -68,7 +68,7 @@ func RunHooksFuture(proj Project, hooks Array[Hook]) concurrent.Future[Try[bool]
 // HookResult on success (the spawn ran to completion; the exit code
 // might still be non-zero), Failure if the spawn itself failed
 // (executable not found, etc.).
-func runOne(proj Project, hook Hook) Try[HookResult] = Try[HookResult](() => {
+func runOne(proj Project, hook Hook) Try[HookResult] = Try(() => {
     val opts = subprocess.NewSpawnOpts(
         hook.Cmd,
         hook.Args.ToGoSlice(),

@@ -15,21 +15,20 @@ Written in [GALA](https://github.com/martianoff/gala) with the
 ## What it does
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│ ⛩  gala_team    state: TL thinking    tick: 47              │
-│   Skunkworks  ·  Default product team                       │
-├──── Team ────────┬──── Conversation with Team Lead ────────┤
-│ ▼ Lead           │ you: ship the new /metrics endpoint      │
-│   ⠋ Iris         │ Iris: dispatching to Felix…              │
-│ ▼ Engineering    │ Felix: implementing handler + tests…     │
-│   ⠼ Felix        │ Theo: reviewing for missing edge cases…  │
-│ ▼ QA             │ Iris: ▶ Ready to ship: feat(api): add …  │
-│   ⠦ Theo         │       Ctrl+A approve & open PR · Ctrl+R │
-├──────────────────┴──────────────────────────────────────────┤
-│ Type to Iris…                                               │
-└─────────────────────────────────────────────────────────────┘
-  Enter send · Ctrl+A approve · Ctrl+R reject ·
-  Tab sidebar · Ctrl+T consults · Ctrl+H history · Ctrl+Q quit
+┌─────────────────────────────────────────────────────────────────────┐
+│  🍎  Gala Team v0.0.1 | gala_simple | Skunkworks                    │
+│      state: TL thinking · 12.3k in / 4.5k out · cache 87.0k · $0.12 │
+├──── Team ────────┬──── Conversation with Team Lead ─────────────────┤
+│ ▼ Lead           │ you: ship the new /metrics endpoint              │
+│   ⠋ Iris  0:14   │ Iris: dispatching to Felix…                      │
+│ ▼ Engineering    │ Iris → Felix: implement handler + tests          │
+│   ⠼ Felix 0:08   │ Felix: implementing handler + tests…             │
+│ ▼ QA             │ Theo: reviewing for missing edge cases…          │
+│   ⠦ Theo  0:03   │ Iris: Summary: Ready to ship: feat(api) …        │
+├──────────────────┴──────────────────────────────────────────────────┤
+│ Type to Iris…                                                       │
+└─────────────────────────────────────────────────────────────────────┘
+  Ctrl+Q · Ctrl+P palette · Enter send · Ctrl+A approve · Ctrl+R reject
 ```
 
 A user prompt enters the **Team Lead**'s conversation. The Team Lead can
@@ -262,17 +261,24 @@ the in-project entry wins.
 
 | Key | Effect |
 |-----|--------|
-| `Enter` | Send composer prompt to the lead. In history mode: open the cursored archive. |
+| `Enter` | Send composer prompt to the lead. In history mode: open the cursored archive. When sidebar-focused on a member row: open the member-detail modal. |
 | `Backspace` | Delete last rune from composer. |
 | `Tab` / `Ctrl+L` | Toggle focus between composer and the team sidebar. |
-| `↑` / `↓` | When sidebar-focused: move row cursor. In history mode: history cursor. |
+| `↑` / `↓` | When sidebar-focused: move row cursor. In history mode: history cursor. Inside the command palette: navigate matches. |
+| `PgUp` / `PgDn` | Scroll the conversation pane. |
+| `End` | Re-stick the conversation pane to the bottom (latest line). |
 | `Space` | When sidebar-focused, on a group header: fold / unfold the role group. |
+| `Ctrl+P` | Open the command palette (fuzzy-search actions: erase session, yank, history, member detail, quit). |
+| `Ctrl+V` | Paste from the system clipboard into the composer. |
+| `Ctrl+Y` | Copy (yank) the entire conversation to the system clipboard. |
 | `Ctrl+T` | Toggle the consult viewer modal (live tail of every active consult). |
 | `Ctrl+A` | Approve the lead's `@summary` → run pre-merge hooks → `gh pr create`. |
 | `Ctrl+R` | Reject the summary → back to live conversation. |
 | `Ctrl+M` | After `PR created` lands: `gh pr merge` with the configured rule. |
+| `Ctrl+N` | Erase current session (two-press confirmation). |
 | `Ctrl+H` | Toggle history browser. |
-| `Esc` | Cancels in priority order: quit confirmation, recovery banner, sidebar focus, history detail. |
+| `F2` / `F3` / `F4` | Switch the layout: Focus mode (no sidebar) / Grid (member cards) / Pipeline (full-screen org chart). Same key again returns to the default split. |
+| `Esc` | Cancels in priority order: quit confirmation, recovery banner, member-detail modal, palette, sidebar focus, history detail. |
 | `Ctrl+Q` | Quit gracefully (twice to confirm). Closes every live `claude` subprocess first. |
 | `Ctrl+C` | Force-kill backstop owned by gala-tui's runtime; bypasses the quit confirmation. |
 

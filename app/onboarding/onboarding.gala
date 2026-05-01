@@ -2,6 +2,7 @@ package onboarding
 
 import (
     "os"
+    "strings"
     "path/filepath"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -99,19 +100,121 @@ func WrapPrompt(proj Project, team Team, member Member, prompt string) Try[strin
     )
 }
 
-// roleSection renders the persona block for `member` on `team`. We
-// always emit "# Your role" so the model knows who it's playing,
-// even when personality / extra are blank. The role line uses the
-// canonical YAML role name ("team_lead" / "engineer" / "qa") so
-// the model can branch on it without us renaming our taxonomy
-// here.
+// roleSection renders the persona + orchestration block for `member`
+// on `team`. The header tells the model who it's playing; the roster
+// + protocol sections teach it how to operate inside the gala_team
+// orchestrator (delegate via @dispatch, finish via @summary, etc.).
+//
+// The TL gets a different protocol section than other members because
+// the directive vocabularies are different:
+//   - TL: @dispatch / @consult / @summary  (outbound delegation)
+//   - others: @finished / @help / @blocked (reporting back to TL)
+//
+// Without this teaching, the model has no idea the gala_team protocol
+// exists — it just answers the prompt as a generic claude session and
+// the dispatch / pipeline machinery never trips.
 func roleSection(team Team, member Member) string {
     val header = s"# Your role\n\nYou are ${member.Name}, the ${RoleName(member.Role)} on team ${team.Name}."
     val personality = if (member.Personality == "") ""
                       else                          s"\n\n## Personality\n\n${member.Personality}"
     val extra = if (member.Extra == "") ""
                 else                    s"\n\n## Additional instructions\n\n${member.Extra}"
-    return s"${header}${personality}${extra}"
+    val isTL = SameRole(member.Role, TeamLead())
+    val roster = if (isTL) s"\n\n${teamRosterSection(team, member)}" else ""
+    val protocol = s"\n\n${protocolSection(isTL)}"
+    return s"${header}${personality}${extra}${roster}${protocol}"
+}
+
+// teamRosterSection lists every other member with their role + one-
+// line personality so the TL can pick who to delegate to. The TL is
+// excluded from the list (they don't dispatch to themselves) and a
+// truncated personality (first line only) keeps the prompt compact.
+func teamRosterSection(team Team, lead Member) string {
+    val others = team.Members.Filter((mem) => mem.Name != lead.Name)
+    if others.IsEmpty() {
+        return "# Your team\n\n(You're a solo team — no other members. Answer the user directly.)"
+    }
+    val rows = others.Map((mem) => {
+        val role = RoleName(mem.Role)
+        val tag = if (mem.Personality == "") ""
+                  else                       s" — ${firstLine(mem.Personality)}"
+        return s"- **${mem.Name}** (${role})${tag}"
+    })
+    return s"# Your team\n\nThese are the members you can delegate to:\n\n${rows.MkString("\n")}"
+}
+
+// firstLine returns the first non-empty line of `s`, trimmed. Used
+// to compact a multi-line personality blurb into a single roster
+// row without dropping the most informative line.
+func firstLine(s string) string {
+    val parts = strings.Split(s, "\n")
+    var i = 0
+    val n = len(parts)
+    for i < n {
+        val ln = strings.TrimSpace(parts[i])
+        if ln != "" { return ln }
+        i = i + 1
+    }
+    return ""
+}
+
+// protocolSection teaches the directive vocabulary the orchestrator
+// listens for. Two flavours: the TL outbound directives, or the
+// member inbound-reporting directives. Both end blocks with `@end`
+// because the parser is line-based and the closing tag is what makes
+// streaming chunks safe to parse incrementally.
+func protocolSection(isTL bool) string {
+    if isTL {
+        return "# How to delegate (orchestration protocol)\n\n" +
+            "You are operating inside an orchestrator that watches your output for special directives. Use these to coordinate the team:\n\n" +
+            "- `@dispatch(<MemberName>) ... @end` — assign the body text to that member as their next task. The orchestrator will spawn them with the body as their prompt and feed their @finished response back to you. You can dispatch multiple members in the same turn (parallel work).\n" +
+            "- `@consult(<TeamKey>) ... @end` — ask another team for input. Used cross-team. Less common.\n" +
+            "- `@summary ... @end` — finalize the turn for the user. After @summary, the user is asked to approve and the turn ends. Use @summary when the work is done OR when you cannot make progress.\n\n" +
+            "Rules:\n" +
+            "- Each directive opens with the tag on its own line and closes with `@end` on its own line.\n" +
+            "- Plain prose between directives is rendered as your message to the user.\n" +
+            "- If you simply want to chat (no orchestration), reply with prose only — no directives needed.\n" +
+            "- Don't fabricate member names; only dispatch to members listed in '# Your team' above.\n\n" +
+            "Example dispatch:\n\n" +
+            "```\n" +
+            "I'll split this two ways.\n\n" +
+            "@dispatch(Felix)\n" +
+            "Implement the parser per RFC-12 §3. Acceptance: round-trip tests pass.\n" +
+            "@end\n\n" +
+            "@dispatch(Mira)\n" +
+            "Implement the validator. Acceptance: rejects malformed input with a useful error.\n" +
+            "@end\n" +
+            "```\n\n" +
+            "Example summary:\n\n" +
+            "```\n" +
+            "@summary\n" +
+            "Both engineers reported back. PR is ready for review at <url>.\n" +
+            "@end\n" +
+            "```\n\n" +
+            "## Cross-team consult etiquette\n\n" +
+            "If the **first** prompt of this turn arrived from another team via `@consult`, the orchestrator is bridging two teams. The **body of your `@summary` block** is what gets sent back to the consulting team's TL — not your full transcript. So:\n\n" +
+            "- Treat the prompt as a question from a peer TL, not the user.\n" +
+            "- Do whatever delegation / investigation the question needs.\n" +
+            "- When done, reply with a single `@summary ... @end` block whose body is the answer (think \"executive summary\" — direct, no preamble). That body is what the upstream TL reads.\n" +
+            "- `@dispatch` inside a consult is fine — the orchestrator routes member output back to you the same way as a normal turn.\n" +
+            "- Do not `@consult` a third team from inside a consult unless absolutely necessary; recursion gets confusing for the user."
+    }
+    return "# How to report back (orchestration protocol)\n\n" +
+        "You are working under a Team Lead inside an orchestrator. When you finish or get stuck, use these directives so the TL knows what happened:\n\n" +
+        "- `@finished ... @end` — your task is complete. Body is the deliverable / summary the TL will read.\n" +
+        "- `@help ... @end` — you need clarification. Body is the question. The TL will reply with a follow-up dispatch.\n" +
+        "- `@blocked ... @end` — you cannot proceed (missing tool, ambiguous spec, conflicting requirement). Body is the reason.\n\n" +
+        "Rules:\n" +
+        "- Open the tag on its own line, close with `@end` on its own line.\n" +
+        "- Send exactly one of these per turn — they're terminal.\n" +
+        "- Free-form prose before the tag is fine; the TL sees your full output.\n\n" +
+        "Example:\n\n" +
+        "```\n" +
+        "I implemented the parser using a hand-written recursive-descent walker.\n\n" +
+        "@finished\n" +
+        "Done. parser.gala (124 lines), 8 round-trip tests green. PR-ready.\n" +
+        "@end\n" +
+        "```"
 }
 
 // SuppressLoadFailure is the forgiving variant for the consult /

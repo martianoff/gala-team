@@ -72,15 +72,25 @@ func SessionPath(repoDir string) string =
 // subprocess is alive at this save. On the next launch, recovery
 // uses this list to spawn those members with `--continue` so the
 // agents pick up where they left off.
+// snapshotCodec returns a Codec[Snapshot] each call rather than as a
+// package-level val — gala wraps top-level vals in Immutable[T] which
+// shadows the codec's `.Decode` / `.Encode` methods at the call site.
+// Constructing per call is cheap (the codec is just metadata).
+func snapshotCodec() json.JsonEncoder[Snapshot] = json.Codec[Snapshot](json.SnakeCase())
+
 func Save(
     repoDir string,
     projectName string,
     conversation Array[ConversationLine],
     activeMembers Array[string],
 ) Try[bool] = Try[bool](() => {
-    val w = json.NewJsonEncoder()
-    encodeSnapshot(w, projectName, time.Now().UnixNano(), conversation, activeMembers)
-    val encoded = w.String()
+    val snap = Snapshot(
+        ProjectName   = projectName,
+        SavedAt       = time.Now().UnixNano(),
+        Conversation  = conversation,
+        ActiveMembers = activeMembers,
+    )
+    val encoded = snapshotCodec().Encode(snap).Get()
     val path    = SessionPath(repoDir)
     val parent  = filepath.Dir(path)
     val mkErr   = os.MkdirAll(parent, os.FileMode(0755))
@@ -107,112 +117,16 @@ func LoadOrError(repoDir string) Either[string, Snapshot] {
     val readResult = Try(() => os.ReadFile(path))
     return readResult match {
         case Failure(err) => Left[string, Snapshot](s"read: ${err.Error()}")
-        case Success(bytes) => Try[Snapshot](() => decodeSnapshot(json.NewJsonDecoder(string(bytes)))) match {
+        case Success(bytes) => snapshotCodec().Decode(string(bytes)) match {
             case Success(snap) => Right[string, Snapshot](snap)
             case Failure(err)  => Left[string, Snapshot](s"decode: ${err.Error()}")
         }
     }
 }
 
-// ----------------------------------------------------------------------------
-// Manual encode/decode
-// ----------------------------------------------------------------------------
-
-func encodeSnapshot(
-    w *json.JsonEncoderImpl,
-    projectName string,
-    savedAt int64,
-    convo Array[ConversationLine],
-    activeMembers Array[string],
-) {
-    w.WriteStartObject()
-    w.WriteKey("project_name"); w.WriteString(projectName)
-    w.WriteKey("saved_at");     w.WriteInt64(savedAt)
-    w.WriteKey("conversation")
-    w.WriteStartArray()
-    convo.ForEach((cl) => {
-        w.WriteStartObject()
-        w.WriteKey("speaker"); w.WriteString(cl.Speaker)
-        w.WriteKey("text");    w.WriteString(cl.Text)
-        w.WriteEndObject()
-    })
-    w.WriteEndArray()
-    w.WriteKey("active_members")
-    w.WriteStartArray()
-    activeMembers.ForEach((name) => w.WriteString(name))
-    w.WriteEndArray()
-    w.WriteEndObject()
-}
-
-func decodeSnapshot(d *json.JsonDecoderImpl) Snapshot {
-    d.StartObject()
-    var name = ""
-    var savedAt = int64(0)
-    var convo = EmptyArray[ConversationLine]()
-    var members = EmptyArray[string]()
-    for d.HasMoreFields() {
-        val key = d.ReadKey()
-        if key == "project_name" {
-            name = d.ReadString()
-        } else if key == "saved_at" {
-            savedAt = d.ReadInt64()
-        } else if key == "conversation" {
-            convo = decodeConversation(d)
-        } else if key == "active_members" {
-            members = decodeStringArray(d)
-        } else {
-            d.Skip()
-        }
-    }
-    d.EndObject()
-    return Snapshot(
-        ProjectName   = name,
-        SavedAt       = savedAt,
-        Conversation  = convo,
-        ActiveMembers = members,
-    )
-}
-
-// decodeStringArray pull-decodes a JSON array of strings. Used for
-// the active_members list; older snapshot files written before the
-// field was added simply have no `active_members` key, so the field
-// defaults to empty (no members to recover).
-func decodeStringArray(d *json.JsonDecoderImpl) Array[string] {
-    var out = EmptyArray[string]()
-    d.StartArray()
-    for d.HasMoreElements() {
-        out = out.Append(d.ReadString())
-    }
-    d.EndArray()
-    return out
-}
-
-// Loop-bound Append intentional: stateful pull-stream from the JSON
-// decoder, no declarative shape fits.
-func decodeConversation(d *json.JsonDecoderImpl) Array[ConversationLine] {
-    var out = EmptyArray[ConversationLine]()
-    d.StartArray()
-    for d.HasMoreElements() {
-        out = out.Append(decodeLine(d))
-    }
-    d.EndArray()
-    return out
-}
-
-func decodeLine(d *json.JsonDecoderImpl) ConversationLine {
-    d.StartObject()
-    var speaker = ""
-    var text = ""
-    for d.HasMoreFields() {
-        val key = d.ReadKey()
-        if key == "speaker" {
-            speaker = d.ReadString()
-        } else if key == "text" {
-            text = d.ReadString()
-        } else {
-            d.Skip()
-        }
-    }
-    d.EndObject()
-    return ConversationLine(Speaker = speaker, Text = text)
-}
+// All snapshot encode/decode now flows through `snapshotCodec` above.
+// The hand-rolled walkers (encodeSnapshot, decodeSnapshot,
+// decodeConversation, decodeLine, decodeStringArray) lived here
+// pre-0.41.0 because Codec[T] couldn't decode `Conversation
+// Array[ConversationLine]`. PR #314 closed that gap, so we no longer
+// need them.

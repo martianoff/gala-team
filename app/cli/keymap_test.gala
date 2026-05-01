@@ -91,9 +91,11 @@ func TestKeyToAppMsg_ArrowRight_NoOp(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(ArrowRight())), "NoOp")
 
 func TestKeyToAppMsg_Home_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Home())), "NoOp")
-func TestKeyToAppMsg_End_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(End())), "NoOp")
-func TestKeyToAppMsg_PageUp_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(PageUp())), "NoOp")
-func TestKeyToAppMsg_PageDown_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(PageDown())), "NoOp")
+// PgUp/PgDn/End now drive the conversation scroll (sticky-bottom
+// `ConversationLog`), not the no-op fallthrough they used to.
+func TestKeyToAppMsg_End_StickToBottom(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(End())), "KeyConvoStickToBottom")
+func TestKeyToAppMsg_PageUp_ConvoPageUp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(PageUp())), "KeyConvoPageUp")
+func TestKeyToAppMsg_PageDown_ConvoPageDown(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(PageDown())), "KeyConvoPageDown")
 func TestKeyToAppMsg_Delete_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Delete())), "NoOp")
 func TestKeyToAppMsg_Insert_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Insert())), "NoOp")
 func TestKeyToAppMsg_Unknown_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Unknown())), "NoOp")
@@ -180,6 +182,21 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case SidebarRowClicked(_)        => "SidebarRowClicked"
     case KeyToggleFocus()            => "KeyToggleFocus"
     case KeySidebarToggleGroup()     => "KeySidebarToggleGroup"
+    case KeyEraseSession()           => "KeyEraseSession"
+    case KeyYankConversation()       => "KeyYankConversation"
+    case KeyPasteClipboard()         => "KeyPasteClipboard"
+    case KeyConvoScrollUp()          => "KeyConvoScrollUp"
+    case KeyConvoScrollDown()        => "KeyConvoScrollDown"
+    case KeyConvoPageUp()            => "KeyConvoPageUp"
+    case KeyConvoPageDown()          => "KeyConvoPageDown"
+    case KeyConvoStickToBottom()     => "KeyConvoStickToBottom"
+    case KeyOpenMemberDetail(_)      => "KeyOpenMemberDetail"
+    case KeyCloseMemberDetail()      => "KeyCloseMemberDetail"
+    case KeyTogglePalette()          => "KeyTogglePalette"
+    case KeyPaletteEvent(_)          => "KeyPaletteEvent"
+    case KeySetViewMode(_)           => "KeySetViewMode"
+    case StderrArrived(_, _)         => "StderrArrived"
+    case StderrEnded(_)              => "StderrEnded"
     case TickMsg()                   => "TickMsg"
     case QuitMsg()                   => "QuitMsg"
     case NoOp()                      => "NoOp"

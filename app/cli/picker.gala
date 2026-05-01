@@ -30,7 +30,7 @@ import (
 //   with the list of available keys so the caller can render a
 //   user-facing diagnostic. Tests assert on the failure shape;
 //   cmd/main.gala lifts the failure into a clean stderr + exit.
-func PickMainTeam(cfg TeamConfig, key string) Try[TeamConfig] = Try[TeamConfig](() => {
+func PickMainTeam(cfg TeamConfig, key string) Try[TeamConfig] = Try(() => {
     if key == "" { return cfg }
     return FindTeamByKey(cfg.Teams, key) match {
         case Some(tm) => cfg.Copy(Team = tm)

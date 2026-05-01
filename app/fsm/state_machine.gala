@@ -91,17 +91,41 @@ struct TransitionContext(
 // Total: every (state, event) pair has a defined result.  Unsupported
 // pairs (e.g. ApprovalAccepted while Idle) return the input state unchanged.
 //
+// UserPrompted is a top-level escape hatch: in any non-approval state,
+// receiving a fresh user prompt restarts the turn (→ TLThinking). This
+// rescues the user from any state the orchestrator landed in but
+// can't drain on its own — e.g. QAGate(Pending = {Theo}) when no QA
+// session was actually spawned, or TLReview after a directive parse
+// hiccup. Approval is the one exception: the user must Ctrl+A / Ctrl+R
+// to leave it, otherwise a stray Enter would silently discard a
+// pending PR commit.
+//
 // Nested match (state → event) instead of a tuple-pattern match: GALA's
 // tuple destructuring treats identifiers as bindings even when they name
 // sealed-type constructors.
-func Transition(state AppState, event Event, ctx TransitionContext) AppState = state match {
-    case Idle()                => onIdle(event)
-    case TLThinking()          => onTLThinking(event, ctx)
-    case Delegating(pending)   => onDelegating(pending, event, ctx)
-    case QAGate(pending)       => onQAGate(pending, event, ctx)
-    case TLReview()            => onTLReview(event, ctx)
-    case TLNudging(reason)     => onTLNudging(reason, event, ctx)
-    case Approval(_)           => onApproval(state, event)
+func Transition(state AppState, event Event, ctx TransitionContext) AppState {
+    if isUserPromptedEvent(event) && !isApprovalState(state) {
+        return TLThinking()
+    }
+    return state match {
+        case Idle()                => onIdle(event)
+        case TLThinking()          => onTLThinking(event, ctx)
+        case Delegating(pending)   => onDelegating(pending, event, ctx)
+        case QAGate(pending)       => onQAGate(pending, event, ctx)
+        case TLReview()            => onTLReview(event, ctx)
+        case TLNudging(reason)     => onTLNudging(reason, event, ctx)
+        case Approval(_)           => onApproval(state, event)
+    }
+}
+
+func isUserPromptedEvent(e Event) bool = e match {
+    case UserPrompted() => true
+    case _              => false
+}
+
+func isApprovalState(s AppState) bool = s match {
+    case Approval(_) => true
+    case _           => false
 }
 
 // ----------------------------------------------------------------------------

@@ -197,6 +197,20 @@ func SidebarGroupAt(team Team, collapsed Array[string], idx int) Option[string] 
     }
 }
 
+// SidebarMemberAt returns the member name at row `idx` if that row
+// is a member row; None when `idx` lands on a group header or
+// out-of-bounds. Used by the member-detail modal trigger to know
+// which member's transcript to surface when the user presses Enter
+// over a sidebar member row.
+func SidebarMemberAt(team Team, collapsed Array[string], idx int) Option[string] {
+    val rows = sidebarRows(team, EmptyHashMap[string, Status](), collapsed)
+    if idx < 0 || idx >= rows.Size() { return None[string]() }
+    return rows.Get(idx) match {
+        case GroupHeader(_, _)    => None[string]()
+        case MemberRow(mem, _)    => Some(mem.Name)
+    }
+}
+
 // sidebarRows assembles the flat row list for the three role
 // groups in canonical order: Lead → Engineering → QA. A
 // collapsed group's member rows are omitted (header still

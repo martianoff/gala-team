@@ -41,10 +41,16 @@ func NoOverrides() Overrides = Overrides(
 
 // Resolve is the entry point. Returns Try[Project] so failures (missing
 // dir / not a git repo) surface with useful messages.
-func Resolve(dir string, overrides Overrides) Try[Project] = Try[Project](() => {
+func Resolve(dir string, overrides Overrides) Try[Project] = Try(() => {
     val abs = absoluteOrPanic(dir)
     requireGitRepo(abs)
-    val name = overrides.Name.GetOrElse(filepath.Base(abs))
+    // Default to a generic "Default Project" rather than the directory
+    // basename. The basename of the working tree (e.g. `gala_simple`,
+    // `next-app`, `infra-tools`) bleeds engineering-internal naming
+    // into a header line that's visible to the end user. A neutral
+    // default keeps the brand bar uncluttered until the user opts
+    // into a real name via `--project-name`.
+    val name = overrides.Name.GetOrElse("Default Project")
     val github = chooseGithub(overrides.Github, abs)
     val branch = chooseDefaultBranch(overrides.DefaultBranch, abs)
     return Project(

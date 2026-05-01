@@ -11,7 +11,7 @@ on:
 # tracks the latest release; when CI is red after a workaround removal,
 # the gating release is in flight.
 env:
-  GALA_VERSION: "0.39.2"
+  GALA_VERSION: "0.41.0"
 
 jobs:
   test:

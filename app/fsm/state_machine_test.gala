@@ -172,14 +172,14 @@ func TestTLThinking_IgnoresQADone(t T) T {
     return Eq(t, stateName(s), "TLThinking")
 }
 
-func TestDelegating_IgnoresUserPrompted(t T) T {
+// UserPrompted is a top-level escape hatch in any non-Approval state
+// (lets the user break out of QAGate when no QA was actually
+// dispatched, or out of Delegating when a member is hung). The FSM
+// resets to TLThinking on every fresh user prompt.
+func TestDelegating_UserPromptedResetsToTLThinking(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
     val s = Transition(Delegating(Pending = pending), UserPrompted(), ctxWithQA(true))
-    val t1 = Eq(t, stateName(s), "Delegating")
-    return s match {
-        case Delegating(rest) => Eq(t1, rest.Size(), 2)  // pending preserved
-        case _                => IsTrue(t1, false)
-    }
+    return Eq(t, stateName(s), "TLThinking")
 }
 
 func TestDelegating_IgnoresQADone(t T) T {
@@ -213,10 +213,13 @@ func TestQAGate_LastQADone_GoesToTLReview(t T) T {
     return Eq(t, stateName(s), "TLReview")
 }
 
-func TestQAGate_IgnoresUserPrompted(t T) T {
+// QAGate is one of the states the UserPrompted escape hatch covers
+// — see TestDelegating_UserPromptedResetsToTLThinking for the
+// rationale.
+func TestQAGate_UserPromptedResetsToTLThinking(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo")
     val s = Transition(QAGate(Pending = pending), UserPrompted(), ctxWithQA(true))
-    return Eq(t, stateName(s), "QAGate")
+    return Eq(t, stateName(s), "TLThinking")
 }
 
 func TestApproval_IgnoresUserPrompted(t T) T {

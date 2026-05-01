@@ -55,65 +55,50 @@ func EmptyRegistry() Registry = Registry(Entries = EmptyArray[ConsultEntry]())
 func Get(r Registry, name string) Option[ConsultEntry] =
     r.Entries.Find((e) => e.Name == name)
 
+// Wire struct for the codec — field is `Team` so SnakeCase maps it
+// to YAML key `team`, then we copy into ConsultEntry's TeamYaml
+// field. (Codec[T].Rename only applies to fields of T itself, not
+// nested struct fields, so a per-element wire layer is the way.)
+struct WireConsultEntry(
+    Name string,
+    Repo string,
+    Team string,
+)
+
+struct WireRegistry(
+    Consults Array[WireConsultEntry],
+)
+
+// registryCodec wraps gala's typed YAML codec for the wire shape.
+// SnakeCase + the wire field names align with the on-disk schema
+// (`consults: [{name, repo, team}, ...]`) without further renames.
+func registryCodec() yaml.YamlEncoder[WireRegistry] = yaml.Codec[WireRegistry](yaml.SnakeCase())
+
 // LoadFromFile reads the YAML at `path` and decodes it. Missing file
 // returns Success(EmptyRegistry()) so callers don't have to special-
 // case "first run". Decode errors surface as Failure.
-func LoadFromFile(path string) Try[Registry] = Try[Registry](() => {
+func LoadFromFile(path string) Try[Registry] = Try(() => {
     val info, statErr = os.Stat(path)
     if statErr != nil { return EmptyRegistry() }
     if info.IsDir() { panic(s"consult registry: ${path} is a directory") }
     val raw, readErr = os.ReadFile(path)
     if readErr != nil { panic(s"consult registry: read ${path}: ${readErr.Error()}") }
-    return decodeRegistry(yaml.NewYamlDecoder(string(raw)))
+    return decodeRegistry(string(raw))
 })
 
-// LoadFromString is the test-friendly entry point — same decoder as
+// LoadFromString is the test-friendly entry point — same codec as
 // LoadFromFile but reads from an in-memory string.
-func LoadFromString(yamlStr string) Try[Registry] = Try[Registry](() => {
-    return decodeRegistry(yaml.NewYamlDecoder(yamlStr))
-})
+func LoadFromString(yamlStr string) Try[Registry] = Try(() => decodeRegistry(yamlStr))
 
-func decodeRegistry(d *yaml.YamlDecoderImpl) Registry {
-    d.StartObject()
-    var entries = EmptyArray[ConsultEntry]()
-    for d.HasMoreFields() {
-        d.ReadKey() match {
-            case "consults" => entries = decodeEntries(d)
-            case _          => d.Skip()
-        }
-    }
-    d.EndObject()
+func decodeRegistry(yamlStr string) Registry {
+    val wire = registryCodec().Decode(yamlStr).Get()
+    val entries = wire.Consults.Map((we) => convertEntry(we))
     return Registry(Entries = entries)
 }
 
-// Loop-bound Append intentional: pull-cursor over a stateful YAML
-// decoder.
-func decodeEntries(d *yaml.YamlDecoderImpl) Array[ConsultEntry] {
-    var out = EmptyArray[ConsultEntry]()
-    d.StartArray()
-    for d.HasMoreElements() {
-        out = out.Append(decodeEntry(d))
-    }
-    d.EndArray()
-    return out
-}
-
-func decodeEntry(d *yaml.YamlDecoderImpl) ConsultEntry {
-    d.StartObject()
-    var name = ""
-    var repo = ""
-    var teamYaml = ""
-    for d.HasMoreFields() {
-        d.ReadKey() match {
-            case "name" => name = d.ReadString()
-            case "repo" => repo = d.ReadString()
-            case "team" => teamYaml = d.ReadString()
-            case _      => d.Skip()
-        }
-    }
-    d.EndObject()
-    if name == ""     { panic("consult registry: entry missing 'name'") }
-    if repo == ""     { panic(s"consult registry: '${name}' missing 'repo'") }
-    if teamYaml == "" { panic(s"consult registry: '${name}' missing 'team'") }
-    return ConsultEntry(Name = name, Repo = repo, TeamYaml = teamYaml)
+func convertEntry(we WireConsultEntry) ConsultEntry {
+    if we.Name == "" { panic("consult registry: entry missing 'name'") }
+    if we.Repo == "" { panic(s"consult registry: '${we.Name}' missing 'repo'") }
+    if we.Team == "" { panic(s"consult registry: '${we.Name}' missing 'team'") }
+    return ConsultEntry(Name = we.Name, Repo = we.Repo, TeamYaml = we.Team)
 }

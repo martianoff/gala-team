@@ -154,7 +154,10 @@ func TestView_Conversation_RendersLines(t T) T {
     return IsTrue(t1, strings.Contains(out, "Iris: on it"))
 }
 
-// >20 lines triggers the "K earlier line(s) hidden" hint.
+// 30-line conversation now lives inside a scrollable ConversationLog
+// (sticky-bottom by default). The "K earlier line(s) hidden" hint
+// from the old hard-cap path is gone; the latest line is what's
+// visible at sticky bottom.
 func TestView_Conversation_Clipping_ShowsHiddenHint(t T) T {
     var convo = EmptyArray[session.ConversationLine]()
     var i = 0
@@ -163,7 +166,7 @@ func TestView_Conversation_Clipping_ShowsHiddenHint(t T) T {
         i = i + 1
     }
     val m = mkModel(mkTeam("X", "")).Copy(Conversation = convo)
-    return IsTrue(t, strings.Contains(render(m), "earlier line(s) hidden"))
+    return IsTrue(t, strings.Contains(render(m), "line 29"))
 }
 
 // Long chunks must wrap inside the conversation pane — otherwise long
@@ -207,25 +210,25 @@ func TestView_Footer_ShowsLastError(t T) T {
     return IsTrue(t1, strings.Contains(out, "session save: disk full"))
 }
 
-// Default hint legend (no PR yet).
+// Default hint legend (no PR yet). Footer compacted to fit the
+// addition of palette / paste / view-mode hints; we now only check
+// the load-bearing keybindings (send / approve / reject / palette).
 func TestView_Footer_DefaultLegend(t T) T {
     val out = render(mkModel(mkTeam("X", "")))
     val t1 = IsTrue(t,  strings.Contains(out, "Enter send"))
     val t2 = IsTrue(t1, strings.Contains(out, "Ctrl+A approve"))
     val t3 = IsTrue(t2, strings.Contains(out, "Ctrl+R reject"))
-    val t4 = IsTrue(t3, strings.Contains(out, "Tab sidebar"))
-    val t5 = IsTrue(t4, strings.Contains(out, "Ctrl+T consults"))
-    return IsTrue(t5, strings.Contains(out, "Ctrl+Q quit"))
+    return IsTrue(t3, strings.Contains(out, "Ctrl+Q"))
 }
 
-// After PrCreated, the legend swaps to the merge-prompt hints.
+// After PrCreated, the legend swaps to the merge-prompt hints
+// (Ctrl+M merge / Ctrl+A re-approve). Tab/consults hints were
+// removed when palette/paste/view-mode hints were added.
 func TestView_Footer_PostPrCreated_ShowsMergeHint(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(LastPrUrl = Some("https://github.com/x/y/pull/1"))
     val out = render(m)
     val t1 = IsTrue(t,  strings.Contains(out, "Ctrl+M merge"))
-    val t2 = IsTrue(t1, strings.Contains(out, "Ctrl+A re-approve"))
-    val t3 = IsTrue(t2, strings.Contains(out, "Tab sidebar"))
-    return IsTrue(t3, strings.Contains(out, "Ctrl+T consults"))
+    return IsTrue(t1, strings.Contains(out, "Ctrl+A re-approve"))
 }
 
 // LastError takes precedence over the legend — even if LastPrUrl is set.
@@ -436,8 +439,10 @@ func TestView_Composer_VeryLongText_DoesNotCrash(t T) T {
     return IsTrue(t, len(out) > 0)
 }
 
-// 200-line conversation — the visible-lines cap (20) clips the rest;
-// the hidden-line hint reports the number truncated.
+// 200-line conversation now goes through ConversationLog. Sticky
+// bottom keeps the most recent line on-screen; older lines aren't
+// "hidden" in the old sense — they're just scrolled-off (PgUp brings
+// them back).
 func TestView_Conversation_TwoHundredLines_ReportsHidden(t T) T {
     var convo = EmptyArray[session.ConversationLine]()
     var i = 0
@@ -447,13 +452,16 @@ func TestView_Conversation_TwoHundredLines_ReportsHidden(t T) T {
     }
     val m = mkModel(mkTeam("X", "")).Copy(Conversation = convo)
     val out = render(m)
-    val t1 = IsTrue(t, strings.Contains(out, "earlier line(s) hidden"))
-    return IsTrue(t1, strings.Contains(out, "180"))  // 200 - 20 visible = 180 hidden
+    return IsTrue(t, strings.Contains(out, "line 199"))
 }
 
 // One conversation line with a very long Text. The renderer doesn't
 // wrap it (TUI single-line widget), so the layout shouldn't corrupt
 // downstream rows. Just assert the speaker prefix made it.
+// Long line wraps inside the Paragraph-rendered ConversationLog
+// entry. We don't assert "Iris:" because the speaker prefix may sit
+// on its own row when the line wraps; just check the rendered text
+// contains a known token from the body.
 func TestView_Conversation_VeryLongLine_DoesNotCrash(t T) T {
     val convo = ArrayOf(session.ConversationLine(
         Speaker = "Iris",
@@ -461,7 +469,7 @@ func TestView_Conversation_VeryLongLine_DoesNotCrash(t T) T {
     ))
     val m = mkModel(mkTeam("X", "")).Copy(Conversation = convo)
     val out = render(m)
-    return IsTrue(t, strings.Contains(out, "Iris:"))
+    return IsTrue(t, strings.Contains(out, "very long"))
 }
 
 // ---------------------------------------------------------------------------
@@ -590,9 +598,12 @@ func TestView_Footer_SidebarFocus_ShowsNavLegend(t T) T {
     return IsTrue(t2, strings.Contains(out, "Esc back to composer"))
 }
 
+// "Tab sidebar" hint was retired in favour of palette + paste + view
+// hints; the new footer surfaces Ctrl+P palette as the load-bearing
+// power-user shortcut.
 func TestView_Footer_ComposerFocus_ShowsCtrlLHint(t T) T {
     val out = render(mkModel(mkTeam("X", "")))
-    return IsTrue(t, strings.Contains(out, "Tab sidebar"))
+    return IsTrue(t, strings.Contains(out, "Ctrl+P palette"))
 }
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,8 @@ sealed type Msg {
     case RtChunkArrived(Member string, Line string)
     case RtSessionFailed(Member string, Err error)
     case RtWriteSent(Member string)
+    case RtStderrArrived(Member string, Line string)
+    case RtStderrEnded(Member string)
     case RtPrCreated(Url string)
     case RtPrFailed(Err error)
     case RtMerged(Url string)
@@ -215,6 +217,21 @@ func NextChunkFuture(s MemberSession) concurrent.Future[Msg] {
     })
 }
 
+// NextStderrFuture schedules the next ReadStderrLine on the session.
+// Mirrors NextChunkFuture's shape but emits RtStderrArrived (or
+// RtStderrEnded on EOF) so the orchestrator can surface auth /
+// permission / install errors that claude only writes to stderr.
+//
+// stderr drain is best-effort — failures here don't terminate the
+// member; the stdout side remains the authoritative liveness signal.
+func NextStderrFuture(s MemberSession) concurrent.Future[Msg] {
+    val name = s.Member.Name
+    return concurrent.FutureApply[Msg](() => s.Process.ReadStderrLine() match {
+        case Success(line) => RtStderrArrived(Member = name, Line = line)
+        case Failure(_)    => RtStderrEnded(Member = name)
+    })
+}
+
 // SendFuture writes `prompt` + "\n" to the session's stdin AND
 // closes stdin afterward. claude with `--print` reads stdin to
 // EOF before producing output — without an explicit close, the
@@ -272,6 +289,8 @@ func MsgMember(msg Msg) string = msg match {
     case RtChunkArrived(name, _)    => name
     case RtSessionFailed(name, _)   => name
     case RtWriteSent(name)          => name
+    case RtStderrArrived(name, _)   => name
+    case RtStderrEnded(name)        => name
     case RtPrCreated(_)             => ""
     case RtPrFailed(_)              => ""
     case RtMerged(_)                => ""

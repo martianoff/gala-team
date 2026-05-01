@@ -48,6 +48,70 @@ struct AppModel(
     Pipeline     PipelineState,
     Sessions     HashMap[string, MemberSession],   // live subprocess per member name
     Conversation Array[session.ConversationLine],  // rendered log of TL talk + chunks
+    // ConversationOffset is the top visible line of the scrollback when
+    // ConversationSticky is false. Sticky mode (the default) ignores
+    // Offset and keeps the view pinned to the latest line. PgUp /
+    // arrow-up flips Sticky off; End / PgDn-past-bottom flips it back.
+    ConversationOffset int,
+    ConversationSticky bool,
+    // MemberDetailOpen, when Some(name), pops a full-screen modal that
+    // shows just `name`'s transcript + role / status metadata. The
+    // user opens it with Enter on a sidebar member row (FocusSidebar)
+    // and closes it with Esc. None means no modal is displayed.
+    MemberDetailOpen Option[string],
+    // PendingClosures counts how many stale SessionFailed events we
+    // expect per member name. Incremented by closeLiveSession when it
+    // kills an in-flight subprocess; decremented by onSessionFailed
+    // when a SessionFailed arrives. Non-zero counts cause that
+    // SessionFailed to be treated as a no-op (the EOF is from the
+    // process we just killed, not the fresh one). Without this, a
+    // fast-double-submit's stale EOF removes the new session from
+    // m.Sessions and the new turn's read pump can't re-arm.
+    PendingClosures HashMap[string, int],
+    // WorkElapsedNs tracks per-member cumulative time spent in a
+    // working status (StWorking / StSlow / StStuck / StRecovering).
+    // The sidebar shows this as the member's "work duration" — it
+    // pauses when the member goes idle and resumes when they're put
+    // back to work. Distinct from LastChunkAt which only feeds the
+    // liveness FSM (StSlow / StStuck thresholds).
+    WorkElapsedNs HashMap[string, int64],
+    // WorkStartedAt is the timestamp the member most recently
+    // entered a working status. Used to compute "current segment"
+    // duration (now - WorkStartedAt) which is added to
+    // WorkElapsedNs[name] to render the live timer. Removed from the
+    // map when the member transitions back to idle.
+    WorkStartedAt HashMap[string, Instant],
+    // TokenUsage tallies cumulative input/output/cache-read tokens
+    // per member across every claude turn this session has run.
+    // Updated from result-event payloads as they arrive in onChunk;
+    // surfaced in the header as a live total across the whole team.
+    TokenUsage HashMap[string, ClaudeUsage],
+    // CurrentTurnUsage is the in-flight cumulative usage from the
+    // most recent assistant chunk per member. Live header tick uses
+    // TokenUsage[name] + CurrentTurnUsage[name]. Replaced (not
+    // added) on each assistant chunk because claude's per-chunk
+    // usage is cumulative-for-this-turn. Cleared when the result
+    // event commits the turn into TokenUsage.
+    CurrentTurnUsage HashMap[string, ClaudeUsage],
+    // TotalCostUsd is the sum of `total_cost_usd` across every
+    // result event we've seen this session. Approximate (claude
+    // computes it server-side); good enough for "did this turn
+    // cost a quarter or a hundred dollars" awareness.
+    TotalCostUsd float64,
+    // Command-palette state. PaletteVisible toggles the overlay;
+    // Palette holds the live picker. We use a flag rather than
+    // Option[Palette[AppMsg]] because the gala 0.41.0 transpiler
+    // initializes Option of a generic struct as a non-None default
+    // (the inner Some looks like a zero Palette), which would render
+    // an empty palette on launch.
+    PaletteVisible bool,
+    Palette        Palette[AppMsg],
+    // ViewMode picks the top-level layout: the default split, a
+    // fullscreen pipeline org chart (F4), a member-card grid (F3),
+    // or focus mode that hides the sidebar (F2). Plain sealed type
+    // (no generic params) so the default lowers to ViewDefault()
+    // cleanly without the Option-of-generic-struct quirk.
+    ViewMode ViewMode,
     Composer     string,                           // current draft prompt text
     Tick         int,                              // monotonic tick counter (drives spinners)
     LastError    Option[string],                   // most recent runtime error, footer
@@ -173,6 +237,17 @@ sealed type FocusState {
     case FocusSidebar
 }
 
+// ViewMode picks the top-level layout. ViewDefault is the launching
+// split (sidebar + conversation); the others are fullscreen
+// alternatives toggled via function keys (Frame M/N/O of the design).
+sealed type ViewMode {
+    case ViewDefault
+    case ViewFocus
+    case ViewGrid
+    case ViewPipeline
+}
+
+
 // InitialModel builds an AppModel for a freshly-loaded team.  All members
 // start Idle, no pipeline, no sessions, empty composer. `registry`
 // defaults to empty so existing tests don't need to pass one — only
@@ -209,6 +284,18 @@ func InitialModelWithTeams(
     Pipeline     = EmptyPipelineState(),
     Sessions     = EmptyHashMap[string, MemberSession](),
     Conversation = EmptyArray[session.ConversationLine](),
+    ConversationOffset = 0,
+    ConversationSticky = true,
+    MemberDetailOpen = None[string](),
+    PendingClosures = EmptyHashMap[string, int](),
+    WorkElapsedNs = EmptyHashMap[string, int64](),
+    WorkStartedAt = EmptyHashMap[string, Instant](),
+    TokenUsage = EmptyHashMap[string, ClaudeUsage](),
+    CurrentTurnUsage = EmptyHashMap[string, ClaudeUsage](),
+    TotalCostUsd = 0.0,
+    PaletteVisible = false,
+    Palette = NewPalette[AppMsg](EmptyArray[PaletteAction[AppMsg]]()),
+    ViewMode = ViewDefault(),
     Composer     = "",
     Tick         = 0,
     LastError    = None[string](),
@@ -342,6 +429,49 @@ sealed type AppMsg {
     // conversation, member buffers, status, and persisted snapshot,
     // killing live subprocesses on the way out. Esc cancels.
     case KeyEraseSession
+    // Yank the entire conversation to the system clipboard (Ctrl+Y)
+    // via the terminal's OSC 52 escape sequence. Works around
+    // PowerShell's mouse-mode-vs-shift-select gap — when gala-tui has
+    // mouse tracking on, native shift-select is consumed by the app,
+    // and PowerShell doesn't honour the standard shift-bypass.
+    case KeyYankConversation
+    // Scrollback navigation for the conversation pane. PgUp/PgDn move
+    // by ~viewportH lines; Up/Down (when no history modal is open and
+    // sidebar isn't focused — TODO) move by 1; End re-sticks to bottom.
+    case KeyConvoScrollUp
+    case KeyConvoScrollDown
+    case KeyConvoPageUp
+    case KeyConvoPageDown
+    case KeyConvoStickToBottom
+    // Member-detail modal: open shows the named member's transcript
+    // in a centered modal; close dismisses it. Open is dispatched
+    // when the user presses Enter on a sidebar member row; close is
+    // dispatched on Esc / Ctrl+D toggle.
+    case KeyOpenMemberDetail(Name string)
+    case KeyCloseMemberDetail
+    // Paste from system clipboard (Ctrl+V). Handler shells out to
+    // the OS's clipboard reader (powershell Get-Clipboard on
+    // Windows, pbpaste on macOS, xclip/xsel on Linux), strips
+    // trailing newlines, and appends to Composer. Read errors land
+    // in LastError so the user knows the paste didn't take.
+    case KeyPasteClipboard
+    // Command palette (Ctrl+P) — fuzzy-search action picker.
+    // KeyTogglePalette opens/closes the overlay. While open, keys
+    // route through KeyPaletteEvent; PalConfirm fires whatever
+    // PaletteAction the user selected (its embedded AppMsg payload).
+    case KeyTogglePalette
+    case KeyPaletteEvent(Ev PaletteEvent)
+    // View-mode toggles. F2/F3/F4 set the named mode; the same key
+    // pressed again returns to ViewDefault. F1 always goes back to
+    // ViewDefault for predictability.
+    case KeySetViewMode(Mode ViewMode)
+    // Stderr pump for live claude subprocesses. StderrArrived
+    // surfaces the line as a warning toast + LastError so the user
+    // sees auth / permission / install errors that would otherwise
+    // look like "claude stuck". StderrEnded re-arms the pump if
+    // the session is still alive — matches the stdout pump shape.
+    case StderrArrived(Member string, Line string)
+    case StderrEnded(Member string)
     // Lifecycle
     case TickMsg
     case QuitMsg

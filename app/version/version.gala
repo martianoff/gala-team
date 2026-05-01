@@ -1,0 +1,12 @@
+package version
+
+// Version is the gala_team release tag rendered in the TUI header
+// brand bar. Keep this in sync with MODULE.bazel's `module(version =
+// "..."`); a stamping pass will eventually inject it at build time
+// (rules_go x_defs / linker --ldflags), but for now bump both files
+// together when cutting a release.
+// Function rather than `val` so callers get a plain `string` —
+// gala's package-level `val` lowers to `Immutable[T]` whose `%v`
+// format renders as `{value}`, which leaks the wrapper braces into
+// any s-string interpolation that uses it.
+func Version() string = "0.0.1"

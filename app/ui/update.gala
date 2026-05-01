@@ -4,6 +4,8 @@ import (
     "strings"
     "martianoff/gala/concurrent"
     "martianoff/gala/json"
+    "martianoff/gala/subprocess"
+    "runtime"
     "github.com/martianoff/gala_team/app/onboarding"
     "github.com/martianoff/gala_team/app/policy"
     "github.com/martianoff/gala_team/app/session"
@@ -49,9 +51,26 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     val (m1, cmd) = dispatchMsg(m, msg)
     val sameTag = stateTag(m.State) == stateTag(m1.State)
     val m2 = if (sameTag) m1 else m1.Copy(StateEnteredAt = m1.NowAt)
-    if !sameTag && stateTag(m.State) == "Delegating" && stateTag(m1.State) == "TLReview" {
+    // Any transition INTO TLReview from a working state (Delegating,
+    // QAGate, or TLNudging) fires the TL relay turn so the lead has a
+    // chance to consolidate. Without QAGate→TLReview wired, a member
+    // (e.g. QA Theo emitting @blocked) drains the pending set, the
+    // FSM lands in TLReview, and nothing prompts the lead — the user
+    // sees the QA verdict but no path forward.
+    val priorTag = stateTag(m.State)
+    if !sameTag && stateTag(m1.State) == "TLReview" &&
+       (priorTag == "Delegating" || priorTag == "QAGate" || priorTag == "TLNudging") {
         val (m3, relayCmds) = spawnTLRelay(m2)
         return (m3, batchAll(ArrayOf[Cmd[AppMsg]](cmd).Append(batchAll(relayCmds))))
+    }
+    // Engineers finished and the policy requires QA → kick off QA review
+    // sessions so the FSM doesn't sit forever in QAGate waiting on
+    // members that were never spawned. Each QA member gets a synthesised
+    // review prompt with the dispatched engineers' deliverables inlined
+    // so they have material to evaluate.
+    if !sameTag && stateTag(m.State) == "Delegating" && stateTag(m1.State) == "QAGate" {
+        val (m3, qaCmd) = spawnQAReview(m2)
+        return (m3, batchAll(ArrayOf[Cmd[AppMsg]](cmd, qaCmd)))
     }
     return (m2, cmd)
 }
@@ -265,7 +284,18 @@ func statusTag(s Status) string = s match {
     case StFailed(_)        => "failed"
 }
 
-func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg match {
+func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
+    // Palette interception: when the command palette is open, route
+    // typing/navigation keys through the palette state machine instead
+    // of the composer. Other messages fall through. Plain bool flag
+    // rather than Option[Tuple[...]] because gala 0.41.0 lowers
+    // Option-of-generic-struct to a non-None default, which would
+    // make the intercept fire even when the palette is closed.
+    if m.PaletteVisible {
+        val (handled, m1, cmd1) = interceptPaletteMsg(m, msg)
+        if handled { return (m1, cmd1) }
+    }
+    return msg match {
     case KeyChar(c)                  => onKeyChar(m, c)
     case KeyBackspace()              => (m.Copy(Composer = trimLastRune(m.Composer)),  NoCmd[AppMsg]())
     case KeySubmit()                 => onSubmit(m)
@@ -274,6 +304,8 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg matc
     case ChunkArrived(name, ln)      => onChunk(m, name, ln)
     case SessionFailed(name, e)      => onSessionFailed(m, name, e)
     case WriteSent(_)                => (m, NoCmd[AppMsg]())
+    case StderrArrived(name, ln)     => onStderr(m, name, ln)
+    case StderrEnded(_)              => (m, NoCmd[AppMsg]())
     case PreMergeHooksPassed(body)   => onPreMergeHooksPassed(m, body)
     case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
     case PrCreated(url)              => onPrCreated(m, url)
@@ -302,9 +334,22 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] = msg matc
     case FocusComposerClicked()      => (m.Copy(Focus = FocusComposer()), NoCmd[AppMsg]())
     case SidebarRowClicked(idx)      => onSidebarRowClicked(m, idx)
     case KeyEraseSession()           => onEraseSession(m)
+    case KeyYankConversation()       => onYankConversation(m)
+    case KeyPasteClipboard()         => onPasteClipboard(m)
+    case KeyConvoScrollUp()          => onConvoScroll(m, -1)
+    case KeyConvoScrollDown()        => onConvoScroll(m, 1)
+    case KeyConvoPageUp()            => onConvoScroll(m, -conversationPageSize())
+    case KeyConvoPageDown()          => onConvoScroll(m, conversationPageSize())
+    case KeyConvoStickToBottom()     => (m.Copy(ConversationSticky = true), NoCmd[AppMsg]())
+    case KeyOpenMemberDetail(n)      => (m.Copy(MemberDetailOpen = Some(n)), NoCmd[AppMsg]())
+    case KeyCloseMemberDetail()      => (m.Copy(MemberDetailOpen = None[string]()), NoCmd[AppMsg]())
+    case KeyTogglePalette()          => onTogglePalette(m)
+    case KeyPaletteEvent(ev)         => onPaletteEvent(m, ev)
+    case KeySetViewMode(mode)        => onSetViewMode(m, mode)
     case TickMsg()                   => onTick(m)
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
+    }
 }
 
 // onKeyChar dispatches typed characters. Default destination is
@@ -444,6 +489,273 @@ func onEraseSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (saved, NoCmd[AppMsg]())
 }
 
+// conversationPageSize is the line delta applied for PgUp / PgDn /
+// wheel-burst events. 10 lines is roughly half a typical viewport on
+// laptop terminals — small enough that the user keeps context, big
+// enough that scrolling through a long log doesn't take 50 keystrokes.
+func conversationPageSize() int = 10
+
+// onConvoScroll moves the scroll offset by `delta` lines (positive =
+// down, negative = up). Negative offset goes into "user scrolled up"
+// territory: ConversationSticky flips off so subsequent appends don't
+// yank the view back to the bottom while the user is reading. Once
+// the user scrolls back past the conceptual bottom, sticky re-engages.
+//
+// We don't have a content-line count here (it depends on terminal
+// width and per-line wrapping computed at view time) so the offset
+// is allowed to grow unbounded — the view-side ConversationLogView
+// clamps it back into range each frame. That's the "store loose,
+// clamp on render" pattern.
+func onConvoScroll(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] {
+    val proposed = m.ConversationOffset + delta
+    val clamped = if (proposed < 0) 0 else proposed
+    // Any upward scroll unsticks; pure downward scroll keeps stickiness.
+    val sticky = if (delta < 0) false else m.ConversationSticky
+    return (m.Copy(ConversationOffset = clamped, ConversationSticky = sticky), NoCmd[AppMsg]())
+}
+
+// interceptPaletteMsg routes input through the open palette when one
+// exists. Returns Some((m, cmd)) to short-circuit normal dispatch,
+// None to let the message fall through (background events stay live).
+//
+// Only typing / navigation / Esc / Ctrl+P close are intercepted —
+// chunk arrivals, ticks, mouse, and lifecycle messages continue to
+// flow to their normal handlers so the orchestrator doesn't pause
+// while the user picks an action.
+func interceptPaletteMsg(m AppModel, msg AppMsg) Tuple3[bool, AppModel, Cmd[AppMsg]] = msg match {
+    case KeyChar(c)            => fired(onPaletteEvent(m, PalChar(C = c)))
+    case KeyBackspace()        => fired(onPaletteEvent(m, PalBackspace()))
+    case HistoryCursorUp()     => fired(onPaletteEvent(m, PalPrev()))
+    case HistoryCursorDown()   => fired(onPaletteEvent(m, PalNext()))
+    case KeySubmit()           => fired(onPaletteEvent(m, PalConfirm()))
+    case HistoryDeselect()     => (true, closePalette(m), NoCmd[AppMsg]())
+    case KeyTogglePalette()    => (true, closePalette(m), NoCmd[AppMsg]())
+    case _                     => (false, m, NoCmd[AppMsg]())
+}
+
+func fired(t Tuple[AppModel, Cmd[AppMsg]]) Tuple3[bool, AppModel, Cmd[AppMsg]] {
+    val (m, c) = t
+    return (true, m, c)
+}
+
+// onSetViewMode flips the top-level layout. Pressing the same F-key
+// twice toggles back to ViewDefault — the user usually wants F3 to
+// "open grid view" and the same key to "go back to normal" without
+// needing to remember a separate F1.
+func onSetViewMode(m AppModel, mode ViewMode) Tuple[AppModel, Cmd[AppMsg]] {
+    val sameAsCurrent = viewModeTag(m.ViewMode) == viewModeTag(mode)
+    val next = if (sameAsCurrent) ViewDefault() else mode
+    return (m.Copy(ViewMode = next), NoCmd[AppMsg]())
+}
+
+// viewModeTag projects a ViewMode case to a stable string for ==
+// comparison without writing a 4x4 nested match. Keeps onSetViewMode
+// short.
+func viewModeTag(v ViewMode) string = v match {
+    case ViewDefault()  => "default"
+    case ViewFocus()    => "focus"
+    case ViewGrid()     => "grid"
+    case ViewPipeline() => "pipeline"
+}
+
+// onTogglePalette opens the palette with the freshly-built action
+// list when closed, closes it when already open. Building actions
+// each open keeps them in sync with the current model (member roster,
+// archive list, etc.).
+func onTogglePalette(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if m.PaletteVisible {
+        return (closePalette(m), NoCmd[AppMsg]())
+    }
+    val actions = paletteActions(m)
+    return (m.Copy(PaletteVisible = true, Palette = NewPalette[AppMsg](actions)), NoCmd[AppMsg]())
+}
+
+// closePalette hides the palette overlay so the main UI regains focus.
+func closePalette(m AppModel) AppModel = m.Copy(PaletteVisible = false)
+
+// onPaletteEvent runs PaletteUpdate against the current palette and
+// stitches the new state back into the model. On PalConfirm, the
+// selected PaletteAction's Msg is dispatched as a regular AppMsg
+// (closing the palette first) so the action runs through the normal
+// pipeline — including its own Cmd return.
+func onPaletteEvent(m AppModel, ev PaletteEvent) Tuple[AppModel, Cmd[AppMsg]] {
+    if !m.PaletteVisible { return (m, NoCmd[AppMsg]()) }
+    val isConfirm = ev match {
+        case PalConfirm() => true
+        case _            => false
+    }
+    if isConfirm {
+        val pickedMsg = paletteSelectedMsg(m.Palette)
+        val mClosed = closePalette(m)
+        return pickedMsg match {
+            case None()      => (mClosed, NoCmd[AppMsg]())
+            case Some(amsg)  => Update(mClosed, amsg)
+        }
+    }
+    val updated = PaletteUpdate[AppMsg](m.Palette, ev)
+    return (m.Copy(Palette = updated), NoCmd[AppMsg]())
+}
+
+// paletteSelectedMsg returns the AppMsg attached to the currently-
+// highlighted PaletteAction, or None when the filter has no matches
+// (Selected out of bounds).
+func paletteSelectedMsg(p Palette[AppMsg]) Option[AppMsg] {
+    val n = p.FilteredIdx.Length()
+    if n == 0 { return None[AppMsg]() }
+    val sel = if (p.Selected < 0) 0 else if (p.Selected >= n) n - 1 else p.Selected
+    val actionIdx = p.FilteredIdx.Get(sel)
+    if actionIdx < 0 || actionIdx >= p.Actions.Length() { return None[AppMsg]() }
+    return Some(p.Actions.Get(actionIdx).Msg)
+}
+
+// paletteActions builds the live command-palette action list. Stable
+// across opens (built fresh each time so member-roster changes appear
+// immediately). Categories group related entries in the rendered
+// panel.
+// paletteActions builds the live action list. Trimmed to entries
+// that don't have an obvious keyboard shortcut (so the palette is a
+// power-user surface for one-off operations, not a redundant menu of
+// hotkeys the footer already advertises).
+func paletteActions(m AppModel) Array[PaletteAction[AppMsg]] {
+    val base = ArrayOf(
+        PaletteAction[AppMsg](Label = "Erase session", Category = "Session", Msg = KeyEraseSession()),
+        PaletteAction[AppMsg](Label = "Yank conversation to clipboard", Category = "Session", Msg = KeyYankConversation()),
+        PaletteAction[AppMsg](Label = "History browser", Category = "View", Msg = KeyToggleHistory()),
+        PaletteAction[AppMsg](Label = "Quit", Category = "App", Msg = QuitMsg()),
+    )
+    val members = m.Team.Members.Map((mem) =>
+        PaletteAction[AppMsg](
+            Label    = s"Open ${mem.Name} (${RoleName(mem.Role)})",
+            Category = "Members",
+            Msg      = KeyOpenMemberDetail(Name = mem.Name),
+        )
+    )
+    return base.AppendAll(members)
+}
+
+// truncateForToast keeps a toast message to a single short line —
+// strips embedded newlines and caps total length so a long @blocked
+// reason or @help question doesn't wrap into the footer row and
+// hide the keybind hint. The full text remains available via
+// LastError and the conversation transcript.
+func truncateForToast(s string) string {
+    val parts = strings.SplitN(strings.TrimSpace(s), "\n", 2)
+    val firstLine = parts[0]
+    val cap = 80
+    if len(firstLine) <= cap { return firstLine }
+    // strings.SplitN with a length-1 separator is safe at byte
+    // boundary `cap` since gala doesn't expose a clean substring op
+    // — feeding the second part through Drop avoids the slice syntax.
+    val tail = strings.TrimPrefix(firstLine, firstLine)
+    val _ = tail
+    return runesPrefix(firstLine, cap) + "…"
+}
+
+// runesPrefix returns the first `n` runes of `s` (or `s` itself if
+// shorter). Built on ToRunes so emoji / multibyte characters don't
+// get sliced mid-codepoint.
+func runesPrefix(s string, n int) string {
+    val rs = ToRunes(s)
+    if len(rs) <= n { return s }
+    var out = EmptyArray[string]()
+    var i = 0
+    for i < n {
+        out = out.Append(string(rs[i]))
+        i = i + 1
+    }
+    return out.MkString("")
+}
+
+// onPasteClipboard reads the system clipboard via the OS-native CLI
+// and appends the result to the composer. Synchronous (a clipboard
+// read is fast) — async would require a Cmd round-trip and a mid-
+// clipboard-read snapshot would be a confusing UX.
+//
+// Newlines in the clipboard text are preserved (so multi-line code
+// blocks paste correctly). Trailing whitespace after the final
+// non-empty line is stripped because most clipboard tools tack on a
+// stray newline. Read failures land in LastError so the user knows
+// the paste didn't take instead of silently appending nothing.
+func onPasteClipboard(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = readClipboard() match {
+    case Failure(err) => (m.Copy(LastError = Some(s"clipboard read: ${err.Error()}")), NoCmd[AppMsg]())
+    case Success(txt) => {
+        val clean = strings.TrimRight(txt, " \t\r\n")
+        val toast = m.Toasts.PushInfo(s"pasted ${len(clean)} chars", time_utils.Now(), time_utils.Seconds(int64(2)))
+        return (m.Copy(Composer = m.Composer + clean, Toasts = toast), NoCmd[AppMsg]())
+    }
+}
+
+// readClipboard shells out to whichever clipboard CLI the host OS
+// ships:
+//   - Windows → powershell.exe Get-Clipboard
+//   - macOS   → pbpaste
+//   - Linux   → xclip / xsel (xclip first, xsel fallback)
+// Returns Try[string] so an unsupported environment surfaces a clean
+// error in LastError instead of a silent failure.
+func readClipboard() Try[string] = Try[string](() => {
+    val (cmd, args) = clipboardReadCmd()
+    val opts = subprocess.NewSpawnOpts(cmd, args.ToGoSlice(), SliceEmpty[string](), ".")
+    val proc = subprocess.Spawn(opts) match {
+        case Success(p)   => p
+        case Failure(err) => panic(s"spawn ${cmd}: ${err.Error()}")
+    }
+    var sb = EmptyArray[string]()
+    for {
+        val line = proc.ReadLine()
+        if line.IsFailure() { break }
+        sb = sb.Append(line.Get())
+    }
+    val code = proc.Wait().Get()
+    if code != 0 { panic(s"${cmd} exited ${code}") }
+    return sb.MkString("\n")
+})
+
+// clipboardReadCmd picks the right (cmd, args) pair for the host OS.
+// runtime.GOOS is "windows" / "darwin" / "linux" — straightforward.
+// Linux falls back to xsel only if xclip isn't installed; we just
+// try xclip first since it's the more common default on modern
+// distros (Wayland / X11 alike via xdotool wrappers).
+func clipboardReadCmd() Tuple[string, Array[string]] {
+    if runtime.GOOS == "windows" {
+        return ("powershell.exe", ArrayOf("-NoProfile", "-Command", "Get-Clipboard -Raw"))
+    }
+    if runtime.GOOS == "darwin" {
+        return ("pbpaste", EmptyArray[string]())
+    }
+    return ("xclip", ArrayOf("-selection", "clipboard", "-o"))
+}
+
+// onYankConversation copies the entire conversation transcript to the
+// system clipboard via the terminal's OSC 52 escape sequence. The
+// terminal — not gala_team — receives the escape and talks to the OS
+// clipboard, so it works over SSH and across multiplexers like tmux
+// (provided they pass OSC 52 through, which most do).
+//
+// Synchronous one-shot write: OSC 52 is a tiny out-of-band escape
+// that doesn't interfere with the cell grid the renderer just drew,
+// and we don't want a Cmd round-trip just for a clipboard copy.
+//
+// User feedback via toast: the only visible signal that the copy
+// worked. Failure (no TTY, terminal doesn't support OSC 52) lands
+// in LastError so the user knows it didn't take.
+func onYankConversation(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if m.Conversation.IsEmpty() {
+        val toast = m.Toasts.PushInfo("nothing to copy — conversation is empty", time_utils.Now(), time_utils.Seconds(int64(3)))
+        return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
+    }
+    val rendered = m.Conversation.Map((cl session.ConversationLine) =>
+        s"${cl.Speaker}: ${cl.Text}"
+    ).MkString("\n")
+    val (_, err) = CopyToClipboard(rendered)
+    if err != nil {
+        return (m.Copy(LastError = Some(s"clipboard copy failed: ${err.Error()}")), NoCmd[AppMsg]())
+    }
+    val n = m.Conversation.Size()
+    val msg = if (n == 1) "copied 1 line to clipboard" else s"copied ${n} lines to clipboard"
+    val toast = m.Toasts.PushInfo(msg, time_utils.Now(), time_utils.Seconds(int64(3)))
+    return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
+}
+
 // clearSessionState wipes every per-conversation field back to its
 // initial state. Pure data reset — no IO. Status map gets a fresh
 // StIdle for every team member so the sidebar shows a clean slate
@@ -455,9 +767,16 @@ func clearSessionState(m AppModel) AppModel {
     )
     return m.Copy(
         Conversation          = EmptyArray[session.ConversationLine](),
+        ConversationOffset    = 0,
+        ConversationSticky    = true,
         Sessions              = EmptyHashMap[string, MemberSession](),
         SessionIds            = EmptyHashMap[string, string](),
         Statuses              = freshStatuses,
+        WorkElapsedNs         = EmptyHashMap[string, int64](),
+        WorkStartedAt         = EmptyHashMap[string, time_utils.Instant](),
+        TokenUsage            = EmptyHashMap[string, ClaudeUsage](),
+        CurrentTurnUsage      = EmptyHashMap[string, ClaudeUsage](),
+        TotalCostUsd          = 0.0,
         TurnBuffer            = "",
         ConsultsFired         = 0,
         ActiveConsults        = EmptyHashMap[string, ConsultSession](),
@@ -493,6 +812,21 @@ func clearSessionState(m AppModel) AppModel {
 // the visible cursor is the action target.
 func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if m.HistoryMode { return onHistorySelect(m) }
+    // Enter while sidebar is focused on a member row opens that
+    // member's detail modal (Frame I in the design). The composer
+    // path stays untouched — submit only fires when focus is on the
+    // composer or no member row is highlighted.
+    val sidebarOpen = m.Focus match {
+        case FocusSidebar() => true
+        case FocusComposer() => false
+    }
+    if sidebarOpen {
+        val picked = SidebarMemberAt(m.Team, m.CollapsedGroups, m.SidebarCursor)
+        return picked match {
+            case Some(name) => (m.Copy(MemberDetailOpen = Some(name)), NoCmd[AppMsg]())
+            case None()     => (m, NoCmd[AppMsg]())
+        }
+    }
     if m.Composer == "" {
         return (m, NoCmd[AppMsg]())
     }
@@ -503,6 +837,10 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         State = nextState,
         Composer = "",
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt)),
+        // Sending a new message means the user is acting "now" — re-stick
+        // to the bottom of the conversation so they see their own line
+        // and the incoming response without having to press End.
+        ConversationSticky = true,
         TurnBuffer    = "",
         ConsultsFired = 0,
         // First user prompt after a recovery dismisses the banner
@@ -516,7 +854,15 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     // the lead — claude with `--print` doesn't keep processes alive
     // across turns, so the SessionId map is the source of truth.
     val firstTurn = !m.SessionIds.Get(lead.Name).IsDefined()
-    return ensureSession(withState, lead) match {
+    // Kill any in-flight lead subprocess BEFORE spawning a new one.
+    // Without this, a fast-double-submit (user types, hits Enter, types
+    // again, hits Enter while claude is still streaming) leaves the
+    // first claude orphaned — its chunks keep arriving over the old
+    // pipe but `m.Sessions[lead]` already points at the new spawn, so
+    // the read pump for the OLD process is what's still scheduled, and
+    // its EOF closes the new turn before any new chunks reach onChunk.
+    val cleared = closeLiveSession(withState, lead.Name)
+    return ensureSession(cleared, lead) match {
         case Left(err)  => (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
         case Right(m1)  => {
             val (effectivePrompt, onboardingErr) =
@@ -527,6 +873,114 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
                 case None()  => m1
             }
             return (setStatus(m2, lead.Name, StWorking()), sendAndPumpCmd(m2, lead, effectivePrompt))
+        }
+    }
+}
+
+// accrueTokens folds a chunk's per-turn token payload into the model.
+//
+// Two paths:
+//   - LiveTurn (assistant chunks): claude's usage block is
+//     cumulative-for-the-active-turn, so we OVERWRITE
+//     CurrentTurnUsage[name] with the latest snapshot. Header
+//     reads TokenUsage[name] + CurrentTurnUsage[name] for the
+//     live total — ticks up as the turn streams.
+//   - FinalTurn (result events): commit by adding to TokenUsage
+//     and clearing CurrentTurnUsage. Cost folds into TotalCostUsd
+//     here, since claude only stamps total_cost_usd on the result.
+func accrueTokens(m AppModel, name string, chunk ClaudeChunk) AppModel {
+    val m1 = chunk.LiveTurn match {
+        case None()    => m
+        case Some(usg) => m.Copy(CurrentTurnUsage = m.CurrentTurnUsage.Put(name, usg))
+    }
+    return chunk.FinalTurn match {
+        case None()    => m1
+        case Some(usg) => {
+            val prior = m1.TokenUsage.Get(name).GetOrElse(zeroUsage())
+            val combined = ClaudeUsage(
+                InputTokens          = prior.InputTokens + usg.InputTokens,
+                OutputTokens         = prior.OutputTokens + usg.OutputTokens,
+                CacheReadInputTokens = prior.CacheReadInputTokens + usg.CacheReadInputTokens,
+            )
+            return m1.Copy(
+                TokenUsage       = m1.TokenUsage.Put(name, combined),
+                CurrentTurnUsage = m1.CurrentTurnUsage.Remove(name),
+                TotalCostUsd     = m1.TotalCostUsd + chunk.CostUsd,
+            )
+        }
+    }
+}
+
+func zeroUsage() ClaudeUsage = ClaudeUsage(
+    InputTokens          = 0,
+    OutputTokens         = 0,
+    CacheReadInputTokens = 0,
+)
+
+// TotalTokenUsage sums per-member usage across the whole team,
+// including any in-flight current-turn snapshots so the header
+// ticks live during streaming. Committed turns sit in TokenUsage;
+// the active assistant chunk's cumulative count sits in
+// CurrentTurnUsage and gets folded in on every render.
+func TotalTokenUsage(m AppModel) ClaudeUsage {
+    val committed = m.TokenUsage.Values().FoldLeft(zeroUsage(), (acc, u) => ClaudeUsage(
+        InputTokens          = acc.InputTokens + u.InputTokens,
+        OutputTokens         = acc.OutputTokens + u.OutputTokens,
+        CacheReadInputTokens = acc.CacheReadInputTokens + u.CacheReadInputTokens,
+    ))
+    return m.CurrentTurnUsage.Values().FoldLeft(committed, (acc, u) => ClaudeUsage(
+        InputTokens          = acc.InputTokens + u.InputTokens,
+        OutputTokens         = acc.OutputTokens + u.OutputTokens,
+        CacheReadInputTokens = acc.CacheReadInputTokens + u.CacheReadInputTokens,
+    ))
+}
+
+// onStderr handles a single stderr line from a claude subprocess.
+// Surfaces it as a warning toast + LastError so the user sees
+// "claude stuck" patterns (auth prompts, permission denials, model
+// not found) that would otherwise look like a hung member.
+//
+// Empty / pure-whitespace lines are skipped (claude periodically
+// flushes them). The pump is re-armed on every line so we keep
+// draining until the subprocess closes.
+func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
+    val trimmed = strings.TrimSpace(line)
+    val pumpCmd = m.Sessions.Get(name) match {
+        case Some(s) => runtimeFutureToCmd(NextStderrFuture(s))
+        case None()  => NoCmd[AppMsg]()
+    }
+    if trimmed == "" { return (m, pumpCmd) }
+    val short = truncateForToast(trimmed)
+    val toast = m.Toasts.PushWarn(s"${name} (stderr): ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
+    val m1 = m.Copy(
+        Toasts    = toast,
+        LastError = Some(s"${name} stderr: ${trimmed}"),
+    )
+    return (m1, pumpCmd)
+}
+
+// closeLiveSession kills any in-flight subprocess for `name` and
+// drops it from m.Sessions. Best-effort: a Kill failure is ignored
+// (the process is probably already gone) — what matters is that the
+// model state no longer thinks `name` has a live pipe to read from.
+//
+// Used by onSubmit before respawning the lead so a fast-double-submit
+// doesn't leave the first turn's claude orphaned and racing the second
+// turn's pump on EOF.
+func closeLiveSession(m AppModel, name string) AppModel {
+    return m.Sessions.Get(name) match {
+        case None()    => m
+        case Some(s)   => {
+            val _ = CloseSession(s)
+            // Bump the pending-closures counter so the inevitable
+            // SessionFailed event from the killed subprocess is
+            // recognized as stale and dropped (instead of removing
+            // the fresh session we're about to spawn).
+            val curr = m.PendingClosures.Get(name).GetOrElse(0)
+            return m.Copy(
+                Sessions        = m.Sessions.Remove(name),
+                PendingClosures = m.PendingClosures.Put(name, curr + 1),
+            )
         }
     }
 }
@@ -586,6 +1040,7 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
         case Some(s) => Batch[AppMsg](
             runtimeFutureToCmd(SendFuture(s, prompt)),
             runtimeFutureToCmd(NextChunkFuture(s)),
+            runtimeFutureToCmd(NextStderrFuture(s)),
         )
         case None() => NoCmd[AppMsg]()
     }
@@ -609,20 +1064,53 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 // the same transcript). Failures are stuck in LastError so the user
 // notices but the TUI keeps running.
 func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
-    val displayText = filterClaudeStreamJson(line)
+    // Stale-event drop: if closeLiveSession killed an in-flight
+    // process for this name, any ChunkArrived currently queuing up
+    // is from the OLD pipe. Skip it WITHOUT re-arming the pump —
+    // re-arming would schedule a second ReadLine on the NEW pipe
+    // and contend with the read pump that ensureSession already
+    // started. That double-read can leave one of the readers
+    // blocked forever.
+    if m.PendingClosures.Get(name).GetOrElse(0) > 0 {
+        return (m, NoCmd[AppMsg]())
+    }
+    val chunk = filterClaudeStreamJson(line)
+    // Fold token + cost totals from result events into the model.
+    // Done before any visible-text branching so even drop-only
+    // chunks (success result with no rendered text) still accrue.
+    val mAccrued = accrueTokens(m, name, chunk)
+    val displayText = chunk.Visible
+    // Surface claude error events (rate-limit, max-turns, etc.) as a
+    // toast + LastError instead of into the transcript — the chat
+    // pane is for conversation, not error frames.
+    val withErrSurface = if (chunk.ErrorText == "") mAccrued else {
+        val toast = mAccrued.Toasts.PushError(s"${name}: ${chunk.ErrorText}", time_utils.Now(), time_utils.Seconds(int64(8)))
+        mAccrued.Copy(Toasts = toast, LastError = Some(s"${name}: ${chunk.ErrorText}"))
+    }
     if displayText == "" {
         // Init/result/tool-use chunks are noise — keep the read pump
         // alive but don't append to the transcript.
-        val pumpCmd = m.Sessions.Get(name) match {
+        val pumpCmd = withErrSurface.Sessions.Get(name) match {
             case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
             case None()  => NoCmd[AppMsg]()
         }
-        return (m.Copy(LastChunkAt = m.LastChunkAt.Put(name, time_utils.Now())), pumpCmd)
+        return (withErrSurface.Copy(LastChunkAt = withErrSurface.LastChunkAt.Put(name, time_utils.Now())), pumpCmd)
     }
-    val nextConvo = m.Conversation.Append(session.ConversationLine(Speaker = name, Text = displayText))
-    val withLastSeen = m.Copy(
-        LastChunkAt = m.LastChunkAt.Put(name, time_utils.Now()),
-        RetryCount  = m.RetryCount.Remove(name),
+    // Hide bare directive marker lines (@dispatch/@consult/@summary/@end/
+    // @done/@finished/@help/@blocked openings + the matching @end) from the
+    // user-facing transcript — they're orchestration glue, not chat. The
+    // body text between markers is kept so users still see the substance.
+    // The directive parser still walks the full text via the unfiltered
+    // path below.
+    val visible = formatDirectiveMarkers(displayText)
+    val nextConvo = if (visible == "") {
+        withErrSurface.Conversation
+    } else {
+        withErrSurface.Conversation.Append(session.ConversationLine(Speaker = name, Text = visible))
+    }
+    val withLastSeen = withErrSurface.Copy(
+        LastChunkAt = withErrSurface.LastChunkAt.Put(name, time_utils.Now()),
+        RetryCount  = withErrSurface.RetryCount.Remove(name),
     )
     // Only flip to StWorking if the member isn't already in a sticky
     // "needs attention" state. StFailed (after retries / @blocked) and
@@ -632,8 +1120,13 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     val current = withLastSeen.Statuses.Get(name).GetOrElse(StIdle())
     val nextStatus = if (isStickyStatus(current)) current else mkWorkingStatus()
     val withLine = setStatus(persistConversation(withLastSeen, nextConvo), name, nextStatus)
-    val (m1, consultCmds) = maybeDispatchConsults(withLine, name, line)
-    val (m2, memberCmds)  = maybeHandleMemberDirectives(m1, name, line)
+    // Use the filtered display text — not the raw stream-json wrapper —
+    // when feeding the per-turn directive buffers. The JSON wrapper hides
+    // the @summary / @dispatch / @end opening tags inside an escaped
+    // string, so Parse() against the raw line yields no directives and
+    // the TL turn never transitions to Approval / Delegating.
+    val (m1, consultCmds) = maybeDispatchConsults(withLine, name, displayText)
+    val (m2, memberCmds)  = maybeHandleMemberDirectives(m1, name, displayText)
     val pumpCmd = m2.Sessions.Get(name) match {
         case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
         case None()  => NoCmd[AppMsg]()
@@ -759,7 +1252,10 @@ func mkHelpWaitingStatus(question string) Status = StHelpWaiting(question)
 // member completed (so the rest of the team doesn't deadlock).
 func onMemberBlocked(m AppModel, name string, reason string) Tuple[AppModel, Cmd[AppMsg]] {
     val nextState = Transition(m.State, MemberBlocked(MemberName = name, Reason = reason), transitionContext(m))
-    val toast = m.Toasts.PushError(s"${name} blocked: ${reason}", time_utils.Now(), time_utils.Seconds(int64(8)))
+    // Truncate the toast so a multi-paragraph @blocked body doesn't
+    // wrap into the footer's row and hide the keybind hint. Full
+    // reason still lives in LastError + the conversation transcript.
+    val toast = m.Toasts.PushError(s"${name} blocked: ${truncateForToast(reason)}", time_utils.Now(), time_utils.Seconds(int64(8)))
     val failedStatus Status = StFailed(Reason = reason)
     val m1 = m.Copy(
         State     = nextState,
@@ -895,6 +1391,16 @@ func maxAutoRetriesOf(m AppModel) int = m.Policy.Heartbeat.MaxRetries
 // so transient crashes don't permanently stick a member in the
 // retry-budget penalty box.
 func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[AppMsg]] {
+    // Stale-event drop: if closeLiveSession recently killed an
+    // in-flight process for `name`, the SessionFailed we're seeing
+    // now is its EOF — not the fresh session's. Drain one count from
+    // PendingClosures and return without touching the model. The
+    // fresh session's own SessionFailed will eventually drive the
+    // FSM transition normally.
+    val pending = m.PendingClosures.Get(name).GetOrElse(0)
+    if pending > 0 {
+        return (m.Copy(PendingClosures = m.PendingClosures.Put(name, pending - 1)), NoCmd[AppMsg]())
+    }
     val cleaned = m.Copy(Sessions = m.Sessions.Remove(name))
     if isCleanCloseError(err) {
         // Clean turn end. Two shapes depending on who finished:
@@ -904,13 +1410,22 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         //     Idle on plain chat).
         //   - Other member → MemberDone(name, body). FSM drains the
         //     pending set and advances to QAGate / TLReview / relay.
-        val nextState = if (name == cleaned.Team.Lead.Name) {
+        if name == cleaned.Team.Lead.Name {
             val dirs = Parse(cleaned.TurnBuffer)
-            Transition(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
-        } else {
-            val body = cleaned.MemberDoneBodies.Get(name).GetOrElse("")
-            Transition(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
+            val nextState = Transition(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
+            val withState = setStatus(cleaned.Copy(State = nextState), name, StIdle())
+            // If the new state is Delegating, fan out: spawn each
+            // dispatched member's session with their per-target body
+            // as the prompt. Without this, members stay StIdle forever
+            // and the user sees "Pipeline (no active turn)" while the
+            // sidebar agents never flip from idle.
+            if (stateTag(nextState) == "Delegating") {
+                return spawnDispatchedMembers(withState, dirs)
+            }
+            return (withState, NoCmd[AppMsg]())
         }
+        val body = cleaned.MemberDoneBodies.Get(name).GetOrElse("")
+        val nextState = Transition(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
         return (setStatus(cleaned.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
     }
     val maxRetries = maxAutoRetriesOf(m)
@@ -948,6 +1463,110 @@ func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
     }
 }
 
+// spawnDispatchedMembers fans out a TL @dispatch turn: walks every
+// Dispatch directive in `dirs`, spawns each target member's claude
+// subprocess via ensureSession, sends the per-target body as the
+// prompt, and flips the member's status to StWorking so the sidebar
+// timer starts ticking.
+//
+// Members named in @dispatch but not in the team roster are skipped
+// silently — the FSM has already added them to the Pending set, so
+// they'll naturally drain on the next MemberDone. We just don't have
+// a Member record to spawn against.
+//
+// ensureSession failures land in LastError per-member; we keep going
+// rather than aborting the whole fanout so a typo'd member name
+// doesn't strand the rest of the dispatch.
+func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, Cmd[AppMsg]] {
+    val targets = dirs.Collect({
+        case Dispatch(name, body) => (name, body)
+    })
+    val seed = (m, EmptyArray[Cmd[AppMsg]]())
+    val (after, cmds) = targets.FoldLeft(seed, (acc, t) => {
+        val (curM, curCmds) = acc
+        val (name, body) = t
+        return findMemberByName(curM.Team.Members, name) match {
+            case None() => (curM, curCmds)
+            case Some(mem) => ensureSession(curM, mem) match {
+                case Left(err)  => (curM.Copy(LastError = Some(s"dispatch ${name}: ${err}")), curCmds)
+                case Right(m1)  => {
+                    val withStatus = setStatus(m1, name, StWorking())
+                    // First-turn detection mirrors onSubmit's pattern: if
+                    // we don't yet have a session id for this member, this
+                    // is their first claude session and the body needs
+                    // the role / protocol / onboarding wrap. Subsequent
+                    // dispatches in the same TUI run reuse the prior
+                    // session via --resume so the model already has the
+                    // role context in conversation history; the bare body
+                    // is enough.
+                    val firstTurn = !curM.SessionIds.Get(name).IsDefined()
+                    val wrapped = if (firstTurn) {
+                        val (w, _) = onboarding.WrapPromptSafe(curM.Project, curM.Team, mem, body)
+                        w
+                    } else {
+                        body
+                    }
+                    val cmd = sendAndPumpCmd(withStatus, mem, wrapped)
+                    return (withStatus, curCmds.Append(cmd))
+                }
+            }
+        }
+    })
+    return (after, batchAll(cmds))
+}
+
+// spawnQAReview kicks off a QA review session for every QA member on
+// the team. Mirrors spawnDispatchedMembers but for the QA role: the
+// review body is a synthesised "review these deliverables" prompt
+// composed of every engineer's @finished body.
+//
+// QA members are first-turn from the orchestrator's perspective even
+// when subsequent turns happen — claude --print is one-shot per
+// invocation; SessionIds picks up the existing session id and
+// switches to --resume on the second QA pass automatically.
+func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val qa = MembersOf(m.Team, QA())
+    if qa.IsEmpty() { return (m, NoCmd[AppMsg]()) }
+    val reviewBody = buildQAReviewPrompt(m)
+    val seed = (m, EmptyArray[Cmd[AppMsg]]())
+    val (after, cmds) = qa.FoldLeft(seed, (acc, mem) => {
+        val (curM, curCmds) = acc
+        val firstTurn = !curM.SessionIds.Get(mem.Name).IsDefined()
+        return ensureSession(curM, mem) match {
+            case Left(err)  => (curM.Copy(LastError = Some(s"qa ${mem.Name}: ${err}")), curCmds)
+            case Right(m1)  => {
+                val withStatus = setStatus(m1, mem.Name, StWorking())
+                val wrapped = if (firstTurn) {
+                    val (w, _) = onboarding.WrapPromptSafe(curM.Project, curM.Team, mem, reviewBody)
+                    w
+                } else {
+                    reviewBody
+                }
+                return (withStatus, curCmds.Append(sendAndPumpCmd(withStatus, mem, wrapped)))
+            }
+        }
+    })
+    return (after, batchAll(cmds))
+}
+
+// buildQAReviewPrompt assembles the review prompt seen by every QA
+// member. Lists each engineer's @finished body so QA has concrete
+// deliverables to evaluate. Engineers who exited without an explicit
+// @finished block get a generic "they were silent" line so QA still
+// sees their existence.
+func buildQAReviewPrompt(m AppModel) string {
+    val engineers = MembersOf(m.Team, Engineer())
+    val sections = engineers.Map((eng) => {
+        val body = m.MemberDoneBodies.Get(eng.Name).GetOrElse("")
+        if body == "" {
+            return s"## ${eng.Name}\n\n(no explicit @finished block — review the engineer's transcript directly if needed)"
+        }
+        return s"## ${eng.Name} reported:\n\n${body}"
+    })
+    val joined = sections.MkString("\n\n")
+    return s"# QA review\n\nThe engineers have reported back. Review their deliverables for correctness, edge cases, and adherence to the brief. When you're done, reply with:\n\n- `@finished ... @end` if the work passes review (body = a 1-3 line approval note)\n- `@blocked ... @end` if there are issues that block sign-off (body = the issues, prioritised)\n\n${joined}"
+}
+
 // findMemberByName scans the team for a Member whose Name matches.
 // Typed-array param so auto-unwrap fires at the call boundary.
 func findMemberByName(members Array[Member], name string) Option[Member] =
@@ -970,80 +1589,264 @@ func isStickyStatus(s Status) bool = s match {
 func mkWorkingStatus() Status = StWorking()
 
 // ----------------------------------------------------------------------------
-// Claude stream-json filtering — typed Codec[T] for each event shape.
-// claude --output-format stream-json --verbose emits one JSON line
-// per event. The Codec generates a zero-reflection decoder from the
-// struct shape and the transpiler auto-injects the StructMeta. We
-// pick the smallest sub-shape we need for each event type.
+// Claude stream-json filtering — typed Codec[T] decode.
+// gala 0.41.0's Codec[T] supports Array[Struct] field decode and
+// silently drops unknown JSON fields, so we model the only shapes we
+// care about (assistant message text, result error) and let the
+// codec do the heavy lifting. Decode failures land as Try.Failure
+// which we trap into emptyChunk() — no raw-JSON leaks ever.
 // ----------------------------------------------------------------------------
 
-// ClaudeStreamEvent captures just the discriminator (`type`). We
-// decode this first to dispatch; the body-bearing decoders only run
-// when the discriminator matches.
-struct ClaudeStreamEvent(Type string)
+// ClaudePart is one element of an assistant message's content[]
+// array. Claude emits `text`, `tool_use`, `tool_result`, `thinking`,
+// etc.; we only render `text`. The Type discriminator is the field
+// the dispatcher reads.
+struct ClaudePart(Type string, Text string)
 
-// ClaudeAssistantEvent shape: the only event we actually display.
-//   {"type":"assistant","message":{"content":[ContentPart]}}
-struct ClaudeAssistantEvent(
-    Type    string,
-    Message ClaudeAssistantMessage,
+// ClaudeAssistantMsg is the inner `message` object. Usage is the
+// per-turn cumulative count claude attaches to every assistant
+// chunk (it grows monotonically through the turn until the result
+// event delivers the final tally). Decoding it here lets us tick
+// the header live during streaming instead of waiting for the
+// turn-end result.
+struct ClaudeAssistantMsg(
+    Content Array[ClaudePart],
+    Usage   ClaudeUsage,
 )
 
-struct ClaudeAssistantMessage(
-    Content Array[ClaudeContentPart],
+// ClaudeAssistantEvent is the outer event for a `type=assistant`
+// stream-json line.
+struct ClaudeAssistantEvent(Type string, Message ClaudeAssistantMsg)
+
+// ClaudeUsage is the token / cost accounting block claude attaches to
+// every result event. We tally these into AppModel.TokenUsage so the
+// header can show running totals across the team.
+struct ClaudeUsage(
+    InputTokens          int,
+    OutputTokens         int,
+    CacheReadInputTokens int,
 )
 
-// ClaudeContentPart covers the two content shapes we render: plain
-// text from the model, and tool-use markers shown as bracketed names
-// so the user sees that a tool was invoked.
-struct ClaudeContentPart(
-    Type string,
-    Text string,
-    Name string,
+// ClaudeResultEvent is the outer event for a `type=result` line.
+// IsError + Result let us surface rate-limit / max-turns errors as
+// toasts; Usage + TotalCostUsd feed the header token counter.
+struct ClaudeResultEvent(
+    Type         string,
+    IsError      bool,
+    Result       string,
+    TotalCostUsd float64,
+    Usage        ClaudeUsage,
 )
 
-// filterClaudeStreamJson returns the visible text for one stream-json
-// line, or "" when the chunk is noise. Uses Codec[T] decoders — no
-// hand-rolled string parsing — so structural changes upstream surface
-// as decode errors we can fall back on.
-func filterClaudeStreamJson(line string) string {
+// Package-level codecs. Codec[T] instances are immutable and safe to
+// share across calls; building one per chunk would just waste work.
+val claudeAssistantCodec = json.Codec[ClaudeAssistantEvent](json.SnakeCase())
+val claudeResultCodec    = json.Codec[ClaudeResultEvent](json.SnakeCase())
+
+// ClaudeChunk is the parsed shape of one stream-json line.
+//   Visible:    the user-facing text to append to the transcript
+//               (may be "" when the line is pure orchestration noise)
+//   ErrorText:  a non-empty value means claude reported an error
+//               (rate limit, max-turns exhausted, etc.) — onChunk
+//               surfaces this via toast + LastError instead of the
+//               transcript so the chat stays clean.
+//   LiveTurn:   Some(usage) when an assistant chunk landed mid-turn.
+//               Claude's assistant.message.usage is cumulative for the
+//               IN-PROGRESS turn; we mirror it into m.CurrentTurnUsage
+//               (overwrite, not add) so the header ticks live.
+//   FinalTurn:  Some(usage) on the per-turn `result` event. Commits
+//               the in-flight count to TokenUsage[name] and clears
+//               CurrentTurnUsage so the next turn starts clean.
+//   CostUsd:    running cost from result.total_cost_usd (only set on
+//               the final turn event). Summed into m.TotalCostUsd.
+struct ClaudeChunk(
+    Visible   string,
+    ErrorText string,
+    LiveTurn  Option[ClaudeUsage],
+    FinalTurn Option[ClaudeUsage],
+    CostUsd   float64,
+)
+
+// emptyChunk is the "drop this line" marker.
+func emptyChunk() ClaudeChunk = ClaudeChunk(
+    Visible   = "",
+    ErrorText = "",
+    LiveTurn  = None[ClaudeUsage](),
+    FinalTurn = None[ClaudeUsage](),
+    CostUsd   = 0.0,
+)
+
+// filterClaudeStreamJson is the chunk classifier. Plain non-JSON
+// lines (the test harness occasionally injects bare strings) pass
+// through as Visible. JSON lines go through two attempts:
+//   1. Decode as ClaudeAssistantEvent — Codec drops unknown fields
+//      so result/system/user JSON also "succeeds" but with Type set
+//      to a non-"assistant" value. We dispatch on Type after.
+//   2. Decode as ClaudeResultEvent for is_error surfacing.
+// Anything that decodes to an unrecognized Type is silently dropped
+// — never rendered raw, since stream-json metadata in the chat pane
+// is the worst possible UX.
+func filterClaudeStreamJson(line string) ClaudeChunk {
     val trimmed = strings.TrimSpace(line)
-    if trimmed == "" { return "" }
-    if !strings.HasPrefix(trimmed, "{") { return line }
-    val ev = json.Codec[ClaudeStreamEvent](json.SnakeCase()).Decode(trimmed)
-    return ev match {
-        case Failure(_) => line
-        case Success(e) => filterByType(e.Type, trimmed, line)
+    if trimmed == "" { return emptyChunk() }
+    if !strings.HasPrefix(trimmed, "{") {
+        return ClaudeChunk(Visible = line, ErrorText = "")
     }
-}
-
-// filterByType dispatches on the event type. system / user / result
-// events are noise — we return "" so onChunk drops them. assistant
-// events get a second decode pass into the typed nested shape so we
-// can pull the content[].text parts cleanly.
-func filterByType(kind string, trimmed string, raw string) string {
-    if kind == "system" || kind == "user" || kind == "result" {
-        return ""
-    }
-    if kind == "assistant" {
-        return json.Codec[ClaudeAssistantEvent](json.SnakeCase()).Decode(trimmed) match {
-            case Failure(_) => raw
-            case Success(e) => renderAssistantContent(e.Message.Content)
+    val asAssistant = claudeAssistantCodec.Decode(trimmed)
+    asAssistant match {
+        case Success(evt) => {
+            if evt.Type == "assistant" { return assistantEventChunk(evt) }
+            // result / user / system / control_request / etc — fall
+            // through to the result codec which can pull the error
+            // text. The codec doesn't fail on these; it just decodes
+            // a no-op assistant event with empty Content.
         }
+        case Failure(_) => {}
     }
-    return raw
+    val asResult = claudeResultCodec.Decode(trimmed)
+    return asResult match {
+        case Success(evt) => resultEventChunk(evt)
+        case Failure(_)   => emptyChunk()
+    }
 }
 
-// renderAssistantContent joins every text part with newlines and
-// inlines tool-use markers as `[tool: <name>]`. Empty result means
-// the assistant chunk had no displayable content (rare — usually
-// just a tool_use without text), and we drop it via the empty-string
-// path in onChunk.
-func renderAssistantContent(parts Array[ClaudeContentPart]) string =
-    parts.Collect({
-        case ClaudeContentPart(Type = t, Text = txt, Name = _)  if t == "text"     => txt
-        case ClaudeContentPart(Type = t, Text = _,   Name = nm) if t == "tool_use" => s"[tool: ${nm}]"
-    }).MkString("\n")
+// assistantEventChunk extracts the joined text from an assistant
+// event's content[]. Filters parts to `text` only — tool_use,
+// tool_result, thinking parts are dropped (the sidebar spinner
+// already conveys "tools are running" without flooding the chat).
+//
+// Tokens carry the message.usage block so accrueTokens can update
+// the header live during streaming. Cost stays 0 here because
+// claude only reports total_cost_usd on the final result event;
+// the cost field updates once at turn end.
+func assistantEventChunk(evt ClaudeAssistantEvent) ClaudeChunk {
+    val texts = evt.Message.Content.Collect({
+        case ClaudePart(kind, text) if kind == "text" => text
+    })
+    return ClaudeChunk(
+        Visible   = texts.MkString("\n"),
+        ErrorText = "",
+        LiveTurn  = Some(evt.Message.Usage),
+        FinalTurn = None[ClaudeUsage](),
+        CostUsd   = 0.0,
+    )
+}
+
+// resultEventChunk dispatches result events: errors surface as
+// ErrorText (toast + LastError); successes drop entirely. Both paths
+// stamp FinalTurn + CostUsd so onChunk commits the in-flight turn
+// count and bumps total cost.
+func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
+    if evt.Type != "result" { return emptyChunk() }
+    val tokens = Some(evt.Usage)
+    if evt.IsError {
+        val msg = if (evt.Result == "") "claude reported an error" else evt.Result
+        return ClaudeChunk(
+            Visible   = "",
+            ErrorText = msg,
+            LiveTurn  = None[ClaudeUsage](),
+            FinalTurn = tokens,
+            CostUsd   = evt.TotalCostUsd,
+        )
+    }
+    return ClaudeChunk(
+        Visible   = "",
+        ErrorText = "",
+        LiveTurn  = None[ClaudeUsage](),
+        FinalTurn = tokens,
+        CostUsd   = evt.TotalCostUsd,
+    )
+}
+
+// formatDirectiveMarkers rewrites orchestration markers in the chunk
+// text so the user-facing transcript shows WHO each directive routes
+// to. Replaces directive openers with a labelled arrow:
+//
+//   @dispatch(Felix)         →  "→ Felix:"
+//   @consult(transpiler)     →  "→ team transpiler:"
+//   @summary                 →  "Summary:"
+//   @help                    →  "Help needed:"
+//   @blocked                 →  "Blocked:"
+//   @finished | @done        →  "Done:"
+//   @end                     →  (dropped)
+//
+// Same-line body after the opener is preserved (left of `@end`). The
+// arrow form makes a TL turn that fans out to multiple members read as
+// a small dispatch summary instead of a wall of unattributed prose.
+func formatDirectiveMarkers(text string) string {
+    if text == "" { return "" }
+    val lines = strings.Split(text, "\n")
+    var kept = EmptyArray[string]()
+    var i = 0
+    val n = len(lines)
+    for i < n {
+        val ln = lines[i]
+        val replacement = rewriteMarkerLine(ln)
+        if replacement != "" {
+            kept = kept.Append(replacement)
+        }
+        i = i + 1
+    }
+    return kept.MkString("\n")
+}
+
+// rewriteMarkerLine returns the user-facing form of a single line:
+//   - "" if the line is `@end` (drop it entirely)
+//   - the original line if it isn't a marker (passthrough)
+//   - "→ <Target>:" / "Summary:" / etc. if the line opens a directive
+//     (the same-line tail is appended after the colon when present)
+func rewriteMarkerLine(line string) string {
+    val trimmed = strings.TrimSpace(line)
+    if trimmed == "" { return line }
+    if trimmed == "@end" || strings.HasPrefix(trimmed, "@end ") { return "" }
+    if strings.HasPrefix(trimmed, "@dispatch(") {
+        val (target, rest) = parseTargetMarker(trimmed, "@dispatch(")
+        return formatRoutedMarker(s"→ ${target}", rest)
+    }
+    if strings.HasPrefix(trimmed, "@consult(") {
+        val (target, rest) = parseTargetMarker(trimmed, "@consult(")
+        return formatRoutedMarker(s"→ team ${target}", rest)
+    }
+    if strings.HasPrefix(trimmed, "@summary") {
+        return formatRoutedMarker("Summary", strings.TrimSpace(strings.TrimPrefix(trimmed, "@summary")))
+    }
+    if strings.HasPrefix(trimmed, "@finished") {
+        return formatRoutedMarker("Done", strings.TrimSpace(strings.TrimPrefix(trimmed, "@finished")))
+    }
+    if strings.HasPrefix(trimmed, "@done") {
+        return formatRoutedMarker("Done", strings.TrimSpace(strings.TrimPrefix(trimmed, "@done")))
+    }
+    if strings.HasPrefix(trimmed, "@help") {
+        return formatRoutedMarker("Help needed", strings.TrimSpace(strings.TrimPrefix(trimmed, "@help")))
+    }
+    if strings.HasPrefix(trimmed, "@blocked") {
+        return formatRoutedMarker("Blocked", strings.TrimSpace(strings.TrimPrefix(trimmed, "@blocked")))
+    }
+    return line
+}
+
+// parseTargetMarker splits "@dispatch(Felix) tail..." into ("Felix",
+// "tail..."). The closing paren is mandatory; if it's missing (the
+// chunk arrived mid-stream), returns the everything-after-prefix as
+// the target so the rendered line at least shows a partial label.
+func parseTargetMarker(trimmed string, prefix string) Tuple[string, string] {
+    val afterOpen = strings.TrimPrefix(trimmed, prefix)
+    // SplitN(afterOpen, ")", 2) yields [target, rest] when the close
+    // paren exists, [afterOpen] when it doesn't (mid-stream chunk).
+    val parts = strings.SplitN(afterOpen, ")", 2)
+    if len(parts) < 2 {
+        return (strings.TrimSpace(afterOpen), "")
+    }
+    return (strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+}
+
+// formatRoutedMarker stitches the label and the same-line body. Empty
+// body → just the label with a colon ("Summary:"). Non-empty body →
+// "label: body" so `@summary done.` renders as `Summary: done.`.
+func formatRoutedMarker(label string, body string) string {
+    if body == "" { return s"  ${label}:" }
+    return s"  ${label}: ${body}"
+}
 
 // isCleanCloseError matches errors that mean "the subprocess finished
 // naturally" rather than "the subprocess crashed". On Windows, when
@@ -1092,11 +1895,61 @@ func onApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     }
 }
 
-// setStatus updates m.Statuses[name] in place and returns the new
-// model. Tiny helper so handlers don't have to type the Copy + Put
-// every time.
-func setStatus(m AppModel, name string, st Status) AppModel =
-    m.Copy(Statuses = m.Statuses.Put(name, st))
+// setStatus updates m.Statuses[name] AND folds the work-elapsed
+// counter so the sidebar timer reflects total work duration (paused
+// while idle) instead of "time since last chunk" (which was a
+// liveness signal that confused users into thinking the timer was a
+// stopwatch).
+//
+//   - Transition idle → working: stamp WorkStartedAt[name] = now.
+//   - Transition working → idle: add (now - WorkStartedAt[name]) to
+//     WorkElapsedNs[name] and clear WorkStartedAt[name].
+//   - Working → working (within working bucket): no-op; the segment
+//     keeps running.
+//
+// LastChunkAt is left untouched — the liveness FSM in onTick still
+// reads it to decide StSlow / StStuck thresholds.
+func setStatus(m AppModel, name string, st Status) AppModel {
+    val prior = m.Statuses.Get(name).GetOrElse(StIdle())
+    val wasWorking = isWorkingStatus(prior)
+    val nowWorking = isWorkingStatus(st)
+    if !wasWorking && nowWorking {
+        return m.Copy(
+            Statuses      = m.Statuses.Put(name, st),
+            WorkStartedAt = m.WorkStartedAt.Put(name, m.NowAt),
+        )
+    }
+    if wasWorking && !nowWorking {
+        val started = m.WorkStartedAt.Get(name)
+        val priorAccum = m.WorkElapsedNs.Get(name).GetOrElse(int64(0))
+        val seg = started match {
+            case None()    => int64(0)
+            case Some(at)  => {
+                val a = m.NowAt.UnixNanos()
+                val b = at.UnixNanos()
+                if (a > b) a - b else int64(0)
+            }
+        }
+        return m.Copy(
+            Statuses      = m.Statuses.Put(name, st),
+            WorkElapsedNs = m.WorkElapsedNs.Put(name, priorAccum + seg),
+            WorkStartedAt = m.WorkStartedAt.Remove(name),
+        )
+    }
+    return m.Copy(Statuses = m.Statuses.Put(name, st))
+}
+
+// isWorkingStatus returns true for any status that should accrue
+// time on the sidebar timer. StRecovering is included because the
+// member is still in a turn (just retrying); StFailed / StHelpWaiting
+// are excluded because the user is meant to act on them.
+func isWorkingStatus(s Status) bool = s match {
+    case StWorking()      => true
+    case StSlow()          => true
+    case StStuck()         => true
+    case StRecovering(_)   => true
+    case _                 => false
+}
 
 // resetAllStatuses sets every team member back to StIdle. Called
 // after a successful merge — the team's pipeline is done, the next
@@ -1383,6 +2236,8 @@ func runtimeToAppMsg(rm Msg) AppMsg = rm match {
     case RtChunkArrived(name, line) => ChunkArrived(Member = name, Line = line)
     case RtSessionFailed(name, err) => SessionFailed(Member = name, ErrText = err.Error())
     case RtWriteSent(name)          => WriteSent(Member = name)
+    case RtStderrArrived(name, line) => StderrArrived(Member = name, Line = line)
+    case RtStderrEnded(name)        => StderrEnded(Member = name)
     case RtPrCreated(url)           => PrCreated(Url = url)
     case RtPrFailed(err)            => PrFailed(ErrText = err.Error())
     case RtMerged(url)              => Merged(Url = url)
@@ -1430,11 +2285,16 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if m.EraseSessionPending {
         return (m.Copy(EraseSessionPending = false), NoCmd[AppMsg]())
     }
+    if m.MemberDetailOpen.IsDefined() {
+        return (m.Copy(MemberDetailOpen = None[string]()), NoCmd[AppMsg]())
+    }
     if m.RecoveryBannerVisible {
         return (m.Copy(
             RecoveryBannerVisible = false,
             RecoveredMembers      = EmptyArray[string](),
             Conversation          = EmptyArray[session.ConversationLine](),
+            ConversationOffset    = 0,
+            ConversationSticky    = true,
         ), NoCmd[AppMsg]())
     }
     val focusedSidebar = m.Focus match {

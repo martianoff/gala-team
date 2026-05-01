@@ -37,8 +37,8 @@ func InputToAppMsg(ev InputEvent) AppMsg = ev match {
 // MouseAt and re-flip focus on every tick) but forwarding every
 // real button as MouseAt for the update layer to interpret.
 func mouseToAppMsg(me MouseEvent) AppMsg = me.Btn match {
-    case MouseScrollUp()   => NoOp()
-    case MouseScrollDown() => NoOp()
+    case MouseScrollUp()   => KeyConvoScrollUp()
+    case MouseScrollDown() => KeyConvoScrollDown()
     case _                 => MouseAt(X = me.X, Y = me.Y, Pressed = me.Pressed)
 }
 
@@ -92,14 +92,32 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+t"))           { return KeyToggleConsultViewer() }
     if (KeyMatchesAny(ev, "ctrl+l", "tab"))    { return KeyToggleFocus() }
     if (KeyMatchesAny(ev, "ctrl+n"))           { return KeyEraseSession() }
+    if (KeyMatchesAny(ev, "ctrl+y"))           { return KeyYankConversation() }
+    if (KeyMatchesAny(ev, "ctrl+v"))           { return KeyPasteClipboard() }
+    if (KeyMatchesAny(ev, "ctrl+p"))           { return KeyTogglePalette() }
     return ev.Key match {
         case Backspace()  => KeyBackspace()
         case Enter()      => KeySubmit()
         case Up()         => HistoryCursorUp()
         case Down()       => HistoryCursorDown()
+        case PageUp()     => KeyConvoPageUp()
+        case PageDown()   => KeyConvoPageDown()
+        case End()        => KeyConvoStickToBottom()
         case Esc()        => HistoryDeselect()
         case Char(c)      => KeyChar(C = c)
         case Space()      => KeyChar(C = ' ')
+        case FKey(n)      => fnKeyToMsg(n)
         case _            => NoOp()
     }
+}
+
+// fnKeyToMsg maps function keys to view-mode toggles. F1 returns to
+// the default split layout; F2/F3/F4 set focus / grid / pipeline.
+// F5 is reserved for activity mode (not yet implemented).
+func fnKeyToMsg(n int) AppMsg {
+    if n == 1 { return KeySetViewMode(Mode = ViewDefault()) }
+    if n == 2 { return KeySetViewMode(Mode = ViewFocus()) }
+    if n == 3 { return KeySetViewMode(Mode = ViewGrid()) }
+    if n == 4 { return KeySetViewMode(Mode = ViewPipeline()) }
+    return NoOp()
 }

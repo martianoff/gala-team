@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+permissions:
+  contents: write
+
+env:
+  # Pinned alongside .github/workflows/ci.yml. Bumping requires both
+  # the gala CLI release tag and the gala_simple tag we clone for
+  # the local_path_override path to exist.
+  GALA_VERSION: "0.41.0"
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+            platform: "@rules_go//go/toolchain:linux_amd64"
+            ext: ""
+          - os: linux
+            arch: arm64
+            runner: ubuntu-latest
+            platform: "@rules_go//go/toolchain:linux_arm64"
+            ext: ""
+          - os: darwin
+            arch: amd64
+            runner: macos-latest
+            platform: "@rules_go//go/toolchain:darwin_amd64"
+            ext: ""
+          - os: darwin
+            arch: arm64
+            runner: macos-latest
+            platform: "@rules_go//go/toolchain:darwin_arm64"
+            ext: ""
+          - os: windows
+            arch: amd64
+            runner: windows-latest
+            platform: "@rules_go//go/toolchain:windows_amd64"
+            ext: ".exe"
+
+    steps:
+      - name: Checkout gala_team
+        uses: actions/checkout@v4
+        with:
+          path: gala_team
+          fetch-depth: 0
+
+      - name: Checkout gala_simple (sibling for local_path_override)
+        uses: actions/checkout@v4
+        with:
+          repository: martianoff/gala
+          ref: ${{ env.GALA_VERSION }}
+          path: gala_simple
+
+      - name: Checkout gala_tui (sibling for local_path_override)
+        uses: actions/checkout@v4
+        with:
+          repository: martianoff/gala-tui
+          path: gala_tui
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-${{ matrix.arch }}
+          repository-cache: true
+
+      - name: Build binary
+        working-directory: gala_team
+        shell: bash
+        run: |
+          bazel build //cmd:gala_team --platforms=${{ matrix.platform }}
+
+      - name: Prepare binary (Unix)
+        if: matrix.os != 'windows'
+        working-directory: gala_team
+        run: |
+          mkdir -p dist
+          cp bazel-bin/cmd/gala_team_/gala_team dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}
+          chmod +x dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: Prepare binary (Windows)
+        if: matrix.os == 'windows'
+        working-directory: gala_team
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item bazel-bin/cmd/gala_team_/gala_team.exe dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}.exe
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gala_team-${{ matrix.os }}-${{ matrix.arch }}
+          path: gala_team/dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+
+  upload-release:
+    name: Upload Release Assets
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten + checksum
+        run: |
+          cd artifacts
+          mkdir -p release
+          find . -mindepth 2 -type f -name 'gala_team-*' -exec mv {} release/ \;
+          rm -rf gala_team-*/
+          mv release/* .
+          rmdir release
+          sha256sum gala_team-* > checksums-sha256.txt
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/gala_team-*
+            artifacts/checksums-sha256.txt

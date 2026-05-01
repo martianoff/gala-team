@@ -5,6 +5,7 @@ import (
     "time"
     "martianoff/gala/time_utils"
     "github.com/martianoff/gala_team/app/session"
+    "github.com/martianoff/gala_team/app/version"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
@@ -65,9 +66,15 @@ func View(m AppModel) Widget {
         .OnClick(FocusSidebarClicked())
     val composerPanel = BorderOf(composer, panelBorder(m, FocusComposer()))
         .OnClick(FocusComposerClicked())
-    return Column(ArrayOf[LayoutChild](
-        Fixed(3, header),
-        Flex(1, Row(ArrayOf[LayoutChild](
+    // Pick the body layout based on ViewMode. Default = sidebar +
+    // conversation; Focus mode hides the sidebar (Frame M); Grid
+    // replaces the conversation pane with a member-card grid (Frame
+    // N); Pipeline shows the full-screen org chart (Frame O).
+    val body = m.ViewMode match {
+        case ViewFocus()    => focusBody(m, mainPanel)
+        case ViewGrid()     => gridBody(m)
+        case ViewPipeline() => pipelineBody(m)
+        case ViewDefault()  => Row(ArrayOf[LayoutChild](
             Fixed(28, sidebarPanel),
             Flex(1, Column(ArrayOf[LayoutChild](
                 recoveryBanner(m),
@@ -76,10 +83,203 @@ func View(m AppModel) Widget {
                 approvalBanner(m),
                 Flex(1, BorderOf(mainPanel, RoundedBorder())),
             ))),
-        ))),
+        ))
+    }
+    val base = Column(ArrayOf[LayoutChild](
+        Fixed(4, header),
+        Flex(1, body),
         Fixed(3, composerPanel),
         Fixed(1, footer),
     ))
+    // Overlay the member-detail modal when the user has Enter'd into
+    // a sidebar member row. The modal sits on top of the base view so
+    // background context is still visible — design Frame I.
+    val withMemberOverlay = m.MemberDetailOpen match {
+        case Some(name) => memberDetailModalOverlay(m, name, base)
+        case None()     => base
+    }
+    // Command palette (Frame J) sits on top of everything so the user
+    // can drive the orchestrator without leaving whatever overlay is
+    // already open.
+    if m.PaletteVisible {
+        return paletteOverlay(m.Palette, withMemberOverlay)
+    }
+    return withMemberOverlay
+}
+
+// paletteOverlay paints the fuzzy-search action picker centered over
+// `base`. Same visual language as the rest of the modal stack — dim
+// backdrop + bordered panel — so it composes cleanly with whatever
+// is open underneath.
+func paletteOverlay(pal Palette[AppMsg], base Widget) Widget {
+    val (cols, rows) = TermSize()
+    val w = if (cols < 60) cols - 4 else MinInt(80, cols - 8)
+    val h = if (rows < 16) rows - 2 else MinInt(20, rows - 4)
+    val body = PaletteViewAtHeight[AppMsg](pal, h - 2, true)
+    val panel = Modal(w, h, body)
+    return Overlay(base, panel)
+}
+
+// focusBody renders the conversation pane only — sidebar hidden.
+// Useful when the team chrome is in the way and the user just wants
+// to read the chat at full width (Frame M).
+func focusBody(m AppModel, mainPanel Widget) Widget = Column(ArrayOf[LayoutChild](
+    recoveryBanner(m),
+    livenessBanner(m),
+    toastBanner(m.Toasts),
+    approvalBanner(m),
+    Flex(1, BorderOf(mainPanel, RoundedBorder())),
+))
+
+// gridBody lays every team member out as a card in a Row of N
+// columns (Frame N). Each card shows the member's name, role,
+// status, and last activity timestamp. Wraps to a second row when
+// there are >4 members so the layout stays readable.
+func gridBody(m AppModel) Widget {
+    val cards = m.Team.Members.Map((mem) => memberCard(m, mem))
+    if cards.IsEmpty() { return Empty() }
+    val children = cards.Map((c) => Flex(1, c))
+    return Row(children)
+}
+
+// memberCard renders one member as a bordered card with their role
+// badge, current status, and last-chunk-elapsed timer.
+func memberCard(m AppModel, mem Member) Widget {
+    val st = m.Statuses.Get(mem.Name).GetOrElse(StIdle())
+    val nameStyle = DefaultStyle().WithBold().WithFg(memberColor(m.Team, mem))
+    val name = TextStyled(s"  ${mem.Name}", nameStyle)
+    val role = TextStyled(s"  ${RoleName(mem.Role)}", DefaultStyle().WithDim())
+    val status = TextStyled(s"  ${statusTagFor(st)}", DefaultStyle().WithDim())
+    val tokens = m.TokenUsage.Get(mem.Name).GetOrElse(zeroUsage())
+    val tok = TextStyled(s"  ${formatTokenCount(tokens.InputTokens + tokens.OutputTokens)} tokens",
+        DefaultStyle().WithDim())
+    val body = Column(ArrayOf[LayoutChild](
+        Fixed(1, name),
+        Fixed(1, role),
+        Fixed(1, Empty()),
+        Fixed(1, status),
+        Fixed(1, tok),
+        Flex(1, Empty()),
+    ))
+    return BorderOf(body, RoundedBorder())
+}
+
+// pipelineBody renders the existing PipelineState chart full-screen
+// (Frame O). For now it just hosts the same widget at the larger
+// area; future iterations can switch to a richer org-chart layout.
+func pipelineBody(m AppModel) Widget = BorderOf(
+    Column(ArrayOf[LayoutChild](
+        Fixed(1, TextStyled("  Pipeline view (F4 to toggle)", DefaultStyle().WithBold())),
+        Fixed(1, Empty()),
+        Flex(1, PipelineView(m.Pipeline)),
+    )),
+    RoundedBorder(),
+)
+
+// memberDetailModalOverlay paints the full transcript + role meta for
+// `name` as a centered modal on top of `base`. Closes via Esc; the
+// keymap routes Esc → KeyCloseMemberDetail when the modal is open.
+//
+// The transcript is filtered from m.Conversation by speaker — the
+// design (Frame I) groups TL prompts, member responses, and any
+// orchestrator nudges to that member into a single readable block.
+// We include the user's `you:` lines too because they're the original
+// task source.
+func memberDetailModalOverlay(m AppModel, name string, base Widget) Widget {
+    val (cols, rows) = TermSize()
+    val w = if (cols < 60) cols - 4 else MinInt(120, cols - 8)
+    val h = if (rows < 16) rows - 2 else MinInt(40, rows - 4)
+    val body = memberDetailBody(m, name, w - 4)
+    val panel = Modal(w, h, body)
+    return Overlay(base, panel)
+}
+
+// memberDetailBody is the modal content: header line + role/meta
+// block + filtered conversation. Width parameter is the inner-modal
+// content width so paragraphHeight can wrap correctly.
+func memberDetailBody(m AppModel, name string, width int) Widget {
+    val mem = MemberByName(m.Team, name)
+    val title = mem match {
+        case Some(mb) => s" ${mb.Name} · ${RoleName(mb.Role)} · transcript "
+        case None()   => s" ${name} · transcript "
+    }
+    val titleBar = TextStyled(title, DefaultStyle().WithBold().WithReverse())
+    val metaLine = mem match {
+        case Some(mb) => {
+            val model = mb.Model.GetOrElse("(default)")
+            val st = m.Statuses.Get(name).GetOrElse(StIdle())
+            return TextStyled(s"  Role: ${RoleName(mb.Role)}    Model: ${model}    Status: ${statusTagFor(st)}",
+                DefaultStyle().WithDim())
+        }
+        case None() => TextStyled(s"  ${name} is not on this team", DefaultStyle().WithDim())
+    }
+    val personality = mem match {
+        case Some(mb) => if (mb.Personality == "") TextStyled("", DefaultStyle())
+                        else                       TextStyled(s"  ${firstLineOf(mb.Personality)}",
+                            DefaultStyle().WithDim())
+        case None() => TextStyled("", DefaultStyle())
+    }
+    val filtered = m.Conversation.Filter((cl session.ConversationLine) =>
+        cl.Speaker == name || cl.Speaker == "you")
+    val entries = filtered.Map((cl session.ConversationLine) => {
+        val raw = s"  ${cl.Speaker}: ${cl.Text}"
+        return ConversationEntry(
+            Body   = ParagraphStyled(raw, speakerStyle(m.Team, cl.Speaker)),
+            Height = paragraphHeight(raw, width),
+        )
+    })
+    val log = ConversationLog(
+        Entries       = entries,
+        Offset        = 0,
+        StickToBottom = true,
+    )
+    val (_, h) = TermSize()
+    val viewportH = MaxInt(4, h - 12)
+    val transcript = if (entries.IsEmpty())
+        TextStyled("  (no transcript yet for this member)", DefaultStyle().WithDim())
+    else
+        ConversationLogView(log, viewportH)
+    val footer = TextStyled("  Esc to close · scroll wheel / PgUp/PgDn to scroll",
+        DefaultStyle().WithDim())
+    return Column(ArrayOf[LayoutChild](
+        Fixed(1, titleBar),
+        Fixed(1, Empty()),
+        Fixed(1, metaLine),
+        Fixed(1, personality),
+        Fixed(1, FillCh('-')),
+        Flex(1, transcript),
+        Fixed(1, FillCh('-')),
+        Fixed(1, footer),
+    ))
+}
+
+// statusTagFor maps a Status to a human-readable tag for the meta
+// line. Mirrors the sidebar tags but without the spinner glyph.
+func statusTagFor(s Status) string = s match {
+    case StIdle()         => "idle"
+    case StQueued()       => "queued"
+    case StWorking()      => "working"
+    case StSlow()         => "slow"
+    case StStuck()        => "stuck"
+    case StRecovering(n)  => s"recovering ${n}"
+    case StHelpWaiting(_) => "needs help"
+    case StDone()         => "done"
+    case StFailed(r)      => s"failed: ${r}"
+}
+
+// firstLineOf returns the first non-empty line of a multi-line string.
+// Used in the modal meta block to compress a multi-line personality
+// into a single-row hint without dropping the first sentence.
+func firstLineOf(s string) string {
+    val parts = strings.Split(s, "\n")
+    var i = 0
+    val n = len(parts)
+    for i < n {
+        val ln = strings.TrimSpace(parts[i])
+        if ln != "" { return ln }
+        i = i + 1
+    }
+    return ""
 }
 
 // panelBorder returns ThickBorder when this panel is the focused
@@ -167,22 +367,115 @@ func approvalSnippet(body string) string {
 // runtime is doing. Member personality belongs in onboarding, not
 // here.
 func headerWidget(m AppModel) Widget {
-    // PowerShell / Windows Terminal sometimes drops the very first
-    // visible row (top status line, prompt artifacts). Putting the
-    // branding ONLY on row 0 means it disappears in those terminals.
-    // Combine apple + gala_team + project + team name on a single
-    // bold cyan line that we ALSO emit on row 1 — at least one of
-    // the two will survive any terminal weirdness, and on a clean
-    // terminal the duplication just reads as a styled banner.
-    val appPrefix = if (m.Project.Name == "gala_team") "" else " | gala_team"
-    val brand = s"  🍎  gala_team${appPrefix} | ${m.Project.Name} | ${m.Team.Name}${teamDescriptionSuffix(m.Team.Description)}"
-    val brandLine = TextStyled(brand, DefaultStyle().WithFg(BrightCyan()))
-    val sub = TextStyled(s"      ${stateLabel(m.State)}", DefaultStyle().WithDim())
+    // PowerShell / Windows Terminal regularly eats the very first
+    // visible row of an alt-screen TUI (an artifact of how the
+    // shell's prior bottom row interacts with the alt-screen mode
+    // switch). Emit a blank spacer on row 0 and put the brand on
+    // row 1 — the spacer is what gets eaten and the brand survives.
+    // On a clean terminal (modern macOS / Linux) the spacer just
+    // reads as a slim top margin, which is fine.
+    // Brand line truncates to terminal width so a long team name +
+    // description doesn't wrap into the state row below. Description
+    // is dropped first; if still too long, team name + project get
+    // ellipsised in turn.
+    val (cols, _) = TermSize()
+    val brand = buildBrandLine(m, cols)
+    val brandLine = TextStyled(brand, DefaultStyle().WithBold().WithFg(BrightCyan()))
+    val sub = TextStyled(s"      ${stateLabel(m.State)}${tokenSuffix(m)}", DefaultStyle().WithDim())
     return Column(ArrayOf[LayoutChild](
-        Fixed(1, brandLine),
+        Fixed(1, Empty()),         // spacer row 0 — sacrificial in PowerShell
+        Fixed(1, brandLine),       // row 1 — first row that always survives
         Fixed(1, sub),
         Fixed(1, FillCh('-')),
     ))
+}
+
+// tokenSuffix renders the running cumulative token usage + cost
+// across every member of the team. Hidden until at least one result
+// event has accrued (so a fresh launch doesn't show "0 tok · $0.00").
+//
+// Format: " · 12.3k in / 4.5k out · cache 87.0k · $0.12"
+//   - 'in' = sum of input_tokens (prompt + tools)
+//   - 'out' = sum of output_tokens (assistant text)
+//   - 'cache' = cache_read_input_tokens, the part the cache served
+//   - dollars are claude's reported total_cost_usd, summed
+func tokenSuffix(m AppModel) string {
+    val usg = TotalTokenUsage(m)
+    val total = usg.InputTokens + usg.OutputTokens + usg.CacheReadInputTokens
+    if total == 0 { return "" }
+    val ins   = formatTokenCount(usg.InputTokens)
+    val outs  = formatTokenCount(usg.OutputTokens)
+    val cache = formatTokenCount(usg.CacheReadInputTokens)
+    return s"  ·  ${ins} in / ${outs} out  ·  cache ${cache}  ·  ${formatCostUsd(m.TotalCostUsd)}"
+}
+
+// formatTokenCount compresses big counts into a "12.3k" / "1.2M"
+// form so the header fits on one line for long-running sessions.
+func formatTokenCount(n int) string {
+    if n < 1000 { return s"${n}" }
+    if n < 1000000 {
+        val whole = n / 100
+        val tenths = whole - (whole / 10) * 10
+        val major = whole / 10
+        return s"${major}.${tenths}k"
+    }
+    val whole = n / 100000
+    val tenths = whole - (whole / 10) * 10
+    val major = whole / 10
+    return s"${major}.${tenths}M"
+}
+
+// formatCostUsd shows fractional dollars with two decimals, dropping
+// to "<$0.01" for sub-cent totals to avoid rendering "$0.00" after a
+// real (non-zero) charge.
+func formatCostUsd(usd float64) string {
+    if usd < 0.005 && usd > 0.0 { return "<$0.01" }
+    val cents = int(usd * 100.0 + 0.5)
+    val dollars = cents / 100
+    val pennies = cents - dollars * 100
+    val pad = if (pennies < 10) "0" else ""
+    // Concat rather than interpolate — gala's s-string handles `$$`
+    // as a literal `$`, but the immediately-following `${dollars}`
+    // still gets read as the literal text `${dollars}` instead of
+    // an interpolation. Concatenating an explicit "$" sidesteps the
+    // tokenizer ambiguity.
+    return "$" + s"${dollars}.${pad}${pennies}"
+}
+
+// buildBrandLine assembles the header brand row, dropping the
+// description first and ellipsising team / project as needed to fit
+// `cols`. The 🍎 + version prefix is treated as fixed-cost; only
+// optional segments are sacrificed.
+func buildBrandLine(m AppModel, cols int) string {
+    val prefix = s"  🍎  Gala Team v${version.Version()}"
+    val full = s"${prefix} | ${m.Project.Name} | ${m.Team.Name}${teamDescriptionSuffix(m.Team.Description)}"
+    if visibleWidth(full) <= cols { return full }
+    val withoutDesc = s"${prefix} | ${m.Project.Name} | ${m.Team.Name}"
+    if visibleWidth(withoutDesc) <= cols { return withoutDesc }
+    val withoutTeam = s"${prefix} | ${m.Project.Name}"
+    if visibleWidth(withoutTeam) <= cols { return withoutTeam }
+    return runesPrefixView(prefix, cols)
+}
+
+// visibleWidth returns the rune count of `s` — we don't try to be
+// pedantic about wide-glyph (CJK / emoji) cell widths because the
+// brand-line fits-or-truncates check tolerates a small overrun
+// without breaking layout (the renderer clips at terminal edge).
+func visibleWidth(s string) int = len(ToRunes(s))
+
+// runesPrefixView mirrors update.gala's runesPrefix — kept local so
+// view.gala doesn't import update.gala's helpers.
+func runesPrefixView(s string, n int) string {
+    val rs = ToRunes(s)
+    if len(rs) <= n { return s }
+    var out = EmptyArray[string]()
+    var i = 0
+    val cap = if (n < 1) 1 else n
+    for i < cap {
+        out = out.Append(string(rs[i]))
+        i = i + 1
+    }
+    return out.MkString("")
 }
 
 // teamDescriptionSuffix appends "  ·  <description>" when the team
@@ -245,33 +538,57 @@ func buildSidebarRightFields(m AppModel, members Array[Member]) HashMap[string, 
     })
 }
 
-// sidebarRightField formats one member's right-side timer text from the
-// current model. Status-driven: only StWorking/StSlow/StStuck show an
-// elapsed timer (since LastChunkAt); StRecovering shows the retry
-// counter; StFailed / StHelpWaiting show static labels.
+// sidebarRightField formats one member's right-side timer. The timer
+// is the cumulative time the member has spent in a working status
+// (StWorking/StSlow/StStuck/StRecovering) — pauses on idle, resumes
+// on the next dispatch. LastChunkAt feeds the liveness FSM under the
+// hood but isn't shown here; users were reading the chunk-elapsed
+// number as "stopwatch" and getting confused when it reset on every
+// chunk.
+//
+// Idle / queued / done shows nothing (no work to time). Failed and
+// help-waiting show their static labels.
 func sidebarRightField(m AppModel, name string) string {
     val status = m.Statuses.Get(name).GetOrElse(StIdle())
     return status match {
-        case StIdle()           => ""
+        case StIdle()           => totalWorkFor(m, name, false)
         case StQueued()         => ""
-        case StDone()           => ""
+        case StDone()           => totalWorkFor(m, name, false)
         case StFailed(_)        => "✗ failed"
-        case StRecovering(note) => s"recov ${note}"
+        case StRecovering(note) => s"${totalWorkFor(m, name, true)} (recov ${note})"
         case StHelpWaiting(_)   => "help"
-        case StWorking()        => lastChunkElapsedFor(m, name)
-        case StSlow()           => lastChunkElapsedFor(m, name)
-        case StStuck()          => lastChunkElapsedFor(m, name)
+        case StWorking()        => totalWorkFor(m, name, true)
+        case StSlow()           => s"${totalWorkFor(m, name, true)} slow"
+        case StStuck()          => s"${totalWorkFor(m, name, true)} stuck"
     }
 }
 
-// lastChunkElapsedFor formats "M:SS" since the most recent chunk for
-// `name`. Empty string when no chunk has been observed yet (member just
-// spawned, or the ChunkArrived stream hasn't kicked off).
-func lastChunkElapsedFor(m AppModel, name string) string {
-    val opt = m.LastChunkAt.Get(name)
-    return opt match {
-        case None()   => ""
-        case Some(at) => formatElapsedSince(m.NowAt, at)
+// totalWorkFor returns the formatted "M:SS" cumulative-work timer
+// for `name`. Adds the live-segment delta (now - WorkStartedAt) when
+// `running` is true, so the timer ticks while the member is
+// working. When `running` is false, just renders the accumulated
+// total — a fixed value that doesn't shift on every redraw.
+//
+// Returns "" when the member has zero accumulated time AND isn't
+// currently running, so an unworked-yet sidebar row stays clean.
+func totalWorkFor(m AppModel, name string, running bool) string {
+    val accum = m.WorkElapsedNs.Get(name).GetOrElse(int64(0))
+    val nowNs = m.NowAt.UnixNanos()
+    val live = if (!running) int64(0) else liveSegmentNs(m, name, nowNs)
+    val totalNs = accum + live
+    if totalNs <= int64(0) { return "" }
+    val secs = totalNs / int64(1000000000)
+    return formatMSS(secs)
+}
+
+// liveSegmentNs returns the in-flight portion of the work timer
+// (now - WorkStartedAt). Zero when the member doesn't have a stamp
+// yet (just spawned, or status hasn't flipped to working).
+func liveSegmentNs(m AppModel, name string, nowNs int64) int64 = m.WorkStartedAt.Get(name) match {
+    case None()   => int64(0)
+    case Some(at) => {
+        val startNs = at.UnixNanos()
+        if (nowNs > startNs) nowNs - startNs else int64(0)
     }
 }
 
@@ -404,69 +721,131 @@ func sidebarHeading(m AppModel) string = "  Team"
 
 func sidebarHeadingStyle(m AppModel) Style = DefaultStyle().WithBold()
 
-// conversationVisibleLines is the soft cap on rendered lines per
-// frame. The underlying conversation log can grow indefinitely
-// (auto-saved to disk via app/session); rendering all of it would
-// overflow off the bottom of the terminal. We render the last N and
-// surface a "(K more lines hidden, scroll history in latest.json)"
-// hint at the top so the user knows older lines exist.
-//
-// Phase-1 fixed value; Phase-2 should pull the actual viewport height
-// from the runtime via a `Sized` wrapper or similar so wide terminals
-// see more.
-val conversationVisibleLines = 20
-
+// conversationPanel renders the chat scrollback as a gala-tui
+// ConversationLog: append-only entries with sticky-bottom semantics
+// and PgUp/PgDn navigation. Each ConversationLine becomes one entry
+// whose intrinsic Height is the wrapped row count at the current
+// pane width. The log clamps the scroll offset to its valid range
+// every frame, so we don't need to mirror that logic in the model.
 func conversationPanel(m AppModel) Widget {
     val header = TextStyled("  Conversation with Team Lead", DefaultStyle().WithBold())
-    val all = m.Conversation
-    val total = all.Size()
-    val visible = if (total <= conversationVisibleLines) all
-                  else                                    all.Drop(total - conversationVisibleLines)
-    val hidden = total - visible.Size()
-    val hiddenLine = if (hidden > 0)
-                         ArrayOf[LayoutChild](Fixed(1, TextStyled(
-                             s"  …${hidden} earlier line(s) hidden — see .gala_team/sessions/latest.json",
-                             DefaultStyle().WithDim())))
-                     else
-                         EmptyArray[LayoutChild]()
-    // Each line is rendered as a Paragraph (wraps automatically to the
-    // pane's width) wrapped in Fixed sized to its intrinsic row count.
-    // Computing intrinsic height needs the actual width of the
-    // conversation pane; conversationPaneWidth is an estimate (term
-    // width minus sidebar 28 + borders 4 + padding 2). Within ~5 cells
-    // it's accurate enough that wrapping is visible without edge clip.
-    val lines = visible.Map((cl session.ConversationLine) => {
+    if m.Conversation.IsEmpty() {
+        return Column(ArrayOf[LayoutChild](
+            Fixed(1, header),
+            Fixed(1, Empty()),
+            Fixed(1, TextStyled("  (no conversation yet — type a prompt below)",
+                  DefaultStyle().WithDim())),
+            Flex(1, Empty()),
+        ))
+    }
+    val width = conversationPaneWidth(m)
+    val entries = m.Conversation.Map((cl session.ConversationLine) => {
         val raw = s"  ${cl.Speaker}: ${cl.Text}"
-        val widget = ParagraphStyled(raw, speakerStyle(cl.Speaker))
-        val rows   = paragraphHeight(raw, conversationPaneWidth(m))
-        return Fixed(rows, widget)
+        val rows = paragraphHeight(raw, width)
+        return ConversationEntry(
+            Body   = ParagraphStyled(raw, speakerStyle(m.Team, cl.Speaker)),
+            Height = rows,
+        )
     })
-    val body = if (lines.IsEmpty() && hidden == 0)
-                   ArrayOf[LayoutChild](
-                       Fixed(1, Empty()),
-                       Fixed(1, TextStyled("  (no conversation yet — type a prompt below)",
-                           DefaultStyle().WithDim())),
-                   )
-               else hiddenLine.AppendAll(lines)
-    val children = ArrayOf[LayoutChild](Fixed(1, header)).AppendAll(body).Append(Flex(1, Empty()))
-    return Column(children)
+    val log = ConversationLog(
+        Entries       = entries,
+        Offset        = m.ConversationOffset,
+        StickToBottom = m.ConversationSticky,
+    )
+    val viewportH = conversationViewportHeight(m)
+    return Column(ArrayOf[LayoutChild](
+        Fixed(1, header),
+        Flex(1, ConversationLogView(log, viewportH)),
+    ))
 }
 
-// speakerStyle picks a text style based on who's speaking — the user
-// gets bright white, members get cyan.
-func speakerStyle(speaker string) Style =
-    if (speaker == "you") DefaultStyle().WithFg(BrightWhite())
-    else                  DefaultStyle().WithFg(BrightCyan())
+// conversationViewportHeight estimates how many rows the conversation
+// pane gets at runtime. Total terminal rows minus the chrome (header
+// 2 + state line 1 + dividers 2 + composer box 3 + footer 1 + a few
+// optional banner rows). Conservative undercount means the
+// ConversationLog clamps to a slightly shorter viewport than reality;
+// the visible window is still correct, the scrollbar just shows a
+// touch more "below" than there actually is — better than overflowing
+// the layout.
+func conversationViewportHeight(m AppModel) int {
+    val (_, rows) = TermSize()
+    val h = rows - 12
+    if h < 4 { return 4 }
+    return h
+}
 
-// conversationPaneWidth estimates how many cells the conversation
-// pane gets at runtime. Term width minus the 28-cell sidebar and the
-// border / padding on both panes. The value is an estimate because
-// the actual layout is computed by gala-tui at draw time; for
-// wrapping purposes a small undercount is fine (lines wrap a row or
-// two earlier than necessary; never clip).
+// speakerStyle picks a text style based on who's speaking. Distinct
+// colors per role (and per engineer ordinal) so a multi-member turn
+// is visually parseable — the user can tell at a glance whether the
+// next paragraph is the TL summarising, an engineer reporting, or QA
+// pushing back.
+//
+//   you      → bright white  (the user)
+//   TL       → bright cyan
+//   engineer → palette cycled by author order: yellow / magenta / blue
+//   qa       → bright green
+//   unknown  → dim white      (consult target from another team, etc.)
+func speakerStyle(team Team, speaker string) Style {
+    if speaker == "you" {
+        return DefaultStyle().WithBold().WithFg(BrightWhite())
+    }
+    return MemberByName(team, speaker) match {
+        case None()    => DefaultStyle().WithFg(BrightWhite()).WithDim()
+        case Some(mem) => DefaultStyle().WithBold().WithFg(memberColor(team, mem))
+    }
+}
+
+// memberColor maps a Member to a foreground color slot. TL and QA each
+// get a single dedicated color; engineers cycle through a 3-color
+// palette by their order in the team roster, so a 4-engineer team
+// renders as Yellow / Magenta / Blue / Yellow rather than four
+// indistinguishable cyans.
+func memberColor(team Team, mem Member) Color = mem.Role match {
+    case TeamLead() => BrightCyan()
+    case QA()       => BrightGreen()
+    case Engineer() => engineerColor(engineerOrdinal(team, mem))
+}
+
+// engineerOrdinal returns 0 for the first engineer in source order, 1
+// for the second, etc. Stable across renders because team_config
+// preserves YAML order. Falls back to 0 for an unknown name.
+func engineerOrdinal(team Team, mem Member) int {
+    val engineers = MembersOf(team, Engineer())
+    val n = engineers.Size()
+    var i = 0
+    for i < n {
+        if engineers.Get(i).Name == mem.Name { return i }
+        i = i + 1
+    }
+    return 0
+}
+
+// engineerColor cycles a 3-color palette so adjacent engineers are
+// visually distinct in the transcript.
+func engineerColor(ordinal int) Color {
+    val mod = ordinal - (ordinal / 3) * 3
+    if mod == 0 { return BrightYellow() }
+    if mod == 1 { return BrightMagenta() }
+    return BrightBlue()
+}
+
+// conversationPaneWidth returns how many cells the conversation pane
+// gets at the current terminal size: total width minus the 28-cell
+// sidebar minus 6 cells of border / padding on both panes.
+//
+// Probed via TermSize() at view time rather than carried in AppModel
+// because (a) the terminal can resize between updates without an
+// intervening Msg and (b) we don't want every model-level helper to
+// have to thread cols through. A small undercount is safe — lines
+// wrap a row or two earlier than necessary, never clip — but a large
+// undercount (the prior hardcoded 80) makes paragraphHeight reserve
+// huge phantom row counts on wide terminals, leaving giant blank
+// gaps between conversation lines.
 func conversationPaneWidth(m AppModel) int {
-    val cols = if (m.NowAt.UnixNanos() == int64(0)) 80 else 80
-    return cols - 28 - 6
+    val (cols, _) = TermSize()
+    val w = cols - 28 - 6
+    if w < 20 { return 20 }
+    return w
 }
 
 // paragraphHeight returns the row count `content` will occupy when
@@ -585,7 +964,13 @@ func composerWidget(m AppModel) Widget {
                     DefaultStyle().WithDim()
                 else
                     DefaultStyle().WithFg(BrightWhite())
-    return TextStyled(s"  ${prompt}▌", style)
+    // Long prompts wrap inside the composer panel via Paragraph
+    // instead of clipping at the right edge. The composer panel
+    // itself is Fixed(3, ...) — three rows = ~2 wrapped lines plus
+    // the cursor row. After-paste of a multi-line block, the user
+    // can scroll the input by deleting characters; further scroll-
+    // ability is the textarea-rewrite follow-up (#12 in the queue).
+    return ParagraphStyled(s"  ${prompt}▌", style)
 }
 
 // footerWidget chooses what one-line legend to render at the
@@ -621,10 +1006,10 @@ func footerWidget(m AppModel) Widget {
 // (Ctrl+L is the alias); Ctrl+T toggles the consult viewer modal;
 // Ctrl+H opens the saved-archive browser.
 func footerHints(m AppModel) string = m.Focus match {
-    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc back to composer · Ctrl+Q quit · Ctrl+N new"
+    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc back to composer · PgUp/PgDn scroll · Ctrl+Q quit"
     case FocusComposer() => m.LastPrUrl match {
-        case Some(_) => "  Ctrl+Q quit · Ctrl+M merge · Ctrl+A re-approve · Tab sidebar · Ctrl+N new"
-        case None()  => "  Ctrl+Q quit · Enter send · Ctrl+A approve · Ctrl+R reject · Tab sidebar · Ctrl+N new"
+        case Some(_) => "  Ctrl+Q · Ctrl+P palette · Ctrl+M merge · Ctrl+A re-approve · F2 focus · F3 grid · F4 pipeline"
+        case None()  => "  Ctrl+Q · Ctrl+P palette · Enter send · Ctrl+A approve · Ctrl+R reject · F2/F3/F4 views"
     }
 }
 
@@ -648,7 +1033,7 @@ func stateLabel(s AppState) string = s match {
 // project name, line count). When ViewingArchive is set, shows that
 // archive's full conversation and a hint to press Esc.
 func historyPanel(m AppModel) Widget = m.ViewingArchive match {
-    case Some(snap) => historyDetailPanel(snap)
+    case Some(snap) => historyDetailPanel(m, snap)
     case None()     => historyIndexPanel(m)
 }
 
@@ -747,19 +1132,20 @@ func archiveRowWidget(meta session.SnapshotMeta, isCursor bool) Widget {
 }
 
 // historyDetailPanel renders a fully-loaded archive in read-only
-// mode. Mirrors conversationPanel's tail-clipping so a long
-// archive doesn't blow past the bottom of the pane: render the
-// last `conversationVisibleLines` lines with a "N earlier hidden"
-// hint at the top when the snapshot is taller than the cap.
-func historyDetailPanel(snap session.Snapshot) Widget {
+// mode. Tail-clips at a fixed cap (the history modal isn't yet
+// wired to the scrollable ConversationLog widget — that's a future
+// follow-up; the live conversation pane uses the scrollable path).
+val historyVisibleLines = 20
+
+func historyDetailPanel(m AppModel, snap session.Snapshot) Widget {
     val header = TextStyled(
         s"  ${formatSavedAt(snap.SavedAt)}  ·  ${snap.ProjectName}  ·  Esc to return to index",
         DefaultStyle().WithBold().WithFg(BrightYellow()),
     )
     val all = snap.Conversation
     val total = all.Size()
-    val visible = if (total <= conversationVisibleLines) all
-                  else                                    all.Drop(total - conversationVisibleLines)
+    val visible = if (total <= historyVisibleLines) all
+                  else                              all.Drop(total - historyVisibleLines)
     val hidden = total - visible.Size()
     val hiddenLine = if (hidden > 0)
                          ArrayOf[LayoutChild](Fixed(1, TextStyled(
@@ -769,7 +1155,7 @@ func historyDetailPanel(snap session.Snapshot) Widget {
                          EmptyArray[LayoutChild]()
     val lines = visible.Map((cl session.ConversationLine) => Fixed(
         1,
-        TextStyled(s"  ${cl.Speaker}: ${cl.Text}", speakerStyle(cl.Speaker)),
+        TextStyled(s"  ${cl.Speaker}: ${cl.Text}", speakerStyle(m.Team, cl.Speaker)),
     ))
     val body = hiddenLine.AppendAll(lines)
     val children = ArrayOf[LayoutChild](Fixed(1, header), Fixed(1, Empty()))

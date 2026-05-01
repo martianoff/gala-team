@@ -12,7 +12,7 @@ bazel_dep(name = "rules_go", version = "0.59.0")
 # Dev: local sibling overrides for both gala stdlib and gala_tui.
 local_path_override(
     module_name = "gala",
-    path = "../gala_simple/.claude/worktrees/agent-a7a11d4acd80bb193",
+    path = "../gala_simple/.claude/worktrees/release-0.41.0",
 )
 
 local_path_override(

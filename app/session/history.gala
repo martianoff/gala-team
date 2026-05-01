@@ -102,10 +102,10 @@ func ListArchives(repoDir string) Try[Array[SnapshotMeta]] = Try[Array[SnapshotM
 // LoadArchive reads a single archive file and returns the full
 // Snapshot — used by the history view when the user picks one to
 // inspect.
-func LoadArchive(path string) Try[Snapshot] = Try[Snapshot](() => {
+func LoadArchive(path string) Try[Snapshot] = Try(() => {
     val raw, err = os.ReadFile(path)
     if err != nil { panic(s"archive: read ${path}: ${err.Error()}") }
-    return decodeSnapshot(json.NewJsonDecoder(string(raw)))
+    return snapshotCodec().Decode(string(raw)).Get()
 })
 
 // ----------------------------------------------------------------------------
@@ -114,12 +114,12 @@ func LoadArchive(path string) Try[Snapshot] = Try[Snapshot](() => {
 
 // metaFromFile decodes only as much of the archive as needed for the
 // list view: ProjectName, SavedAt, and a count of conversation lines.
-// Reuses decodeSnapshot then projects — simpler than writing a partial
-// decoder for the list-only path.
-func metaFromFile(path string) Try[SnapshotMeta] = Try[SnapshotMeta](() => {
+// Reuses the package-level snapshotCodec then projects — simpler than
+// writing a partial decoder for the list-only path.
+func metaFromFile(path string) Try[SnapshotMeta] = Try(() => {
     val raw, err = os.ReadFile(path)
     if err != nil { panic(s"meta: read ${path}: ${err.Error()}") }
-    val snap = decodeSnapshot(json.NewJsonDecoder(string(raw)))
+    val snap = snapshotCodec().Decode(string(raw)).Get()
     return SnapshotMeta(
         Path        = path,
         Label       = labelFromFilename(filepath.Base(path)),

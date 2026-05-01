@@ -12,24 +12,28 @@ import (
 // ============================================================================
 // app/config — loads a team.yaml file into a validated Team + Workflow.
 //
-// The yaml package's Codec[T] is the right tool conceptually, but its
-// generated decoder doesn't handle struct fields whose type is Array[T] or
-// HashMap (Phase-2 TODO upstream). Members live in an Array[Member] so
-// we'd hit that limitation immediately.
-//
-// Workaround: drive yaml.NewYamlDecoder via its public FieldDecoder API
-// directly. More verbose than `Codec[TeamConfig]` but bypasses the
-// array-decode gap and gives precise control over which fields are
-// required vs ignored.  See DESIGN.md §5.1, §5.3.
+// gala 0.41.0's `yaml.Codec[T]` handles `Array[Struct]` (PR #314) so the
+// hand-rolled pull-decoder this file used to host has been replaced with
+// a wire-format struct + a single `Codec[WireConfig]` decode + a
+// post-decode conversion to the public `Team` / `Member` / `Policy` /
+// `Workflow` shapes (the public types carry sealed `Role` /
+// `WorkspaceMode` / `MergeRule` values that the codec doesn't touch
+// natively, and a computed `Lead` field that has no YAML key).
 // ============================================================================
 
 // LoadFromString parses a YAML document into TeamConfig (Team + Workflow),
 // returning Failure with a descriptive error on parse / validation
-// problems.  Path-based loading lives in the caller; this entry point
+// problems. Path-based loading lives in the caller; this entry point
 // keeps IO out of the pure parser so unit tests drive it with literals.
-func LoadFromString(yamlStr string) Try[TeamConfig] = Try[TeamConfig](() => {
-    val d = yaml.NewYamlDecoder(yamlStr)
-    return decodeTopLevel(d)
+func LoadFromString(yamlStr string) Try[TeamConfig] = Try(() => {
+    val wire = configCodec().Decode(yamlStr).Get()
+    if wire.Teams.IsEmpty() {
+        panic("team.yaml: must declare at least one team under top-level 'teams:'")
+    }
+    val teams = wire.Teams.Map((wt) => convertTeam(wt))
+    val workflow = convertWorkflow(wire.Workflow, yamlStr)
+    val pol = convertPolicy(wire.Policy, hasYamlBlock(yamlStr, "policy"))
+    return validate(teams, workflow, pol)
 })
 
 // TeamConfig is what LoadFromString returns: the validated team plus
@@ -37,7 +41,8 @@ func LoadFromString(yamlStr string) Try[TeamConfig] = Try[TeamConfig](() => {
 // (workspace mode / hooks / merge rule); when team.yaml omits the
 // `policy:` block we fall back to DefaultPolicy() — shared workspace,
 // no hooks, squash merge.
-// TeamConfig carries every team declared in the yaml file plus the
+//
+// Team carries every team declared in the yaml file plus the
 // shared workflow + policy. Team is the main team — what the lead is
 // driving — and is also at index 0 of Teams. Additional entries in
 // Teams are in-project consultancies addressable by key from
@@ -51,87 +56,212 @@ struct TeamConfig(
 )
 
 // ----------------------------------------------------------------------------
-// Manual decoder
+// Wire-format structs (1:1 with the on-disk YAML schema)
+// ----------------------------------------------------------------------------
+//
+// These exist solely so Codec[T] has a flat shape to decode into. The
+// public types (Team / Member / Workflow / Policy) carry sealed types
+// and computed fields that the codec can't synthesise directly; we map
+// wire → public via the convert* helpers below.
+
+struct WireMember(
+    Name        string,
+    Role        string,
+    Personality string,
+    Model       string,
+    Extra       string,
+    Onboarding  Array[string],
+)
+
+struct WireTeam(
+    Key                        string,
+    Name                       string,
+    Description                string,
+    Members                    Array[WireMember],
+    Onboarding                 Array[string],
+    DangerouslySkipPermissions bool,
+)
+
+struct WireApproval(
+    RequireUserConfirm bool,
+)
+
+struct WireWorkflow(
+    QARequired        bool,
+    ParallelEngineers bool,
+    Approval          WireApproval,
+)
+
+struct WireHook(
+    Name string,
+    Cmd  string,
+    Args Array[string],
+)
+
+struct WireHeartbeat(
+    SlowAfterSeconds    int64,
+    StuckAfterSeconds   int64,
+    AbandonAfterSeconds int64,
+    MaxRetries          int,
+)
+
+struct WirePolicy(
+    WorkspaceMode string,
+    MergeRule     string,
+    PreMerge      Array[WireHook],
+    PostMerge     Array[WireHook],
+    Heartbeat     WireHeartbeat,
+)
+
+struct WireConfig(
+    Teams    Array[WireTeam],
+    Workflow WireWorkflow,
+    Policy   WirePolicy,
+)
+
+// configCodec is the typed YAML codec for the full file. Renames keep
+// `extra_instructions` (verbose canonical key) and the four heartbeat
+// fields lined up with on-disk YAML; everything else is plain
+// snake_case.
+func configCodec() yaml.YamlEncoder[WireConfig] = yaml.Codec[WireConfig](yaml.SnakeCase())
+    .Rename("Extra", "extra_instructions")
+
+// ----------------------------------------------------------------------------
+// Wire → public conversion
 // ----------------------------------------------------------------------------
 
-func decodeTopLevel(d *yaml.YamlDecoderImpl) TeamConfig {
-    d.StartObject()
-    var teams = EmptyArray[Team]()
-    var workflow = DefaultWorkflow()
-    var pol = DefaultPolicy()
-
-    for d.HasMoreFields() {
-        d.ReadKey() match {
-            case "teams" => {
-                // `teams: [{key, name, description, members, onboarding}, ...]`.
-                teams = teams.AppendAll(decodeTeamsArray(d))
-            }
-            case "workflow" => workflow = decodeWorkflowBlock(d)
-            case "policy"   => pol = decodePolicyBlock(d)
-            case _          => d.Skip()
-        }
-    }
-    d.EndObject()
-
-    if teams.IsEmpty() {
-        panic("team.yaml: must declare at least one team under top-level 'teams:'")
-    }
-    return validate(teams, workflow, pol)
-}
-
-// decodeTeamsArray walks a `teams: [ … ]` list. Each entry must have
-// at minimum a name + members; key defaults to a slug of the name
-// when unset.
-func decodeTeamsArray(d *yaml.YamlDecoderImpl) Array[Team] {
-    var out = EmptyArray[Team]()
-    d.StartArray()
-    for d.HasMoreElements() {
-        out = out.Append(decodeTeamEntry(d, ""))
-    }
-    d.EndArray()
-    return out
-}
-
-// decodeTeamEntry parses one team object. `defaultKey` is what we
-// fall back to when the YAML omits `key:` — for the legacy `team:`
-// shape it's "main"; for entries inside a `teams:` list it's "" so
-// we can derive a slug from the name.
-func decodeTeamEntry(d *yaml.YamlDecoderImpl, defaultKey string) Team {
-    d.StartObject()
-    var key = defaultKey
-    var name = ""
-    var description = ""
-    var members = EmptyArray[Member]()
-    var onboarding = EmptyArray[string]()
-    var dangerous = false
-    for d.HasMoreFields() {
-        d.ReadKey() match {
-            case "key"                          => key = d.ReadString()
-            case "name"                         => name = d.ReadString()
-            case "description"                  => description = d.ReadString()
-            case "members"                      => members = decodeMemberArray(d)
-            case "onboarding"                   => onboarding = decodeStringArray(d)
-            case "dangerously_skip_permissions" => dangerous = d.ReadBool()
-            case _                              => d.Skip()
-        }
-    }
-    d.EndObject()
-    if name == "" { panic("team.yaml: team.name is required and must be non-empty") }
-    if members.IsEmpty() { panic(s"team.yaml: team '${name}' has no members") }
+func convertTeam(wt WireTeam) Team {
+    if wt.Name == "" { panic("team.yaml: team.name is required and must be non-empty") }
+    if wt.Members.IsEmpty() { panic(s"team.yaml: team '${wt.Name}' has no members") }
+    val members = wt.Members.Map((wm) => convertMember(wm))
     val leads = members.Filter((m) => SameRole(m.Role, TeamLead()))
     if leads.Length() != 1 {
-        panic(s"team.yaml: team '${name}' must declare exactly one team_lead (found ${leads.Length()})")
+        panic(s"team.yaml: team '${wt.Name}' must declare exactly one team_lead (found ${leads.Length()})")
     }
-    val effectiveKey = if (key == "") slugify(name) else key
+    val effectiveKey = if (wt.Key == "") slugify(wt.Name) else wt.Key
     return Team(
         Key                        = effectiveKey,
-        Name                       = name,
-        Description                = description,
+        Name                       = wt.Name,
+        Description                = wt.Description,
         Members                    = members,
         Lead                       = leads.Get(0),
-        Onboarding                 = onboarding,
-        DangerouslySkipPermissions = dangerous,
+        Onboarding                 = wt.Onboarding,
+        DangerouslySkipPermissions = wt.DangerouslySkipPermissions,
     )
+}
+
+func convertMember(wm WireMember) Member {
+    if wm.Name == "" {
+        panic("team.yaml: member is missing required 'name' field")
+    }
+    val role = RoleFromName(wm.Role) match {
+        case Some(r) => r
+        case None()  => panic(s"team.yaml: unknown role '${wm.Role}' for member '${wm.Name}' (expected: team_lead | engineer | qa)")
+    }
+    val modelOpt = if (wm.Model == "") None[string]() else Some(wm.Model)
+    return Member(
+        Name        = wm.Name,
+        Role        = role,
+        Personality = wm.Personality,
+        Model       = modelOpt,
+        Extra       = wm.Extra,
+        Onboarding  = wm.Onboarding,
+    )
+}
+
+// convertWorkflow falls back to DefaultWorkflow() when the YAML omits
+// the `workflow:` block entirely (codec zeroes the struct, but the
+// design defaults are non-zero — qa_required + parallel_engineers +
+// require_user_confirm are all true). The string-side block-presence
+// check is the one heuristic we rely on; an explicit "workflow: {}"
+// (empty block, no fields) reads as "use defaults" too, which is
+// reasonable.
+// convertWorkflow merges the codec-decoded values with per-key
+// defaults. Codec[T] zeros missing bool fields, so we re-scan the
+// YAML to detect each key's presence and fall back to
+// DefaultWorkflow() for absent keys.
+func convertWorkflow(ww WireWorkflow, yamlStr string) Workflow {
+    val defaults = DefaultWorkflow()
+    if !hasYamlBlock(yamlStr, "workflow") { return defaults }
+    val qa = if (hasIndentedKey(yamlStr, "qa_required")) ww.QARequired else defaults.QARequired
+    val par = if (hasIndentedKey(yamlStr, "parallel_engineers")) ww.ParallelEngineers else defaults.ParallelEngineers
+    val conf = if (hasIndentedKey(yamlStr, "require_user_confirm")) ww.Approval.RequireUserConfirm else defaults.RequireUserConfirm
+    return Workflow(
+        QARequired         = qa,
+        ParallelEngineers  = par,
+        RequireUserConfirm = conf,
+    )
+}
+
+// hasIndentedKey returns true when `yamlStr` contains "<key>:" with
+// any leading whitespace. Used by the codec converters to tell
+// "field absent → use default" from "field set to false".
+func hasIndentedKey(yamlStr string, key string) bool =
+    strings.Contains(yamlStr, s"\n${key}:") ||
+    strings.Contains(yamlStr, s"\n  ${key}:") ||
+    strings.Contains(yamlStr, s"\n    ${key}:") ||
+    strings.Contains(yamlStr, s"\n      ${key}:") ||
+    strings.HasPrefix(yamlStr, s"${key}:")
+
+func convertPolicy(wp WirePolicy, blockPresent bool) Policy {
+    if !blockPresent { return DefaultPolicy() }
+    val hb = if (wp.Heartbeat.SlowAfterSeconds == int64(0) &&
+                  wp.Heartbeat.StuckAfterSeconds == int64(0) &&
+                  wp.Heartbeat.AbandonAfterSeconds == int64(0) &&
+                  wp.Heartbeat.MaxRetries == 0) {
+        DefaultHeartbeat()
+    } else {
+        Heartbeat(
+            SlowAfterSeconds    = wp.Heartbeat.SlowAfterSeconds,
+            StuckAfterSeconds   = wp.Heartbeat.StuckAfterSeconds,
+            AbandonAfterSeconds = wp.Heartbeat.AbandonAfterSeconds,
+            MaxRetries          = wp.Heartbeat.MaxRetries,
+        )
+    }
+    val mode = if (wp.WorkspaceMode == "") Shared() else workspaceModeFromString(wp.WorkspaceMode)
+    val rule = if (wp.MergeRule == "")     SquashMerge() else mergeRuleFromString(wp.MergeRule)
+    val pre  = wp.PreMerge.Map((wh) => convertHook(wh))
+    val post = wp.PostMerge.Map((wh) => convertHook(wh))
+    return Policy(
+        WorkspaceMode = mode,
+        MergeRule     = rule,
+        PreMerge      = pre,
+        PostMerge     = post,
+        Heartbeat     = hb,
+    )
+}
+
+func convertHook(wh WireHook) Hook {
+    if wh.Name == "" { panic("team.yaml: policy hook is missing required 'name'") }
+    if wh.Cmd == ""  { panic(s"team.yaml: policy hook '${wh.Name}' is missing required 'cmd'") }
+    return Hook(Name = wh.Name, Cmd = wh.Cmd, Args = wh.Args)
+}
+
+func workspaceModeFromString(s string) WorkspaceMode {
+    if s == "shared" { return Shared() }
+    if s == "worktree-per-engineer" { return WorktreePerEngineer() }
+    panic(s"team.yaml: unknown policy.workspace_mode '${s}' (expected: shared | worktree-per-engineer)")
+}
+
+func mergeRuleFromString(s string) MergeRule {
+    if s == "squash" { return SquashMerge() }
+    if s == "rebase" { return RebaseMerge() }
+    if s == "merge"  { return PlainMerge() }
+    panic(s"team.yaml: unknown policy.merge_rule '${s}' (expected: squash | rebase | merge)")
+}
+
+// hasYamlBlock returns true when `yamlStr` declares a top-level
+// `<name>:` block. Used to distinguish "block omitted entirely" (apply
+// defaults) from "block present with all-false fields" (use the
+// codec-decoded values verbatim). String-level scan rather than a
+// re-decode pass — defaults at top-level only, so we look for the
+// pattern at column 0.
+func hasYamlBlock(yamlStr string, name string) bool {
+    val needle1 = s"\n${name}:"
+    val needle2 = s"\n${name} :"
+    if strings.HasPrefix(yamlStr, s"${name}:") { return true }
+    if strings.HasPrefix(yamlStr, s"${name} :") { return true }
+    return strings.Contains(yamlStr, needle1) || strings.Contains(yamlStr, needle2)
 }
 
 // slugify turns a team name into a usable Key fallback: trim, lower
@@ -142,238 +272,9 @@ func slugify(name string) string {
     return strings.Join(strings.Fields(lower), "-")
 }
 
-// Loop-bound Append intentional: yaml.YamlDecoderImpl is a stateful
-// pull-cursor, so each element comes from a side-effecting call pair.
-func decodeMemberArray(d *yaml.YamlDecoderImpl) Array[Member] {
-    var members = EmptyArray[Member]()
-    d.StartArray()
-    for d.HasMoreElements() {
-        members = members.Append(decodeMember(d))
-    }
-    d.EndArray()
-    return members
-}
-
-func decodeMember(d *yaml.YamlDecoderImpl) Member {
-    d.StartObject()
-    var roleStr = ""
-    var name = ""
-    var personality = ""
-    var modelOpt = None[string]()
-    var extra = ""
-    var onboarding = EmptyArray[string]()
-    for d.HasMoreFields() {
-        d.ReadKey() match {
-            case "role"        => roleStr = d.ReadString()
-            case "name"        => name = d.ReadString()
-            case "personality" => personality = d.ReadString()
-            case "model"       => {
-                if d.IsNull() {
-                    d.ReadNull()
-                } else {
-                    modelOpt = Some(d.ReadString())
-                }
-            }
-            case "extra_instructions" => extra = d.ReadString()
-            case "onboarding"         => onboarding = decodeStringArray(d)
-            case _                    => d.Skip()
-        }
-    }
-    d.EndObject()
-
-    if name == "" {
-        panic("team.yaml: member is missing required 'name' field")
-    }
-    val role = RoleFromName(roleStr) match {
-        case Some(r) => r
-        case None()  => panic(s"team.yaml: unknown role '${roleStr}' for member '${name}' (expected: team_lead | engineer | qa)")
-    }
-    return Member(
-        Name        = name,
-        Role        = role,
-        Personality = personality,
-        Model       = modelOpt,
-        Extra       = extra,
-        Onboarding  = onboarding,
-    )
-}
-
-func decodeWorkflowBlock(d *yaml.YamlDecoderImpl) Workflow {
-    d.StartObject()
-    var qa = true
-    var parallel = true
-    var requireConfirm = true
-    for d.HasMoreFields() {
-        d.ReadKey() match {
-            case "qa_required"        => qa = d.ReadBool()
-            case "parallel_engineers" => parallel = d.ReadBool()
-            case "approval"           => {
-                d.StartObject()
-                for d.HasMoreFields() {
-                    d.ReadKey() match {
-                        case "require_user_confirm" => requireConfirm = d.ReadBool()
-                        case _                      => d.Skip()
-                    }
-                }
-                d.EndObject()
-            }
-            case _ => d.Skip()
-        }
-    }
-    d.EndObject()
-    return Workflow(
-        QARequired         = qa,
-        ParallelEngineers  = parallel,
-        RequireUserConfirm = requireConfirm,
-    )
-}
-
 // ----------------------------------------------------------------------------
 // Validation
 // ----------------------------------------------------------------------------
-
-// ----------------------------------------------------------------------------
-// Policy block decoder
-// ----------------------------------------------------------------------------
-//
-// Shape mirrored on team.yaml:
-//
-//   policy:
-//     workspace_mode: shared | worktree-per-engineer
-//     merge_rule:     squash | rebase | merge
-//     pre_merge:
-//       - name: lint
-//         cmd: go
-//         args: [vet, ./...]
-//     post_merge:
-//       - name: notify
-//         cmd: ...
-//
-// Unknown keys are skipped so adding new top-level policy keys upstream
-// won't break older configs that don't recognize them.
-
-func decodePolicyBlock(d *yaml.YamlDecoderImpl) Policy {
-    d.StartObject()
-    var mode WorkspaceMode = Shared()
-    var rule MergeRule = SquashMerge()
-    var pre = EmptyArray[Hook]()
-    var post = EmptyArray[Hook]()
-    var hb = DefaultHeartbeat()
-    for d.HasMoreFields() {
-        val key = d.ReadKey()
-        if key == "workspace_mode" {
-            mode = decodeWorkspaceMode(d.ReadString())
-        } else if key == "merge_rule" {
-            rule = decodeMergeRule(d.ReadString())
-        } else if key == "pre_merge" {
-            pre = decodeHooks(d)
-        } else if key == "post_merge" {
-            post = decodeHooks(d)
-        } else if key == "heartbeat" {
-            hb = decodeHeartbeat(d)
-        } else {
-            d.Skip()
-        }
-    }
-    d.EndObject()
-    return Policy(WorkspaceMode = mode, MergeRule = rule, PreMerge = pre, PostMerge = post, Heartbeat = hb)
-}
-
-// decodeHeartbeat parses the `policy.heartbeat:` sub-block. Each
-// field is optional; missing keys keep the default value from
-// DefaultHeartbeat. Accepted keys (all integers; seconds for the
-// timing thresholds, count for max_retries):
-//   slow_after_seconds
-//   stuck_after_seconds
-//   abandon_after_seconds
-//   max_retries
-func decodeHeartbeat(d *yaml.YamlDecoderImpl) Heartbeat {
-    d.StartObject()
-    val defaults = DefaultHeartbeat()
-    var slow = defaults.SlowAfterSeconds
-    var stuck = defaults.StuckAfterSeconds
-    var abandon = defaults.AbandonAfterSeconds
-    var retries = defaults.MaxRetries
-    for d.HasMoreFields() {
-        val key = d.ReadKey()
-        if key == "slow_after_seconds" {
-            slow = int64(d.ReadInt())
-        } else if key == "stuck_after_seconds" {
-            stuck = int64(d.ReadInt())
-        } else if key == "abandon_after_seconds" {
-            abandon = int64(d.ReadInt())
-        } else if key == "max_retries" {
-            retries = d.ReadInt()
-        } else {
-            d.Skip()
-        }
-    }
-    d.EndObject()
-    return Heartbeat(
-        SlowAfterSeconds    = slow,
-        StuckAfterSeconds   = stuck,
-        AbandonAfterSeconds = abandon,
-        MaxRetries          = retries,
-    )
-}
-
-func decodeWorkspaceMode(s string) WorkspaceMode {
-    if s == "shared" { return Shared() }
-    if s == "worktree-per-engineer" { return WorktreePerEngineer() }
-    panic(s"team.yaml: unknown policy.workspace_mode '${s}' (expected: shared | worktree-per-engineer)")
-}
-
-func decodeMergeRule(s string) MergeRule {
-    if s == "squash" { return SquashMerge() }
-    if s == "rebase" { return RebaseMerge() }
-    if s == "merge"  { return PlainMerge() }
-    panic(s"team.yaml: unknown policy.merge_rule '${s}' (expected: squash | rebase | merge)")
-}
-
-// Loop-bound Append intentional: yaml.YamlDecoderImpl is a stateful
-// pull-cursor, so each element comes from a side-effecting call pair.
-func decodeHooks(d *yaml.YamlDecoderImpl) Array[Hook] {
-    var hooks = EmptyArray[Hook]()
-    d.StartArray()
-    for d.HasMoreElements() {
-        hooks = hooks.Append(decodeHook(d))
-    }
-    d.EndArray()
-    return hooks
-}
-
-func decodeHook(d *yaml.YamlDecoderImpl) Hook {
-    d.StartObject()
-    var name = ""
-    var cmd = ""
-    var args = EmptyArray[string]()
-    for d.HasMoreFields() {
-        val key = d.ReadKey()
-        if key == "name" {
-            name = d.ReadString()
-        } else if key == "cmd" {
-            cmd = d.ReadString()
-        } else if key == "args" {
-            args = decodeStringArray(d)
-        } else {
-            d.Skip()
-        }
-    }
-    d.EndObject()
-    if name == "" { panic("team.yaml: policy hook is missing required 'name'") }
-    if cmd == ""  { panic(s"team.yaml: policy hook '${name}' is missing required 'cmd'") }
-    return Hook(Name = name, Cmd = cmd, Args = args)
-}
-
-func decodeStringArray(d *yaml.YamlDecoderImpl) Array[string] {
-    var xs = EmptyArray[string]()
-    d.StartArray()
-    for d.HasMoreElements() {
-        xs = xs.Append(d.ReadString())
-    }
-    d.EndArray()
-    return xs
-}
 
 // validate runs the per-team and cross-team checks before producing
 // the TeamConfig. Per-team: at least one engineer; QA presence
@@ -399,7 +300,7 @@ func validate(teams Array[Team], workflow Workflow, pol Policy) TeamConfig {
 }
 
 // validateOneTeam enforces the per-team invariants. Lead presence is
-// already checked in decodeTeamEntry; here we cover engineers and the
+// already checked in convertTeam; here we cover engineers and the
 // QA-required workflow constraint, plus member-name uniqueness.
 func validateOneTeam(tm Team, workflow Workflow) {
     val engineers = tm.Members.Filter((m) => SameRole(m.Role, Engineer()))

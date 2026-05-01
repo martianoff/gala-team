@@ -100,9 +100,16 @@ sealed type DriverStep {
 // loop continues — driver scripts shouldn't crash the harness.
 func applyOneCommand(m AppModel, term TermDims, raw string) DriverStep {
     val d = json.NewJsonDecoder(raw)
-    val (kind, ok) = readType(d)
+    // Wrap the type read in Try so a malformed JSON line (unbalanced
+    // braces, raw text, etc.) surfaces as an error frame rather than
+    // a panic that exits the harness.
+    val typeTry = Try[Tuple[string, bool]](() => readType(d))
+    val (kind, ok) = typeTry match {
+        case Success(t) => t
+        case Failure(_) => ("", false)
+    }
     if !ok {
-        emitError("missing or invalid 'type' field")
+        emitError(s"malformed command: ${raw}")
         return ContinueDriver(M = m, T = term)
     }
     if kind == "quit" { return StopDriver() }
@@ -208,6 +215,12 @@ func decodeKey(d *json.JsonDecoderImpl) Option[AppMsg] {
     if keyName == "CtrlM"     { return Some[AppMsg](KeyMerge()) }
     if keyName == "CtrlH"     { return Some[AppMsg](KeyToggleHistory()) }
     if keyName == "Tab"       { return Some[AppMsg](KeyToggleConsultViewer()) }
+    if keyName == "CtrlY"     { return Some[AppMsg](KeyYankConversation()) }
+    if keyName == "PageUp"    { return Some[AppMsg](KeyConvoPageUp()) }
+    if keyName == "PageDown"  { return Some[AppMsg](KeyConvoPageDown()) }
+    if keyName == "End"       { return Some[AppMsg](KeyConvoStickToBottom()) }
+    if keyName == "Up"        { return Some[AppMsg](KeyConvoScrollUp()) }
+    if keyName == "Down"      { return Some[AppMsg](KeyConvoScrollDown()) }
     return None[AppMsg]()
 }
 

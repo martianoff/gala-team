@@ -14,22 +14,7 @@ Written in [GALA](https://github.com/martianoff/gala) with the
 
 ## What it does
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│  🍎  Gala Team v0.0.1 | gala_simple | Skunkworks                    │
-│      state: TL thinking · 12.3k in / 4.5k out · cache 87.0k · $0.12 │
-├──── Team ────────┬──── Conversation with Team Lead ─────────────────┤
-│ ▼ Lead           │ you: ship the new /metrics endpoint              │
-│   ⠋ Iris  0:14   │ Iris: dispatching to Felix…                      │
-│ ▼ Engineering    │ Iris → Felix: implement handler + tests          │
-│   ⠼ Felix 0:08   │ Felix: implementing handler + tests…             │
-│ ▼ QA             │ Theo: reviewing for missing edge cases…          │
-│   ⠦ Theo  0:03   │ Iris: Summary: Ready to ship: feat(api) …        │
-├──────────────────┴──────────────────────────────────────────────────┤
-│ Type to Iris…                                                       │
-└─────────────────────────────────────────────────────────────────────┘
-  Ctrl+Q · Ctrl+P palette · Enter send · Ctrl+A approve · Ctrl+R reject
-```
+![gala_team in action](docs/images/gala_team.gif)
 
 A user prompt enters the **Team Lead**'s conversation. The Team Lead can
 emit orchestration directives in its assistant text:

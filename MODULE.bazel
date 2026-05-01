@@ -10,6 +10,9 @@ bazel_dep(name = "gazelle", version = "0.47.0")
 bazel_dep(name = "rules_go", version = "0.59.0")
 
 # Dev: local sibling overrides for both gala stdlib and gala_tui.
+# Both repos gitignore their generated MODULE.bazel + BUILD.bazel
+# files; CI re-creates them via the `Stage gala_tui Bazel files`
+# workflow step before invoking bazel.
 local_path_override(
     module_name = "gala",
     path = "../gala_simple/.claude/worktrees/release-0.41.0",

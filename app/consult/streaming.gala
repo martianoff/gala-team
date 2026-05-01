@@ -6,6 +6,7 @@ import (
     "github.com/martianoff/gala_team/app/onboarding"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
@@ -82,7 +83,7 @@ func DispatchConsult(
 // `@consult(<key>)` and `<key>` matches a sibling team's Key.
 func SpawnInProjectConsult(tm Team, proj Project, name string, body string) Try[ConsultSession] = Try(() => {
     val lead = tm.Lead
-    val (wrapped, _) = onboarding.WrapPromptSafe(proj, tm, lead, body)
+    val (wrapped, _) = onboarding.WrapPromptSafe(proj, tm, lead, Shared(), body)
     val sess = SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
         case Failure(e) => panic(s"spawn: ${e.Error()}")
         case Success(s) => s
@@ -119,7 +120,7 @@ func SpawnConsult(r Registry, name string, body string) Try[ConsultSession] = Tr
         case Success(c) => c.Team
     }
     val lead = tm.Lead
-    val (wrapped, _) = onboarding.WrapPromptSafe(proj, tm, lead, body)
+    val (wrapped, _) = onboarding.WrapPromptSafe(proj, tm, lead, Shared(), body)
     val sess = SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
         case Failure(e) => panic(s"spawn: ${e.Error()}")
         case Success(s) => s

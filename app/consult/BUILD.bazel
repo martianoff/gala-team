@@ -12,6 +12,7 @@ gala_library(
         "//app/config",
         "//app/headless",
         "//app/onboarding",
+        "//app/policy",
         "//app/project",
         "//app/runtime",
         "//app/team",

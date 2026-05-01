@@ -107,8 +107,11 @@ func SpawnSession(
 // For WorktreePerEngineer, the team lead still gets `proj.Repo` but
 // engineers / QAs get a per-member git worktree at
 // `<proj.Repo>/.gala_team/worktrees/<m.Name>` with a branch named
-// `gala_team/<m.Name>`. The worktree is created on first call;
-// subsequent calls for the same member just return the existing path.
+// `gala_team/<proj.Name>/<m.Name>`. The project-scoped branch keeps
+// runs against different projects (same team yaml, different `--project`
+// dirs) from clobbering each other's branches if the same repo is
+// reused. The worktree is created on first call; subsequent calls
+// for the same member just return the existing path.
 func EnsureWorkspace(proj Project, m Member, mode WorkspaceMode) Try[string] = mode match {
     case Shared()              => Success[string](proj.Repo)
     case WorktreePerEngineer() => m.Role match {
@@ -117,13 +120,20 @@ func EnsureWorkspace(proj Project, m Member, mode WorkspaceMode) Try[string] = m
     }
 }
 
+// WorktreeBranchFor mirrors the branch-naming convention used by
+// ensureWorktree so other layers (onboarding prompts, view, log
+// surfaces) can name the same branch without re-implementing the
+// formula. Format: `gala_team/<proj.Name>/<member.Name>`.
+func WorktreeBranchFor(proj Project, m Member) string =
+    "gala_team/" + proj.Name + "/" + m.Name
+
 // ensureWorktree creates `<proj.Repo>/.gala_team/worktrees/<m.Name>`
 // if it doesn't already exist by shelling out to `git worktree add
-// -B gala_team/<m.Name> <path>`. If the directory already exists,
-// returns the path without re-running git (idempotent).
+// -B gala_team/<proj.Name>/<m.Name> <path>`. If the directory already
+// exists, returns the path without re-running git (idempotent).
 func ensureWorktree(proj Project, m Member) Try[string] = Try[string](() => {
     val wtPath = filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
-    val branch = "gala_team/" + m.Name
+    val branch = WorktreeBranchFor(proj, m)
     val info, statErr = os.Stat(wtPath)
     if statErr == nil && info.IsDir() { return wtPath }
     val parent = filepath.Dir(wtPath)

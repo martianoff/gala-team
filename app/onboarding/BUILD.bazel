@@ -5,6 +5,7 @@ gala_library(
     srcs = ["onboarding.gala"],
     importpath = "github.com/martianoff/gala_team/app/onboarding",
     deps = [
+        "//app/policy",
         "//app/project",
         "//app/team",
         "@gala//collection_immutable",
@@ -18,6 +19,7 @@ gala_go_test(
     srcs = ["onboarding_test.gala"],
     deps = [
         ":onboarding",
+        "//app/policy",
         "//app/project",
         "//app/team",
         "@gala//collection_immutable",

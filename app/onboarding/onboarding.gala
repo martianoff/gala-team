@@ -7,6 +7,7 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
 )
@@ -85,8 +86,8 @@ func Load(proj Project, paths Array[string]) Try[string] = Try[string](() => {
 // Failure the caller can either propagate (interactive UX panics
 // on first-prompt setup errors) or degrade (consult / headless
 // flow falls back to the raw prompt — see WrapPromptSafe).
-func WrapPrompt(proj Project, team Team, member Member, prompt string) Try[string] {
-    val role = roleSection(team, member)
+func WrapPrompt(proj Project, team Team, member Member, mode WorkspaceMode, prompt string) Try[string] {
+    val role = roleSection(proj, team, member, mode)
     val paths = Compose(team, member)
     if paths.IsEmpty() {
         return Success[string](s"${role}\n\n# Your task\n\n${prompt}")
@@ -113,7 +114,7 @@ func WrapPrompt(proj Project, team Team, member Member, prompt string) Try[strin
 // Without this teaching, the model has no idea the gala_team protocol
 // exists — it just answers the prompt as a generic claude session and
 // the dispatch / pipeline machinery never trips.
-func roleSection(team Team, member Member) string {
+func roleSection(proj Project, team Team, member Member, mode WorkspaceMode) string {
     val header = s"# Your role\n\nYou are ${member.Name}, the ${RoleName(member.Role)} on team ${team.Name}."
     val personality = if (member.Personality == "") ""
                       else                          s"\n\n## Personality\n\n${member.Personality}"
@@ -121,8 +122,75 @@ func roleSection(team Team, member Member) string {
                 else                    s"\n\n## Additional instructions\n\n${member.Extra}"
     val isTL = SameRole(member.Role, TeamLead())
     val roster = if (isTL) s"\n\n${teamRosterSection(team, member)}" else ""
+    val workspace = s"\n\n${workspaceSection(proj, member, mode)}"
     val protocol = s"\n\n${protocolSection(isTL)}"
-    return s"${header}${personality}${extra}${roster}${protocol}"
+    return s"${header}${personality}${extra}${roster}${workspace}${protocol}"
+}
+
+// WorkspacePathFor mirrors runtime.EnsureWorkspace's path computation
+// without the side effect of creating directories — pure derivation
+// for prompt assembly. Keep these two in sync if the worktree layout
+// changes.
+//
+// Shared mode → everyone is in proj.Repo.
+// WorktreePerEngineer → TL stays in proj.Repo, but engineers / QAs
+// each get `<proj.Repo>/.gala_team/worktrees/<member-name>` on
+// branch `gala_team/<member-name>`.
+func WorkspacePathFor(proj Project, m Member, mode WorkspaceMode) string = mode match {
+    case Shared() => proj.Repo
+    case WorktreePerEngineer() => m.Role match {
+        case TeamLead() => proj.Repo
+        case _          => filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
+    }
+}
+
+// workspaceSection teaches the model where its own files live AND
+// where its peers' files live. Without this, the TL routinely
+// concludes "the engineers didn't produce any files" when in reality
+// the engineers wrote everything in their own isolated worktree and
+// the TL was looking in the wrong cwd.
+func workspaceSection(proj Project, member Member, mode WorkspaceMode) string {
+    val isTL = SameRole(member.Role, TeamLead())
+    val myCwd = WorkspacePathFor(proj, member, mode)
+    return mode match {
+        case Shared()              => sharedWorkspaceSection(isTL, myCwd)
+        case WorktreePerEngineer() => worktreeWorkspaceSection(proj, member, isTL, myCwd)
+    }
+}
+
+func sharedWorkspaceSection(isTL bool, cwd string) string {
+    val header = "# Workspace layout\n\n"
+    if isTL {
+        return header +
+            s"All members share the project root at `${cwd}` as their cwd. " +
+            "Concurrent file edits from different members can collide; coordinate via @dispatch bodies to keep work non-overlapping.\n\n" +
+            "When a member emits `@finished`, their files are already on disk in this same cwd — read them directly to verify."
+    }
+    return header +
+        s"Your cwd is `${cwd}`, shared with the rest of the team. " +
+        "Other members may edit files concurrently. " +
+        "When you finish, list the files you touched in your `@finished` body so the TL can review."
+}
+
+func worktreeWorkspaceSection(proj Project, member Member, isTL bool, cwd string) string {
+    val header = "# Workspace layout\n\n"
+    val branchPattern = "gala_team/" + proj.Name + "/<MemberName>"
+    if isTL {
+        return header +
+            s"Your cwd is the project root at `${proj.Repo}`.\n\n" +
+            "**Engineers and QAs each run in an isolated git worktree** at " +
+            s"`${proj.Repo}/.gala_team/worktrees/<MemberName>` on branch `${branchPattern}`. " +
+            "Their file edits live ONLY on that branch until merged — they are NOT visible from your cwd.\n\n" +
+            "When inspecting a member's deliverables (e.g. after they emit `@finished`), read files from their worktree path, not your own. " +
+            "If you don't see an expected file in your cwd, that does NOT mean the member failed — check the worktree at " +
+            s"`${proj.Repo}/.gala_team/worktrees/<MemberName>/` first."
+    }
+    val branch = "gala_team/" + proj.Name + "/" + member.Name
+    return header +
+        s"Your cwd is `${cwd}`, an isolated git worktree on branch `${branch}`. The main repo lives at `${proj.Repo}`.\n\n" +
+        "Your file edits stay on your branch — nothing is auto-merged, and the TL is in a different cwd. " +
+        "When you emit `@finished`, list the files you wrote (relative paths from your cwd, OR absolute paths) so the TL can find them. " +
+        "The TL won't see your files unless they read from your worktree path."
 }
 
 // teamRosterSection lists every other member with their role + one-
@@ -222,8 +290,8 @@ func protocolSection(isTL bool) string {
 // cross-team consult, so we degrade to "no onboarding pack" + the
 // raw prompt and surface the error message in the second tuple slot
 // for the caller to log.
-func WrapPromptSafe(proj Project, team Team, member Member, prompt string) Tuple[string, Option[string]] {
-    return WrapPrompt(proj, team, member, prompt) match {
+func WrapPromptSafe(proj Project, team Team, member Member, mode WorkspaceMode, prompt string) Tuple[string, Option[string]] {
+    return WrapPrompt(proj, team, member, mode, prompt) match {
         case Success(wrapped) => (wrapped, None[string]())
         case Failure(err)     => (prompt, Some(err.Error()))
     }

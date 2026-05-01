@@ -7,6 +7,7 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/directive"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
@@ -58,7 +59,7 @@ func RunHeadless(proj Project, tm Team, prompt string) Either[string, HeadlessRe
     // Wrap the prompt with the team / member's onboarding pack. Headless
     // uses the safe variant — a missing onboarding doc shouldn't sink an
     // entire cross-team consult; the failure is logged into Result.Err.
-    val (wrapped, onbErr) = onboarding.WrapPromptSafe(proj, tm, lead, prompt)
+    val (wrapped, onbErr) = onboarding.WrapPromptSafe(proj, tm, lead, Shared(), prompt)
     return SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
         case Failure(e) => Left[string, HeadlessResult](s"spawn ${lead.Name}: ${e.Error()}")
         case Success(s) => Right[string, HeadlessResult](driveLoop(proj, tm, s, prompt, wrapped, onbErr))

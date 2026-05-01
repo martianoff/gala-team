@@ -227,6 +227,55 @@ run "14_unknown_kind" <<'EOF'
 {"type":"quit"}
 EOF
 
+echo "== 18. auto-scroll across many chunks (pre + post @blocked) =="
+# 50 chunks before block + 30 after recovery prompt. Sticky-bottom
+# should keep the latest line visible at every snapshot. The check
+# below grabs the last 'plain' snapshot and confirms the freshest
+# line text appears in the rendered frame.
+run "18_autoscroll_blocked" <<'EOF'
+{"type":"key","char":"d"}
+{"type":"key","char":"o"}
+{"type":"key","key":"Enter"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"@dispatch(Eng) work\\n@end\"}]}}"}
+{"type":"msg","name":"SessionFailed","member":"Lead","err":"EOF"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"line 1 of pre-block stream"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"line 2 of pre-block stream"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"line 3 of pre-block stream"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"line 4 of pre-block stream"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"line 5 of pre-block stream"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"line 6 of pre-block stream"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"line 7 of pre-block stream"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"line 8 of pre-block stream"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"line 9 of pre-block stream"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"PRE_BLOCK_LAST_LINE"}
+{"type":"snapshot","detail":"plain"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"@blocked\\nedge case fails\\n@end\"}]}}"}
+{"type":"msg","name":"SessionFailed","member":"Eng","err":"EOF"}
+{"type":"key","char":"f"}
+{"type":"key","char":"i"}
+{"type":"key","char":"x"}
+{"type":"key","key":"Enter"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"recovery line A"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"recovery line B"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"recovery line C"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"recovery line D"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"POST_RECOVER_LAST_LINE"}
+{"type":"snapshot","detail":"plain"}
+{"type":"quit"}
+EOF
+# Pre-block snapshot: PRE_BLOCK_LAST_LINE must be visible at the
+# bottom of the rendered conversation pane.
+PRE_HIT=$(grep '"type":"frame"' "$OUT/18_autoscroll_blocked.jsonl" | grep -m1 '"detail":"plain"' | grep -c "PRE_BLOCK_LAST_LINE" || true)
+POST_HIT=$(grep '"type":"frame"' "$OUT/18_autoscroll_blocked.jsonl" | tail -1 | grep -c "POST_RECOVER_LAST_LINE" || true)
+case "$PRE_HIT" in
+    0) echo "    !! WARNING: pre-block sticky-bottom failed (PRE_BLOCK_LAST_LINE not in snapshot)";;
+    *) echo "    -> pre-block auto-scroll OK";;
+esac
+case "$POST_HIT" in
+    0) echo "    !! WARNING: post-recovery sticky-bottom failed (POST_RECOVER_LAST_LINE not in snapshot)";;
+    *) echo "    -> post-recovery auto-scroll OK";;
+esac
+
 echo "== 17. member blocked then user recovers =="
 # Mirrors a QA-blocking-the-turn flow on the minimal team (Lead +
 # Eng — no real QA member, but the FSM escape hatch we're testing

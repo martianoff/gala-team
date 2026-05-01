@@ -35,6 +35,17 @@ jobs:
           repository: martianoff/gala-tui
           path: gala_tui
 
+      - name: Setup Go
+        # The gala transpiler invokes `go/importer` for cross-language
+        # type inference (so `Option[string].Map(strings.TrimSpace)`
+        # resolves to `Option[string]` instead of `Option[any]`). Without
+        # Go on PATH the .bazelrc's `--action_env=GOROOT/PATH` exports
+        # nothing and the generated .gen.go widens lambdas to `any`,
+        # breaking downstream Go compilation.
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.14.0
         with:

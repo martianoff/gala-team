@@ -3,9 +3,7 @@ package main
 import (
     "os"
     "path/filepath"
-    "runtime/debug"
     "strings"
-    "time"
     . "github.com/martianoff/gala-tui"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -266,37 +264,7 @@ func sampleTeam() Team {
     )
 }
 
-// logCrash is the deferred panic-trap. Anything that escapes Run /
-// the test driver lands here. We do two things:
-//   1. Write a timestamped block to <project>/.gala_team/crash.log so
-//      the user has a durable record even when the alt-screen ate
-//      whatever stderr printed.
-//   2. Print the panic + stack to stderr after the alt-screen is off
-//      so it lands in the user's normal terminal scrollback.
-//
-// Without this the TUI's alt-screen + the gala-tui runtime's defer
-// chain swallow most panic output — the user sees the screen go
-// black and the prompt return with no diagnostic.
-func logCrash() {
-    val r = recover()
-    if r == nil { return }
-    val home, homeErr = os.UserHomeDir()
-    val baseDir = if (homeErr != nil) os.TempDir() else filepath.Join(home, ".gala_team")
-    val _ = os.MkdirAll(baseDir, os.FileMode(0755))
-    val logPath = filepath.Join(baseDir, "crash.log")
-    val f, ferr = os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, os.FileMode(0644))
-    val stack = string(debug.Stack())
-    if ferr == nil {
-        defer f.Close()
-        val ts = time.Now().Format(time.RFC3339)
-        val _, _ = f.WriteString(s"\n=== ${ts} ===\npanic: ${r}\n${stack}\n")
-    }
-    val _, _ = os.Stderr.WriteString(s"\ngala_team: panic recovered\n  ${r}\n  see ${logPath}\n${stack}\n")
-    os.Exit(2)
-}
-
 func main() {
-    defer logCrash()
     if hasFlag(ArrayOf("--help", "-h")) {
         printUsage()
         os.Exit(0)

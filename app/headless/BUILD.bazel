@@ -7,6 +7,7 @@ gala_library(
     deps = [
         "//app/directive",
         "//app/onboarding",
+        "//app/policy",
         "//app/project",
         "//app/runtime",
         "//app/session",

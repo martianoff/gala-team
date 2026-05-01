@@ -9,6 +9,7 @@ import (
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala_team/app/onboarding"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
 )
@@ -126,7 +127,7 @@ func TestWrapPrompt_EmptyOnboarding_StillIncludesRoleHeader(t T) T {
     val tm = mkTeam(EmptyArray[string](), ArrayOf(
         mkMember("Iris", TeamLead(), EmptyArray[string]()),
     ))
-    val res = WrapPrompt(proj, tm, tm.Lead, "do the thing")
+    val res = WrapPrompt(proj, tm, tm.Lead, Shared(), "do the thing")
     val t1 = IsSuccess(t, res)
     val out = res.Get()
     val t2 = IsTrue(t1, strings.Contains(out, "# Your role"))
@@ -149,7 +150,7 @@ func TestWrapPrompt_IncludesPersonalityAndExtra(t T) T {
         Onboarding = EmptyArray[string](),
     )
     val tm = mkTeam(EmptyArray[string](), ArrayOf(iris))
-    val res = WrapPrompt(proj, tm, iris, "ship it")
+    val res = WrapPrompt(proj, tm, iris, Shared(), "ship it")
     val t1 = IsSuccess(t, res)
     val out = res.Get()
     val t2 = IsTrue(t1, strings.Contains(out, "Calm, decisive."))
@@ -170,7 +171,7 @@ func TestWrapPrompt_EmptyPersonality_OmitsSubsection(t T) T {
         Onboarding = EmptyArray[string](),
     )
     val tm = mkTeam(EmptyArray[string](), ArrayOf(blank))
-    val res = WrapPrompt(proj, tm, tm.Lead, "task")
+    val res = WrapPrompt(proj, tm, tm.Lead, Shared(), "task")
     val out = res.Get()
     val t1 = IsFalse(t, strings.Contains(out, "## Personality"))
     return IsFalse(t1, strings.Contains(out, "## Additional instructions"))
@@ -181,7 +182,7 @@ func TestWrapPrompt_PrependsOnboardingHeader(t T) T {
     val tm = mkTeam(ArrayOf("readme.md"), ArrayOf(
         mkMember("Iris", TeamLead(), EmptyArray[string]()),
     ))
-    val res = WrapPrompt(proj, tm, tm.Lead, "ship it")
+    val res = WrapPrompt(proj, tm, tm.Lead, Shared(), "ship it")
     val t1 = IsSuccess(t, res)
     val text = res.Get()
     val onbPos = stringFind(text, "# Project onboarding")
@@ -200,7 +201,7 @@ func TestWrapPromptSafe_MissingDoc_DegradesGracefully(t T) T {
     val tm = mkTeam(ArrayOf("ghost.md"), ArrayOf(
         mkMember("Iris", TeamLead(), EmptyArray[string]()),
     ))
-    val (raw, errOpt) = WrapPromptSafe(proj, tm, tm.Lead, "ship it")
+    val (raw, errOpt) = WrapPromptSafe(proj, tm, tm.Lead, Shared(), "ship it")
     val t1 = Eq(t, raw, "ship it")
     return errOpt match {
         case Some(_) => IsTrue(t1, true)

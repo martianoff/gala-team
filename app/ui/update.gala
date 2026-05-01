@@ -876,7 +876,7 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         case Left(err)  => (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
         case Right(m1)  => {
             val (effectivePrompt, onboardingErr) =
-                if (firstTurn) onboarding.WrapPromptSafe(m.Project, m.Team, lead, prompt)
+                if (firstTurn) onboarding.WrapPromptSafe(m.Project, m.Team, lead, m.Policy.WorkspaceMode, prompt)
                 else           (prompt, None[string]())
             val m2 = onboardingErr match {
                 case Some(e) => m1.Copy(LastError = Some(s"onboarding: ${e}"))
@@ -1531,7 +1531,7 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
                     // is enough.
                     val firstTurn = !curM.SessionIds.Get(name).IsDefined()
                     val wrapped = if (firstTurn) {
-                        val (w, _) = onboarding.WrapPromptSafe(curM.Project, curM.Team, mem, body)
+                        val (w, _) = onboarding.WrapPromptSafe(curM.Project, curM.Team, mem, curM.Policy.WorkspaceMode, body)
                         w
                     } else {
                         body
@@ -1567,7 +1567,7 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             case Right(m1)  => {
                 val withStatus = setStatus(m1, mem.Name, StWorking())
                 val wrapped = if (firstTurn) {
-                    val (w, _) = onboarding.WrapPromptSafe(curM.Project, curM.Team, mem, reviewBody)
+                    val (w, _) = onboarding.WrapPromptSafe(curM.Project, curM.Team, mem, curM.Policy.WorkspaceMode, reviewBody)
                     w
                 } else {
                     reviewBody

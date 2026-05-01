@@ -67,6 +67,15 @@ jobs:
           repository: martianoff/gala-tui
           path: gala_tui
 
+      - name: Setup Go
+        # The gala transpiler invokes go/importer for cross-language
+        # type inference; without Go on PATH the .bazelrc's
+        # --action_env=GOROOT/PATH exports nothing and lambdas widen
+        # to `any`, breaking the generated Go on the Linux runners.
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.14.0
         with:

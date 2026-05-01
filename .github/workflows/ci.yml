@@ -7,83 +7,29 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-# Pinned alongside .github/workflows/release.yml. Bumping requires
-# both the gala CLI release tag and the gala_simple tag we clone for
-# the local_path_override path to exist.
 env:
   GALA_VERSION: "0.41.0"
 
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 30
     steps:
-      - name: Checkout gala_team
-        uses: actions/checkout@v4
-        with:
-          path: gala_team
+      - uses: actions/checkout@v4
 
-      - name: Checkout gala_simple (sibling for local_path_override)
-        uses: actions/checkout@v4
-        with:
-          repository: martianoff/gala
-          ref: ${{ env.GALA_VERSION }}
-          path: gala_simple
-
-      - name: Checkout gala_tui (sibling for local_path_override)
-        uses: actions/checkout@v4
-        with:
-          repository: martianoff/gala-tui
-          path: gala_tui
-
-      - name: Add swap space
-        # The 16-GB Linux runner gets OOM-killed during bazel test
-        # ('Server terminated abruptly: Socket closed' is the kernel
-        # OOM-killer signature). Backing memory with swap lets the
-        # gala transpiler + Go compile actions spill instead of dying.
-        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c
-        with:
-          swap-size-gb: 10
-
-      - name: Setup Go
-        # The gala transpiler invokes `go/importer` for cross-language
-        # type inference (so `Option[string].Map(strings.TrimSpace)`
-        # resolves to `Option[string]` instead of `Option[any]`). Without
-        # Go on PATH the .bazelrc's `--action_env=GOROOT/PATH` exports
-        # nothing and the generated .gen.go widens lambdas to `any`,
-        # breaking downstream Go compilation.
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: "1.25.5"
 
-      - name: Export GOROOT
-        # setup-go doesn't always set GOROOT in the env; .bazelrc reads
-        # it via --action_env=GOROOT, so make it explicit.
-        shell: bash
-        run: echo "GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
-
-      - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.14.0
-        with:
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}
-          repository-cache: true
+      - name: Install gala CLI
+        # gala.mod resolves gala_tui + uuid via the GALA dep system —
+        # no bazel, no overrides, no siblings. Just install the
+        # published gala binary and let `gala test` do its thing.
+        run: |
+          curl -fsSL -o /tmp/gala "https://github.com/martianoff/gala/releases/download/${GALA_VERSION}/gala-linux-amd64"
+          chmod +x /tmp/gala
+          sudo mv /tmp/gala /usr/local/bin/gala
+          gala version
 
       - name: Test
-        working-directory: gala_team
-        # `bazel test` builds whatever its deps need, including //app/...
-        # and the test binaries — the previous separate `bazel build`
-        # step was redundant. --jobs=1 + the JVM heap cap keep the 16-GB
-        # Linux runner from OOMing the bazel server (prior runs hit
-        # 'Server terminated abruptly: Socket closed' around the 25-min
-        # mark). local_path_override paths in MODULE.bazel point at
-        # dev-only paths; the --override_module flags repoint them at
-        # the sibling clones we just checked out.
-        run: |
-          bazel \
-            --host_jvm_args=-Xmx2g \
-            test //app/... //cmd:gala_team \
-            --jobs=2 \
-            --build_tests_only=false \
-            --override_module=gala=../gala_simple \
-            --override_module=gala_tui=../gala_tui
+        run: gala test

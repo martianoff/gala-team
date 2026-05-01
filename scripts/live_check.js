@@ -160,8 +160,11 @@ console.log("\n=== 11. @blocked routing ===");
     const last = fs1[fs1.length - 1];
     if (last.statuses && last.statuses.Eng === "failed") ok("11", "@blocked → Eng status failed");
     else bug("11", "HIGH", `@blocked: Eng status = ${JSON.stringify(last.statuses)}`);
-    if (last.lastError && last.lastError.includes("missing tool gh")) ok("11", "@blocked reason in LastError");
-    else bug("11", "MED", `@blocked reason missing — lastError=${last.lastError}`);
+    // The @blocked reason no longer fills LastError (was hiding the
+    // footer keybinds). The body lives in the conversation transcript
+    // + the StFailed sidebar badge truncation.
+    if (last.plain && last.plain.includes("missing tool gh")) ok("11", "@blocked reason rendered in conversation");
+    else bug("11", "MED", "@blocked reason missing from conversation transcript");
 }
 
 console.log("\n=== 15. Scrollable chat: PgUp unsticks, End re-sticks ===");

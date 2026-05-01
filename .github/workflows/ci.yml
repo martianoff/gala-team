@@ -59,21 +59,19 @@ jobs:
           disk-cache: ${{ github.workflow }}
           repository-cache: true
 
-      - name: Build
-        working-directory: gala_team
-        # Override the dev-only local_path_override paths in
-        # MODULE.bazel to the sibling clones we just checked out.
-        # Locally these point at gala_simple's worktree
-        # (.claude/worktrees/release-0.41.0); in CI we clone the
-        # tag straight into gala_simple/.
-        run: |
-          bazel build //cmd:gala_team //app/... \
-            --override_module=gala=../gala_simple \
-            --override_module=gala_tui=../gala_tui
-
       - name: Test
         working-directory: gala_team
+        # `bazel test` builds whatever its deps need, including //app/...
+        # and the test binaries — the previous separate `bazel build`
+        # step was redundant. --jobs=2 caps action parallelism so the
+        # 16-GB Linux runner doesn't OOM under bazel + gala transpiler
+        # + Go compile concurrency.
+        # local_path_override paths in MODULE.bazel point at dev-only
+        # paths (gala_simple's worktree); the --override_module flags
+        # repoint them at the sibling clones we just checked out.
         run: |
-          bazel test //app/... \
+          bazel test //app/... //cmd:gala_team \
+            --jobs=2 \
+            --build_tests_only=false \
             --override_module=gala=../gala_simple \
             --override_module=gala_tui=../gala_tui

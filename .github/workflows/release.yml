@@ -126,8 +126,11 @@ jobs:
       - name: Build binary
         working-directory: gala_team
         shell: bash
+        # --jobs=2 caps parallelism so the 16-GB Linux runner doesn't
+        # OOM under bazel + gala transpiler + Go compile concurrency.
         run: |
           bazel build //cmd:gala_team \
+            --jobs=2 \
             --platforms=${{ matrix.platform }} \
             --override_module=gala=../gala_simple \
             --override_module=gala_tui=../gala_tui

@@ -90,6 +90,10 @@ func View(m AppModel) Widget {
         Flex(1, body),
         Fixed(3, composerPanel),
         Fixed(1, footer),
+        // Error banner sits at the very bottom — visible without
+        // shadowing the keybind row, off the chat-input area, easy
+        // to scan at a glance. Renders 0 rows when there's no error.
+        errorBanner(m),
     ))
     // Overlay the member-detail modal when the user has Enter'd into
     // a sidebar member row. The modal sits on top of the base view so
@@ -991,10 +995,20 @@ func footerWidget(m AppModel) Widget {
             DefaultStyle().WithBold().WithFg(BrightYellow()),
         )
     }
-    return m.LastError match {
-        case Some(err) => TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed()))
-        case None()    => TextStyled(footerHints(m), DefaultStyle().WithDim())
-    }
+    // LastError is rendered as a separate banner above the composer
+    // (see errorBanner) so it doesn't sit on top of the keybind row.
+    // The footer always shows the keybind hints; quit/erase prompts
+    // override above so the user can see the safety prompt clearly.
+    return TextStyled(footerHints(m), DefaultStyle().WithDim())
+}
+
+// errorBanner renders LastError as a single line above the composer
+// when set, or a 0-row spacer when there's no error. Keeps the
+// footer's keybind hints stable instead of being shadowed by error
+// text.
+func errorBanner(m AppModel) LayoutChild = m.LastError match {
+    case None()    => Fixed(0, Empty())
+    case Some(err) => Fixed(1, TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed())))
 }
 
 // footerHints picks a context-appropriate key legend. After

@@ -231,7 +231,8 @@ func TestView_Footer_PostPrCreated_ShowsMergeHint(t T) T {
     return IsTrue(t1, strings.Contains(out, "Ctrl+A re-approve"))
 }
 
-// LastError takes precedence over the legend — even if LastPrUrl is set.
+// LastError now renders as a separate banner BELOW the footer — it
+// no longer hides the keybind legend. Both must be visible at once.
 func TestView_Footer_LastErrorBeatsLegend(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(
         LastError = Some("gh pr merge: auth required"),
@@ -239,7 +240,7 @@ func TestView_Footer_LastErrorBeatsLegend(t T) T {
     )
     val out = render(m)
     val t1 = IsTrue(t,  strings.Contains(out, "auth required"))
-    return IsFalse(t1, strings.Contains(out, "Ctrl+M merge"))
+    return IsTrue(t1, strings.Contains(out, "Ctrl+M merge"))
 }
 
 // QuitPending replaces the regular footer with a confirmation
@@ -252,6 +253,9 @@ func TestView_Footer_QuitPending_ShowsConfirmation(t T) T {
     return IsTrue(t1, strings.Contains(out, "Esc to cancel"))
 }
 
+// Quit confirmation replaces the footer keybind row, but the
+// separate LastError banner below still renders — that's intended;
+// both are independent surfaces now.
 func TestView_Footer_QuitPending_BeatsLastError(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(
         QuitPending = true,
@@ -259,7 +263,7 @@ func TestView_Footer_QuitPending_BeatsLastError(t T) T {
     )
     val out = render(m)
     val t1 = IsTrue(t,  strings.Contains(out, "Press Ctrl+Q again to confirm"))
-    return IsFalse(t1, strings.Contains(out, "disk full"))
+    return IsTrue(t1, strings.Contains(out, "disk full"))
 }
 
 // ---------------------------------------------------------------------------

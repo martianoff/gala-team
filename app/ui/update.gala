@@ -1226,8 +1226,14 @@ func extractBlockedReason(d Directive) Option[string] = d match {
 // just captures the deliverable text.
 func onMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppMsg]] {
     val toast = m.Toasts.PushSuccess(s"${name} done", time_utils.Now(), time_utils.Seconds(int64(3)))
-    val m1 = m.Copy(
-        MemberDoneBodies = m.MemberDoneBodies.Put(name, body),
+    // Kill the member's claude subprocess once they've reported back —
+    // anything they emit AFTER @finished is just trailing tool calls
+    // / thinking that shouldn't land in the conversation. Same shape
+    // as closeLiveSession in onSubmit; PendingClosures drops the
+    // stale chunks the read pump still has queued.
+    val closed = closeLiveSession(m, name)
+    val m1 = closed.Copy(
+        MemberDoneBodies = closed.MemberDoneBodies.Put(name, body),
         Toasts           = toast,
     )
     return (setStatus(m1, name, StIdle()), NoCmd[AppMsg]())
@@ -1240,7 +1246,11 @@ func onMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppM
 func onMemberHelp(m AppModel, name string, question string) Tuple[AppModel, Cmd[AppMsg]] {
     val nextState = Transition(m.State, MemberHelpRequested(MemberName = name, Question = question), transitionContext(m))
     val toast = m.Toasts.PushInfo(s"${name} needs help", time_utils.Now(), time_utils.Seconds(int64(5)))
-    val m1 = m.Copy(State = nextState, Toasts = toast)
+    // Kill the member's subprocess once they've asked for help — any
+    // post-@help output is the model rambling rather than waiting.
+    // The TL's nudge turn brings them back via a fresh dispatch.
+    val closed = closeLiveSession(m, name)
+    val m1 = closed.Copy(State = nextState, Toasts = toast)
     val m2 = setStatus(m1, name, mkHelpWaitingStatus(question))
     val (m3, cmds) = spawnTLNudge(m2, s"help-${name}", buildHelpNudgePrompt(name, question))
     return (m3, batchAll(cmds))
@@ -1273,7 +1283,12 @@ func onMemberBlocked(m AppModel, name string, reason string) Tuple[AppModel, Cmd
     val nextState = Transition(m.State, MemberBlocked(MemberName = name, Reason = reason), transitionContext(m))
     val toast = m.Toasts.PushError(s"${name} blocked", time_utils.Now(), time_utils.Seconds(int64(5)))
     val failedStatus Status = StFailed(Reason = truncateForToast(reason))
-    val m1 = m.Copy(
+    // Kill the subprocess on @blocked — keeping it alive lets late
+    // chunks (tool-use, thinking content blocks, etc.) sneak into
+    // the transcript even though the member has self-marked failed.
+    // PendingClosures drops the queued reads the pump still owns.
+    val closed = closeLiveSession(m, name)
+    val m1 = closed.Copy(
         State  = nextState,
         Toasts = toast,
     )
@@ -1705,7 +1720,17 @@ func filterClaudeStreamJson(line string) ClaudeChunk {
     val trimmed = strings.TrimSpace(line)
     if trimmed == "" { return emptyChunk() }
     if !strings.HasPrefix(trimmed, "{") {
-        return ClaudeChunk(Visible = line, ErrorText = "")
+        // Plain text — only render when the line doesn't carry JSON
+        // structural tokens. Real claude turns produce one JSON
+        // object per stream line, but a thinking content part can be
+        // long enough to exceed bufio.Scanner's default 64KB buffer
+        // and split across two reads. The second read starts mid-
+        // string and matches none of the JSON shapes our codecs know,
+        // but it still contains `"}` / `:null` / `"stop_reason":` etc.
+        // and was leaking as a literal "Mira: <base64>...{stop_reason}"
+        // line in the conversation. Drop those fragments instead.
+        if looksLikeJsonFragment(trimmed) { return emptyChunk() }
+        return ClaudeChunk(Visible = line, ErrorText = "", LiveTurn = None[ClaudeUsage](), FinalTurn = None[ClaudeUsage](), CostUsd = 0.0)
     }
     val asAssistant = claudeAssistantCodec.Decode(trimmed)
     asAssistant match {
@@ -1725,6 +1750,29 @@ func filterClaudeStreamJson(line string) ClaudeChunk {
     }
 }
 
+// looksLikeJsonFragment heuristically detects a stream-json line
+// that was split across two reads — most often the second half of a
+// long `"thinking":"..."` content part, which arrives without the
+// opening `{` but still carries telltale closing tokens. Skipping
+// the line is safer than rendering raw JSON noise in the chat.
+//
+// Handles the common shapes claude emits in fragments:
+//   - `..."}],"stop_reason":null,"stop_sequence":null,...`
+//   - `..."]}, ..., "uuid":"..."}`
+//   - `...}` standalone closer
+//
+// Plain-text test-driver injections (e.g. `"fixed it all"`) don't
+// contain these tokens so they pass through unaffected.
+func looksLikeJsonFragment(s string) bool {
+    if strings.Contains(s, "\"stop_reason\"") { return true }
+    if strings.Contains(s, "\"usage\":")        { return true }
+    if strings.Contains(s, "\"session_id\":")   { return true }
+    if strings.Contains(s, "\"input_tokens\"")  { return true }
+    if strings.HasSuffix(s, "}")                { return true }
+    if strings.HasSuffix(s, "]}")               { return true }
+    return false
+}
+
 // assistantEventChunk extracts the joined text from an assistant
 // event's content[]. Filters parts to `text` only — tool_use,
 // tool_result, thinking parts are dropped (the sidebar spinner
@@ -1738,13 +1786,43 @@ func assistantEventChunk(evt ClaudeAssistantEvent) ClaudeChunk {
     val texts = evt.Message.Content.Collect({
         case ClaudePart(kind, text) if kind == "text" => text
     })
+    val joined = texts.MkString("\n")
+    // Codec safety net — gala 0.41.0's JSON string decoder occasionally
+    // overruns very long string literals and drags the JSON envelope's
+    // closing tokens into the extracted Text. Truncating at the first
+    // recognisable envelope marker keeps the conversation pane clean
+    // when that bug fires (real assistant text never embeds these
+    // exact tokens).
     return ClaudeChunk(
-        Visible   = texts.MkString("\n"),
+        Visible   = sanitizeAssistantText(joined),
         ErrorText = "",
         LiveTurn  = Some(evt.Message.Usage),
         FinalTurn = None[ClaudeUsage](),
         CostUsd   = 0.0,
     )
+}
+
+func sanitizeAssistantText(s string) string {
+    val markers = ArrayOf(
+        "\"stop_reason\":",
+        "\"stop_sequence\":",
+        "\"usage\":{\"input_tokens\"",
+        "\"session_id\":",
+        "\",\"caller\":{\"type\":",
+    )
+    var earliest = ""
+    var earliestIdx = -1
+    markers.ForEach((m) => {
+        val idx = strings.Index(s, m)
+        if idx >= 0 && (earliestIdx < 0 || idx < earliestIdx) {
+            earliestIdx = idx
+            earliest = m
+        }
+    })
+    if earliestIdx < 0 { return s }
+    val parts = strings.SplitN(s, earliest, 2)
+    if len(parts) < 1 { return s }
+    return parts[0]
 }
 
 // resultEventChunk dispatches result events: errors surface as
@@ -1875,6 +1953,14 @@ func isCleanCloseError(err string) bool {
     if strings.Contains(err, "The pipe has been ended")        { return true }
     if strings.Contains(err, "broken pipe")                    { return true }
     if strings.Contains(err, "file already closed")            { return true }
+    // bufio.Scanner returns "Read returned impossible count"
+    // when the underlying pipe Read violates the io.Reader
+    // contract (Windows stdout occasionally hits this on very
+    // long stream-json lines). Retrying just spawns another
+    // claude that hits the same OS-level glitch, so we treat
+    // this as a terminal-but-clean turn end and let the FSM
+    // advance via TLDone like a normal EOF.
+    if strings.Contains(err, "impossible count")               { return true }
     return false
 }
 

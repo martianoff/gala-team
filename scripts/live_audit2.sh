@@ -227,6 +227,43 @@ run "14_unknown_kind" <<'EOF'
 {"type":"quit"}
 EOF
 
+echo "== 17. member blocked then user recovers =="
+# Mirrors a QA-blocking-the-turn flow on the minimal team (Lead +
+# Eng — no real QA member, but the FSM escape hatch we're testing
+# applies to any member-blocked transition). After @blocked, user
+# types a follow-up prompt → UserPrompted escape hatch should reset
+# the FSM to TLThinking instead of leaving us stuck post-block.
+run "17_blocked_recover" <<'EOF'
+{"type":"key","char":"d"}
+{"type":"key","char":"o"}
+{"type":"key","key":"Enter"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"@dispatch(Eng) implement\\n@end\"}]}}"}
+{"type":"msg","name":"SessionFailed","member":"Lead","err":"EOF"}
+{"type":"msg","name":"ChunkArrived","member":"Eng","line":"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"@blocked\\nlibrary fails on edge case X\\n@end\"}]}}"}
+{"type":"msg","name":"SessionFailed","member":"Eng","err":"EOF"}
+{"type":"snapshot","detail":"plain"}
+{"type":"key","char":"f"}
+{"type":"key","char":"i"}
+{"type":"key","char":"x"}
+{"type":"key","key":"Enter"}
+{"type":"snapshot","detail":"plain"}
+{"type":"quit"}
+EOF
+# Last frame should be back in TLThinking (UserPrompted escape hatch)
+QR_HIT=$(grep '"type":"frame"' "$OUT/17_blocked_recover.jsonl" | tail -1 | grep -o '"state":"[A-Za-z]*"' | head -1)
+case "$QR_HIT" in
+    *TLThinking*) echo "    -> recovered to TLThinking after @blocked";;
+    *)            echo "    !! WARNING: stuck in $QR_HIT after recovery prompt";;
+esac
+# After QA @blocked, FSM should be in TLReview/TLNudging (relay
+# fired automatically). User's next prompt resets to TLThinking via
+# the UserPrompted escape hatch.
+QR_HIT=$(grep '"type":"frame"' "$OUT/17_qa_fail_recover.jsonl" | tail -1 | grep -o '"state":"[A-Za-z]*"' | head -1)
+case "$QR_HIT" in
+    *TLThinking*) echo "    -> recovered to TLThinking after QA fail";;
+    *)            echo "    !! WARNING: stuck in $QR_HIT after recovery prompt";;
+esac
+
 echo "== 12. resize sweep =="
 run "12_resize" <<'EOF'
 {"type":"resize","cols":80,"rows":24}

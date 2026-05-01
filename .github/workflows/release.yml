@@ -76,6 +76,13 @@ jobs:
         with:
           go-version: "1.25.5"
 
+      - name: Export GOROOT
+        # setup-go doesn't always set GOROOT in the env; .bazelrc reads
+        # it via --action_env=GOROOT, so make it explicit. bash works on
+        # all three runners (Git Bash on windows-latest).
+        shell: bash
+        run: echo "GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+
       - name: Setup Bazel
         uses: bazel-contrib/setup-bazel@0.14.0
         with:

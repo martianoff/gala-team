@@ -31,5 +31,12 @@ jobs:
           sudo mv /tmp/gala /usr/local/bin/gala
           gala version
 
-      - name: Test
-        run: gala test
+      - name: Build
+        # `gala test` doesn't handle multi-package projects (test files
+        # declare `package main` while libs declare their own package
+        # name — same convention gala_simple uses, which is why
+        # gala_simple's own CI uses bazel for tests). For now we
+        # smoke-test that the binary builds; per-package test
+        # iteration is a follow-up.
+        run: gala build -o gala_team ./cmd
+

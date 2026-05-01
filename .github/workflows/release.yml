@@ -8,16 +8,13 @@ permissions:
   contents: write
 
 env:
-  # Pinned alongside .github/workflows/ci.yml. Bumping requires both
-  # the gala CLI release tag and the gala_simple tag we clone for
-  # the local_path_override path to exist.
   GALA_VERSION: "0.41.0"
 
 jobs:
   build:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -25,94 +22,53 @@ jobs:
           - os: linux
             arch: amd64
             runner: ubuntu-latest
-            platform: "@rules_go//go/toolchain:linux_amd64"
             ext: ""
-          - os: linux
-            arch: arm64
-            runner: ubuntu-latest
-            platform: "@rules_go//go/toolchain:linux_arm64"
-            ext: ""
-          - os: darwin
-            arch: amd64
-            runner: macos-latest
-            platform: "@rules_go//go/toolchain:darwin_amd64"
-            ext: ""
+            gala_asset: gala-linux-amd64
           - os: darwin
             arch: arm64
             runner: macos-latest
-            platform: "@rules_go//go/toolchain:darwin_arm64"
             ext: ""
+            gala_asset: gala-darwin-arm64
           - os: windows
             arch: amd64
             runner: windows-latest
-            platform: "@rules_go//go/toolchain:windows_amd64"
             ext: ".exe"
+            gala_asset: gala-windows-amd64.exe
 
     steps:
-      - name: Checkout gala_team
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          path: gala_team
           fetch-depth: 0
 
-      - name: Checkout gala_simple (sibling for local_path_override)
-        uses: actions/checkout@v4
-        with:
-          repository: martianoff/gala
-          ref: ${{ env.GALA_VERSION }}
-          path: gala_simple
-
-      - name: Checkout gala_tui (sibling for local_path_override)
-        uses: actions/checkout@v4
-        with:
-          repository: martianoff/gala-tui
-          path: gala_tui
-
-      - name: Add swap space (Linux only)
-        # The 16-GB Linux runner OOM-kills the bazel server during
-        # cold builds; backing memory with swap lets the gala
-        # transpiler + Go compile actions spill instead of dying.
-        # macOS / Windows runners aren't hitting this so skip there.
-        if: matrix.os == 'linux'
-        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c
-        with:
-          swap-size-gb: 10
-
-      - name: Setup Go
-        # The gala transpiler invokes go/importer for cross-language
-        # type inference; without Go on PATH the .bazelrc's
-        # --action_env=GOROOT/PATH exports nothing and lambdas widen
-        # to `any`, breaking the generated Go on the Linux runners.
-        uses: actions/setup-go@v5
+      - uses: actions/setup-go@v5
         with:
           go-version: "1.25.5"
 
-      - name: Export GOROOT
-        # setup-go doesn't always set GOROOT in the env; .bazelrc reads
-        # it via --action_env=GOROOT, so make it explicit. bash works on
-        # all three runners (Git Bash on windows-latest).
+      - name: Install gala CLI (Unix)
+        if: matrix.os != 'windows'
         shell: bash
-        run: echo "GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+        run: |
+          curl -fsSL -o /tmp/gala "https://github.com/martianoff/gala/releases/download/${GALA_VERSION}/${{ matrix.gala_asset }}"
+          chmod +x /tmp/gala
+          sudo mv /tmp/gala /usr/local/bin/gala
+          gala version
 
-      - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.14.0
-        with:
-          bazelisk-cache: true
-          disk-cache: ${{ github.workflow }}-${{ matrix.os }}-${{ matrix.arch }}
-          repository-cache: true
+      - name: Install gala CLI (Windows)
+        if: matrix.os == 'windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/martianoff/gala/releases/download/$env:GALA_VERSION/${{ matrix.gala_asset }}"
+          $dst = "$env:USERPROFILE\gala.exe"
+          Invoke-WebRequest -Uri $url -OutFile $dst
+          echo "$env:USERPROFILE" >> $env:GITHUB_PATH
+          & $dst version
 
       - name: Stamp version (Unix)
         if: matrix.os != 'windows'
-        working-directory: gala_team
         shell: bash
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          # Rewrite the literal in app/version/version.gala so the
-          # binary's header reads "Gala Team v<release tag>" instead
-          # of the dev placeholder "0.0.1". sed -i differs between
-          # GNU and BSD; the empty-string -i argument is the
-          # portable form.
           python3 -c "
           import pathlib, re, os
           p = pathlib.Path('app/version/version.gala')
@@ -124,7 +80,6 @@ jobs:
 
       - name: Stamp version (Windows)
         if: matrix.os == 'windows'
-        working-directory: gala_team
         shell: pwsh
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
@@ -134,42 +89,26 @@ jobs:
           $path = 'app/version/version.gala'
           (Get-Content $path) -replace 'Version\(\) string = "[^"]+"', "Version() string = `"$tag`"" | Set-Content $path
 
-      - name: Build binary
-        working-directory: gala_team
-        shell: bash
-        # --jobs=1 + the JVM heap cap keep the 16-GB Linux runner from
-        # OOMing the bazel server. macOS / Windows runners have similar
-        # memory budgets, so apply across the matrix.
-        run: |
-          bazel \
-            --host_jvm_args=-Xmx2g \
-            build //cmd:gala_team \
-            --jobs=2 \
-            --platforms=${{ matrix.platform }} \
-            --override_module=gala=../gala_simple \
-            --override_module=gala_tui=../gala_tui
-
-      - name: Prepare binary (Unix)
+      - name: Build binary (Unix)
         if: matrix.os != 'windows'
-        working-directory: gala_team
+        shell: bash
         run: |
           mkdir -p dist
-          cp bazel-bin/cmd/gala_team_/gala_team dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}
+          gala build -o dist/gala_team-${{ matrix.os }}-${{ matrix.arch }} ./cmd
           chmod +x dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}
 
-      - name: Prepare binary (Windows)
+      - name: Build binary (Windows)
         if: matrix.os == 'windows'
-        working-directory: gala_team
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          Copy-Item bazel-bin/cmd/gala_team_/gala_team.exe dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}.exe
+          gala build -o "dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}.exe" ./cmd
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: gala_team-${{ matrix.os }}-${{ matrix.arch }}
-          path: gala_team/dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
+          path: dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.ext }}
 
   upload-release:
     name: Upload Release Assets

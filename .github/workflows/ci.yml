@@ -35,6 +35,15 @@ jobs:
           repository: martianoff/gala-tui
           path: gala_tui
 
+      - name: Add swap space
+        # The 16-GB Linux runner gets OOM-killed during bazel test
+        # ('Server terminated abruptly: Socket closed' is the kernel
+        # OOM-killer signature). Backing memory with swap lets the
+        # gala transpiler + Go compile actions spill instead of dying.
+        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c
+        with:
+          swap-size-gb: 10
+
       - name: Setup Go
         # The gala transpiler invokes `go/importer` for cross-language
         # type inference (so `Option[string].Map(strings.TrimSpace)`

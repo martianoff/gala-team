@@ -67,6 +67,16 @@ jobs:
           repository: martianoff/gala-tui
           path: gala_tui
 
+      - name: Add swap space (Linux only)
+        # The 16-GB Linux runner OOM-kills the bazel server during
+        # cold builds; backing memory with swap lets the gala
+        # transpiler + Go compile actions spill instead of dying.
+        # macOS / Windows runners aren't hitting this so skip there.
+        if: matrix.os == 'linux'
+        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c
+        with:
+          swap-size-gb: 10
+
       - name: Setup Go
         # The gala transpiler invokes go/importer for cross-language
         # type inference; without Go on PATH the .bazelrc's

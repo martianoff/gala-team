@@ -17,6 +17,7 @@ jobs:
   build:
     name: Build ${{ matrix.os }}-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -143,8 +144,7 @@ jobs:
           bazel \
             --host_jvm_args=-Xmx2g \
             build //cmd:gala_team \
-            --jobs=1 \
-            --local_resources=memory=10000 \
+            --jobs=2 \
             --platforms=${{ matrix.platform }} \
             --override_module=gala=../gala_simple \
             --override_module=gala_tui=../gala_tui

@@ -16,6 +16,7 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     steps:
       - name: Checkout gala_team
         uses: actions/checkout@v4
@@ -82,8 +83,7 @@ jobs:
           bazel \
             --host_jvm_args=-Xmx2g \
             test //app/... //cmd:gala_team \
-            --jobs=1 \
+            --jobs=2 \
             --build_tests_only=false \
-            --local_resources=memory=10000 \
             --override_module=gala=../gala_simple \
             --override_module=gala_tui=../gala_tui

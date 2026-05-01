@@ -1,3 +1,3 @@
 module github.com/martianoff/gala_team
 
-gala 0.39.1
+gala 0.41.0

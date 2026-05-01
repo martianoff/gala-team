@@ -7,9 +7,9 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
-# Bump GALA_VERSION whenever a new gala release ships. gala_team typically
-# tracks the latest release; when CI is red after a workaround removal,
-# the gating release is in flight.
+# Pinned alongside .github/workflows/release.yml. Bumping requires
+# both the gala CLI release tag and the gala_simple tag we clone for
+# the local_path_override path to exist.
 env:
   GALA_VERSION: "0.41.0"
 
@@ -17,19 +17,35 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Checkout gala_team
+        uses: actions/checkout@v4
         with:
-          go-version: '1.25'
+          path: gala_team
 
-      - name: Install GALA CLI
-        run: |
-          curl -fsSL -o /usr/local/bin/gala \
-            "https://github.com/martianoff/gala/releases/download/${GALA_VERSION}/gala-linux-amd64"
-          chmod +x /usr/local/bin/gala
-          gala version
+      - name: Checkout gala_simple (sibling for local_path_override)
+        uses: actions/checkout@v4
+        with:
+          repository: martianoff/gala
+          ref: ${{ env.GALA_VERSION }}
+          path: gala_simple
+
+      - name: Checkout gala_tui (sibling for local_path_override)
+        uses: actions/checkout@v4
+        with:
+          repository: martianoff/gala-tui
+          path: gala_tui
+
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.14.0
+        with:
+          bazelisk-cache: true
+          disk-cache: ${{ github.workflow }}
+          repository-cache: true
+
+      - name: Build
+        working-directory: gala_team
+        run: bazel build //cmd:gala_team //app/...
 
       - name: Test
-        run: gala test
+        working-directory: gala_team
+        run: bazel test //app/...

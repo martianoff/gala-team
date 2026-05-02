@@ -1,0 +1,135 @@
+package runtime
+
+import (
+    "path/filepath"
+    "strings"
+    "time"
+    "martianoff/gala/json"
+    . "martianoff/gala/std"
+)
+
+// ============================================================================
+// app/runtime/trace — opt-in diagnostic capture for claude stream-json.
+//
+// Activated by setting GALA_TEAM_TRACE_DIR=<dir> before launching
+// gala_team. When unset (the common case) every TraceClaudeLine call
+// returns after a single os.Getenv lookup — no allocations, no file
+// opens, no JSON encoding.
+//
+// When set, each chunk seen by the claude stream classifier is teed
+// into a JSONL file at:
+//
+//     $GALA_TEAM_TRACE_DIR/<member>/<process-stamp>.jsonl
+//
+// One JSON object per line, e.g.:
+//
+//     {"ts":"2026-04-30T12:34:56.789Z","member":"Iris",
+//      "raw":"{\"type\":\"assistant\",\"message\":{...}}",
+//      "visible":"Hello!","error":"","dropped":false,"reason":""}
+//
+// Files are append-only, opened lazily on first trace, and held open
+// for the process lifetime — the OS reaps handles on exit. Each
+// AppendTraceLine call is a single buffered Write, so a crash
+// mid-process loses at most the in-flight record (encoding/json buffers
+// the whole record before issuing one Write). Per the user spec, no
+// turn-end fsync; the cost would dwarf the pump's chunk-rate budget.
+//
+// File-open + write ergonomics live in trace.go (gala can't compose
+// `os.O_APPEND|os.O_CREATE|os.O_WRONLY` cleanly and we want a single
+// long-lived file handle per (member, session)). Everything else —
+// env lookup, record shape, JSON encoding, timestamp formatting —
+// stays here so the diagnostic format is gala-native and easy to evolve.
+// ============================================================================
+
+// TraceRecord is the JSONL row written for each chunk. Field names are
+// stable: external scripts in scripts/ read these for offline analysis.
+//
+//   Ts:       UTC RFC3339 with milliseconds.
+//   Member:   speaker the chunk is attributed to. Empty when the chunk
+//             arrives via the no-member-context entry point (tests).
+//   Raw:      the verbatim line claude wrote to stdout. Whitespace is
+//             preserved; we do NOT trim before logging so the trace is
+//             a faithful tape recording.
+//   Visible:  what filterClaudeStreamJson extracted as user-facing text.
+//             Empty when the chunk was orchestration noise (init, tool
+//             invocations, result events with no error).
+//   Error:    non-empty when claude reported an is_error result.
+//   Dropped:  true when the chunk was discarded entirely (no Visible,
+//             no Error). Pair with Reason for the why.
+//   Reason:   diagnostic string — populated when Dropped is true. e.g.
+//             "non-json line dropped as json fragment", "decoded with
+//             unrecognised type". Empty for kept chunks.
+struct TraceRecord(
+    Ts      string,
+    Member  string,
+    Raw     string,
+    Visible string,
+    Error   string,
+    Dropped bool,
+    Reason  string,
+)
+
+// traceCodec serialises TraceRecord to one JSON line.
+val traceCodec = json.Codec[TraceRecord](json.SnakeCase())
+
+// traceProcessStamp is the per-process timestamp used in the trace
+// filename. Computed lazily on first trace so importing this package
+// without ever tracing is allocation-free.
+var traceProcessStamp = ""
+
+// TraceClaudeLine appends one diagnostic record for `member`. No-op
+// when GALA_TEAM_TRACE_DIR is unset — the env lookup is the only work
+// performed and the rest short-circuits immediately.
+//
+// `dropped` should be true when the chunk produced no Visible AND no
+// Error AND was not a result event with usage tally — i.e. the
+// classifier discarded it entirely. The trace file then captures both
+// the raw line and the reason so a "where did the text go?" post-mortem
+// can correlate input → drop → cause without re-running the session.
+//
+// Failures (disk full, permission denied) are written once to stderr
+// and then suppressed so a misconfigured trace dir doesn't flood the
+// terminal with errors during a normal session.
+func TraceClaudeLine(member string, raw string, visible string, errText string, dropped bool, reason string) {
+    val dir = TraceDir()
+    if dir == "" { return }
+    if traceProcessStamp == "" {
+        traceProcessStamp = time.Now().UTC().Format("20060102T150405Z")
+    }
+    val rec = TraceRecord(
+        Ts      = time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+        Member  = member,
+        Raw     = raw,
+        Visible = visible,
+        Error   = errText,
+        Dropped = dropped,
+        Reason  = reason,
+    )
+    val encoded = traceCodec.Encode(rec)
+    if encoded.IsFailure() { return }
+    val path = filepath.Join(dir, sanitiseSegment(member), traceProcessStamp + ".jsonl")
+    // Best-effort: a failed Append is dropped on the floor. The
+    // Go-side helper keeps the file handle cached so a recurring
+    // failure (e.g. disk full) doesn't re-open thrash the FS, and we
+    // explicitly choose not to spam stderr from inside the chunk pump
+    // — diagnostic capture is best-effort; a missed line is not a bug.
+    val _ = AppendTraceLine(path, encoded.Get())
+}
+
+// sanitiseSegment strips path separators from a member name before
+// using it as a directory segment. Member names in team.yaml are
+// user-supplied, so a hostile yaml could specify ".." or a slash and
+// write outside GALA_TEAM_TRACE_DIR. We replace forward and backward
+// slashes (the OS path separators) with '_', and collapse the bare
+// "." / ".." segments which would resolve to the parent dir.
+//
+// We don't bother filtering ASCII control bytes — Windows filesystems
+// reject those, but a member name in team.yaml that contains them
+// would already have failed yaml parsing, and filesystems on POSIX
+// silently allow them. Keep this minimal.
+func sanitiseSegment(s string) string {
+    if s == "" { return "_" }
+    val replaced = strings.ReplaceAll(strings.ReplaceAll(s, "/", "_"), "\\", "_")
+    if replaced == "." || replaced == ".." { return "_" }
+    return replaced
+}

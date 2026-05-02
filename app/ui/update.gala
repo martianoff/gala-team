@@ -1084,7 +1084,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     if m.PendingClosures.Get(name).GetOrElse(0) > 0 {
         return (m, NoCmd[AppMsg]())
     }
-    val chunk = filterClaudeStreamJson(line)
+    val chunk = filterClaudeStreamJsonFor(name, line)
     // Fold token + cost totals from result events into the model.
     // Done before any visible-text branching so even drop-only
     // chunks (success result with no rendered text) still accrue.
@@ -1620,11 +1620,38 @@ func mkWorkingStatus() Status = StWorking()
 
 // ----------------------------------------------------------------------------
 // Claude stream-json filtering — typed Codec[T] decode.
-// gala 0.41.0's Codec[T] supports Array[Struct] field decode and
+// gala 0.41.0+'s Codec[T] supports Array[Struct] field decode and
 // silently drops unknown JSON fields, so we model the only shapes we
 // care about (assistant message text, result error) and let the
 // codec do the heavy lifting. Decode failures land as Try.Failure
 // which we trap into emptyChunk() — no raw-JSON leaks ever.
+//
+// What we explicitly do NOT do anymore:
+//   - sanitise the extracted assistant text. The prior heuristic
+//     scanned for envelope markers ("\"stop_reason\":", "\"usage\":",
+//     etc.) and truncated everything after the first match. That
+//     silently dropped legitimate response text whenever claude was
+//     asked to explain its own stream-json format (the response would
+//     literally contain those substrings). User: "we shouldn't truncate
+//     any text, we should extract text carefully" — so we trust whatever
+//     the codec returned and render it verbatim. If the codec ever
+//     over-runs on a long string literal again, the fix is in gala's
+//     JSON decoder, not a downstream truncator.
+//   - drop pre-fragment lines based on JSON-token heuristics. The
+//     original looksLikeJsonFragment() was a workaround for gala
+//     0.41.0's bufio.Scanner buffer being too small (64KB default,
+//     long thinking parts split across reads). gala_simple's
+//     subprocess now sizes the buffer to 4 MiB (maxLineBytes in
+//     subprocess.go) so that fragmentation cause is gone. We keep
+//     only the cleanest tail patterns — a line that is JUST `}` or
+//     `]}` (after trim) — as a tiny defence against the very rare
+//     malformed line. Anything else, even if it looks JSON-shaped, is
+//     rendered verbatim. Better to occasionally show an ugly token
+//     than silently drop a multi-paragraph response.
+//
+// Optional diagnostic: setting GALA_TEAM_TRACE_DIR=<dir> tees every
+// (raw line, parsed result) pair into per-member JSONL files. See
+// app/runtime/trace.gala for the format.
 // ----------------------------------------------------------------------------
 
 // ClaudePart is one element of an assistant message's content[]
@@ -1706,36 +1733,69 @@ func emptyChunk() ClaudeChunk = ClaudeChunk(
     CostUsd   = 0.0,
 )
 
-// filterClaudeStreamJson is the chunk classifier. Plain non-JSON
-// lines (the test harness occasionally injects bare strings) pass
-// through as Visible. JSON lines go through two attempts:
+// filterClaudeStreamJsonFor is the chunk classifier. The `member`
+// name is forwarded to the GALA_TEAM_TRACE_DIR diagnostic; pass "" if
+// you don't have one (tests, no-context callers — see the bare
+// filterClaudeStreamJson alias below).
+//
+// Plain non-JSON lines (the test harness occasionally injects bare
+// strings) pass through as Visible. JSON lines go through two attempts:
 //   1. Decode as ClaudeAssistantEvent — Codec drops unknown fields
 //      so result/system/user JSON also "succeeds" but with Type set
 //      to a non-"assistant" value. We dispatch on Type after.
 //   2. Decode as ClaudeResultEvent for is_error surfacing.
-// Anything that decodes to an unrecognized Type is silently dropped
-// — never rendered raw, since stream-json metadata in the chat pane
-// is the worst possible UX.
-func filterClaudeStreamJson(line string) ClaudeChunk {
+// Anything that decodes to an unrecognised Type is silently dropped
+// (never rendered raw — stream-json metadata in the chat pane is the
+// worst possible UX).
+//
+// Trust-the-codec policy: whatever the codec returns as the joined
+// `text` parts is rendered verbatim. No post-processing. If gala's
+// JSON decoder produces dirty output, the fix is in the decoder.
+func filterClaudeStreamJsonFor(member string, line string) ClaudeChunk {
     val trimmed = strings.TrimSpace(line)
-    if trimmed == "" { return emptyChunk() }
+    if trimmed == "" {
+        return emptyChunk()
+    }
     if !strings.HasPrefix(trimmed, "{") {
-        // Plain text — only render when the line doesn't carry JSON
-        // structural tokens. Real claude turns produce one JSON
-        // object per stream line, but a thinking content part can be
-        // long enough to exceed bufio.Scanner's default 64KB buffer
-        // and split across two reads. The second read starts mid-
-        // string and matches none of the JSON shapes our codecs know,
-        // but it still contains `"}` / `:null` / `"stop_reason":` etc.
-        // and was leaking as a literal "Mira: <base64>...{stop_reason}"
-        // line in the conversation. Drop those fragments instead.
-        if looksLikeJsonFragment(trimmed) { return emptyChunk() }
-        return ClaudeChunk(Visible = line, ErrorText = "", LiveTurn = None[ClaudeUsage](), FinalTurn = None[ClaudeUsage](), CostUsd = 0.0)
+        // Plain text — render verbatim unless the line is a bare JSON
+        // closer (`}` / `]}`). Those bare closers are the only stream
+        // shape we still drop, on the premise that real assistant
+        // text basically never trims to a single closing brace and
+        // a malformed claude stdout line that *was* the second half
+        // of a JSON envelope would otherwise leak into the chat.
+        // False positives (e.g. an assistant turn that genuinely ends
+        // with the literal token "}") are accepted as the lesser evil
+        // versus the silent-drop bug we just removed.
+        if isBareJsonCloser(trimmed) {
+            TraceClaudeLine(member, line, "", "", true, "non-json bare closer")
+            return emptyChunk()
+        }
+        TraceClaudeLine(member, line, line, "", false, "")
+        return ClaudeChunk(
+            Visible   = line,
+            ErrorText = "",
+            LiveTurn  = None[ClaudeUsage](),
+            FinalTurn = None[ClaudeUsage](),
+            CostUsd   = 0.0,
+        )
     }
     val asAssistant = claudeAssistantCodec.Decode(trimmed)
     asAssistant match {
         case Success(evt) => {
-            if evt.Type == "assistant" { return assistantEventChunk(evt) }
+            if evt.Type == "assistant" {
+                val chunk = assistantEventChunk(evt)
+                // Assistant chunks with no text parts (thinking-only,
+                // tool_use-only) produce empty Visible. They're not
+                // dropped from the orchestration stream — onChunk still
+                // sees the chunk and accrues usage tokens — but from
+                // a "where did the text go?" debugging perspective they
+                // contributed nothing visible. Mark as dropped with a
+                // reason so the trace makes the distinction clear.
+                val dropped = chunk.Visible == ""
+                val reason = if (dropped) "assistant chunk with no text parts" else ""
+                TraceClaudeLine(member, line, chunk.Visible, "", dropped, reason)
+                return chunk
+            }
             // result / user / system / control_request / etc — fall
             // through to the result codec which can pull the error
             // text. The codec doesn't fail on these; it just decodes
@@ -1745,31 +1805,48 @@ func filterClaudeStreamJson(line string) ClaudeChunk {
     }
     val asResult = claudeResultCodec.Decode(trimmed)
     return asResult match {
-        case Success(evt) => resultEventChunk(evt)
-        case Failure(_)   => emptyChunk()
+        case Success(evt) => {
+            val chunk = resultEventChunk(evt)
+            // The result codec also accepts unknown event types
+            // (system / rate_limit_event / control_request — Codec[T]
+            // ignores unknown fields). Their Type field is intact, so
+            // the trace reason explicitly carries it for post-mortem.
+            val typeStr = if (evt.Type == "") "<empty>" else evt.Type
+            val dropped = chunk.Visible == "" && chunk.ErrorText == ""
+            val reason = if (!dropped) "" else if (evt.Type == "result") "result event with no error" else s"non-rendering event type: ${typeStr}"
+            TraceClaudeLine(member, line, chunk.Visible, chunk.ErrorText, dropped, reason)
+            return chunk
+        }
+        case Failure(_) => {
+            TraceClaudeLine(member, line, "", "", true, "json decoded as neither assistant nor result")
+            return emptyChunk()
+        }
     }
 }
 
-// looksLikeJsonFragment heuristically detects a stream-json line
-// that was split across two reads — most often the second half of a
-// long `"thinking":"..."` content part, which arrives without the
-// opening `{` but still carries telltale closing tokens. Skipping
-// the line is safer than rendering raw JSON noise in the chat.
+// filterClaudeStreamJson preserves the no-member entry point used by
+// existing tests and ad-hoc callers. Tracing under "" lands in
+// $GALA_TEAM_TRACE_DIR/_/<stamp>.jsonl after sanitisation.
+func filterClaudeStreamJson(line string) ClaudeChunk =
+    filterClaudeStreamJsonFor("", line)
+
+// isBareJsonCloser detects lines that, after trim, are JUST `}` or
+// `]}`. The bufio buffer is large enough (4 MiB, see
+// gala_simple/subprocess/subprocess.go:maxLineBytes) that real
+// stream-json fragmentation effectively does not happen, so we no
+// longer need the broader marker-substring heuristics that the prior
+// looksLikeJsonFragment() used. Keeping just the bare-closer check
+// covers the rare leftover case where the OS pipe delivers a JSON
+// trailer on its own without the opening brace.
 //
-// Handles the common shapes claude emits in fragments:
-//   - `..."}],"stop_reason":null,"stop_sequence":null,...`
-//   - `..."]}, ..., "uuid":"..."}`
-//   - `...}` standalone closer
-//
-// Plain-text test-driver injections (e.g. `"fixed it all"`) don't
-// contain these tokens so they pass through unaffected.
-func looksLikeJsonFragment(s string) bool {
-    if strings.Contains(s, "\"stop_reason\"") { return true }
-    if strings.Contains(s, "\"usage\":")        { return true }
-    if strings.Contains(s, "\"session_id\":")   { return true }
-    if strings.Contains(s, "\"input_tokens\"")  { return true }
-    if strings.HasSuffix(s, "}")                { return true }
-    if strings.HasSuffix(s, "]}")               { return true }
+// We do NOT special-case lines that *contain* the substrings
+// "stop_reason" / "usage" / "session_id" / "input_tokens" — those
+// are real words an assistant might use when explaining claude's
+// stream-json format, and the previous suffix-truncation against
+// them was the bug we just removed.
+func isBareJsonCloser(s string) bool {
+    if s == "}"  { return true }
+    if s == "]}" { return true }
     return false
 }
 
@@ -1782,47 +1859,21 @@ func looksLikeJsonFragment(s string) bool {
 // the header live during streaming. Cost stays 0 here because
 // claude only reports total_cost_usd on the final result event;
 // the cost field updates once at turn end.
+//
+// No sanitisation: whatever the codec returned is what we render.
+// See the top-of-section comment for the rationale.
 func assistantEventChunk(evt ClaudeAssistantEvent) ClaudeChunk {
     val texts = evt.Message.Content.Collect({
         case ClaudePart(kind, text) if kind == "text" => text
     })
     val joined = texts.MkString("\n")
-    // Codec safety net — gala 0.41.0's JSON string decoder occasionally
-    // overruns very long string literals and drags the JSON envelope's
-    // closing tokens into the extracted Text. Truncating at the first
-    // recognisable envelope marker keeps the conversation pane clean
-    // when that bug fires (real assistant text never embeds these
-    // exact tokens).
     return ClaudeChunk(
-        Visible   = sanitizeAssistantText(joined),
+        Visible   = joined,
         ErrorText = "",
         LiveTurn  = Some(evt.Message.Usage),
         FinalTurn = None[ClaudeUsage](),
         CostUsd   = 0.0,
     )
-}
-
-func sanitizeAssistantText(s string) string {
-    val markers = ArrayOf(
-        "\"stop_reason\":",
-        "\"stop_sequence\":",
-        "\"usage\":{\"input_tokens\"",
-        "\"session_id\":",
-        "\",\"caller\":{\"type\":",
-    )
-    var earliest = ""
-    var earliestIdx = -1
-    markers.ForEach((m) => {
-        val idx = strings.Index(s, m)
-        if idx >= 0 && (earliestIdx < 0 || idx < earliestIdx) {
-            earliestIdx = idx
-            earliest = m
-        }
-    })
-    if earliestIdx < 0 { return s }
-    val parts = strings.SplitN(s, earliest, 2)
-    if len(parts) < 1 { return s }
-    return parts[0]
 }
 
 // resultEventChunk dispatches result events: errors surface as

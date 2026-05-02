@@ -79,9 +79,9 @@ func main() {
     // the team lead. Used by multi-member E2E tests that orchestrate
     // each role manually. Defaults to the lead when omitted.
     val outcome = if (member == "")
-        RunHeadless(proj, cfg.Team, prompt)
+        RunHeadless(proj, cfg.Team, cfg.Policy.WorkspaceMode, prompt)
     else
-        RunHeadlessAs(proj, cfg.Team, member, prompt)
+        RunHeadlessAs(proj, cfg.Team, cfg.Policy.WorkspaceMode, member, prompt)
     outcome match {
         case Left(err) => {
             val _ = os.Stderr.WriteString(s"gala_team_headless: ${err}\n")

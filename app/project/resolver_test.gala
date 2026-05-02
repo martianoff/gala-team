@@ -1,11 +1,10 @@
-package main
+package project
 
 import (
     "os"
     "path/filepath"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
-    . "github.com/martianoff/gala_team/app/project"
 )
 
 // resolver tests cover only the non-shelling-out paths.  Real git

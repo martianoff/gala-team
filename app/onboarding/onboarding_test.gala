@@ -1,4 +1,4 @@
-package main
+package onboarding
 
 import (
     "os"
@@ -8,7 +8,6 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
-    . "github.com/martianoff/gala_team/app/onboarding"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"

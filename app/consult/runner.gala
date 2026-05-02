@@ -7,6 +7,7 @@ import (
     "github.com/martianoff/gala_team/app/headless"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
 )
@@ -75,7 +76,7 @@ func loadTeamStep(entry ConsultEntry, proj Project, body string) ConsultOutcome 
 // and Right(result) for everything else (the result's Err field
 // captures non-fatal stream-level issues).
 func runHeadlessStep(entry ConsultEntry, proj Project, tm Team, body string) ConsultOutcome =
-    headless.RunHeadless(proj, tm, body) match {
+    headless.RunHeadless(proj, tm, Shared(), body) match {
         case Left(err)     => ConsultErr(Name = entry.Name, ErrText = err)
         case Right(result) => ConsultOk(Name = entry.Name, Result = result)
     }

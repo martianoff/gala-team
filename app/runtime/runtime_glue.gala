@@ -386,6 +386,30 @@ func RemoveWorktree(proj Project, m Member) Try[bool] = Try[bool](() => {
     return true
 })
 
+// PruneWorktrees runs `git worktree prune` to drop git's internal
+// metadata for worktrees whose directories were removed out-of-band
+// (e.g. via Start fresh's filesystem wipe, or an aborted prior run
+// that left .git/worktrees/<name>/ ghosts behind). Without this,
+// `git worktree list` keeps reporting `prunable` entries that confuse
+// subsequent `git worktree add -B <branch> <path>` calls.
+//
+// Best-effort: failures are silently swallowed via Try[].
+func PruneWorktrees(proj Project) Try[bool] = Try[bool](() => {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("worktree", "prune").ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val proc = subprocess.Spawn(opts) match {
+        case Success(p)   => p
+        case Failure(err) => panic(s"git worktree prune: ${err.Error()}")
+    }
+    val code = proc.Wait().Get()
+    if code != 0 { panic(s"git worktree prune exited with code ${code}") }
+    return true
+})
+
 // claudeArgs assembles the `claude` CLI flags for a spawn:
 //   - `--print` always, so claude reads the prompt from stdin
 //     and exits after responding instead of starting a TTY-bound
@@ -534,7 +558,8 @@ func MsgMember(msg Msg) string = msg match {
 // trail of "what summary did the team agree to".
 func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
     val title = ghTitle(body)
-    val args = ArrayOf("pr", "create", "--title", title, "--body", body)
+    val bodyWithFooter = body + "\n\n---\n🍎 orchestrated by [Gala Team](https://github.com/martianoff/gala-team)"
+    val args = ArrayOf("pr", "create", "--title", title, "--body", bodyWithFooter)
     return concurrent.FutureApply[Msg](() => {
         val opts = subprocess.NewSpawnOpts(
             "gh",

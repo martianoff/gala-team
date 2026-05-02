@@ -1,9 +1,8 @@
-package main
+package config
 
 import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
-    . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/team"
 )

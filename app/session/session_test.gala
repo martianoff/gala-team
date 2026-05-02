@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
     "os"
@@ -7,7 +7,6 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
-    . "github.com/martianoff/gala_team/app/session"
 )
 
 // mkTempDir creates a fresh empty directory for the duration of one test

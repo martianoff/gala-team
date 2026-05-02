@@ -970,6 +970,12 @@ func wipeMemberWorktrees(m AppModel) {
         if isLead { return }
         val _ = RemoveWorktree(m.Project, mem)
     })
+    // (3) Prune git's internal worktree metadata. RemoveWorktree
+    // short-circuits when the directory is already gone, so any prior
+    // out-of-band wipe leaves orphan `.git/worktrees/<name>/` entries
+    // that subsequent `git worktree add` calls choke on. `git worktree
+    // prune` cleans those up unconditionally.
+    val _ = PruneWorktrees(m.Project)
 }
 
 // clearSessionState wipes every per-conversation field back to its

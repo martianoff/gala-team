@@ -1,11 +1,10 @@
-package main
+package fsm
 
 import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/directive"
-    . "github.com/martianoff/gala_team/app/fsm"
 )
 
 func ctxWithQA(qaRequired bool) TransitionContext = TransitionContext(

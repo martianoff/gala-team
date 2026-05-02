@@ -189,27 +189,37 @@ struct HeadlessResult(
 // (spawn, read of an unreachable repo, etc.). The result's Err field
 // captures non-fatal stream-level errors (a chunk read that didn't
 // land cleanly but the rest of the conversation is intact).
-func RunHeadless(proj Project, tm Team, prompt string) Either[string, HeadlessResult] =
-    RunHeadlessAs(proj, tm, tm.Lead.Name, prompt)
+func RunHeadless(proj Project, tm Team, mode WorkspaceMode, prompt string) Either[string, HeadlessResult] =
+    RunHeadlessAs(proj, tm, mode, tm.Lead.Name, prompt)
 
 // RunHeadlessAs spawns ANY team member (lead, engineer, QA) and
 // drives one prompt through their claude session. Used by multi-
 // member E2E tests that need to manually orchestrate the chain of
 // command without driving the full FSM.
 //
+// `mode` is the team's WorkspaceMode (from the policy block). Engineers
+// and QAs run in their own worktree under WorktreePerEngineer; the lead
+// always runs on the lead branch in `proj.Repo`. Without honouring the
+// mode here, every member ends up in `proj.Repo` and engineer commits
+// land on whichever branch the project root happens to be on (the
+// lead branch), bypassing the per-engineer isolation guarantee.
+//
 // Returns Left on lookup or spawn failure (member missing from team,
-// claude binary failing to start). Returns Right(result) even when
-// the spawned session reported a non-fatal error mid-stream — the
-// Err field carries it.
-func RunHeadlessAs(proj Project, tm Team, memberName string, prompt string) Either[string, HeadlessResult] {
+// claude binary failing to start, worktree creation failed). Returns
+// Right(result) even when the spawned session reported a non-fatal
+// error mid-stream — the Err field carries it.
+func RunHeadlessAs(proj Project, tm Team, mode WorkspaceMode, memberName string, prompt string) Either[string, HeadlessResult] {
     val pick = tm.Members.Find((m) => m.Name == memberName)
     return pick match {
         case None() => Left[string, HeadlessResult](s"member '${memberName}' is not on team '${tm.Name}'")
         case Some(member) => {
-            val (wrapped, onbErr) = onboarding.WrapPromptSafe(proj, tm, member, Shared(), prompt)
-            return SpawnSession(proj, member, proj.Repo, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
-                case Failure(e) => Left[string, HeadlessResult](s"spawn ${member.Name}: ${e.Error()}")
-                case Success(s) => Right[string, HeadlessResult](driveLoop(proj, tm, s, prompt, wrapped, onbErr))
+            val (wrapped, onbErr) = onboarding.WrapPromptSafe(proj, tm, member, mode, prompt)
+            return EnsureWorkspace(proj, member, mode) match {
+                case Failure(e) => Left[string, HeadlessResult](s"workspace ${member.Name}: ${e.Error()}")
+                case Success(cwd) => SpawnSession(proj, member, cwd, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
+                    case Failure(e) => Left[string, HeadlessResult](s"spawn ${member.Name}: ${e.Error()}")
+                    case Success(s) => Right[string, HeadlessResult](driveLoop(proj, tm, s, prompt, wrapped, onbErr))
+                }
             }
         }
     }
@@ -250,7 +260,7 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
                 // consult runner then tries to parse as @summary
                 // directives, breaking the cross-team flow.
                 val visible = ExtractClaudeText(line)
-                if visible != "" {
+                if visible != "" && !isDuplicateOfLast(convo, name, visible) {
                     convo = convo.Append(session.ConversationLine(Speaker = name, Text = visible))
                 }
             }
@@ -275,6 +285,18 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
         Err          = failure,
     )
 }
+
+// isDuplicateOfLast returns true when `text` (from `speaker`) matches
+// the last conversation line by the same speaker. claude's stream-json
+// often emits an intermediate assistant chunk plus a final consolidated
+// assistant message carrying the same text — both decode through
+// ExtractClaudeText and would otherwise show up twice in the
+// transcript. Dedupe consecutive identical lines.
+func isDuplicateOfLast(convo Array[session.ConversationLine], speaker string, text string) bool =
+    convo.LastOption() match {
+        case None()       => false
+        case Some(last) => last.Speaker == speaker && last.Text == text
+    }
 
 // extractSummary joins every member-spoken line of the conversation
 // (skipping the user's prompt), runs the directive parser, and

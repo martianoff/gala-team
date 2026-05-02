@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
     "errors"
@@ -6,7 +6,6 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/project"
-    . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
 )
 

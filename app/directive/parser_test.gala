@@ -1,9 +1,8 @@
-package main
+package directive
 
 import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
-    . "github.com/martianoff/gala_team/app/directive"
 )
 
 func first(t T, msg string) Directive {

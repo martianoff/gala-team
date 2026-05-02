@@ -1,4 +1,4 @@
-package main
+package consult
 
 import (
     "os"
@@ -7,7 +7,6 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
-    . "github.com/martianoff/gala_team/app/consult"
 )
 
 val sampleYaml = "consults:\n" +

@@ -1,11 +1,10 @@
-package main
+package cli
 
 import (
     "strings"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "github.com/martianoff/gala_team/app/cli"
     . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/team"

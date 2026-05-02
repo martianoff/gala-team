@@ -1,4 +1,4 @@
-package main
+package consult
 
 import (
     "os"
@@ -7,7 +7,6 @@ import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "github.com/martianoff/gala_team/app/consult"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
 )

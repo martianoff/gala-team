@@ -313,6 +313,126 @@ case "$QR_HIT" in
     *)            echo "    !! WARNING: stuck in $QR_HIT after recovery prompt";;
 esac
 
+echo "== 25. base64-trail JSON leak regression =="
+# Real-claude bug: when claude emits a long text chunk (e.g. base64
+# digest output), gala's JSON codec sometimes returns text that
+# extends PAST the closing quote — the envelope tail (`}],"stop_reason":...`)
+# bleeds into the visible Visible field. The sanitiser must truncate
+# at the first envelope marker so the user sees prose, not metadata.
+run "25_base64_leak" <<'EOF'
+{"type":"key","char":"x"}
+{"type":"key","key":"Enter"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Here is the digest: SNX1IOJhjNYS85CGNnfOe840RDTACl7Pt1TJNx2PZ19RqZkJ=\"}],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":5,\"output_tokens\":10,\"cache_read_input_tokens\":0},\"session_id\":\"abc\",\"uuid\":\"xyz\"}}"}
+{"type":"msg","name":"SessionFailed","member":"Lead","err":"EOF"}
+{"type":"snapshot","detail":"plain"}
+{"type":"quit"}
+EOF
+LEAK=$(grep '"type":"frame"' "$OUT/25_base64_leak.jsonl" | tail -1 | grep -c "stop_reason\|session_id.*abc\|cache_read_input_tokens" || true)
+case "$LEAK" in
+    0) echo "    -> base64 + envelope leak suppressed";;
+    *) echo "    !! WARNING: stream-json envelope leaked into transcript ($LEAK markers found)";;
+esac
+
+echo "== 19. help overlay (F6) =="
+run "19_help" <<'EOF'
+{"type":"resize","cols":120,"rows":36}
+{"type":"key","key":"FKey6"}
+{"type":"snapshot","detail":"plain"}
+{"type":"key","key":"Esc"}
+{"type":"snapshot","detail":"plain"}
+{"type":"quit"}
+EOF
+HELP_HIT=$(grep -m1 '"detail":"plain"' "$OUT/19_help.jsonl" | grep -c "Help · keys" || true)
+case "$HELP_HIT" in
+    0) echo "    !! WARNING: F6 didn't open help overlay";;
+    *) echo "    -> F6 opens help overlay";;
+esac
+
+echo "== 20. F5 activity view =="
+run "20_activity" <<'EOF'
+{"type":"resize","cols":120,"rows":36}
+{"type":"key","char":"h"}
+{"type":"key","char":"i"}
+{"type":"key","key":"Enter"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"hello back"}
+{"type":"msg","name":"SessionFailed","member":"Lead","err":"EOF"}
+{"type":"key","key":"FKey5"}
+{"type":"snapshot","detail":"plain"}
+{"type":"quit"}
+EOF
+ACT_HIT=$(grep '"type":"frame"' "$OUT/20_activity.jsonl" | tail -1 | grep -c "Activity log" || true)
+case "$ACT_HIT" in
+    0) echo "    !! WARNING: F5 didn't render activity view";;
+    *) echo "    -> F5 renders activity view";;
+esac
+
+echo "== 21. command palette (Ctrl+P) =="
+run "21_palette" <<'EOF'
+{"type":"resize","cols":120,"rows":36}
+{"type":"key","key":"CtrlP"}
+{"type":"snapshot","detail":"plain"}
+{"type":"key","key":"Esc"}
+{"type":"snapshot","detail":"plain"}
+{"type":"quit"}
+EOF
+PAL_HIT=$(grep -m1 '"detail":"plain"' "$OUT/21_palette.jsonl" | grep -c "View: Default split\|Help (key" || true)
+case "$PAL_HIT" in
+    0) echo "    !! WARNING: Ctrl+P didn't open palette with view entries";;
+    *) echo "    -> Ctrl+P opens palette with new entries";;
+esac
+
+echo "== 22. approval modal (Ctrl+A pre-check) =="
+run "22_approval_modal" <<'EOF'
+{"type":"resize","cols":120,"rows":36}
+{"type":"key","char":"x"}
+{"type":"key","key":"Enter"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"@summary"}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"All done. Ship it."}
+{"type":"msg","name":"ChunkArrived","member":"Lead","line":"@end"}
+{"type":"msg","name":"SessionFailed","member":"Lead","err":"EOF"}
+{"type":"snapshot","detail":"plain"}
+{"type":"key","key":"CtrlA"}
+{"type":"snapshot","detail":"plain"}
+{"type":"quit"}
+EOF
+APPR_TITLE=$(grep -m1 '"detail":"plain"' "$OUT/22_approval_modal.jsonl" | grep -c "Open PR?" || true)
+APPR_BLOCK=$(grep '"type":"frame"' "$OUT/22_approval_modal.jsonl" | tail -1 | grep -c "no commits ahead" || true)
+case "$APPR_TITLE" in
+    0) echo "    !! WARNING: approval modal didn't render Open PR? title";;
+    *) echo "    -> approval modal renders";;
+esac
+case "$APPR_BLOCK" in
+    0) echo "    !! WARNING: Ctrl+A didn't trigger the no-commits pre-check";;
+    *) echo "    -> approval pre-check blocks empty PR";;
+esac
+
+echo "== 23. project-info modal via palette =="
+run "23_project_info" <<'EOF'
+{"type":"resize","cols":120,"rows":36}
+{"type":"key","key":"CtrlP"}
+{"type":"key","char":"P"}
+{"type":"key","char":"r"}
+{"type":"key","char":"o"}
+{"type":"key","key":"Enter"}
+{"type":"snapshot","detail":"plain"}
+{"type":"quit"}
+EOF
+PI_HIT=$(grep '"type":"frame"' "$OUT/23_project_info.jsonl" | tail -1 | grep -c "Project: Default Project\|Repo:\|GitHub:" || true)
+case "$PI_HIT" in
+    0) echo "    !! WARNING: project-info modal didn't render";;
+    *) echo "    -> project-info modal renders";;
+esac
+
+echo "== 24. compact-left toggle (Ctrl+,) =="
+run "24_compact" <<'EOF'
+{"type":"resize","cols":120,"rows":36}
+{"type":"snapshot","detail":"plain"}
+{"type":"key","key":"Ctrl,"}
+{"type":"snapshot","detail":"plain"}
+{"type":"quit"}
+EOF
+echo "    -> compact toggle frames captured (visual diff: panel width 28→20)"
+
 echo "== 12. resize sweep =="
 run "12_resize" <<'EOF'
 {"type":"resize","cols":80,"rows":24}

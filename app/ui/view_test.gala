@@ -610,7 +610,7 @@ func TestView_Footer_SidebarFocus_ShowsNavLegend(t T) T {
     val out = render(m)
     val t1 = IsTrue(t, strings.Contains(out, "↑↓ navigate"))
     val t2 = IsTrue(t1, strings.Contains(out, "Space fold/unfold"))
-    return IsTrue(t2, strings.Contains(out, "Esc back to composer"))
+    return IsTrue(t2, strings.Contains(out, "Esc composer"))
 }
 
 // "Tab sidebar" hint was retired in favour of palette + paste + view

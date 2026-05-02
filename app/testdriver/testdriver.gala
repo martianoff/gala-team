@@ -230,8 +230,21 @@ func decodeKey(d *json.JsonDecoderImpl) Option[AppMsg] {
     if keyName == "CtrlN"     { return Some[AppMsg](KeyEraseSession()) }
     if keyName == "CtrlM"     { return Some[AppMsg](KeyMerge()) }
     if keyName == "CtrlH"     { return Some[AppMsg](KeyToggleHistory()) }
-    if keyName == "Tab"       { return Some[AppMsg](KeyToggleConsultViewer()) }
+    if keyName == "CtrlT"     { return Some[AppMsg](KeyToggleConsultViewer()) }
+    if keyName == "CtrlP"     { return Some[AppMsg](KeyTogglePalette()) }
+    // Tab matches the live keymap → focus toggle (NOT consult viewer;
+    // that was the pre-2026-04 binding). Mouse-only callers route the
+    // consult viewer via Ctrl+T or the palette entry instead.
+    if keyName == "Tab"       { return Some[AppMsg](KeyToggleFocus()) }
     if keyName == "CtrlY"     { return Some[AppMsg](KeyYankConversation()) }
+    if keyName == "Ctrl,"     { return Some[AppMsg](KeyToggleCompactSidebar()) }
+    if keyName == "Ctrl."     { return Some[AppMsg](KeyToggleCompactSidebar()) }
+    if keyName == "FKey1"     { return Some[AppMsg](KeySetViewMode(Mode = ViewDefault())) }
+    if keyName == "FKey2"     { return Some[AppMsg](KeySetViewMode(Mode = ViewFocus())) }
+    if keyName == "FKey3"     { return Some[AppMsg](KeySetViewMode(Mode = ViewGrid())) }
+    if keyName == "FKey4"     { return Some[AppMsg](KeySetViewMode(Mode = ViewPipeline())) }
+    if keyName == "FKey5"     { return Some[AppMsg](KeySetViewMode(Mode = ViewActivity())) }
+    if keyName == "FKey6"     { return Some[AppMsg](KeyToggleHelp()) }
     if keyName == "PageUp"    { return Some[AppMsg](KeyConvoPageUp()) }
     if keyName == "PageDown"  { return Some[AppMsg](KeyConvoPageDown()) }
     if keyName == "End"       { return Some[AppMsg](KeyConvoStickToBottom()) }

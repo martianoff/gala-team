@@ -143,48 +143,87 @@ func onTick(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 func pruneToasts(q ToastQueue, now time_utils.Instant) ToastQueue = q.Prune(now)
 
 // updateLivenessStatuses walks `members` and maps each to a derived
-// status from LastChunkAt. On a band transition, three things happen
-// simultaneously: (1) status flipped in m.Statuses; (2) toast pushed
-// for the user; (3) FSM event emitted so Delegating advances toward
-// TLNudging (stuck) or past the dead member (abandoned). The returned
-// Cmd array carries any orchestrator-level work the FSM transition
-// triggered — typically a TL nudge spawn.
+// status from LastChunkAt. On a band transition: (1) status flipped
+// in m.Statuses; (2) toast pushed; (3) FSM event emitted so
+// Delegating advances toward TLNudging (stuck) or past the dead
+// member (abandoned).
+//
+// CRITICAL: TL nudges are batched at the END of the walk, not fired
+// per-member. Without batching, when N engineers all hit the stuck
+// threshold in the same tick (typical when the user runs a parallel
+// dispatch fan-out and walks away), the orchestrator spawns N TL
+// nudges back-to-back — each lands a separate claude turn at the
+// lead, the user sees N "TL is working" toasts, and the team
+// pipeline pile-on confuses everyone.
+//
+// Aggregated nudge: collect every newly-stuck member during the
+// walk; afterwards, if any are present, emit ONE MemberStuck FSM
+// transition + ONE spawnTLNudge with a prompt that lists every stuck
+// member. Failed (abandoned) transitions are still per-member because
+// they don't spawn a nudge turn — they only advance the pending set.
 func updateLivenessStatuses(
     m AppModel, members Array[Member], now time_utils.Instant,
-) Tuple[AppModel, Array[Cmd[AppMsg]]] = members.FoldLeft(
-    (m, EmptyArray[Cmd[AppMsg]]()),
-    (acc, mem) => {
-        val (m1, cmds) = (acc.V1, acc.V2)
+) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyArray[string]())
+    val (m1, cmds, stuckNames) = members.FoldLeft(seed, (acc, mem) => {
+        val (curM, curCmds, curStuck) = acc
         val name = mem.Name
-        val current = m1.Statuses.Get(name).GetOrElse(StIdle())
-        val derived = livenessStatus(m1, name, current, now)
-        if statusTag(current) == statusTag(derived) { return (m1, cmds) }
-        val m2 = m1.Copy(
-            Statuses = m1.Statuses.Put(name, derived),
-            Toasts   = pushTransitionToast(m1.Toasts, name, derived, now),
+        val current = curM.Statuses.Get(name).GetOrElse(StIdle())
+        val derived = livenessStatus(curM, name, current, now)
+        if statusTag(current) == statusTag(derived) { return (curM, curCmds, curStuck) }
+        val withStatus = curM.Copy(
+            Statuses = curM.Statuses.Put(name, derived),
+            Toasts   = pushTransitionToast(curM.Toasts, name, derived, now),
         )
-        val (m3, transitionCmds) = onLivenessTransition(m2, name, derived)
-        return (m3, transitionCmds.FoldLeft(cmds, (a, c) => a.Append(c)))
-    },
-)
+        return derived match {
+            case StStuck() => (withStatus, curCmds, curStuck.Append(name))
+            case StFailed(_) => {
+                val nextState = Transition(withStatus.State, MemberAbandoned(MemberName = name), transitionContext(withStatus))
+                return (withStatus.Copy(State = nextState), curCmds, curStuck)
+            }
+            case _ => (withStatus, curCmds, curStuck)
+        }
+    })
+    if stuckNames.IsEmpty() { return (m1, cmds) }
+    return spawnAggregatedStuckNudge(m1, stuckNames, cmds, now)
+}
 
-// onLivenessTransition fires when a member's status crossed a band.
-// Stuck → emit MemberStuck event (FSM enters TLNudging) + spawn TL
-// nudge turn. Failed (heartbeat-driven, i.e. abandoned) → emit
-// MemberAbandoned and let the FSM advance the pending set without TL
-// involvement. Other transitions (Working ↔ Slow) are status-only
-// with no FSM consequence.
-func onLivenessTransition(m AppModel, name string, derived Status) Tuple[AppModel, Array[Cmd[AppMsg]]] = derived match {
-    case StStuck() => {
-        val nextState = Transition(m.State, MemberStuck(MemberName = name), transitionContext(m))
-        val m1 = m.Copy(State = nextState)
-        return spawnTLNudge(m1, s"stuck-${name}", buildStuckNudgePrompt(m1, name, m1.NowAt))
+// spawnAggregatedStuckNudge fires a single TL nudge covering every
+// newly-stuck member. Transitions the FSM via the FIRST stuck name
+// (one MemberStuck event is enough — the FSM only tracks "are we
+// nudging?" not which member) and builds an aggregated prompt.
+func spawnAggregatedStuckNudge(
+    m AppModel,
+    stuck Array[string],
+    cmds Array[Cmd[AppMsg]],
+    now time_utils.Instant,
+) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    val first = stuck.Get(0)
+    val nextState = Transition(m.State, MemberStuck(MemberName = first), transitionContext(m))
+    val withState = m.Copy(State = nextState)
+    val prompt = buildAggregatedStuckPrompt(withState, stuck, now)
+    val (afterSpawn, spawnCmds) = spawnTLNudge(withState, s"stuck-batch-${stuck.Size()}", prompt)
+    val merged = spawnCmds.FoldLeft(cmds, (a, c) => a.Append(c))
+    return (afterSpawn, merged)
+}
+
+// buildAggregatedStuckPrompt formats a system message listing every
+// stuck member in one block. Falls back to the single-member prompt
+// when only one is stuck — the additional "members listed below"
+// boilerplate is wasted cognitive load when there's just one.
+func buildAggregatedStuckPrompt(m AppModel, stuck Array[string], now time_utils.Instant) string {
+    if stuck.Size() == 1 {
+        return buildStuckNudgePrompt(m, stuck.Get(0), now)
     }
-    case StFailed(_) => {
-        val nextState = Transition(m.State, MemberAbandoned(MemberName = name), transitionContext(m))
-        return (m.Copy(State = nextState), EmptyArray[Cmd[AppMsg]]())
-    }
-    case _ => (m, EmptyArray[Cmd[AppMsg]]())
+    val rows = stuck.Map((name) => {
+        val elapsed = m.LastChunkAt.Get(name) match {
+            case None()   => int64(0)
+            case Some(at) => elapsedSeconds(now, at)
+        }
+        return s"  • ${name} silent for ${elapsed}s"
+    })
+    val joined = rows.MkString("\n")
+    return s"System: ${stuck.Size()} members went stuck simultaneously past the heartbeat threshold:\n${joined}\n\nDecide what to do — re-prompt them with a single @dispatch listing every stuck name, reassign to other members, or @summary the turn as-is and surface the failures."
 }
 
 // spawnTLNudge fires a fresh TL turn with the given system prompt.
@@ -295,6 +334,17 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
         val (handled, m1, cmd1) = interceptPaletteMsg(m, msg)
         if handled { return (m1, cmd1) }
     }
+    // Recovery-modal interception: when the §5.6 modal is up, every
+    // input goes to it. Tab cycles the focused button, Enter confirms
+    // the focused choice, Esc cancels (handled below in HistoryDeselect).
+    // Without this, the user lands on the modal and can neither dismiss
+    // it nor pick a button — keys flow to the composer instead.
+    if m.RecoveryModalOpen {
+        val intercepted = recoveryIntercept(m, msg)
+        if intercepted.IsDefined() {
+            return intercepted.GetOrElse((m, NoCmd[AppMsg]()))
+        }
+    }
     return msg match {
     case KeyChar(c)                  => onKeyChar(m, c)
     case KeyBackspace()              => (m.Copy(Composer = trimLastRune(m.Composer)),  NoCmd[AppMsg]())
@@ -345,6 +395,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case KeyCloseMemberDetail()      => (m.Copy(MemberDetailOpen = None[string]()), NoCmd[AppMsg]())
     case KeyTogglePalette()          => onTogglePalette(m)
     case KeyPaletteEvent(ev)         => onPaletteEvent(m, ev)
+    case KeyPaletteRowClick(idx)     => onPaletteRowClick(m, idx)
     case KeySetViewMode(mode)        => onSetViewMode(m, mode)
     case KeyToggleHelp()             => (m.Copy(HelpVisible = !m.HelpVisible), NoCmd[AppMsg]())
     case KeyToggleProjectInfo()      => (m.Copy(ProjectInfoOpen = !m.ProjectInfoOpen), NoCmd[AppMsg]())
@@ -352,10 +403,22 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case KeyToggleCompactSidebar()   => (m.Copy(CompactSidebar = !m.CompactSidebar), NoCmd[AppMsg]())
     case KeyRecoveryCycle()          => onRecoveryCycle(m)
     case KeyRecoveryConfirm()        => onRecoveryConfirm(m)
+    case KeyRecoveryClick(c)         => onRecoveryConfirm(m.Copy(RecoveryFocus = c))
     case TickMsg()                   => onTick(m)
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
     }
+}
+
+// recoveryIntercept routes Tab → KeyRecoveryCycle and Enter →
+// KeyRecoveryConfirm when the §5.6 modal is up. Returns Some when
+// the message was consumed; None lets the regular dispatch handle
+// it (so a click on the modal's button widget still fires
+// KeyRecoveryClick via the normal path).
+func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg]]] = msg match {
+    case KeyToggleFocus() => Some(onRecoveryCycle(m))
+    case KeySubmit()      => Some(onRecoveryConfirm(m))
+    case _                => None[Tuple[AppModel, Cmd[AppMsg]]]()
 }
 
 // onRecoveryCycle advances the focus across the recovery modal's
@@ -649,6 +712,30 @@ func onPaletteEvent(m AppModel, ev PaletteEvent) Tuple[AppModel, Cmd[AppMsg]] {
     }
     val updated = PaletteUpdate[AppMsg](m.Palette, ev)
     return (m.Copy(Palette = updated), NoCmd[AppMsg]())
+}
+
+// onPaletteRowClick handles a mouse click on the palette's idx-th
+// visible result row. The widget hands us the visible index; we
+// nudge Selected via PalNext/PalPrev (PaletteUpdate doesn't expose a
+// "set Selected" event) until it matches, then fire PalConfirm so a
+// single click picks-and-confirms.
+//
+// Nudging is O(N) on the visible row count, but the palette caps at
+// ~8 rows so this is a couple of iterations at worst.
+func onPaletteRowClick(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
+    if !m.PaletteVisible { return (m, NoCmd[AppMsg]()) }
+    val pal = m.Palette
+    val n = pal.FilteredIdx.Length()
+    if n == 0 { return (m, NoCmd[AppMsg]()) }
+    val target = if (idx < 0) 0 else if (idx >= n) n - 1 else idx
+    var aligned = pal
+    var safety = 0
+    for aligned.Selected != target && safety < 64 {
+        val ev = if (aligned.Selected < target) PalNext() else PalPrev()
+        aligned = PaletteUpdate[AppMsg](aligned, ev)
+        safety = safety + 1
+    }
+    return onPaletteEvent(m.Copy(Palette = aligned), PalConfirm())
 }
 
 // paletteSelectedMsg returns the AppMsg attached to the currently-
@@ -2017,18 +2104,22 @@ func isBareJsonCloser(s string) bool {
 // claude only reports total_cost_usd on the final result event;
 // the cost field updates once at turn end.
 //
-// Safety net: a chunk's joined text is dropped if it looks like a
-// raw stream-json envelope. This is belt-and-braces — the codec is
-// expected to skip unknown fields, but historical regressions on
-// the gala json side have shown up as a tool_use chunk whose Text
-// got mis-attributed to the JSON envelope. Better to drop than to
-// leak `{"type":"assistant",...}` into the chat pane.
+// Safety net (TWO layers — the codec is the first defence, this is
+// the second):
+//   1. If the text TRIMS to a stream-json envelope opener, drop it.
+//   2. If the text CONTAINS one of the trailing-envelope markers
+//      (`"stop_reason":`, `"session_id":`, `"usage":{"input_tokens`),
+//      truncate at the first marker. This covers the real-world bug
+//      where the codec extracted the legitimate `text` field but
+//      ALSO swallowed the trailing envelope (seen with long base64
+//      payloads — gala json's string-termination heuristic gets
+//      confused by certain characters in the value).
 func assistantEventChunk(evt ClaudeAssistantEvent) ClaudeChunk {
     val texts = evt.Message.Content.Collect({
         case ClaudePart(kind, text) if kind == "text" => text
     })
     val joined = texts.MkString("\n")
-    val safe = if (looksLikeStreamJson(joined)) "" else joined
+    val safe = sanitizeAssistantText(joined)
     return ClaudeChunk(
         Visible   = safe,
         ErrorText = "",
@@ -2038,11 +2129,20 @@ func assistantEventChunk(evt ClaudeAssistantEvent) ClaudeChunk {
     )
 }
 
-// looksLikeStreamJson is the JSON-leak guard. Returns true when `text`
-// trims to a `{"...` opener AND contains stream-json field markers
-// that no real assistant prose would carry verbatim. Conservative —
-// real text that happens to start with `{` won't be dropped unless it
-// also includes one of the marker substrings.
+// sanitizeAssistantText runs both leak guards in order. If the whole
+// text is recognisably a stream-json envelope, drop it; otherwise
+// truncate at the first leaked-envelope marker so legitimate prose
+// up to the leak is still rendered. Empty input passes through.
+func sanitizeAssistantText(text string) string {
+    if text == "" { return "" }
+    if looksLikeStreamJson(text) { return "" }
+    return truncateAtEnvelopeMarker(text)
+}
+
+// looksLikeStreamJson is the whole-envelope guard: matches when the
+// trimmed text starts with `{"` AND carries a stream-json field
+// marker. Conservative — real prose that happens to start with `{`
+// won't be dropped unless one of the marker substrings is present.
 func looksLikeStreamJson(text string) bool {
     val t = strings.TrimSpace(text)
     if !strings.HasPrefix(t, "{\"") { return false }
@@ -2051,6 +2151,44 @@ func looksLikeStreamJson(text string) bool {
            strings.Contains(t, "\"type\":\"tool_result\"") ||
            strings.Contains(t, "\"stop_reason\":") ||
            strings.Contains(t, "\"session_id\":")
+}
+
+// truncateAtEnvelopeMarker is the partial-leak guard: when the text
+// contains a stream-json envelope marker partway through (the codec
+// ate the legitimate text PLUS the closing envelope), cut at the
+// first marker so the user sees clean prose up to the leak point.
+//
+// Markers chosen for low false-positive rate: real assistant prose
+// almost never contains literal `"stop_reason":` or `"usage":{"input_tokens`
+// — they'd have to be inside a code block, in which case they'd be
+// fenced and likely escaped. Acceptable cost of false-positive: a
+// rare assistant message about claude's API gets clipped at a
+// substring; we'd rather under-render than leak.
+//
+// Uses strings.SplitN(prefix-only) per marker rather than slicing —
+// gala doesn't allow s[0:cut] on raw strings.
+func truncateAtEnvelopeMarker(text string) string {
+    val markers = ArrayOf(
+        "\"stop_reason\":",
+        "\"stop_sequence\":",
+        "\"session_id\":",
+        "\"usage\":{\"input_tokens",
+        "\"usage\":{\"output_tokens",
+        "\"parent_tool_use_id\":",
+        "}],\"stop_reason\"",
+        "}],\"usage\":",
+    )
+    var truncated = text
+    var i = 0
+    val n = markers.Size()
+    for i < n {
+        val parts = strings.SplitN(truncated, markers.Get(i), 2)
+        if len(parts) > 1 {
+            truncated = parts[0]
+        }
+        i = i + 1
+    }
+    return strings.TrimRight(truncated, " \t\n\"}],")
 }
 
 // resultEventChunk dispatches result events: errors surface as
@@ -2070,8 +2208,25 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
             CostUsd   = evt.TotalCostUsd,
         )
     }
+    // Render the `result` field as visible text on a clean turn. Two
+    // claude output shapes ship to us:
+    //   (a) Streaming: many `assistant.message.text` chunks during the
+    //       turn + a final `result` event whose Result field echoes the
+    //       full text. In this case the assistant chunks already
+    //       populated the transcript; we drop the result echo.
+    //   (b) Bulk: zero assistant chunks, only one `result` event whose
+    //       Result field IS the entire turn. Without rendering it the
+    //       transcript stays empty and the user sees no response.
+    //
+    // We can't tell (a) from (b) at this layer (the per-member
+    // streaming-text accumulator is in onChunk, not here). Render the
+    // result text whenever it's substantive AND looks like prose, not
+    // a stream-json envelope re-encoding. Duplicate display in case (a)
+    // is the lesser evil vs. silent drop in case (b) — DESIGN.md says
+    // "we'd rather under-format than under-render".
+    val visibleResult = sanitizeAssistantText(evt.Result)
     return ClaudeChunk(
-        Visible   = "",
+        Visible   = visibleResult,
         ErrorText = "",
         LiveTurn  = None[ClaudeUsage](),
         FinalTurn = tokens,

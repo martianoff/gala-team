@@ -240,11 +240,13 @@ func guidanceRows(m AppModel) Array[string] {
 
 // recoveryModalOverlay is the §5.6 Resume / Inspect / Start-fresh
 // modal. Replaces the legacy single-line "↻ Restored …" banner.
+// Each button is a real ButtonClick widget so mouse-only users can
+// pick a choice; Tab/Enter still drive it from the keyboard via the
+// dispatchMsg interception layer.
 func recoveryModalOverlay(m AppModel, base Widget) Widget {
     val (cols, rows) = TermSize()
     val w = if (cols < 60) cols - 4 else MinInt(70, cols - 8)
     val h = if (rows < 14) rows - 2 else MinInt(16, rows - 4)
-    val choice = m.RecoveryFocus
     val lines = m.Conversation.Size()
     val agents = m.RecoveredMembers.Size()
     val title = TextStyled(" ↺  Resume previous session? ", DefaultStyle().WithBold().WithReverse())
@@ -255,22 +257,62 @@ func recoveryModalOverlay(m AppModel, base Widget) Widget {
         s"  Pending:    ${agents} agent(s)",
     )
     val infoWidgets = info.Map((r) => Fixed(1, TextStyled(r, DefaultStyle())))
-    val buttons = TextStyled(recoveryButtonsLine(choice), DefaultStyle())
-    val footer = TextStyled("  Tab cycle · Enter confirm · Esc cancel", DefaultStyle().WithDim())
+    val buttonRow = recoveryButtonRow(m)
+    val footer = TextStyled("  Tab cycle · Enter / click · Esc cancel", DefaultStyle().WithDim())
     val body = Column(ArrayOf[LayoutChild](
         Fixed(1, title),
         Fixed(1, FillCh('-')),
-    ).AppendAll(infoWidgets).Append(Fixed(1, Empty())).Append(Fixed(1, buttons))
+    ).AppendAll(infoWidgets).Append(Fixed(1, Empty())).Append(Fixed(3, buttonRow))
         .Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
     return Overlay(base, Modal(w, h, body))
 }
 
-// recoveryButtonsLine renders the three buttons with the focused one
-// in reverse video so the user sees which is active.
-func recoveryButtonsLine(c RecoveryChoice) string = c match {
-    case ResumeFocus()     => "  [ Resume ]    Inspect      Start fresh"
-    case InspectFocus()    => "    Resume    [ Inspect ]    Start fresh"
-    case StartFreshFocus() => "    Resume      Inspect    [ Start fresh ]"
+// recoveryButtonRow renders the three buttons as real ButtonClick
+// widgets so a mouse-click picks-and-confirms in one action. Each
+// button dispatches a one-shot "set focus + confirm" message —
+// SelectAndConfirm — that the update layer handles atomically.
+func recoveryButtonRow(m AppModel) Widget {
+    val resumeBtn = ButtonClick[AppMsg](
+        "Resume",
+        isResumeFocus(m.RecoveryFocus),
+        KeyRecoveryClick(Choice = ResumeFocus()),
+    )
+    val inspectBtn = ButtonClick[AppMsg](
+        "Inspect",
+        isInspectFocus(m.RecoveryFocus),
+        KeyRecoveryClick(Choice = InspectFocus()),
+    )
+    val freshBtn = ButtonClick[AppMsg](
+        "Start fresh",
+        isStartFreshFocus(m.RecoveryFocus),
+        KeyRecoveryClick(Choice = StartFreshFocus()),
+    )
+    return Row(ArrayOf[LayoutChild](
+        Flex(1, Empty()),
+        Fixed(12, resumeBtn),
+        Fixed(2, Empty()),
+        Fixed(12, inspectBtn),
+        Fixed(2, Empty()),
+        Fixed(16, freshBtn),
+        Flex(1, Empty()),
+    ))
+}
+
+// isResumeFocus / isInspectFocus / isStartFreshFocus split the
+// RecoveryChoice match into single-call predicates so the
+// `recoveryButtonRow` widget call stays flat. Inline pattern-match
+// would force a temp val per button, which obscures the intent.
+func isResumeFocus(c RecoveryChoice) bool = c match {
+    case ResumeFocus() => true
+    case _             => false
+}
+func isInspectFocus(c RecoveryChoice) bool = c match {
+    case InspectFocus() => true
+    case _              => false
+}
+func isStartFreshFocus(c RecoveryChoice) bool = c match {
+    case StartFreshFocus() => true
+    case _                 => false
 }
 
 // approvalModalOverlay paints the §6.1 / Frame G approval dialog —
@@ -330,14 +372,16 @@ func approvalBranchHint(m AppModel) string {
 }
 
 // paletteOverlay paints the fuzzy-search action picker centered over
-// `base`. Same visual language as the rest of the modal stack — dim
-// backdrop + bordered panel — so it composes cleanly with whatever
-// is open underneath.
+// `base`. Uses the click-aware variant so a mouse click on a row
+// dispatches PalClick directly (which the dispatcher routes to
+// PalConfirm via onPalClick); without this, the palette renders but
+// click-to-pick is silently ignored on every row.
 func paletteOverlay(pal Palette[AppMsg], base Widget) Widget {
     val (cols, rows) = TermSize()
     val w = if (cols < 60) cols - 4 else MinInt(80, cols - 8)
     val h = if (rows < 16) rows - 2 else MinInt(20, rows - 4)
-    val body = PaletteViewAtHeight[AppMsg](pal, h - 2, true)
+    val body = PaletteViewAtHeightClick[AppMsg](pal, h - 2, true,
+        (i) => KeyPaletteRowClick(Idx = i))
     val panel = Modal(w, h, body)
     return Overlay(base, panel)
 }
@@ -1374,10 +1418,10 @@ func errorBanner(m AppModel) LayoutChild = m.LastError match {
 // (Ctrl+L is the alias); Ctrl+T toggles the consult viewer modal;
 // Ctrl+H opens the saved-archive browser.
 func footerHints(m AppModel) string = m.Focus match {
-    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc back to composer · PgUp/PgDn scroll · Ctrl+Q quit"
+    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc composer · F2/F3/F4/F5 views · F6 help · Ctrl+Q quit"
     case FocusComposer() => m.LastPrUrl match {
-        case Some(_) => "  Ctrl+Q · Ctrl+P palette · Ctrl+M merge · Ctrl+A re-approve · F2 focus · F3 grid · F4 pipeline"
-        case None()  => "  Ctrl+Q · Ctrl+P palette · Enter send · Ctrl+A approve · Ctrl+R reject · F2/F3/F4 views"
+        case Some(_) => "  Ctrl+M merge · Ctrl+A re-approve · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+        case None()  => "  Enter send · Ctrl+A approve · Ctrl+R reject · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
     }
 }
 

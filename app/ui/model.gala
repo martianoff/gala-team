@@ -230,6 +230,16 @@ struct AppModel(
     // TL relay turn (#28). Empty string if a member finished via EOF
     // without an explicit @done block.
     MemberDoneBodies HashMap[string, string],
+    // Per-member counter of visible assistant chunks rendered in the
+    // CURRENT turn. Used to deduplicate the result-event echo: when
+    // claude streams text chunks AND emits a final `result.result`
+    // field carrying the same text, we render the streamed version
+    // and drop the echo. When the counter is 0 at result time
+    // (e.g. claude ran without --output-format stream chunks), we
+    // render result.result so the turn isn't silently empty.
+    // Reset on every new turn open (onSubmit / spawnDispatchedMembers
+    // / spawnQAReview / spawnTLNudge / @consult relay).
+    TurnVisibleChunks HashMap[string, int],
     // Toggles the help overlay. Bound to `?` and to a clickable `?`
     // button in the header (DESIGN.md §8.5). The overlay is a
     // floating modal that auto-renders the key + mouse parity matrix.
@@ -371,6 +381,7 @@ func InitialModelWithTeams(
     MemberBuffers         = EmptyHashMap[string, string](),
     MemberDirectivesFired = EmptyHashMap[string, int](),
     MemberDoneBodies      = EmptyHashMap[string, string](),
+    TurnVisibleChunks     = EmptyHashMap[string, int](),
     HelpVisible           = false,
     ProjectInfoOpen       = false,
     GuidanceOpen          = false,
@@ -513,6 +524,10 @@ sealed type AppMsg {
     // PaletteAction the user selected (its embedded AppMsg payload).
     case KeyTogglePalette
     case KeyPaletteEvent(Ev PaletteEvent)
+    // Mouse click on a palette row at index Idx — sets the palette's
+    // Selected field, then dispatches PalConfirm so a single click
+    // picks-and-fires.
+    case KeyPaletteRowClick(Idx int)
     // View-mode toggles. F2/F3/F4 set the named mode; the same key
     // pressed again returns to ViewDefault. F1 always goes back to
     // ViewDefault for predictability.
@@ -533,6 +548,9 @@ sealed type AppMsg {
     // the legacy banner triggered.
     case KeyRecoveryCycle
     case KeyRecoveryConfirm
+    // Mouse click on a specific recovery button — sets focus AND
+    // confirms in one shot so a single click is enough to pick.
+    case KeyRecoveryClick(Choice RecoveryChoice)
     // Stderr pump for live claude subprocesses. StderrArrived
     // surfaces the line as a warning toast + LastError so the user
     // sees auth / permission / install errors that would otherwise

@@ -18,7 +18,7 @@
 # cases that real claude triggers.
 
 set -uo pipefail
-HEADLESS="$(bazel info bazel-bin)/cmd/gala_team_headless/gala_team_headless.exe"
+HEADLESS="$(bazel info bazel-bin)/cmd/gala_team_headless/gala_team_headless_/gala_team_headless.exe"
 SBX="/tmp/galateam_real_$$"
 mkdir -p "$SBX"
 git -C "$SBX" init --quiet
@@ -39,8 +39,12 @@ run_real() {
     local prompt="$2"
     "$HEADLESS" --team "$SBX/team.yaml" --project "$SBX" --prompt "$prompt" \
         > "$OUT/${name}.json" 2> "$OUT/${name}.err.log" || true
+    # The output is itself JSON (the headless writer escapes inner
+    # quotes as \"). Look for the escaped form so we catch envelope
+    # leak inside the conversation entries' Text field, not just the
+    # outer envelope of the report itself.
     local leaks
-    leaks=$(grep -cE '"stop_reason"|"session_id"|"cache_read_input_tokens"|"parent_tool_use_id"' "$OUT/${name}.json" || true)
+    leaks=$(grep -cE '\\"stop_reason\\"|\\"session_id\\"|\\"cache_read_input_tokens\\"|\\"parent_tool_use_id\\"|"speaker":"[A-Za-z]+","text":"\{' "$OUT/${name}.json" || true)
     case "$leaks" in
         0) echo "  ${name}: clean (no stream-json envelope markers in transcript)";;
         *) echo "  ${name}: !! LEAK ($leaks envelope markers found) — see $OUT/${name}.json";;

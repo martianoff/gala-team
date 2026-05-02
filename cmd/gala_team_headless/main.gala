@@ -1,0 +1,93 @@
+package main
+
+import (
+    "os"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/config"
+    . "github.com/martianoff/gala_team/app/headless"
+    . "github.com/martianoff/gala_team/app/project"
+)
+
+// ============================================================================
+// gala_team_headless — non-interactive driver. Reads --team / --project /
+// --prompt, runs the team-lead session once, prints the result as JSON
+// on stdout. Exit 0 on success (even if the team itself reported an
+// error in conversation), 1 on infrastructure failure (missing yaml,
+// missing repo, claude spawn failed).
+//
+// Used by: scripts/real_claude_audit.sh, the consult runner once that
+// lands, and any CI integration that wants to drive the team without
+// a TTY.
+// ============================================================================
+
+// flagValue scans os.Args for the named flag and returns its value
+// (or `dflt` when missing). Linear scan; the headless surface has
+// only three flags so a flag library is overkill.
+func flagValue(name string, dflt string) string {
+    val args = ArrayOf(os.Args...)
+    val n = args.Size()
+    var i = 1
+    var found = dflt
+    for i < n - 1 {
+        if args.Get(i) == name {
+            found = args.Get(i + 1)
+        }
+        i = i + 1
+    }
+    return found
+}
+
+// die prints msg to stderr + exits 1. Used for missing required args
+// and config-load failures.
+func die(msg string) {
+    val _ = os.Stderr.WriteString(s"gala_team_headless: ${msg}\n")
+    os.Exit(1)
+}
+
+func main() {
+    val teamPath = flagValue("--team", "")
+    val projDir  = flagValue("--project", ".")
+    val prompt   = flagValue("--prompt", "")
+    if teamPath == "" {
+        die("--team is required (path to team.yaml)")
+    }
+    if prompt == "" {
+        die("--prompt is required (the prompt to send to the team lead)")
+    }
+    val info, statErr = os.Stat(teamPath)
+    val _ = info
+    if statErr != nil {
+        die(s"--team: cannot stat '${teamPath}': ${statErr.Error()}")
+    }
+    val raw, readErr = os.ReadFile(teamPath)
+    if readErr != nil {
+        die(s"--team: cannot read '${teamPath}': ${readErr.Error()}")
+    }
+    val cfgTry = LoadFromString(string(raw))
+    if cfgTry.IsFailure() {
+        die(s"--team: parse '${teamPath}': ${cfgTry.GetError().Error()}")
+    }
+    val cfg = cfgTry.Get()
+    val projTry = Resolve(projDir, NoOverrides())
+    if projTry.IsFailure() {
+        die(s"--project: ${projTry.GetError().Error()}")
+    }
+    val proj = projTry.Get()
+    val outcome = RunHeadless(proj, cfg.Team, prompt)
+    outcome match {
+        case Left(err) => {
+            val _ = os.Stderr.WriteString(s"gala_team_headless: ${err}\n")
+            os.Exit(1)
+        }
+        case Right(result) => {
+            EncodeJson(result) match {
+                case Success(j) => {
+                    val _ = os.Stdout.WriteString(j)
+                    val _ = os.Stdout.WriteString("\n")
+                }
+                case Failure(e) => die(s"encode result: ${e.Error()}")
+            }
+        }
+    }
+}

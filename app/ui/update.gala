@@ -437,7 +437,13 @@ func onRecoveryCycle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // onRecoveryConfirm dispatches the focused button's action.
 //   Resume     → dismiss modal, conversation/state already loaded.
 //   Inspect    → enter ReadOnlyMode, dismiss modal.
-//   StartFresh → wipe Conversation + RecoveredMembers, dismiss modal.
+//   StartFresh → wipe Conversation + RecoveredMembers + worktrees,
+//                dismiss modal. Worktrees are wiped per the user's
+//                "blank slate" expectation — the design originally
+//                preserved them with a follow-up `--reap` command;
+//                shipping that as a separate flag was less ergonomic
+//                than just deleting on Start fresh, since the user
+//                already opted into starting over.
 func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if !m.RecoveryModalOpen { return (m, NoCmd[AppMsg]()) }
     return m.RecoveryFocus match {
@@ -450,12 +456,15 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             RecoveryBannerVisible = false,
             ReadOnlyMode = true,
         ), NoCmd[AppMsg]())
-        case StartFreshFocus() => (m.Copy(
-            RecoveryModalOpen = false,
-            RecoveryBannerVisible = false,
-            Conversation = EmptyArray[session.ConversationLine](),
-            RecoveredMembers = EmptyArray[string](),
-        ), NoCmd[AppMsg]())
+        case StartFreshFocus() => {
+            wipeMemberWorktrees(m)
+            return (m.Copy(
+                RecoveryModalOpen = false,
+                RecoveryBannerVisible = false,
+                Conversation = EmptyArray[session.ConversationLine](),
+                RecoveredMembers = EmptyArray[string](),
+            ), NoCmd[AppMsg]())
+        }
     }
 }
 
@@ -601,6 +610,12 @@ func onEraseSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return acc.Put(name, curr + 1)
     })
     val _ = CloseAllSessions(m.Sessions)
+    // Wipe the engineer / QA worktrees on disk so the next dispatch
+    // lands in a clean checkout. Best-effort — IO errors leave the
+    // stale dirs but the data reset proceeds. Worktrees are
+    // recreated on the next `ensureSession` call (ensureWorktree
+    // detects unregistered dirs and refreshes them).
+    wipeMemberWorktrees(m)
     val cleared = clearSessionState(m.Copy(PendingClosures = withPending))
     val saved = persistConversation(cleared, cleared.Conversation)
     return (saved, NoCmd[AppMsg]())
@@ -912,10 +927,37 @@ func onYankConversation(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
 }
 
+// wipeMemberWorktrees removes every member's git worktree so a fresh
+// session starts on a clean filesystem. Two-step process per member:
+//   1. `git worktree remove --force` so git deregisters the worktree
+//      and cleans `.git/worktrees/<member>`.
+//   2. `git branch -D gala_team/<proj>/<member>` so the next dispatch
+//      doesn't pick up the stale branch tip.
+// Best-effort — IO failures are silently ignored. The user opted into
+// "Start fresh = blank slate"; we don't want a partial cleanup to
+// abort the wipe because of one stale lockfile.
+//
+// Skipped entirely when WorkspaceMode is Shared (no per-member
+// worktrees exist to wipe).
+func wipeMemberWorktrees(m AppModel) {
+    val name = policy.WorkspaceModeName(m.Policy.WorkspaceMode)
+    if name != "worktree-per-engineer" { return }
+    m.Team.Members.ForEach((mem) => {
+        val isLead = SameRole(mem.Role, TeamLead())
+        if isLead { return }
+        val _ = RemoveWorktree(m.Project, mem)
+    })
+}
+
 // clearSessionState wipes every per-conversation field back to its
 // initial state. Pure data reset — no IO. Status map gets a fresh
 // StIdle for every team member so the sidebar shows a clean slate
 // instead of stale "working" / "failed" pills.
+//
+// IMPORTANT: this function is intentionally IO-free. The worktree
+// wipe lives in `wipeMemberWorktrees` (called separately) so unit
+// tests can exercise the data-only reset without setting up a
+// scratch git repo.
 func clearSessionState(m AppModel) AppModel {
     val freshStatuses = m.Team.Members.FoldLeft(
         EmptyHashMap[string, Status](),
@@ -2872,6 +2914,12 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return (m.Copy(HelpVisible = false), NoCmd[AppMsg]())
     }
     if m.RecoveryModalOpen {
+        // Esc on the recovery modal = "discard prior session" — same
+        // semantics as the Start fresh button, so wipe worktrees too
+        // for consistency. Without this, Esc would silently leave
+        // stale worktrees on disk while the rest of the prior
+        // session was wiped, creating the same staleness bug.
+        wipeMemberWorktrees(m)
         return (m.Copy(
             RecoveryModalOpen     = false,
             RecoveryBannerVisible = false,

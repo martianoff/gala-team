@@ -1,0 +1,13 @@
+load("@gala//:gala.bzl", "gala_binary")
+
+gala_binary(
+    name = "gala_team_headless",
+    srcs = ["main.gala"],
+    deps = [
+        "//app/config",
+        "//app/headless",
+        "//app/project",
+        "@gala//collection_immutable",
+    ],
+    visibility = ["//visibility:public"],
+)

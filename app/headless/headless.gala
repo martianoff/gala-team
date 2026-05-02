@@ -1,6 +1,7 @@
 package headless
 
 import (
+    "strings"
     "martianoff/gala/json"
     "github.com/martianoff/gala_team/app/onboarding"
     "github.com/martianoff/gala_team/app/session"
@@ -12,6 +13,118 @@ import (
     . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
 )
+
+// ============================================================================
+// Headless-side claude stream-json filter.
+//
+// Mirrors app/ui's filterClaudeStreamJsonFor, but without the AppModel
+// dependency so headless / consult flows can use it without pulling
+// in the entire UI package. Single entry point: ExtractClaudeText(line)
+// returns the user-facing text or "" when the line is pure orchestration
+// noise (system:init, tool_use envelopes, malformed JSON, etc.).
+// ============================================================================
+
+// HeadlessPart is one element of an assistant message's content[].
+struct HeadlessPart(Type string, Text string)
+
+// HeadlessMessage carries the content array we care about. Usage is
+// declared so the codec doesn't trip over the field; we don't read it.
+struct HeadlessMessage(Content Array[HeadlessPart])
+
+// HeadlessAssistantEvent is the outer event for `type=assistant`.
+struct HeadlessAssistantEvent(Type string, Message HeadlessMessage)
+
+// HeadlessResultEvent is `type=result` — IsError + Result are what
+// we need to render the final-turn text in bulk mode (claude
+// configurations that don't stream).
+struct HeadlessResultEvent(
+    Type    string,
+    IsError bool,
+    Result  string,
+)
+
+val headlessAssistantCodec = json.Codec[HeadlessAssistantEvent](json.SnakeCase())
+val headlessResultCodec    = json.Codec[HeadlessResultEvent](json.SnakeCase())
+
+// ExtractClaudeText classifies a single stream-json line. Returns the
+// joined visible text (empty when nothing user-facing). Same two-step
+// guard as the UI side: drop whole-envelope stream-json, truncate
+// at marker when the codec returned envelope tail mixed with prose.
+func ExtractClaudeText(line string) string {
+    val trimmed = strings.TrimSpace(line)
+    if trimmed == "" { return "" }
+    if !strings.HasPrefix(trimmed, "{") {
+        if isHeadlessBareJsonCloser(trimmed) { return "" }
+        return line
+    }
+    val asAssistant = headlessAssistantCodec.Decode(trimmed)
+    asAssistant match {
+        case Success(evt) => {
+            if evt.Type == "assistant" {
+                val texts = evt.Message.Content.Collect({
+                    case HeadlessPart(kind, text) if kind == "text" => text
+                })
+                return sanitizeHeadlessText(texts.MkString("\n"))
+            }
+        }
+        case Failure(_) => {}
+    }
+    val asResult = headlessResultCodec.Decode(trimmed)
+    asResult match {
+        case Success(evt) => {
+            if evt.Type == "result" && !evt.IsError {
+                return sanitizeHeadlessText(evt.Result)
+            }
+        }
+        case Failure(_) => {}
+    }
+    return ""
+}
+
+// sanitizeHeadlessText is the leak guard pair: whole-envelope drop
+// then partial-tail truncate. Same shape as the UI's sanitizer.
+func sanitizeHeadlessText(text string) string {
+    if text == "" { return "" }
+    if isHeadlessStreamJson(text) { return "" }
+    return truncateAtHeadlessMarker(text)
+}
+
+func isHeadlessStreamJson(text string) bool {
+    val t = strings.TrimSpace(text)
+    if !strings.HasPrefix(t, "{\"") { return false }
+    return strings.Contains(t, "\"type\":\"assistant\"") ||
+           strings.Contains(t, "\"type\":\"tool_use\"") ||
+           strings.Contains(t, "\"type\":\"tool_result\"") ||
+           strings.Contains(t, "\"stop_reason\":") ||
+           strings.Contains(t, "\"session_id\":")
+}
+
+func truncateAtHeadlessMarker(text string) string {
+    val markers = ArrayOf(
+        "\"stop_reason\":",
+        "\"stop_sequence\":",
+        "\"session_id\":",
+        "\"usage\":{\"input_tokens",
+        "\"usage\":{\"output_tokens",
+        "\"parent_tool_use_id\":",
+        "}],\"stop_reason\"",
+        "}],\"usage\":",
+    )
+    var truncated = text
+    var i = 0
+    val n = markers.Size()
+    for i < n {
+        val parts = strings.SplitN(truncated, markers.Get(i), 2)
+        if len(parts) > 1 {
+            truncated = parts[0]
+        }
+        i = i + 1
+    }
+    return strings.TrimRight(truncated, " \t\n\"}],")
+}
+
+func isHeadlessBareJsonCloser(s string) bool =
+    s == "}" || s == "]}" || s == "}}" || s == "]"
 
 // ============================================================================
 // app/headless — non-interactive driver. Spawns the team-lead `claude`
@@ -94,7 +207,16 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
                 stopped = true
             }
             case Success(RtChunkArrived(_, line)) => {
-                convo = convo.Append(session.ConversationLine(Speaker = name, Text = line))
+                // Same filter the TUI applies — extract text from
+                // assistant / result events; drop system:init / tool
+                // envelopes / non-prose lines. Without this, the
+                // headless transcript leaks raw stream-json that the
+                // consult runner then tries to parse as @summary
+                // directives, breaking the cross-team flow.
+                val visible = ExtractClaudeText(line)
+                if visible != "" {
+                    convo = convo.Append(session.ConversationLine(Speaker = name, Text = visible))
+                }
             }
             case Success(RtSessionFailed(_, err)) => {
                 val msg = err.Error()

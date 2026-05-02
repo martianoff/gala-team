@@ -1085,15 +1085,24 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 // the same transcript). Failures are stuck in LastError so the user
 // notices but the TUI keeps running.
 func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
-    // Stale-event drop: if closeLiveSession killed an in-flight
-    // process for this name, any ChunkArrived currently queuing up
-    // is from the OLD pipe. Skip it WITHOUT re-arming the pump —
-    // re-arming would schedule a second ReadLine on the NEW pipe
-    // and contend with the read pump that ensureSession already
-    // started. That double-read can leave one of the readers
-    // blocked forever.
-    if m.PendingClosures.Get(name).GetOrElse(0) > 0 {
-        return (m, NoCmd[AppMsg]())
+    // Stale-event drop: closeLiveSession bumps PendingClosures by 1
+    // for each kill so the inevitable EOF (or any in-flight chunk)
+    // from the OLD pipe is treated as drained, not appended to the
+    // fresh session's transcript. We decrement on ANY first event
+    // (chunk OR SessionFailed) and return without re-arming the pump
+    // — the new session's pump was already armed by ensureSession.
+    //
+    // Decrementing on ChunkArrived (not just SessionFailed) is what
+    // keeps subsequent fresh chunks landing once the stale-event
+    // budget is spent. Without this, a relay-spawn followed by a
+    // user resubmit (closeLiveSession again) leaves the counter at
+    // 1 with no real EOF coming to drain it (in test mode, or in
+    // production when the kill was clean enough that no straggler
+    // chunk was ever emitted), and every fresh chunk is silently
+    // dropped — see live_audit2.sh:18_autoscroll_blocked.
+    val pending = m.PendingClosures.Get(name).GetOrElse(0)
+    if pending > 0 {
+        return (m.Copy(PendingClosures = m.PendingClosures.Put(name, pending - 1)), NoCmd[AppMsg]())
     }
     val chunk = filterClaudeStreamJsonFor(name, line)
     // Fold token + cost totals from result events into the model.
@@ -1626,14 +1635,61 @@ func buildQAReviewPrompt(m AppModel) string {
 // Branch resolution is delegated to policy.BranchForMember (which we
 // added so update.gala doesn't have to dot-import the policy package
 // just to pattern-match on WorkspaceMode here).
+// buildDeliverableManifest now does the aggregation legwork for QA:
+// for each engineer it shells out to `git diff --name-only` and inlines
+// the actual file list. Without this, QA has to know git, run the
+// command, parse the output — that's an aggregator's job, not a
+// reviewer's. Per the user's note "QA might not necessarily be trained
+// to handle this", the orchestrator does it on QA's behalf and hands
+// over a flat list of paths to inspect.
 func buildDeliverableManifest(m AppModel, engineers Array[Member]) string {
     val rows = engineers.Map((eng) => {
         val cwd = onboarding.WorkspacePathFor(m.Project, eng, m.Policy.WorkspaceMode)
         val branch = manifestBranchFor(m, eng)
-        val diffHint = s"git -C ${cwd} diff --name-only ${m.Project.DefaultBranch}..HEAD"
-        return s"- **${eng.Name}** (${RoleName(eng.Role)})\n  - cwd:    ${cwd}\n  - branch: ${branch}\n  - files:  run \\`${diffHint}\\` to enumerate changes"
+        val files = listChangedFiles(cwd, m.Project.DefaultBranch)
+        val filesBlock = if (files.IsEmpty())
+            "  - files:  (none — engineer didn't commit any changes)"
+        else
+            s"  - files:\n${files.Map((f) => s"      ${f}").MkString("\n")}"
+        return s"- **${eng.Name}** (${RoleName(eng.Role)})\n  - cwd:    ${cwd}\n  - branch: ${branch}\n${filesBlock}"
     })
-    return s"# Deliverable manifest\n\nEach engineer's workspace + branch + suggested diff command. Read files directly from the listed cwd — that's where their work lives.\n\n${rows.MkString("\n")}"
+    return s"# Deliverable manifest\n\nEach engineer's workspace + branch + the files they actually changed (pre-aggregated by the orchestrator — read directly, no need to run git yourself).\n\n${rows.MkString("\n")}"
+}
+
+// listChangedFiles returns the file list git would print for
+// `git diff --name-only <default>..HEAD` in `cwd`. Empty array on any
+// failure (cwd doesn't exist, default branch missing, no commits). The
+// "fail soft" policy keeps the QA prompt from blowing up because of a
+// stale worktree — the manifest just says "(none)" and QA falls back
+// to the engineer reports. Failure modes ARE legitimate: an engineer
+// might emit @finished without committing if their work is purely
+// analytical (a recommendation, not a code change).
+func listChangedFiles(cwd string, defaultBranch string) Array[string] {
+    if defaultBranch == "" { return EmptyArray[string]() }
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("diff", "--name-only", defaultBranch + "..HEAD").ToGoSlice(),
+        SliceEmpty[string](),
+        cwd,
+    )
+    val procTry = subprocess.Spawn(opts)
+    if procTry.IsFailure() { return EmptyArray[string]() }
+    val proc = procTry.Get()
+    var out = EmptyArray[string]()
+    var stopped = false
+    for !stopped {
+        val ln = proc.ReadLine()
+        if ln.IsFailure() {
+            stopped = true
+        } else {
+            val t = strings.TrimSpace(ln.Get())
+            if t != "" { out = out.Append(t) }
+        }
+    }
+    val codeTry = proc.Wait()
+    if codeTry.IsFailure() { return EmptyArray[string]() }
+    if codeTry.Get() != 0 { return EmptyArray[string]() }
+    return out
 }
 
 // manifestBranchFor picks the branch each engineer's work lives on.

@@ -30,5 +30,8 @@ gala_go_test(
     srcs = ["runtime_glue_test.gala"],
     deps = [
         ":runtime",
+        "//app/project",
+        "//app/team",
+        "@gala//collection_immutable",
     ],
 )

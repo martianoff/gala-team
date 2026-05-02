@@ -4,7 +4,10 @@ import (
     "errors"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/runtime"
+    . "github.com/martianoff/gala_team/app/team"
 )
 
 // runtime_glue's surface is mostly Cmd[Msg] builders that wrap subprocess
@@ -72,4 +75,43 @@ func TestMsg_RtPrFailed_Construction(t T) T {
         case RtPrFailed(e) => Eq(t, e.Error(), "not authenticated")
         case _             => IsTrue(t, false)
     }
+}
+
+// Branch-name slugification: "Default Project" must NOT produce a
+// branch ref containing a space (git rejects that). Regression test
+// for the live bug that caused `git worktree add` to exit 255 on
+// fresh sessions where the user hadn't supplied --project-name.
+func TestWorktreeBranchFor_SlugifiesSpaces(t T) T {
+    val proj = Project(
+        Name = "Default Project",
+        Repo = "/tmp/whatever",
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+    val mem = Member(
+        Name = "Felix", Role = Engineer(),
+        Personality = "", Model = None[string](),
+        Extra = "", Onboarding = EmptyArray[string](),
+    )
+    val branch = WorktreeBranchFor(proj, mem)
+    return Eq(t, branch, "gala_team/default-project/Felix")
+}
+
+func TestLeadBranchFor_SlugifiesSpaces(t T) T {
+    val proj = Project(
+        Name = "Default Project",
+        Repo = "/tmp/whatever",
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+    return Eq(t, LeadBranchFor(proj), "gala_team/default-project/lead")
+}
+
+// Plain ASCII project names pass through untouched (lower-cased).
+func TestLeadBranchFor_AlphaNumPassthrough(t T) T {
+    val proj = Project(
+        Name = "Skunkworks", Repo = "/x",
+        Github = None[string](), DefaultBranch = "main",
+    )
+    return Eq(t, LeadBranchFor(proj), "gala_team/skunkworks/lead")
 }

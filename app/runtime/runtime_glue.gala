@@ -136,7 +136,45 @@ func EnsureWorkspace(proj Project, m Member, mode WorkspaceMode) Try[string] {
 // LeadBranchFor returns the branch name the lead operates on for a
 // given project. Mirrors WorktreeBranchFor's convention so users see
 // a consistent gala_team/<proj>/<who> namespace across all members.
-func LeadBranchFor(proj Project) string = "gala_team/" + proj.Name + "/lead"
+//
+// Project name is slugified (`gitSlug`) because git refuses refs
+// containing spaces / `~` / `^` / etc. The auto-detected default
+// project name is "Default Project" with a literal space, which
+// would produce an invalid branch — slugified to "default-project".
+func LeadBranchFor(proj Project) string = "gala_team/" + gitSlug(proj.Name) + "/lead"
+
+// gitSlug normalises arbitrary project names into something git
+// accepts as a ref component. Per git-check-ref-format(1) refs
+// can't contain space, control chars, `~`, `^`, `:`, `?`, `*`,
+// `[`, `\`, sequences `..` / `@{`, leading or trailing `/` or
+// `.`. We map every invalid char to `-`, lowercase the result,
+// collapse runs, and trim. Empty input falls back to "project".
+func gitSlug(s string) string {
+    if s == "" { return "project" }
+    val lower = strings.ToLower(s)
+    val rs = ToRunes(lower)
+    var out = EmptyArray[string]()
+    var i = 0
+    val n = len(rs)
+    var lastWasDash = false
+    for i < n {
+        val c = rs[i]
+        val safe = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/'
+        if safe {
+            out = out.Append(string(c))
+            lastWasDash = false
+        } else {
+            if !lastWasDash {
+                out = out.Append("-")
+                lastWasDash = true
+            }
+        }
+        i = i + 1
+    }
+    val joined = strings.Trim(out.MkString(""), "-/.")
+    if joined == "" { return "project" }
+    return joined
+}
 
 // ensureLeadBranch creates the lead's branch (if missing) and checks
 // it out. Idempotent: if the user is already on the lead branch, no
@@ -236,7 +274,7 @@ func ResetLeadBranch(proj Project) Try[bool] = Try[bool](() => {
 // surfaces) can name the same branch without re-implementing the
 // formula. Format: `gala_team/<proj.Name>/<member.Name>`.
 func WorktreeBranchFor(proj Project, m Member) string =
-    "gala_team/" + proj.Name + "/" + m.Name
+    "gala_team/" + gitSlug(proj.Name) + "/" + m.Name
 
 // ensureWorktree creates `<proj.Repo>/.gala_team/worktrees/<m.Name>`
 // if it isn't already a registered worktree. If the dir exists but git

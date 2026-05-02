@@ -159,8 +159,40 @@ func workspaceSection(proj Project, member Member, mode WorkspaceMode) string {
 }
 
 // leadBranchOf mirrors runtime.LeadBranchFor without taking a runtime
-// dep — onboarding stays a pure-data package.
-func leadBranchOf(proj Project) string = "gala_team/" + proj.Name + "/lead"
+// dep — onboarding stays a pure-data package. Slug logic mirrors
+// runtime.gitSlug; we duplicate it here rather than import runtime
+// because it'd create a cycle (runtime depends on onboarding via
+// the spawn flow). Keep these two helpers in sync.
+func leadBranchOf(proj Project) string = "gala_team/" + onbGitSlug(proj.Name) + "/lead"
+
+// onbGitSlug must match runtime.gitSlug; see comment above for why
+// we duplicate. If you touch one, touch the other.
+func onbGitSlug(s string) string {
+    if s == "" { return "project" }
+    val lower = strings.ToLower(s)
+    val rs = ToRunes(lower)
+    var out = EmptyArray[string]()
+    var i = 0
+    val n = len(rs)
+    var lastWasDash = false
+    for i < n {
+        val c = rs[i]
+        val safe = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/'
+        if safe {
+            out = out.Append(string(c))
+            lastWasDash = false
+        } else {
+            if !lastWasDash {
+                out = out.Append("-")
+                lastWasDash = true
+            }
+        }
+        i = i + 1
+    }
+    val joined = strings.Trim(out.MkString(""), "-/.")
+    if joined == "" { return "project" }
+    return joined
+}
 
 func sharedWorkspaceSection(proj Project, isTL bool, cwd string) string {
     val header = "# Workspace layout\n\n"
@@ -179,7 +211,7 @@ func sharedWorkspaceSection(proj Project, isTL bool, cwd string) string {
 
 func worktreeWorkspaceSection(proj Project, member Member, isTL bool, cwd string) string {
     val header = "# Workspace layout\n\n"
-    val branchPattern = "gala_team/" + proj.Name + "/<MemberName>"
+    val branchPattern = "gala_team/" + onbGitSlug(proj.Name) + "/<MemberName>"
     if isTL {
         val leadBranch = leadBranchOf(proj)
         return header +
@@ -192,7 +224,7 @@ func worktreeWorkspaceSection(proj Project, member Member, isTL bool, cwd string
             "If you don't see an expected file in your cwd, that does NOT mean the member failed — check the worktree at " +
             s"`${proj.Repo}/.gala_team/worktrees/<MemberName>/` first."
     }
-    val branch = "gala_team/" + proj.Name + "/" + member.Name
+    val branch = "gala_team/" + onbGitSlug(proj.Name) + "/" + member.Name
     return header +
         s"Your cwd is `${cwd}`, an isolated git worktree on branch `${branch}`. The main repo lives at `${proj.Repo}`.\n\n" +
         "Your file edits stay on your branch — nothing is auto-merged, and the TL is in a different cwd. " +

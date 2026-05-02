@@ -11,6 +11,7 @@ gala_binary(
         "//app/config",
         "//app/consult",
         "//app/fsm",
+        "//app/guidance",
         "//app/policy",
         "//app/project",
         "//app/session",

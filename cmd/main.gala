@@ -9,10 +9,12 @@ import (
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/time_utils"
     "github.com/martianoff/gala_team/app/consult"
+    "github.com/martianoff/gala_team/app/guidance"
     "github.com/martianoff/gala_team/app/session"
     "github.com/martianoff/gala_team/app/testdriver"
     . "github.com/martianoff/gala_team/app/cli"
     . "github.com/martianoff/gala_team/app/config"
+    . "github.com/martianoff/gala_team/app/guidance"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
@@ -206,16 +208,21 @@ func resolveProject(dir string) Project = Resolve(dir, NoOverrides()) match {
     }
 }
 
-// loadRegistry reads `<repo>/.gala_team/consults.yaml`, falling back to
-// an empty registry on missing-file or decode failure. Failure to load
-// the consults file is non-fatal — the user can still run the team
-// interactively; only `@consult(<name>)` directives will fail until
-// they fix the YAML.
-func loadRegistry(proj Project) consult.Registry =
-    consult.LoadFromFile(filepath.Join(proj.Repo, ".gala_team", "consults.yaml")) match {
-        case Success(r)   => r
-        case Failure(_)   => consult.EmptyRegistry()
+// loadRegistry reads `<repo>/.gala_team/consults.yaml` first, then
+// merges in entries from the user-scoped fallback at
+// `~/.config/gala_team/registry.yaml`. Project entries win on name
+// collisions (DESIGN.md §6.2.1). Failure to load either file is
+// non-fatal — the user can still run the team interactively; only
+// `@consult(<name>)` directives will fail until they fix the YAML.
+func loadRegistry(proj Project) consult.Registry {
+    val projPath = filepath.Join(proj.Repo, ".gala_team", "consults.yaml")
+    val home, _ = os.UserHomeDir()
+    val userPath = if (home == "") "" else filepath.Join(home, ".config", "gala_team", "registry.yaml")
+    return consult.LoadWithFallback(projPath, userPath) match {
+        case Success(r) => r
+        case Failure(_) => consult.EmptyRegistry()
     }
+}
 
 // ----- demo fallback (only used when --team is omitted) ---------------------
 
@@ -231,6 +238,7 @@ func sampleTeamConfig() TeamConfig {
         Teams    = ArrayOf(tm),
         Workflow = DefaultWorkflow(),
         Policy   = DefaultPolicy(),
+        Guidance = EmptyArray[GuidancePair](),
     )
 }
 
@@ -293,8 +301,14 @@ func main() {
     // <repo>/.gala_team/sessions/latest.json. None on first launch.
     val registry = loadRegistry(proj)
     val archives = loadArchives(proj)
+    // Load guidance docs (DESIGN.md §5.7). Missing docs surface as
+    // warnings on stderr but don't sink startup.
+    val (guidanceBundle, guidanceWarns) = loadGuidance(proj, cfg.Guidance)
+    guidanceWarns.ForEach((w) => {
+        val _ = os.Stderr.WriteString(s"gala_team: guidance warning: ${w}\n")
+    })
     val seeded = primeFromSnapshot(InitialModelWithTeams(proj, cfg.Team, cfg.Workflow, cfg.Policy, registry, cfg.Teams))
-    val initial = seeded.Copy(Archives = archives)
+    val initial = seeded.Copy(Archives = archives, Guidance = guidanceBundle)
     val program = Program[AppModel, AppMsg](
         Initial = initial,
         Update  = (m, msg) => Update(m, msg),
@@ -323,6 +337,16 @@ func main() {
 // archive directory.
 func loadArchives(proj Project) Array[session.SnapshotMeta] =
     session.ListArchives(proj.Repo).GetOrElse(EmptyArray[session.SnapshotMeta]())
+
+// loadGuidance materialises the guidance: block from team.yaml into
+// a Guidance bundle (sha256'd, ready to paste into the TL system
+// prompt). Missing files surface as warnings on the returned array
+// but don't sink startup — DESIGN.md §5.7 calls them "drop the
+// slot" failures.
+func loadGuidance(proj Project, pairs Array[GuidancePair]) Tuple[Guidance, Array[string]] {
+    val tuples = pairs.Map((p) => Tuple[string, string](V1 = p.Slot, V2 = p.Path))
+    return guidance.LoadAll(proj.Repo, tuples)
+}
 
 // primeFromSnapshot replays the persisted conversation log into a
 // fresh AppModel and lifts the prior session's ActiveMembers list

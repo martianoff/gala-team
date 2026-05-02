@@ -4,6 +4,7 @@ import (
     "strings"
     "time"
     "martianoff/gala/time_utils"
+    "github.com/martianoff/gala_team/app/guidance"
     "github.com/martianoff/gala_team/app/policy"
     "github.com/martianoff/gala_team/app/session"
     "github.com/martianoff/gala_team/app/version"
@@ -114,7 +115,11 @@ func View(m AppModel) Widget {
     val withProjectInfo = if (m.ProjectInfoOpen) projectInfoOverlay(m, withMemberOverlay) else withMemberOverlay
     val withGuidance    = if (m.GuidanceOpen)    guidanceOverlay(m, withProjectInfo)     else withProjectInfo
     val withRecovery    = if (m.RecoveryModalOpen) recoveryModalOverlay(m, withGuidance) else withGuidance
-    val withHelp        = if (m.HelpVisible) helpOverlay(m, withRecovery) else withRecovery
+    val withApproval    = m.State match {
+        case Approval(body) => approvalModalOverlay(m, body, withRecovery)
+        case _              => withRecovery
+    }
+    val withHelp        = if (m.HelpVisible) helpOverlay(m, withApproval) else withApproval
     if m.PaletteVisible {
         return paletteOverlay(m.Palette, withHelp)
     }
@@ -214,15 +219,22 @@ func guidanceOverlay(m AppModel, base Widget) Widget {
 }
 
 // guidanceRows formats the loaded guidance docs as one row per slot.
-// Stub for §5.7 — the loader hasn't landed yet, so we always show the
-// configuration hint. Will read m.Guidance.Docs once the type is wired.
+// Walks m.Guidance.Docs and emits "slot → path  (sha bytes)" rows.
+// Empty bundle shows the schema hint so the user knows how to wire
+// guidance up.
 func guidanceRows(m AppModel) Array[string] {
-    return ArrayOf(
-        "  (no guidance docs configured yet)",
-        "",
-        "  Add a `guidance:` block to .gala_team.yaml pointing at",
-        "  TESTING.md / ARCHITECTURE.md / SECURITY.md / CLAUDE.md.",
-        "  See DESIGN.md §5.7 for the full schema.",
+    val docs = m.Guidance.Docs
+    if docs.IsEmpty() {
+        return ArrayOf(
+            "  (no guidance docs configured yet)",
+            "",
+            "  Add a `guidance:` block to team.yaml pointing at",
+            "  TESTING.md / ARCHITECTURE.md / SECURITY.md / CLAUDE.md.",
+            "  See DESIGN.md §5.7 for the full schema.",
+        )
+    }
+    return docs.Map((d) =>
+        s"  • ${d.Slot}  →  ${d.Path}  (sha ${guidance.Sha256Short(d)}, ${len(d.Body)} bytes)"
     )
 }
 
@@ -261,6 +273,62 @@ func recoveryButtonsLine(c RecoveryChoice) string = c match {
     case StartFreshFocus() => "    Resume      Inspect    [ Start fresh ]"
 }
 
+// approvalModalOverlay paints the §6.1 / Frame G approval dialog —
+// a centered modal with the summary preview + Branch / Base / Title
+// metadata + [ Yes ] / [ No ] buttons. Replaces the legacy single-
+// line approval banner, which is still rendered as a dim breadcrumb
+// underneath in case the user dismissed the modal accidentally.
+func approvalModalOverlay(m AppModel, body string, base Widget) Widget {
+    val (cols, rows) = TermSize()
+    val w = if (cols < 70) cols - 4 else MinInt(78, cols - 8)
+    val h = if (rows < 18) rows - 2 else MinInt(20, rows - 4)
+    val title = TextStyled(" Open PR? ", DefaultStyle().WithBold().WithReverse())
+    val firstLine = approvalFirstLine(body)
+    val summaryRow = TextStyled(s"  Summary:  ${firstLine}", DefaultStyle())
+    val branchHint = approvalBranchHint(m)
+    val info = ArrayOf(
+        s"  Branch:   ${branchHint}",
+        s"  Base:     ${m.Project.DefaultBranch}",
+        s"  Repo:     ${m.Project.Name}",
+    )
+    val infoWidgets = info.Map((r) => Fixed(1, TextStyled(r, DefaultStyle().WithDim())))
+    val buttons = TextStyled("           [ Yes — Ctrl+A ]     [ No — Ctrl+R ]",
+        DefaultStyle().WithBold())
+    val footer = TextStyled("  Yes runs pre-merge hooks then `gh pr create`. Esc dismisses the modal (banner stays).",
+        DefaultStyle().WithDim())
+    val body2 = Column(ArrayOf[LayoutChild](
+        Fixed(1, title),
+        Fixed(1, FillCh('-')),
+        Fixed(1, summaryRow),
+        Fixed(1, Empty()),
+    ).AppendAll(infoWidgets).Append(Fixed(1, Empty())).Append(Fixed(1, buttons))
+        .Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
+    return Overlay(base, Modal(w, h, body2))
+}
+
+// approvalFirstLine flattens the summary's first non-empty line and
+// caps it to 70 cols so the modal width stays predictable.
+func approvalFirstLine(body string) string {
+    val flat = strings.Join(strings.Fields(body), " ")
+    val rs = ToRunes(flat)
+    if len(rs) <= 70 { return string(rs) }
+    var prefix = EmptyArray[string]()
+    var i = 0
+    for i < 67 {
+        prefix = prefix.Append(string(rs[i]))
+        i = i + 1
+    }
+    return prefix.MkString("") + "..."
+}
+
+// approvalBranchHint synthesises a sensible branch name from the
+// project's default + a hash of the summary. We don't compute it
+// here — `gh pr create` infers from current HEAD — so the hint just
+// says "<current HEAD>" so the user knows they should have committed.
+func approvalBranchHint(m AppModel) string {
+    return s"current HEAD on ${m.Project.Name}"
+}
+
 // paletteOverlay paints the fuzzy-search action picker centered over
 // `base`. Same visual language as the rest of the modal stack — dim
 // backdrop + bordered panel — so it composes cleanly with whatever
@@ -297,38 +365,89 @@ func gridBody(m AppModel) Widget {
 }
 
 // memberCard renders one member as a bordered card with their role
-// badge, current status, and last-chunk-elapsed timer.
+// badge, current status, last-message preview, cumulative token
+// count, and a per-turn token counter (when there's an active turn).
+// Frame N in DESIGN.md.
 func memberCard(m AppModel, mem Member) Widget {
     val st = m.Statuses.Get(mem.Name).GetOrElse(StIdle())
     val nameStyle = DefaultStyle().WithBold().WithFg(memberColor(m.Team, mem))
     val name = TextStyled(s"  ${mem.Name}", nameStyle)
     val role = TextStyled(s"  ${RoleName(mem.Role)}", DefaultStyle().WithDim())
     val status = TextStyled(s"  ${statusTagFor(st)}", DefaultStyle().WithDim())
-    val tokens = m.TokenUsage.Get(mem.Name).GetOrElse(zeroUsage())
-    val tok = TextStyled(s"  ${formatTokenCount(tokens.InputTokens + tokens.OutputTokens)} tokens",
+    val preview = TextStyled(s"  \"${memberLastMessage(m, mem.Name)}\"",
         DefaultStyle().WithDim())
+    val tokens = m.TokenUsage.Get(mem.Name).GetOrElse(zeroUsage())
+    val turn = m.CurrentTurnUsage.Get(mem.Name).GetOrElse(zeroUsage())
+    val cum = formatTokenCount(tokens.InputTokens + tokens.OutputTokens)
+    val cur = turn.InputTokens + turn.OutputTokens
+    val tokLabel = if (cur > 0)
+        s"  ${cum} total · ${formatTokenCount(cur)} this turn"
+    else
+        s"  ${cum} total"
+    val tok = TextStyled(tokLabel, DefaultStyle().WithDim())
     val body = Column(ArrayOf[LayoutChild](
         Fixed(1, name),
         Fixed(1, role),
-        Fixed(1, Empty()),
         Fixed(1, status),
+        Fixed(1, Empty()),
+        Fixed(1, preview),
+        Fixed(1, Empty()),
         Fixed(1, tok),
         Flex(1, Empty()),
     ))
     return BorderOf(body, RoundedBorder())
 }
 
+// memberLastMessage returns a one-line preview of `name`'s most
+// recent message in the conversation log. Falls back to "—" when the
+// member hasn't spoken yet. Capped to 24 cols so the card width
+// stays predictable across teams of different name lengths.
+func memberLastMessage(m AppModel, name string) string {
+    var found = ""
+    var i = m.Conversation.Size() - 1
+    for i >= 0 {
+        val cl = m.Conversation.Get(i)
+        if cl.Speaker == name {
+            found = cl.Text
+            i = -1
+        } else {
+            i = i - 1
+        }
+    }
+    if found == "" { return "—" }
+    val flat = strings.Join(strings.Fields(found), " ")
+    val rs = ToRunes(flat)
+    if len(rs) <= 24 { return string(rs) }
+    var prefix = EmptyArray[string]()
+    var k = 0
+    for k < 21 {
+        prefix = prefix.Append(string(rs[k]))
+        k = k + 1
+    }
+    return prefix.MkString("") + "…"
+}
+
 // pipelineBody renders the existing PipelineState chart full-screen
-// (Frame O). For now it just hosts the same widget at the larger
-// area; future iterations can switch to a richer org-chart layout.
-func pipelineBody(m AppModel) Widget = BorderOf(
-    Column(ArrayOf[LayoutChild](
-        Fixed(1, TextStyled("  Pipeline view (F4 to toggle)", DefaultStyle().WithBold())),
-        Fixed(1, Empty()),
-        Flex(1, PipelineView(m.Pipeline)),
-    )),
-    RoundedBorder(),
-)
+// (Frame O), with lane labels and a legend so users can read the
+// chain-of-command at a glance even on big teams.
+func pipelineBody(m AppModel) Widget {
+    val laneRow = TextStyled(
+        s"  Lanes:   You → Lead → Engineers → QA → Lead review → Approval",
+        DefaultStyle().WithDim())
+    val legend = TextStyled(
+        "  Legend:  ⠋ working   ✓ done   ✗ failed   ◇ idle   ⟳ consult (dashed border)",
+        DefaultStyle().WithDim())
+    return BorderOf(
+        Column(ArrayOf[LayoutChild](
+            Fixed(1, TextStyled("  Pipeline view (F4 to toggle)", DefaultStyle().WithBold())),
+            Fixed(1, laneRow),
+            Fixed(1, legend),
+            Fixed(1, Empty()),
+            Flex(1, PipelineView(m.Pipeline)),
+        )),
+        RoundedBorder(),
+    )
+}
 
 // activityBody renders the reverse-chronological event log (Frame P).
 // We don't keep a separate event-stream model; the existing

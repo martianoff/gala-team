@@ -99,9 +99,13 @@ func TestView_Header_StateLabel_Idle(t T) T {
     return IsTrue(t, strings.Contains(out, "state: idle"))
 }
 
+// In Approval state the modal floats over the header, but the header
+// row still renders below it. Snapshot rendering layers the modal on
+// top so we look for "Open PR?" — the modal title — instead of the
+// header label, which is now visually hidden behind the modal.
 func TestView_Header_StateLabel_Approval(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(State = Approval(SummaryBody = "ship"))
-    return IsTrue(t, strings.Contains(render(m), "state: approval"))
+    return IsTrue(t, strings.Contains(render(m), "Open PR?"))
 }
 
 // ---------------------------------------------------------------------------
@@ -115,12 +119,16 @@ func TestView_ApprovalBanner_HiddenInIdle(t T) T {
 }
 
 // Banner shows in Approval state with the snippet.
+// The Approval modal (DESIGN.md Frame G) replaces the legacy single-
+// line banner. We assert on the modal title, the summary preview, and
+// the [Yes]/[No] button labels so the test catches accidental regressions
+// to "approval state didn't show anything user-actionable".
 func TestView_ApprovalBanner_VisibleInApproval(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(State = Approval(SummaryBody = "Ship the metrics endpoint"))
     val out = render(m)
-    val t1 = IsTrue(t, strings.Contains(out, "Ready to ship"))
+    val t1 = IsTrue(t, strings.Contains(out, "Open PR?"))
     val t2 = IsTrue(t1, strings.Contains(out, "Ship the metrics endpoint"))
-    return IsTrue(t2, strings.Contains(out, "Ctrl+A approve & open PR"))
+    return IsTrue(t2, strings.Contains(out, "Yes"))
 }
 
 // Newlines in the summary body are flattened so the banner stays on one line.
@@ -426,12 +434,15 @@ func TestView_Header_VeryLongDescription_DoesNotCrash(t T) T {
 // column clipping (sidebar takes 28 cols of 100), so we test the
 // invariant that always holds: the banner header is present and
 // the layout below it (composer / footer hint) still renders.
+// Oversized summary body still fits because the modal flattens / caps
+// the first line at 70 cols (approvalFirstLine). Just assert the modal
+// renders without crashing.
 func TestView_ApprovalBanner_OversizedBody_DoesNotCrash(t T) T {
-    val big = strings.Repeat("ship the metrics endpoint ", 10)  // ~260 chars
+    val big = strings.Repeat("ship the metrics endpoint ", 10)
     val m = mkModel(mkTeam("X", "")).Copy(State = Approval(SummaryBody = big))
     val out = render(m)
-    val t1 = IsTrue(t, strings.Contains(out, "Ready to ship"))
-    return IsTrue(t1, strings.Contains(out, "Ctrl+A approve"))
+    val t1 = IsTrue(t, strings.Contains(out, "Open PR?"))
+    return IsTrue(t1, strings.Contains(out, "Yes"))
 }
 
 // Composer with a string longer than the viewport renders without

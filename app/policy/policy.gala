@@ -76,14 +76,59 @@ func DefaultHeartbeat() Heartbeat = Heartbeat(
     MaxRetries          = 2,
 )
 
+// Guardrails carries the §5.4 "block this PR if X" toggles. Defaults
+// are forgiving — opt-in stricter values via the team.yaml `policy:`
+// block. Used by checkPrReady and the approval pipeline.
+//
+// Guardrails are warnings or hard blocks, not orchestration:
+//   - MaxDiffLines: warn-only when the engineers' total diff exceeds.
+//   - ForbidFiles: glob list of paths NEVER allowed in a PR (e.g.
+//     `.env*`, `secrets/**`). Hard block.
+//   - BlockDirectMainPush: when true, refuse to `git push` directly;
+//     all changes flow through `gh pr create`. The orchestrator
+//     never pushes anyway, so the flag is a self-documenting
+//     invariant for now.
+//   - BranchNamePattern: regex the branch name must satisfy before
+//     `gh pr create` fires. Empty = no check.
+//   - CommitMessageStyle: "conventional" (feat:/fix:/chore: prefix)
+//     or "freeform". "conventional" runs a regex on each commit
+//     message before the PR is opened.
+//   - RequiredQAApprovals: number of distinct QA "@finished" verdicts
+//     that must precede `@summary`. Empty teams or teams with
+//     fewer QA members still default to 0.
+struct Guardrails(
+    MaxDiffLines        int,
+    ForbidFiles         Array[string],
+    BlockDirectMainPush bool,
+    BranchNamePattern   string,
+    CommitMessageStyle  string,
+    RequiredQAApprovals int,
+)
+
+// DefaultGuardrails is the most-forgiving shape. Empty pattern lists,
+// 0 minimum approvals, and a 800-line diff ceiling matching DESIGN.md
+// §5.4. BlockDirectMainPush is true because the orchestrator never
+// pushes — flipping it on default makes the invariant explicit.
+func DefaultGuardrails() Guardrails = Guardrails(
+    MaxDiffLines        = 800,
+    ForbidFiles         = EmptyArray[string](),
+    BlockDirectMainPush = true,
+    BranchNamePattern   = "",
+    CommitMessageStyle  = "freeform",
+    RequiredQAApprovals = 0,
+)
+
 // Policy is the full per-team orchestration ruleset. Parsed from the
 // optional `policy:` block in team.yaml.
 struct Policy(
     WorkspaceMode WorkspaceMode,
     PreMerge      Array[Hook],
     PostMerge     Array[Hook],
+    PreDone       Array[Hook],
+    PreQA         Array[Hook],
     MergeRule     MergeRule,
     Heartbeat     Heartbeat,
+    Guardrails    Guardrails,
 )
 
 // DefaultPolicy returns the most permissive shape — shared workspace,
@@ -93,9 +138,38 @@ func DefaultPolicy() Policy = Policy(
     WorkspaceMode = Shared(),
     PreMerge      = EmptyArray[Hook](),
     PostMerge     = EmptyArray[Hook](),
+    PreDone       = EmptyArray[Hook](),
+    PreQA         = EmptyArray[Hook](),
     MergeRule     = SquashMerge(),
     Heartbeat     = DefaultHeartbeat(),
+    Guardrails    = DefaultGuardrails(),
 )
+
+// PolicyViolation is the union of every reason the orchestrator can
+// block a transition. Surfaced via toasts + the activity log; the
+// approval modal lists every active violation before the user can
+// hit Yes.
+sealed type PolicyViolation {
+    case HookFailed(Name string, Hook string, Stderr string)
+    case BadBranchName(Got string, Pattern string)
+    case BadCommitMessage(Sha string, Reason string)
+    case TooManyDiffLines(Got int, Limit int)
+    case ForbiddenFiles(Files Array[string])
+    case InsufficientQAApprovals(Got int, Required int)
+}
+
+// ViolationName projects a PolicyViolation case to a stable string for
+// activity-log filtering and toast titles. Mirrors the union's case
+// names verbatim so callers can `kind:hook` filter in the activity
+// view without needing to know the sealed-type internals.
+func ViolationName(v PolicyViolation) string = v match {
+    case HookFailed(_, _, _)            => "hook"
+    case BadBranchName(_, _)            => "branch_name"
+    case BadCommitMessage(_, _)         => "commit_message"
+    case TooManyDiffLines(_, _)         => "diff_size"
+    case ForbiddenFiles(_)              => "forbidden_files"
+    case InsufficientQAApprovals(_, _)  => "qa_approvals"
+}
 
 // MergeRuleName pretty-prints a MergeRule for UI / log surfaces.
 func MergeRuleName(r MergeRule) string = r match {

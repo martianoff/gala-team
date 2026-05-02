@@ -90,6 +90,25 @@ func LoadFromFile(path string) Try[Registry] = Try(() => {
 // LoadFromFile but reads from an in-memory string.
 func LoadFromString(yamlStr string) Try[Registry] = Try(() => decodeRegistry(yamlStr))
 
+// LoadWithFallback reads the project-scoped registry first and, when
+// it has no entries OR doesn't exist, tries the user-scoped one at
+// `~/.config/gala_team/registry.yaml`. Returns the merged registry —
+// project entries take precedence on name collisions, matching
+// DESIGN.md §6.2.1 ("when the in-project schema and the cross-repo
+// registry both define <name>, the in-project entry wins").
+//
+// IO failures on the user-scoped file are non-fatal — we don't want
+// a missing config dir to sink a perfectly valid project consult.
+func LoadWithFallback(projectPath string, userConfigPath string) Try[Registry] = Try[Registry](() => {
+    val projReg = LoadFromFile(projectPath).GetOrElse(EmptyRegistry())
+    val userReg = LoadFromFile(userConfigPath).GetOrElse(EmptyRegistry())
+    val projNames = projReg.Entries.Map((e) => e.Name)
+    val merged = projReg.Entries.AppendAll(
+        userReg.Entries.FilterNot((e) => projNames.Contains(e.Name))
+    )
+    return Registry(Entries = merged)
+})
+
 func decodeRegistry(yamlStr string) Registry {
     val wire = registryCodec().Decode(yamlStr).Get()
     val entries = wire.Consults.Map((we) => convertEntry(we))

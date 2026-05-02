@@ -1,0 +1,175 @@
+package guidance
+
+import (
+    "os"
+    "crypto/sha256"
+    "encoding/hex"
+    "path/filepath"
+    "strings"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+)
+
+// ============================================================================
+// app/guidance — DESIGN.md §5.7 "Project guidance — TL's standing orders".
+//
+// Guidance docs are markdown files committed to the repo (TESTING.md,
+// ARCHITECTURE.md, SECURITY.md, CLAUDE.md, plus user-defined custom
+// slots) that the orchestrator materialises into the TL's system
+// prompt. They're how a team encodes "the lead engineer who pushes
+// back when work drifts" — prose rules, not policy programs.
+//
+// Phase 1 surface: load by absolute / repo-relative path, sha256 the
+// body, format as a single block for the TL prompt. Hot-reload, the
+// 50k-token warning, and the per-section breakdown are layered on
+// top of this primitive in later commits.
+// ============================================================================
+
+// GuidanceDoc is one loaded guidance file. Slot is the conceptual
+// label ("testing", "architecture", custom names); Path is what the
+// user wrote in .gala_team.yaml; Body is the file contents at load
+// time; Sha256 is the lowercase hex digest of Body for change
+// detection across hot-reloads.
+struct GuidanceDoc(
+    Slot   string,
+    Path   string,
+    Body   string,
+    Sha256 string,
+)
+
+// Sha256Short returns the first 8 hex chars of d.Sha256 — enough to
+// disambiguate hot-reloads in the activity log without flooding
+// every guidance row with a 64-char digest. Plain function rather
+// than a method because gala doesn't synthesise method dispatch on
+// struct receivers (the Go-style receiver syntax doesn't apply).
+func Sha256Short(d GuidanceDoc) string {
+    if len(d.Sha256) <= 8 { return d.Sha256 }
+    var prefix = EmptyArray[string]()
+    val rs = ToRunes(d.Sha256)
+    var i = 0
+    for i < 8 {
+        prefix = prefix.Append(string(rs[i]))
+        i = i + 1
+    }
+    return prefix.MkString("")
+}
+
+// Guidance is the loaded guidance bundle. Docs is the ordered list
+// of every slot present in the config; rendering walks this in
+// declaration order so Testing comes before Architecture before
+// Security, etc., matching the user's mental model.
+struct Guidance(Docs Array[GuidanceDoc])
+
+// EmptyGuidance is what callers get when no .gala_team.yaml
+// `guidance:` block is present. Resolving any slot returns None.
+func EmptyGuidance() Guidance = Guidance(Docs = EmptyArray[GuidanceDoc]())
+
+// LoadDoc reads a single doc from disk. Relative paths resolve
+// against `repoDir`; absolute paths pass through. Missing files
+// surface as Failure so the caller can decide between strict and
+// forgiving behaviour (interactive UX panics; CI fall-through).
+func LoadDoc(repoDir string, slot string, rawPath string) Try[GuidanceDoc] = Try[GuidanceDoc](() => {
+    val resolved = if (filepath.IsAbs(rawPath)) rawPath else filepath.Join(repoDir, rawPath)
+    val body, err = os.ReadFile(resolved)
+    if err != nil { panic(s"guidance: cannot read '${resolved}': ${err.Error()}") }
+    val text = string(body)
+    val digest = sha256Hex(body)
+    return GuidanceDoc(Slot = slot, Path = rawPath, Body = text, Sha256 = digest)
+})
+
+// sha256Hex returns the hex-encoded sha256 of `b`. Lifted into its own
+// function because gala's transpiler doesn't accept the Go expression
+// `sha256.Sum256(b)[:]` (array-to-slice via [:] inside an expression
+// position trips a SyntaxError). The Go-side body uses the standard
+// stdlib path; gala just wraps it.
+func sha256Hex(b []byte) string {
+    val h = sha256.New()
+    val _, _ = h.Write(b)
+    val sum = h.Sum(nil)
+    return hex.EncodeToString(sum)
+}
+
+// LoadAll loads every (slot, path) pair into a Guidance bundle.
+// Missing-file failures are swallowed to a warning collection (the
+// caller decides whether to surface them) so a single missing doc
+// doesn't sink the whole startup.
+func LoadAll(repoDir string, pairs Array[Tuple[string, string]]) Tuple[Guidance, Array[string]] {
+    var docs = EmptyArray[GuidanceDoc]()
+    var warnings = EmptyArray[string]()
+    var i = 0
+    val n = pairs.Size()
+    for i < n {
+        val pair = pairs.Get(i)
+        LoadDoc(repoDir, pair.V1, pair.V2) match {
+            case Success(d) => { docs = docs.Append(d) }
+            case Failure(err) => { warnings = warnings.Append(s"${pair.V1}: ${err.Error()}") }
+        }
+        i = i + 1
+    }
+    return (Guidance(Docs = docs), warnings)
+}
+
+// PromptBlock formats the guidance bundle as a single Markdown block
+// that the orchestrator prepends to the TL's first system prompt.
+// Empty bundle returns empty string so the prompt assembler can
+// concatenate unconditionally without leaving stray headers.
+func PromptBlock(g Guidance) string {
+    if g.Docs.IsEmpty() { return "" }
+    val header = "## Project guidance — you are the guard on these\n\n" +
+        "Treat each section below as a standing order from the project owners. " +
+        "When you @dispatch work, attach the relevant excerpts to the engineer's brief. " +
+        "When you review the engineer's output (and again when QA reports), check the " +
+        "result against these. Cite the source path (e.g. `per docs/TESTING.md §2`) " +
+        "so the engineer can verify, not just trust.\n\n"
+    val sections = g.Docs.Map((d) => {
+        val title = titleCase(strings.ReplaceAll(d.Slot, "_", " "))
+        return s"### ${title}  (${d.Path}, sha256:${Sha256Short(d)})\n\n${d.Body}"
+    })
+    return header + sections.MkString("\n\n")
+}
+
+// ApproxTokens returns a rough token-count estimate (chars/4). Used
+// by the startup warning when total guidance exceeds the 50k-token
+// budget DESIGN.md §5.7 mentions.
+func ApproxTokens(g Guidance) int {
+    var total = 0
+    var i = 0
+    val n = g.Docs.Size()
+    for i < n {
+        total = total + len(g.Docs.Get(i).Body)
+        i = i + 1
+    }
+    return total / 4
+}
+
+// titleCase upper-cases the first letter of each space-separated word
+// in `s`. Used to render slot names like "perf_guide" → "Perf Guide"
+// in the prompt block.
+func titleCase(s string) string {
+    val parts = strings.Split(s, " ")
+    var out = EmptyArray[string]()
+    var i = 0
+    val n = len(parts)
+    for i < n {
+        out = out.Append(capFirst(parts[i]))
+        i = i + 1
+    }
+    return out.MkString(" ")
+}
+
+// capFirst upper-cases the first rune of a single word, leaving the
+// rest unchanged. Empty word passes through.
+func capFirst(w string) string {
+    if w == "" { return w }
+    val rs = ToRunes(w)
+    val first = strings.ToUpper(string(rs[0]))
+    var rest = EmptyArray[string]()
+    var i = 1
+    val n = len(rs)
+    for i < n {
+        rest = rest.Append(string(rs[i]))
+        i = i + 1
+    }
+    return first + rest.MkString("")
+}

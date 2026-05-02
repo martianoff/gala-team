@@ -15,6 +15,7 @@ gala_library(
         "//app/consult",
         "//app/directive",
         "//app/fsm",
+        "//app/guidance",
         "//app/headless",
         "//app/onboarding",
         "//app/policy",

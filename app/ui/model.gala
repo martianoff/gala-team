@@ -7,6 +7,7 @@ import (
     . "martianoff/gala/time_utils"
     . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/consult"
+    . "github.com/martianoff/gala_team/app/guidance"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
@@ -32,6 +33,7 @@ import (
 // update() returning a new copy.
 struct AppModel(
     Project      Project,
+    Guidance     Guidance,
     Team         Team,
     // Every team declared in team.yaml. The main team is `Team`
     // (selected at startup via --team-key); the rest are
@@ -316,6 +318,7 @@ func InitialModelWithTeams(
     teams Array[Team],
 ) AppModel = AppModel(
     Project      = proj,
+    Guidance     = EmptyGuidance(),
     Team         = team,
     Teams        = teams,
     Workflow     = workflow,

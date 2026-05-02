@@ -33,7 +33,8 @@ func LoadFromString(yamlStr string) Try[TeamConfig] = Try(() => {
     val teams = wire.Teams.Map((wt) => convertTeam(wt))
     val workflow = convertWorkflow(wire.Workflow, yamlStr)
     val pol = convertPolicy(wire.Policy, hasYamlBlock(yamlStr, "policy"))
-    return validate(teams, workflow, pol)
+    val guidance = wire.Guidance.Map((wg) => GuidancePair(Slot = wg.Slot, Path = wg.Path))
+    return validate(teams, workflow, pol, guidance)
 })
 
 // TeamConfig is what LoadFromString returns: the validated team plus
@@ -53,6 +54,15 @@ struct TeamConfig(
     Teams    Array[Team],
     Workflow Workflow,
     Policy   Policy,
+    Guidance Array[GuidancePair],
+)
+
+// GuidancePair is the parsed (slot, path) pair from the guidance:
+// block of team.yaml. The actual file load happens in cmd/main.gala
+// (we don't want config to do IO; this package stays pure-data).
+struct GuidancePair(
+    Slot string,
+    Path string,
 )
 
 // ----------------------------------------------------------------------------
@@ -105,18 +115,36 @@ struct WireHeartbeat(
     MaxRetries          int,
 )
 
+struct WireGuardrails(
+    MaxDiffLines        int,
+    ForbidFiles         Array[string],
+    BlockDirectMainPush bool,
+    BranchNamePattern   string,
+    CommitMessageStyle  string,
+    RequiredQAApprovals int,
+)
+
 struct WirePolicy(
     WorkspaceMode string,
     MergeRule     string,
     PreMerge      Array[WireHook],
     PostMerge     Array[WireHook],
+    PreDone       Array[WireHook],
+    PreQA         Array[WireHook],
     Heartbeat     WireHeartbeat,
+    Guardrails    WireGuardrails,
+)
+
+struct WireGuidance(
+    Slot string,
+    Path string,
 )
 
 struct WireConfig(
     Teams    Array[WireTeam],
     Workflow WireWorkflow,
     Policy   WirePolicy,
+    Guidance Array[WireGuidance],
 )
 
 // configCodec is the typed YAML codec for the full file. Renames keep
@@ -220,14 +248,38 @@ func convertPolicy(wp WirePolicy, blockPresent bool) Policy {
     }
     val mode = if (wp.WorkspaceMode == "") Shared() else workspaceModeFromString(wp.WorkspaceMode)
     val rule = if (wp.MergeRule == "")     SquashMerge() else mergeRuleFromString(wp.MergeRule)
-    val pre  = wp.PreMerge.Map((wh) => convertHook(wh))
-    val post = wp.PostMerge.Map((wh) => convertHook(wh))
+    val pre  = wp.PreMerge.Map((wh WireHook) => convertHook(wh))
+    val post = wp.PostMerge.Map((wh WireHook) => convertHook(wh))
+    val preDone = wp.PreDone.Map((wh WireHook) => convertHook(wh))
+    val preQA   = wp.PreQA.Map((wh WireHook) => convertHook(wh))
+    val guardrails = convertGuardrails(wp.Guardrails)
     return Policy(
         WorkspaceMode = mode,
         MergeRule     = rule,
         PreMerge      = pre,
         PostMerge     = post,
+        PreDone       = preDone,
+        PreQA         = preQA,
         Heartbeat     = hb,
+        Guardrails    = guardrails,
+    )
+}
+
+// convertGuardrails maps the wire shape to the typed Guardrails. Empty
+// values fall through to the defaults so a yaml that only sets a
+// subset still reads cleanly. CommitMessageStyle defaults to
+// "freeform" because the regex check is opt-in (Conventional Commits
+// is opinionated and not every team uses it).
+func convertGuardrails(wg WireGuardrails) Guardrails {
+    val style = if (wg.CommitMessageStyle == "") "freeform" else wg.CommitMessageStyle
+    val maxLines = if (wg.MaxDiffLines == 0) 800 else wg.MaxDiffLines
+    return Guardrails(
+        MaxDiffLines        = maxLines,
+        ForbidFiles         = wg.ForbidFiles,
+        BlockDirectMainPush = wg.BlockDirectMainPush,
+        BranchNamePattern   = wg.BranchNamePattern,
+        CommitMessageStyle  = style,
+        RequiredQAApprovals = wg.RequiredQAApprovals,
     )
 }
 
@@ -281,7 +333,7 @@ func slugify(name string) string {
 // matches workflow.qa_required; member names unique within the team.
 // Cross-team: keys are unique across the whole list. The first team
 // in source order is the "main" team.
-func validate(teams Array[Team], workflow Workflow, pol Policy) TeamConfig {
+func validate(teams Array[Team], workflow Workflow, pol Policy, guidance Array[GuidancePair]) TeamConfig {
     teams.ForEach((tm) => validateOneTeam(tm, workflow))
 
     val _ = teams.FoldLeft(EmptyHashMap[string, bool](), (seen, tm) => {
@@ -296,6 +348,7 @@ func validate(teams Array[Team], workflow Workflow, pol Policy) TeamConfig {
         Teams    = teams,
         Workflow = workflow,
         Policy   = pol,
+        Guidance = guidance,
     )
 }
 

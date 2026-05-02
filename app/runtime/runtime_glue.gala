@@ -321,7 +321,19 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try[string](() => {
         case Failure(err) => panic(s"git worktree add ${wtPath}: ${err.Error()}")
     }
     val code = proc.Wait().Get()
-    if code != 0 { panic(s"git worktree add ${wtPath} exited with code ${code}") }
+    if code != 0 {
+        // Idempotency fallback. `git worktree add` exits non-zero in
+        // a few "already exists" shapes — concurrent callers racing
+        // through the isRegisteredWorktree check, or a stale ghost
+        // entry git refuses to overwrite. Re-query: if the path IS
+        // registered now, treat as success and hand back the path.
+        // Only panic when we genuinely failed to land a worktree at
+        // this location.
+        if isRegisteredWorktree(proj, wtPath) {
+            return wtPath
+        }
+        panic(s"git worktree add ${wtPath} exited with code ${code}")
+    }
     return wtPath
 })
 

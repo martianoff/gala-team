@@ -1357,6 +1357,13 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     val visible = formatDirectiveMarkers(displayText)
     val nextConvo = if (visible == "") {
         withErrSurface.Conversation
+    } else if (isDuplicateOfLastConvoLine(withErrSurface.Conversation, name, visible)) {
+        // claude often emits an intermediate streamed assistant chunk
+        // and a final consolidated assistant message that decode to
+        // the SAME visible text. Without this guard the same paragraph
+        // appears twice in a row in the transcript — see the duplicate
+        // Iris-scoping-questions block users hit during live runs.
+        withErrSurface.Conversation
     } else {
         withErrSurface.Conversation.Append(session.ConversationLine(Speaker = name, Text = visible, At = time_utils.Now().UnixNanos()))
     }
@@ -1803,6 +1810,17 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val seed = (m, EmptyArray[Cmd[AppMsg]]())
     val (after, cmds) = qa.FoldLeft(seed, (acc, mem) => {
         val (curM, curCmds) = acc
+        // Skip QA members the lead already dispatched in their @dispatch
+        // list. Without this guard, ensureSession runs twice for the
+        // same member: once via spawnDispatchedMembers (lead's manual
+        // @dispatch(<QA-name>)) and again via this auto-QA fan-out
+        // when engineers complete. The second `git worktree add -B`
+        // collides with the first one's registered worktree and exits
+        // 128, surfacing as "dispatch <QA>: workspace … exited with
+        // code 128" in the toast.
+        if isCurrentlyDispatched(curM, mem.Name) {
+            return (curM, curCmds)
+        }
         val firstTurn = !curM.SessionIds.Get(mem.Name).IsDefined()
         return ensureSession(curM, mem) match {
             case Left(err)  => (curM.Copy(LastError = Some(s"qa ${mem.Name}: ${err}")), curCmds)
@@ -1820,6 +1838,21 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     })
     return (after, batchAll(cmds))
 }
+
+// isCurrentlyDispatched returns true when `name`'s status reflects an
+// active turn — Working / Slow / Stuck / Recovering / HelpWaiting —
+// meaning some prior dispatch already spawned them. Used by
+// spawnQAReview to skip QA members the lead already kicked off via a
+// manual @dispatch directive in the same turn.
+func isCurrentlyDispatched(m AppModel, name string) bool =
+    m.Statuses.Get(name).GetOrElse(StIdle()) match {
+        case StWorking()      => true
+        case StSlow()         => true
+        case StStuck()        => true
+        case StRecovering(_)  => true
+        case StHelpWaiting(_) => true
+        case _                => false
+    }
 
 // buildQAReviewPrompt assembles the review prompt seen by every QA
 // member. Lists each engineer's @finished body PLUS the concrete
@@ -1948,6 +1981,19 @@ func isStickyStatus(s Status) bool = s match {
 // return-typed helper sidesteps the FIX-013 widening regression for
 // any future cases that need it.
 func mkWorkingStatus() Status = StWorking()
+
+// isDuplicateOfLastConvoLine returns true when `text` (from `speaker`)
+// matches the most recent conversation line by the same speaker. claude
+// emits both a streamed intermediate assistant chunk AND a final
+// consolidated assistant message carrying the same text — both decode
+// through filterClaudeStreamJsonFor and would otherwise show up as two
+// identical paragraphs in a row. Mirror of the headless driver's
+// dedupe in app/headless/headless.gala.
+func isDuplicateOfLastConvoLine(convo Array[session.ConversationLine], speaker string, text string) bool =
+    convo.LastOption() match {
+        case None()     => false
+        case Some(last) => last.Speaker == speaker && last.Text == text
+    }
 
 // ----------------------------------------------------------------------------
 // Claude stream-json filtering — typed Codec[T] decode.

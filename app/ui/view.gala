@@ -1193,7 +1193,7 @@ func conversationViewportHeight(m AppModel) int {
 // breaks scrollback.
 func renderConversationLine(m AppModel, cl session.ConversationLine, width int) Array[ConversationEntry] {
     val proseStyle = speakerStyle(m.Team, cl.Speaker)
-    val codeStyle = DefaultStyle().WithFg(BrightBlack()).WithDim()
+    val codeStyle = DefaultStyle().WithFg(BrightCyan())
     val codeBarStyle = DefaultStyle().WithFg(BrightCyan()).WithDim()
     val prefix = s"  ${cl.Speaker}: "
     // Walk the text line by line, toggling between prose and code on

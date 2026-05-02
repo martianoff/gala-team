@@ -39,7 +39,12 @@ import (
 
 // ConversationLine is a single rendered turn in the Team-Lead conversation
 // log: who spoke (the user, or a member name) and the text they produced.
-struct ConversationLine(Speaker string, Text string)
+//
+// `At` is the unix-nano timestamp when the line was appended. Defaults
+// to 0 so legacy snapshots (pre-timestamp) load cleanly; the activity
+// view treats zero as "no timestamp" and omits the prefix. New entries
+// stamped via `time_utils.Now().UnixNanos()` at append time.
+struct ConversationLine(Speaker string, Text string, At int64 = int64(0))
 
 // Snapshot is the on-disk shape. ProjectName is informational (lets us
 // detect cross-project mismatches later); SavedAt is unix nanos at the

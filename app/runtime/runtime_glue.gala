@@ -302,9 +302,17 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try[string](() => {
         val rmErr = os.RemoveAll(wtPath)
         if rmErr != nil { panic(s"worktree clean ${wtPath}: ${rmErr.Error()}") }
     }
+    // Fork the engineer's worktree from the project's DEFAULT BRANCH
+    // (e.g. main / master), NOT from current HEAD. The lead has its
+    // own branch (gala_team/<proj>/lead) which Start fresh hard-resets
+    // — without an explicit start point, `git worktree add -B` forks
+    // from current HEAD = the reset lead branch, leaving engineers
+    // with an empty checkout that doesn't even have the user's
+    // committed baseline. Forking from the default branch gives them
+    // the same starting state the user has on main.
     val opts = subprocess.NewSpawnOpts(
         "git",
-        ArrayOf("worktree", "add", "-B", branch, wtPath).ToGoSlice(),
+        ArrayOf("worktree", "add", "-B", branch, wtPath, proj.DefaultBranch).ToGoSlice(),
         SliceEmpty[string](),
         proj.Repo,
     )

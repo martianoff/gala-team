@@ -15,7 +15,7 @@ bazel_dep(name = "rules_go", version = "0.59.0")
 # workflow step before invoking bazel.
 local_path_override(
     module_name = "gala",
-    path = "../gala_simple/.claude/worktrees/release-0.41.0",
+    path = "../gala_simple/.claude/worktrees/release-0.43.0",
 )
 
 local_path_override(

@@ -1,6 +1,6 @@
 module github.com/martianoff/gala_team
 
-gala 0.42.0
+gala 0.43.0
 
 require (
 	github.com/martianoff/gala-tui v0.7.3

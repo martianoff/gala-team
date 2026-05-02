@@ -1311,12 +1311,138 @@ func TestKeyToggleHelp_F6_FlipsHelpVisible(t T) T {
     return IsFalse(t1, m2.HelpVisible)
 }
 
-// rate_limit_event JSON lines must be dropped entirely — they are
-// neither assistant nor result, just claude's metadata, and must not
-// appear in the user-facing conversation.
+// Real-claude regression suite: each fixture is a trimmed real
+// stream-json line captured from `claude --output-format stream-json
+// --verbose --print` against gala_simple. The matrix covers EVERY
+// type the claude CLI emits so a future codec / filter regression
+// trips a failing test instead of leaking the envelope into the
+// transcript. Run `claude --print --output-format stream-json
+// --verbose <prompt>` against any project to capture more shapes.
+//
+// Pattern: each test injects ONE captured line via ChunkArrived,
+// asserts on whether anything landed in the conversation, and (for
+// the assistant-text case) asserts the visible text is clean prose
+// without envelope markers.
+
+func TestRealClaude_SystemInit_IsDropped(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"C:\\\\Users\\\\maxmr\",\"session_id\":\"abc\",\"tools\":[\"Task\",\"Bash\",\"Read\"],\"model\":\"claude-opus-4-7\"}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    return Eq(t, m.Conversation.Filter((cl) => cl.Speaker == "Iris").Size(), 0)
+}
+
+func TestRealClaude_AssistantThinking_IsDropped(t T) T {
+    // Claude's `thinking` content blocks have no user-facing text;
+    // they should drop without leaking the thinking signature.
+    val seed = sampleModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-7\",\"id\":\"msg_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"abc==\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    return Eq(t, m.Conversation.Filter((cl) => cl.Speaker == "Iris").Size(), 0)
+}
+
+func TestRealClaude_AssistantToolUse_IsDropped(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-7\",\"id\":\"msg_02\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\",\"description\":\"list files\"},\"caller\":{\"type\":\"direct\"}}],\"usage\":{\"input_tokens\":5,\"output_tokens\":48,\"cache_read_input_tokens\":0}}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    return Eq(t, m.Conversation.Filter((cl) => cl.Speaker == "Iris").Size(), 0)
+}
+
+func TestRealClaude_UserToolResult_IsDropped(t T) T {
+    // claude wraps tool results as `type:"user"` envelopes. These are
+    // claude-internal scaffolding, not user-visible.
+    val seed = sampleModel()
+    val line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01\",\"type\":\"tool_result\",\"content\":\"BUGS.MD\\nBUILD.bazel\\nCLAUDE.MD\"}]},\"parent_tool_use_id\":null,\"session_id\":\"abc\",\"uuid\":\"x\"}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    return Eq(t, m.Conversation.Filter((cl) => cl.Speaker == "Iris").Size(), 0)
+}
+
+func TestRealClaude_AssistantText_RendersCleanProse(t T) T {
+    // The one shape that SHOULD render — assistant text content.
+    val seed = sampleModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-7\",\"id\":\"msg_03\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"The project root is a Bazel-managed Go monorepo.\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":20,\"cache_read_input_tokens\":0}}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
+    val t1 = Eq(t, entries.Size(), 1)
+    val text = entries.Get(0).Text
+    val t2 = IsTrue(t1, strings.Contains(text, "Bazel-managed Go monorepo"))
+    val t3 = IsFalse(t2, strings.Contains(text, "input_tokens"))
+    val t4 = IsFalse(t3, strings.Contains(text, "session_id"))
+    return IsFalse(t4, strings.Contains(text, "stop_reason"))
+}
+
+func TestRealClaude_ResultSuccess_RendersResultBody(t T) T {
+    // result event with non-empty `result` field should render
+    // (covers bulk-mode claude that doesn't stream).
+    val seed = sampleModel()
+    val line = "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"duration_ms\":9638,\"num_turns\":2,\"result\":\"The project root is a Bazel-managed Go monorepo.\",\"session_id\":\"abc\",\"total_cost_usd\":0.12,\"usage\":{\"input_tokens\":5,\"output_tokens\":20,\"cache_read_input_tokens\":0}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
+    val t1 = Eq(t, entries.Size(), 1)
+    val text = entries.Get(0).Text
+    val t2 = IsTrue(t1, strings.Contains(text, "Bazel-managed Go monorepo"))
+    return IsFalse(t2, strings.Contains(text, "session_id"))
+}
+
+func TestRealClaude_AssistantWithMixedContent_RendersOnlyText(t T) T {
+    // content[] mixing thinking + tool_use + text — only text part
+    // should render, no envelope tail.
+    val seed = sampleModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"thinking\",\"thinking\":\"plan\"},{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"pwd\"}},{\"type\":\"text\",\"text\":\"hello world\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
+    val t1 = Eq(t, entries.Size(), 1)
+    val text = entries.Get(0).Text
+    val t2 = IsTrue(t1, strings.Contains(text, "hello world"))
+    val t3 = IsFalse(t2, strings.Contains(text, "tool_use"))
+    return IsFalse(t3, strings.Contains(text, "thinking"))
+}
+
+func TestRealClaude_ControlRequest_IsDropped(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"control_request\",\"request\":{\"action\":\"interrupt\"},\"session_id\":\"abc\"}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    return Eq(t, m.Conversation.Filter((cl) => cl.Speaker == "Iris").Size(), 0)
+}
+
+func TestRealClaude_ToolUseResultStandalone_IsDropped(t T) T {
+    // Some claude versions emit tool_use_result as a standalone
+    // envelope rather than wrapping in user.message.
+    val seed = sampleModel()
+    val line = "{\"type\":\"tool_use_result\",\"tool_use_result\":{\"stdout\":\"file1\\nfile2\",\"is_error\":false},\"parent_tool_use_id\":null,\"session_id\":\"abc\",\"uuid\":\"x\"}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    return Eq(t, m.Conversation.Filter((cl) => cl.Speaker == "Iris").Size(), 0)
+}
+
+// Non-renderable stream-json event types must be dropped entirely.
+// Each test injects a real-world line shape pulled from claude
+// stream-json output. None of these should land in Conversation.
 func TestOnChunk_RateLimitEvent_IsDropped(t T) T {
     val seed = sampleModel()
     val line = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":1777750200},\"uuid\":\"cc0\",\"session_id\":\"abc\"}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
+    return Eq(t, entries.Size(), 0)
+}
+
+func TestOnChunk_ToolUseResult_IsDropped(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"tool_use_result\",\"tool_use_result\":{\"stdout\":\"file1\\nfile2\",\"is_error\":false},\"parent_tool_use_id\":null,\"session_id\":\"abc\",\"uuid\":\"x\"}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
+    return Eq(t, entries.Size(), 0)
+}
+
+func TestOnChunk_UserToolResult_IsDropped(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"x\",\"type\":\"tool_result\",\"content\":\"ls output here\"}]}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
+    return Eq(t, entries.Size(), 0)
+}
+
+func TestOnChunk_SystemEvent_IsDropped(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/x\",\"session_id\":\"abc\",\"tools\":[\"Read\",\"Bash\"]}"
     val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
     val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
     return Eq(t, entries.Size(), 0)

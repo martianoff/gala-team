@@ -57,6 +57,19 @@ func ExtractClaudeText(line string) string {
         if isHeadlessBareJsonCloser(trimmed) { return "" }
         return line
     }
+    // Drop known non-renderable event types by prefix BEFORE codec
+    // attempts. The codec sometimes mis-handles nested objects in
+    // tool_use / tool_use_result / user.tool_result content blocks
+    // and leaks the raw envelope into the transcript. Same fix as
+    // the UI side's filterClaudeStreamJsonFor.
+    if headlessHasTypePrefix(trimmed, "rate_limit_event") ||
+       headlessHasTypePrefix(trimmed, "tool_use_result") ||
+       headlessHasTypePrefix(trimmed, "system") ||
+       headlessHasTypePrefix(trimmed, "user") ||
+       headlessHasTypePrefix(trimmed, "control_request") ||
+       headlessHasTypePrefix(trimmed, "control_response") {
+        return ""
+    }
     val asAssistant = headlessAssistantCodec.Decode(trimmed)
     asAssistant match {
         case Success(evt) => {
@@ -128,6 +141,12 @@ func truncateAtHeadlessMarker(text string) string {
 
 func isHeadlessBareJsonCloser(s string) bool =
     s == "}" || s == "]}" || s == "}}" || s == "]"
+
+// headlessHasTypePrefix mirrors the UI's hasJsonTypePrefix — checks
+// whether `trimmed` opens with `{"type":"<kind>"`. Used as a fast
+// pre-filter for non-renderable stream-json event types.
+func headlessHasTypePrefix(trimmed string, kind string) bool =
+    strings.HasPrefix(trimmed, "{\"type\":\"" + kind + "\"")
 
 // ============================================================================
 // app/headless — non-interactive driver. Spawns the team-lead `claude`

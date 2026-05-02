@@ -1057,7 +1057,7 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val withState = m.Copy(
         State = nextState,
         Composer = "",
-        Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt)),
+        Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt, At = time_utils.Now().UnixNanos())),
         // Sending a new message means the user is acting "now" — re-stick
         // to the bottom of the conversation so they see their own line
         // and the incoming response without having to press End.
@@ -1171,6 +1171,22 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
         case None()  => NoCmd[AppMsg]()
     }
     if trimmed == "" { return (m, pumpCmd) }
+    // "No conversation found with session ID..." means our recorded
+    // SessionId is stale (claude restarted or session expired). The
+    // best we can do is forget the id so the next dispatch starts a
+    // fresh `--session-id` spawn instead of `--resume`-ing into a
+    // dead conversation. Without this clearing, the member is
+    // permanently broken until the user erases the session.
+    if strings.Contains(trimmed, "No conversation found with session ID") {
+        val short = truncateForToast(trimmed)
+        val toast = m.Toasts.PushWarn(s"${name}: stale session id, will respawn fresh", time_utils.Now(), time_utils.Seconds(int64(6)))
+        val m1 = m.Copy(
+            Toasts     = toast,
+            SessionIds = m.SessionIds.Remove(name),
+            LastError  = Some(s"${name}: ${short}"),
+        )
+        return (m1, pumpCmd)
+    }
     val short = truncateForToast(trimmed)
     val toast = m.Toasts.PushWarn(s"${name} (stderr): ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
     val m1 = m.Copy(
@@ -1336,7 +1352,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     val nextConvo = if (visible == "") {
         withErrSurface.Conversation
     } else {
-        withErrSurface.Conversation.Append(session.ConversationLine(Speaker = name, Text = visible))
+        withErrSurface.Conversation.Append(session.ConversationLine(Speaker = name, Text = visible, At = time_utils.Now().UnixNanos()))
     }
     val withLastSeen = withErrSurface.Copy(
         LastChunkAt = withErrSurface.LastChunkAt.Put(name, time_utils.Now()),
@@ -2033,6 +2049,15 @@ struct ClaudeChunk(
     CostUsd   float64,
 )
 
+// hasJsonTypePrefix returns true when `trimmed` starts with the
+// stream-json type discriminator `{"type":"<kind>"`. Cheap string
+// match used as the pre-filter for non-renderable event types
+// (rate_limit_event, tool_use_result, system, user, control_*) —
+// dropping them by prefix avoids relying on the codec which
+// sometimes mis-handles their nested-object shapes.
+func hasJsonTypePrefix(trimmed string, kind string) bool =
+    strings.HasPrefix(trimmed, "{\"type\":\"" + kind + "\"")
+
 // emptyChunk is the "drop this line" marker.
 func emptyChunk() ClaudeChunk = ClaudeChunk(
     Visible   = "",
@@ -2087,6 +2112,23 @@ func filterClaudeStreamJsonFor(member string, line string) ClaudeChunk {
             FinalTurn = None[ClaudeUsage](),
             CostUsd   = 0.0,
         )
+    }
+    // Type-discriminator pre-filter: drop known non-renderable event
+    // types BEFORE attempting codec decode. The codec sometimes
+    // mis-handles unknown nested objects (tool_use's `input`/`caller`,
+    // user.message.content's tool_result blocks) and produces
+    // garbage; the type prefix is unambiguous and cheap to match.
+    // Anything caught here would have rendered as raw JSON in the
+    // transcript otherwise — see user reports of rate_limit_event /
+    // tool_use_result / system / user envelopes leaking through.
+    if hasJsonTypePrefix(trimmed, "rate_limit_event") ||
+       hasJsonTypePrefix(trimmed, "tool_use_result") ||
+       hasJsonTypePrefix(trimmed, "system") ||
+       hasJsonTypePrefix(trimmed, "user") ||
+       hasJsonTypePrefix(trimmed, "control_request") ||
+       hasJsonTypePrefix(trimmed, "control_response") {
+        TraceClaudeLine(member, line, "", "", true, "non-renderable event type")
+        return emptyChunk()
     }
     val asAssistant = claudeAssistantCodec.Decode(trimmed)
     asAssistant match {
@@ -2222,9 +2264,15 @@ func looksLikeStreamJson(text string) bool {
     if !strings.HasPrefix(t, "{\"") { return false }
     return strings.Contains(t, "\"type\":\"assistant\"") ||
            strings.Contains(t, "\"type\":\"tool_use\"") ||
+           strings.Contains(t, "\"type\":\"tool_use_result\"") ||
            strings.Contains(t, "\"type\":\"tool_result\"") ||
+           strings.Contains(t, "\"type\":\"rate_limit_event\"") ||
+           strings.Contains(t, "\"type\":\"system\"") ||
            strings.Contains(t, "\"stop_reason\":") ||
-           strings.Contains(t, "\"session_id\":")
+           strings.Contains(t, "\"session_id\":") ||
+           strings.Contains(t, "\"rate_limit_info\":") ||
+           strings.Contains(t, "\"tool_use_result\":") ||
+           strings.Contains(t, "\"parent_tool_use_id\":")
 }
 
 // truncateAtEnvelopeMarker is the partial-leak guard: when the text

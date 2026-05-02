@@ -79,10 +79,32 @@ func TestKeyToAppMsg_Space_KeyChar(t T) T {
 }
 
 // F1-F5 set view modes (Default / Focus / Grid / Pipeline / Activity);
-// F-keys outside that range fall through to NoOp so the runtime keeps
-// dispatching events without flooding the model.
+// F6 toggles help; F-keys outside that range fall through to NoOp.
+//
+// Regression: F5/F6 silently dropped through 2026-04 because the
+// FKey match arm fell into a default `NoOp` branch after the view-
+// mode wiring landed only for F1-F4. The catch-all unit test below
+// covers every F1..F8 to lock the contract.
+func TestKeyToAppMsg_F1_Default(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 1))), "KeySetViewMode")
+
+func TestKeyToAppMsg_F2_Focus(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 2))), "KeySetViewMode")
+
+func TestKeyToAppMsg_F3_Grid(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 3))), "KeySetViewMode")
+
+func TestKeyToAppMsg_F4_Pipeline(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 4))), "KeySetViewMode")
+
 func TestKeyToAppMsg_F5_Activity(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 5))), "KeySetViewMode")
+
+func TestKeyToAppMsg_F6_Help(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 6))), "KeyToggleHelp")
+
+func TestKeyToAppMsg_F7_NoOp(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 7))), "NoOp")
 
 func TestKeyToAppMsg_F8_NoOp(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 8))), "NoOp")
@@ -198,6 +220,14 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case KeyTogglePalette()          => "KeyTogglePalette"
     case KeyPaletteEvent(_)          => "KeyPaletteEvent"
     case KeySetViewMode(_)           => "KeySetViewMode"
+    case KeyPaletteRowClick(_)       => "KeyPaletteRowClick"
+    case KeyToggleHelp()             => "KeyToggleHelp"
+    case KeyToggleProjectInfo()      => "KeyToggleProjectInfo"
+    case KeyToggleGuidance()         => "KeyToggleGuidance"
+    case KeyToggleCompactSidebar()   => "KeyToggleCompactSidebar"
+    case KeyRecoveryCycle()          => "KeyRecoveryCycle"
+    case KeyRecoveryConfirm()        => "KeyRecoveryConfirm"
+    case KeyRecoveryClick(_)         => "KeyRecoveryClick"
     case StderrArrived(_, _)         => "StderrArrived"
     case StderrEnded(_)              => "StderrEnded"
     case TickMsg()                   => "TickMsg"

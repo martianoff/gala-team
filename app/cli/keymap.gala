@@ -97,6 +97,11 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+p"))           { return KeyTogglePalette() }
     if (KeyMatchesAny(ev, "ctrl+,"))           { return KeyToggleCompactSidebar() }
     if (KeyMatchesAny(ev, "ctrl+."))           { return KeyToggleCompactSidebar() }
+    // Fallback bindings for terminals that don't decode F-key escape
+    // sequences (Windows Terminal vs xterm send different codes; the
+    // gala-tui input parser sometimes drops F5/F6). Ctrl+/ ↔ help is
+    // an editor convention; Ctrl+5 ↔ activity is mnemonic with F5.
+    if (KeyMatchesAny(ev, "ctrl+/"))           { return KeyToggleHelp() }
     // Help overlay: bound to F6 (free function key) AND palette entry.
     // Bare `?` would compete with composer typing; F-keys are unambiguous.
     return ev.Key match {

@@ -13,4 +13,9 @@ MODULE.bazel.lock
 # Bazel-managed local workspace cache for transpiled GALA stdlib;
 # regenerated on every `bazel build`, never edited by hand.
 .gala/
-.claude/
+# Local Claude Code agent config — opaque to the project. Project-
+# scoped slash-command skills live under .claude/skills and ARE
+# tracked (carve-out below).
+.claude/*
+!.claude/skills/
+!.claude/skills/**

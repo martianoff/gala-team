@@ -1280,6 +1280,37 @@ func TestInitialModel_TeamsListContainsMainTeam(t T) T {
     return Eq(t1, m.Teams.Get(0).Key, "main")
 }
 
+// F5 (KeySetViewMode(ViewActivity)) and F6 (KeyToggleHelp) plumbed
+// through dispatchMsg. Regression: live mode reported neither
+// responding because the keymap wired them but the dispatcher had no
+// case before this commit landed (and after).
+func TestKeySetViewMode_F5_TogglesViewActivity(t T) T {
+    val seed = sampleModel()
+    val (m, _) = Update(seed, KeySetViewMode(Mode = ViewActivity()))
+    return m.ViewMode match {
+        case ViewActivity() => IsTrue(t, true)
+        case _              => IsTrue(t, false)
+    }
+}
+
+func TestKeySetViewMode_F5_Twice_TogglesBackToDefault(t T) T {
+    val seed = sampleModel()
+    val (m1, _) = Update(seed, KeySetViewMode(Mode = ViewActivity()))
+    val (m2, _) = Update(m1, KeySetViewMode(Mode = ViewActivity()))
+    return m2.ViewMode match {
+        case ViewDefault() => IsTrue(t, true)
+        case _             => IsTrue(t, false)
+    }
+}
+
+func TestKeyToggleHelp_F6_FlipsHelpVisible(t T) T {
+    val seed = sampleModel()
+    val (m1, _) = Update(seed, KeyToggleHelp())
+    val t1 = IsTrue(t, m1.HelpVisible)
+    val (m2, _) = Update(m1, KeyToggleHelp())
+    return IsFalse(t1, m2.HelpVisible)
+}
+
 // dispatchOneConsult must filter the main team out of the in-project
 // team list before passing to DispatchConsult — otherwise a lead's
 // `@consult(<own-key>)` would loop back to itself instead of

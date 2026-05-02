@@ -458,12 +458,18 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         ), NoCmd[AppMsg]())
         case StartFreshFocus() => {
             wipeMemberWorktrees(m)
-            return (m.Copy(
+            val empty = EmptyArray[session.ConversationLine]()
+            val cleared = m.Copy(
                 RecoveryModalOpen = false,
                 RecoveryBannerVisible = false,
-                Conversation = EmptyArray[session.ConversationLine](),
+                Conversation = empty,
                 RecoveredMembers = EmptyArray[string](),
-            ), NoCmd[AppMsg]())
+            )
+            // Persist the cleared conversation so the next launch
+            // doesn't reload prior data via primeFromSnapshot.
+            // Without this, "Start fresh → quit → reopen" silently
+            // round-trips the old transcript back into view.
+            return (persistConversation(cleared, empty), NoCmd[AppMsg]())
         }
     }
 }
@@ -2920,14 +2926,20 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // stale worktrees on disk while the rest of the prior
         // session was wiped, creating the same staleness bug.
         wipeMemberWorktrees(m)
-        return (m.Copy(
+        val empty = EmptyArray[session.ConversationLine]()
+        val cleared = m.Copy(
             RecoveryModalOpen     = false,
             RecoveryBannerVisible = false,
             RecoveredMembers      = EmptyArray[string](),
-            Conversation          = EmptyArray[session.ConversationLine](),
+            Conversation          = empty,
             ConversationOffset    = 0,
             ConversationSticky    = true,
-        ), NoCmd[AppMsg]())
+        )
+        // Persist the cleared conversation so the NEXT launch doesn't
+        // load stale data from .gala_team/sessions/latest.json.
+        // Without this, "discard → quit → reopen" round-trips the
+        // prior conversation back in via primeFromSnapshot.
+        return (persistConversation(cleared, empty), NoCmd[AppMsg]())
     }
     if m.GuidanceOpen {
         return (m.Copy(GuidanceOpen = false), NoCmd[AppMsg]())

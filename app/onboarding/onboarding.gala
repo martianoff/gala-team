@@ -153,18 +153,23 @@ func workspaceSection(proj Project, member Member, mode WorkspaceMode) string {
     val isTL = SameRole(member.Role, TeamLead())
     val myCwd = WorkspacePathFor(proj, member, mode)
     return mode match {
-        case Shared()              => sharedWorkspaceSection(isTL, myCwd)
+        case Shared()              => sharedWorkspaceSection(proj, isTL, myCwd)
         case WorktreePerEngineer() => worktreeWorkspaceSection(proj, member, isTL, myCwd)
     }
 }
 
-func sharedWorkspaceSection(isTL bool, cwd string) string {
+// leadBranchOf mirrors runtime.LeadBranchFor without taking a runtime
+// dep — onboarding stays a pure-data package.
+func leadBranchOf(proj Project) string = "gala_team/" + proj.Name + "/lead"
+
+func sharedWorkspaceSection(proj Project, isTL bool, cwd string) string {
     val header = "# Workspace layout\n\n"
     if isTL {
+        val leadBranch = leadBranchOf(proj)
         return header +
-            s"All members share the project root at `${cwd}` as their cwd. " +
-            "Concurrent file edits from different members can collide; coordinate via @dispatch bodies to keep work non-overlapping.\n\n" +
-            "When a member emits `@finished`, their files are already on disk in this same cwd — read them directly to verify."
+            s"Your cwd is the project root at `${cwd}`. **You are checked out on branch `${leadBranch}`** — your own dedicated branch forked from `${proj.DefaultBranch}`. " +
+            "Commit your work to this branch; the user opens a PR from it via Ctrl+A. Each fresh session hard-resets this branch back to `${proj.DefaultBranch}`, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
+            "All members share the project root cwd in shared mode. Concurrent file edits can collide; coordinate via @dispatch bodies to keep work non-overlapping. When a member emits `@finished`, their files are already on disk in this same cwd — read them directly to verify."
     }
     return header +
         s"Your cwd is `${cwd}`, shared with the rest of the team. " +
@@ -176,9 +181,11 @@ func worktreeWorkspaceSection(proj Project, member Member, isTL bool, cwd string
     val header = "# Workspace layout\n\n"
     val branchPattern = "gala_team/" + proj.Name + "/<MemberName>"
     if isTL {
+        val leadBranch = leadBranchOf(proj)
         return header +
-            s"Your cwd is the project root at `${proj.Repo}`.\n\n" +
-            "**Engineers and QAs each run in an isolated git worktree** at " +
+            s"Your cwd is the project root at `${proj.Repo}`. **You are checked out on branch `${leadBranch}`** — your own dedicated branch forked from `${proj.DefaultBranch}`. " +
+            "Commit your work to this branch; the user opens a PR from it via Ctrl+A. Each fresh session hard-resets this branch back to `${proj.DefaultBranch}`, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
+            s"**Engineers and QAs each run in an isolated git worktree** at " +
             s"`${proj.Repo}/.gala_team/worktrees/<MemberName>` on branch `${branchPattern}`. " +
             "Their file edits live ONLY on that branch until merged — they are NOT visible from your cwd.\n\n" +
             "When inspecting a member's deliverables (e.g. after they emit `@finished`), read files from their worktree path, not your own. " +

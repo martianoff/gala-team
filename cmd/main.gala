@@ -360,17 +360,26 @@ func loadGuidance(proj Project, pairs Array[GuidancePair]) Tuple[Guidance, Array
 // .gala_team/sessions/ directory between repos.
 // primeFromSnapshot loads the prior session's conversation log and
 // kicks the §5.6 recovery modal — the user picks Resume / Inspect /
-// Start fresh before any orchestration spawns. ResumeChoice = Some
-// is the modal-active sentinel; the legacy banner stays present too
-// so users with old muscle-memory still get the inline indicator,
-// but the modal owns the actual decision.
+// Start fresh before any orchestration spawns.
+//
+// Empty-snapshot short-circuit: if the loaded Conversation has zero
+// entries AND no recovered members, there's nothing to resume —
+// previous Start fresh / Esc-on-recovery flushed the snapshot to
+// empty. Skip the modal entirely so the user lands on a fresh
+// composer instead of being asked to "resume" a blank session
+// (which is what they explicitly asked for last time).
 func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match {
     case None()       => m
-    case Some(snap)   => m.Copy(
-        Conversation          = snap.Conversation,
-        RecoveredMembers      = snap.ActiveMembers,
-        RecoveryBannerVisible = true,
-        RecoveryModalOpen     = true,
-        RecoveryFocus         = ResumeFocus(),
-    )
+    case Some(snap)   => {
+        if snap.Conversation.IsEmpty() && snap.ActiveMembers.IsEmpty() {
+            return m
+        }
+        return m.Copy(
+            Conversation          = snap.Conversation,
+            RecoveredMembers      = snap.ActiveMembers,
+            RecoveryBannerVisible = true,
+            RecoveryModalOpen     = true,
+            RecoveryFocus         = ResumeFocus(),
+        )
+    }
 }

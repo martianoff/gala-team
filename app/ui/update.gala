@@ -780,25 +780,32 @@ func paletteSelectedMsg(p Palette[AppMsg]) Option[AppMsg] {
 // power-user surface for one-off operations, not a redundant menu of
 // hotkeys the footer already advertises).
 func paletteActions(m AppModel) Array[PaletteAction[AppMsg]] {
+    // Help / Activity are listed FIRST so they're visible without
+    // scrolling — the user has already reported they couldn't find
+    // them in the default visible window. F5/F6 escape sequences
+    // aren't parsed by gala-tui's CSI handler today (only F1-F4 via
+    // the SS3 path), so the palette is the canonical reachable
+    // surface for both views until the upstream parser learns
+    // ESC[15~ / ESC[17~.
     val base = ArrayOf(
-        PaletteAction[AppMsg](Label = "Erase session", Category = "Session", Msg = KeyEraseSession()),
-        PaletteAction[AppMsg](Label = "Yank conversation to clipboard", Category = "Session", Msg = KeyYankConversation()),
-        PaletteAction[AppMsg](Label = "History browser", Category = "View", Msg = KeyToggleHistory()),
+        PaletteAction[AppMsg](Label = "Help · keys + mouse  (Ctrl+/)", Category = "Help", Msg = KeyToggleHelp()),
+        PaletteAction[AppMsg](Label = "View: Activity log  (Ctrl+5 if F5 doesn't fire)", Category = "View", Msg = KeySetViewMode(Mode = ViewActivity())),
         PaletteAction[AppMsg](Label = "View: Default split (F1)", Category = "View", Msg = KeySetViewMode(Mode = ViewDefault())),
         PaletteAction[AppMsg](Label = "View: Focus mode (F2)", Category = "View", Msg = KeySetViewMode(Mode = ViewFocus())),
         PaletteAction[AppMsg](Label = "View: Member grid (F3)", Category = "View", Msg = KeySetViewMode(Mode = ViewGrid())),
         PaletteAction[AppMsg](Label = "View: Pipeline org chart (F4)", Category = "View", Msg = KeySetViewMode(Mode = ViewPipeline())),
-        PaletteAction[AppMsg](Label = "View: Activity log (F5)", Category = "View", Msg = KeySetViewMode(Mode = ViewActivity())),
-        PaletteAction[AppMsg](Label = "Toggle composer / sidebar focus", Category = "Navigate", Msg = KeyToggleFocus()),
-        PaletteAction[AppMsg](Label = "Toggle consult viewer", Category = "Navigate", Msg = KeyToggleConsultViewer()),
-        PaletteAction[AppMsg](Label = "Approve summary (open PR)", Category = "Approval", Msg = KeyApprove()),
-        PaletteAction[AppMsg](Label = "Reject summary", Category = "Approval", Msg = KeyReject()),
-        PaletteAction[AppMsg](Label = "Merge open PR", Category = "Approval", Msg = KeyMerge()),
-        PaletteAction[AppMsg](Label = "Help (key + mouse parity)", Category = "Help", Msg = KeyToggleHelp()),
+        PaletteAction[AppMsg](Label = "Compact / wide left panel  (Ctrl+,)", Category = "View", Msg = KeyToggleCompactSidebar()),
         PaletteAction[AppMsg](Label = "Project info", Category = "Project", Msg = KeyToggleProjectInfo()),
         PaletteAction[AppMsg](Label = "Guidance docs", Category = "Project", Msg = KeyToggleGuidance()),
-        PaletteAction[AppMsg](Label = "Compact / wide left panel", Category = "View", Msg = KeyToggleCompactSidebar()),
-        PaletteAction[AppMsg](Label = "Quit", Category = "App", Msg = QuitMsg()),
+        PaletteAction[AppMsg](Label = "Approve summary (Ctrl+A)", Category = "Approval", Msg = KeyApprove()),
+        PaletteAction[AppMsg](Label = "Reject summary (Ctrl+R)", Category = "Approval", Msg = KeyReject()),
+        PaletteAction[AppMsg](Label = "Merge open PR (Ctrl+M)", Category = "Approval", Msg = KeyMerge()),
+        PaletteAction[AppMsg](Label = "Toggle composer / sidebar focus (Tab)", Category = "Navigate", Msg = KeyToggleFocus()),
+        PaletteAction[AppMsg](Label = "Toggle consult viewer (Ctrl+T)", Category = "Navigate", Msg = KeyToggleConsultViewer()),
+        PaletteAction[AppMsg](Label = "History browser (Ctrl+H)", Category = "View", Msg = KeyToggleHistory()),
+        PaletteAction[AppMsg](Label = "Yank conversation to clipboard (Ctrl+Y)", Category = "Session", Msg = KeyYankConversation()),
+        PaletteAction[AppMsg](Label = "Erase session (Ctrl+N)", Category = "Session", Msg = KeyEraseSession()),
+        PaletteAction[AppMsg](Label = "Quit (Ctrl+Q)", Category = "App", Msg = QuitMsg()),
     )
     val members = m.Team.Members.Map((mem) =>
         PaletteAction[AppMsg](
@@ -933,19 +940,29 @@ func onYankConversation(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
 }
 
-// wipeMemberWorktrees removes every member's git worktree so a fresh
-// session starts on a clean filesystem. Two-step process per member:
-//   1. `git worktree remove --force` so git deregisters the worktree
-//      and cleans `.git/worktrees/<member>`.
-//   2. `git branch -D gala_team/<proj>/<member>` so the next dispatch
-//      doesn't pick up the stale branch tip.
+// wipeMemberWorktrees removes every member's git worktree AND hard-
+// resets the lead's branch so a fresh session starts on a clean
+// filesystem AND a clean main-tracked HEAD. Two halves:
+//
+//   1. Lead-branch reset (always runs, regardless of workspace mode):
+//      hard-reset `gala_team/<proj>/lead` back to the project's
+//      default branch. Without this, leftover commits from prior
+//      Lead turns confuse the next session — the lead inspects the
+//      file tree, sees its OWN previous edits, and re-plans against
+//      that stale starting point.
+//
+//   2. Engineer/QA worktree wipe (worktree-per-engineer only):
+//      `git worktree remove --force` per member. Without this,
+//      `?? crypto/` and other untracked files from the prior
+//      engineer leak into the new engineer's view.
+//
 // Best-effort — IO failures are silently ignored. The user opted into
 // "Start fresh = blank slate"; we don't want a partial cleanup to
 // abort the wipe because of one stale lockfile.
-//
-// Skipped entirely when WorkspaceMode is Shared (no per-member
-// worktrees exist to wipe).
 func wipeMemberWorktrees(m AppModel) {
+    // (1) Lead-branch reset. Always runs.
+    val _ = ResetLeadBranch(m.Project)
+    // (2) Engineer/QA worktree wipe. Worktree mode only.
     val name = policy.WorkspaceModeName(m.Policy.WorkspaceMode)
     if name != "worktree-per-engineer" { return }
     m.Team.Members.ForEach((mem) => {

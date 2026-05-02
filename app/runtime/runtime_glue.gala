@@ -112,13 +112,124 @@ func SpawnSession(
 // dirs) from clobbering each other's branches if the same repo is
 // reused. The worktree is created on first call; subsequent calls
 // for the same member just return the existing path.
-func EnsureWorkspace(proj Project, m Member, mode WorkspaceMode) Try[string] = mode match {
-    case Shared()              => Success[string](proj.Repo)
-    case WorktreePerEngineer() => m.Role match {
-        case TeamLead() => Success[string](proj.Repo)
-        case _          => ensureWorktree(proj, m)
+func EnsureWorkspace(proj Project, m Member, mode WorkspaceMode) Try[string] {
+    val isLead = SameRole(m.Role, TeamLead())
+    if isLead {
+        // Lead always runs on its own branch forked from the project's
+        // default. Without this, the lead inspects whatever branch the
+        // user happens to be on and gets confused by leftover state
+        // from the previous session. ensureLeadBranch creates / checks
+        // out `gala_team/<proj>/lead` so each session starts clean
+        // (Start fresh / Ctrl+N hard-reset that branch back to the
+        // default — see `ResetLeadBranch`).
+        val _ = ensureLeadBranch(proj)
+    }
+    return mode match {
+        case Shared()              => Success[string](proj.Repo)
+        case WorktreePerEngineer() => m.Role match {
+            case TeamLead() => Success[string](proj.Repo)
+            case _          => ensureWorktree(proj, m)
+        }
     }
 }
+
+// LeadBranchFor returns the branch name the lead operates on for a
+// given project. Mirrors WorktreeBranchFor's convention so users see
+// a consistent gala_team/<proj>/<who> namespace across all members.
+func LeadBranchFor(proj Project) string = "gala_team/" + proj.Name + "/lead"
+
+// ensureLeadBranch creates the lead's branch (if missing) and checks
+// it out. Idempotent: if the user is already on the lead branch, no
+// IO happens. If the branch doesn't exist, fork it from the project's
+// default branch. Best-effort — IO failures don't sink the orchestration
+// (the lead just stays on whatever branch they happen to be on).
+func ensureLeadBranch(proj Project) Try[bool] = Try[bool](() => {
+    val branch = LeadBranchFor(proj)
+    val current = currentBranch(proj.Repo)
+    if current == branch { return true }
+    // Branch exists locally? Just check it out.
+    val refOpts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("rev-parse", "--verify", "--quiet", "refs/heads/" + branch).ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val refProc = subprocess.Spawn(refOpts).Get()
+    val refCode = refProc.Wait().Get()
+    val branchExists = refCode == 0
+    val args = if (branchExists)
+        ArrayOf("checkout", branch)
+    else
+        ArrayOf("checkout", "-b", branch, proj.DefaultBranch)
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        args.ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val proc = subprocess.Spawn(opts) match {
+        case Success(p)   => p
+        case Failure(err) => panic(s"git checkout ${branch}: ${err.Error()}")
+    }
+    val code = proc.Wait().Get()
+    if code != 0 { panic(s"git checkout ${branch} exited with code ${code}") }
+    return true
+})
+
+// currentBranch reads `git rev-parse --abbrev-ref HEAD`. Returns "" on
+// any failure (detached HEAD, not a git repo, etc.) so callers can
+// treat absence as "different branch — needs checkout".
+func currentBranch(repo string) string {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("rev-parse", "--abbrev-ref", "HEAD").ToGoSlice(),
+        SliceEmpty[string](),
+        repo,
+    )
+    val procTry = subprocess.Spawn(opts)
+    if procTry.IsFailure() { return "" }
+    val proc = procTry.Get()
+    var line = ""
+    var stopped = false
+    for !stopped {
+        val ln = proc.ReadLine()
+        if ln.IsFailure() {
+            stopped = true
+        } else {
+            val t = strings.TrimSpace(ln.Get())
+            if t != "" { line = t }
+        }
+    }
+    val code = proc.Wait()
+    if code.IsFailure() { return "" }
+    if code.Get() != 0 { return "" }
+    return line
+}
+
+// ResetLeadBranch hard-resets the lead's branch back to the project's
+// default branch. Called by the Start fresh / Ctrl+N paths so the new
+// session doesn't inherit committed leftover work from the prior
+// session. Best-effort — IO failures don't block the data-side reset.
+//
+// Two-step: (1) checkout the lead branch (creating it if missing);
+// (2) `git reset --hard <default>`. Step 1 is idempotent via
+// ensureLeadBranch.
+func ResetLeadBranch(proj Project) Try[bool] = Try[bool](() => {
+    val _ = ensureLeadBranch(proj).Get()
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("reset", "--hard", proj.DefaultBranch).ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val proc = subprocess.Spawn(opts) match {
+        case Success(p)   => p
+        case Failure(err) => panic(s"git reset --hard ${proj.DefaultBranch}: ${err.Error()}")
+    }
+    val code = proc.Wait().Get()
+    if code != 0 { panic(s"git reset --hard exited with code ${code}") }
+    return true
+})
 
 // WorktreeBranchFor mirrors the branch-naming convention used by
 // ensureWorktree so other layers (onboarding prompts, view, log

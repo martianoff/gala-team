@@ -109,6 +109,16 @@ func TestKeyToAppMsg_F7_NoOp(t T) T =
 func TestKeyToAppMsg_F8_NoOp(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 8))), "NoOp")
 
+// Ctrl+5 / Ctrl+6 are the fallback bindings users can rely on
+// while the upstream F-key gap exists (gala-tui v0.7.1's parseCsi
+// only decodes F1-F4; F5+ silently drops, see martianoff/gala-tui#10).
+// These cover the common "I pressed F5 but nothing happened" path.
+func TestKeyToAppMsg_Ctrl5_Activity(t T) T =
+    expectMsg(t, KeyToAppMsg(Ctrl(Char('5'))), "KeySetViewMode")
+
+func TestKeyToAppMsg_Ctrl6_Help(t T) T =
+    expectMsg(t, KeyToAppMsg(Ctrl(Char('6'))), "KeyToggleHelp")
+
 func TestKeyToAppMsg_ArrowLeft_NoOp(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(ArrowLeft())), "NoOp")
 

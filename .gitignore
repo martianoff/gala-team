@@ -13,3 +13,4 @@ MODULE.bazel.lock
 # Bazel-managed local workspace cache for transpiled GALA stdlib;
 # regenerated on every `bazel build`, never edited by hand.
 .gala/
+.claude/

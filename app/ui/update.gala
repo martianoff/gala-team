@@ -346,9 +346,53 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case KeyTogglePalette()          => onTogglePalette(m)
     case KeyPaletteEvent(ev)         => onPaletteEvent(m, ev)
     case KeySetViewMode(mode)        => onSetViewMode(m, mode)
+    case KeyToggleHelp()             => (m.Copy(HelpVisible = !m.HelpVisible), NoCmd[AppMsg]())
+    case KeyToggleProjectInfo()      => (m.Copy(ProjectInfoOpen = !m.ProjectInfoOpen), NoCmd[AppMsg]())
+    case KeyToggleGuidance()         => (m.Copy(GuidanceOpen = !m.GuidanceOpen), NoCmd[AppMsg]())
+    case KeyToggleCompactSidebar()   => (m.Copy(CompactSidebar = !m.CompactSidebar), NoCmd[AppMsg]())
+    case KeyRecoveryCycle()          => onRecoveryCycle(m)
+    case KeyRecoveryConfirm()        => onRecoveryConfirm(m)
     case TickMsg()                   => onTick(m)
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
+    }
+}
+
+// onRecoveryCycle advances the focus across the recovery modal's
+// three buttons (Resume → Inspect → StartFresh → Resume). No-op when
+// the modal isn't visible.
+func onRecoveryCycle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if !m.RecoveryModalOpen { return (m, NoCmd[AppMsg]()) }
+    val next = m.RecoveryFocus match {
+        case ResumeFocus()     => InspectFocus()
+        case InspectFocus()    => StartFreshFocus()
+        case StartFreshFocus() => ResumeFocus()
+    }
+    return (m.Copy(RecoveryFocus = next), NoCmd[AppMsg]())
+}
+
+// onRecoveryConfirm dispatches the focused button's action.
+//   Resume     → dismiss modal, conversation/state already loaded.
+//   Inspect    → enter ReadOnlyMode, dismiss modal.
+//   StartFresh → wipe Conversation + RecoveredMembers, dismiss modal.
+func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if !m.RecoveryModalOpen { return (m, NoCmd[AppMsg]()) }
+    return m.RecoveryFocus match {
+        case ResumeFocus() => (m.Copy(
+            RecoveryModalOpen = false,
+            RecoveryBannerVisible = false,
+        ), NoCmd[AppMsg]())
+        case InspectFocus() => (m.Copy(
+            RecoveryModalOpen = false,
+            RecoveryBannerVisible = false,
+            ReadOnlyMode = true,
+        ), NoCmd[AppMsg]())
+        case StartFreshFocus() => (m.Copy(
+            RecoveryModalOpen = false,
+            RecoveryBannerVisible = false,
+            Conversation = EmptyArray[session.ConversationLine](),
+            RecoveredMembers = EmptyArray[string](),
+        ), NoCmd[AppMsg]())
     }
 }
 
@@ -642,6 +686,10 @@ func paletteActions(m AppModel) Array[PaletteAction[AppMsg]] {
         PaletteAction[AppMsg](Label = "Approve summary (open PR)", Category = "Approval", Msg = KeyApprove()),
         PaletteAction[AppMsg](Label = "Reject summary", Category = "Approval", Msg = KeyReject()),
         PaletteAction[AppMsg](Label = "Merge open PR", Category = "Approval", Msg = KeyMerge()),
+        PaletteAction[AppMsg](Label = "Help (key + mouse parity)", Category = "Help", Msg = KeyToggleHelp()),
+        PaletteAction[AppMsg](Label = "Project info", Category = "Project", Msg = KeyToggleProjectInfo()),
+        PaletteAction[AppMsg](Label = "Guidance docs", Category = "Project", Msg = KeyToggleGuidance()),
+        PaletteAction[AppMsg](Label = "Compact / wide left panel", Category = "View", Msg = KeyToggleCompactSidebar()),
         PaletteAction[AppMsg](Label = "Quit", Category = "App", Msg = QuitMsg()),
     )
     val members = m.Team.Members.Map((mem) =>
@@ -2638,6 +2686,27 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     }
     if m.EraseSessionPending {
         return (m.Copy(EraseSessionPending = false), NoCmd[AppMsg]())
+    }
+    // Modal stack closes in reverse z-order: help is topmost, then
+    // recovery, guidance, project-info, member-detail, archive view.
+    if m.HelpVisible {
+        return (m.Copy(HelpVisible = false), NoCmd[AppMsg]())
+    }
+    if m.RecoveryModalOpen {
+        return (m.Copy(
+            RecoveryModalOpen     = false,
+            RecoveryBannerVisible = false,
+            RecoveredMembers      = EmptyArray[string](),
+            Conversation          = EmptyArray[session.ConversationLine](),
+            ConversationOffset    = 0,
+            ConversationSticky    = true,
+        ), NoCmd[AppMsg]())
+    }
+    if m.GuidanceOpen {
+        return (m.Copy(GuidanceOpen = false), NoCmd[AppMsg]())
+    }
+    if m.ProjectInfoOpen {
+        return (m.Copy(ProjectInfoOpen = false), NoCmd[AppMsg]())
     }
     if m.MemberDetailOpen.IsDefined() {
         return (m.Copy(MemberDetailOpen = None[string]()), NoCmd[AppMsg]())

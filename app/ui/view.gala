@@ -4,6 +4,7 @@ import (
     "strings"
     "time"
     "martianoff/gala/time_utils"
+    "github.com/martianoff/gala_team/app/policy"
     "github.com/martianoff/gala_team/app/session"
     "github.com/martianoff/gala_team/app/version"
     . "martianoff/gala/std"
@@ -76,7 +77,7 @@ func View(m AppModel) Widget {
         case ViewPipeline() => pipelineBody(m)
         case ViewActivity() => activityBody(m)
         case ViewDefault()  => Row(ArrayOf[LayoutChild](
-            Fixed(28, sidebarPanel),
+            Fixed(if (m.CompactSidebar) 20 else 28, sidebarPanel),
             Flex(1, Column(ArrayOf[LayoutChild](
                 recoveryBanner(m),
                 livenessBanner(m),
@@ -96,20 +97,168 @@ func View(m AppModel) Widget {
         // to scan at a glance. Renders 0 rows when there's no error.
         errorBanner(m),
     ))
-    // Overlay the member-detail modal when the user has Enter'd into
-    // a sidebar member row. The modal sits on top of the base view so
-    // background context is still visible — design Frame I.
+    // Overlay stack — paint each modal on top of the base, in
+    // ascending z-order. Each overlay is conditional; when none are
+    // open the base view is returned unchanged.
+    //
+    //   1. Member-detail (Frame I)
+    //   2. Project-info (Frame S)
+    //   3. Guidance (§5.7)
+    //   4. Recovery (§5.6, replaces the legacy banner)
+    //   5. Help (`?` / F6, §8.5)
+    //   6. Palette (Frame J — always topmost)
     val withMemberOverlay = m.MemberDetailOpen match {
         case Some(name) => memberDetailModalOverlay(m, name, base)
         case None()     => base
     }
-    // Command palette (Frame J) sits on top of everything so the user
-    // can drive the orchestrator without leaving whatever overlay is
-    // already open.
+    val withProjectInfo = if (m.ProjectInfoOpen) projectInfoOverlay(m, withMemberOverlay) else withMemberOverlay
+    val withGuidance    = if (m.GuidanceOpen)    guidanceOverlay(m, withProjectInfo)     else withProjectInfo
+    val withRecovery    = if (m.RecoveryModalOpen) recoveryModalOverlay(m, withGuidance) else withGuidance
+    val withHelp        = if (m.HelpVisible) helpOverlay(m, withRecovery) else withRecovery
     if m.PaletteVisible {
-        return paletteOverlay(m.Palette, withMemberOverlay)
+        return paletteOverlay(m.Palette, withHelp)
     }
-    return withMemberOverlay
+    return withHelp
+}
+
+// helpOverlay paints the auto-generated help modal — every key
+// binding + its mouse counterpart side-by-side. Closes on Esc / `F6`
+// / clicking outside (Esc handler is in update.gala).
+func helpOverlay(m AppModel, base Widget) Widget {
+    val (cols, rows) = TermSize()
+    val w = if (cols < 70) cols - 4 else MinInt(80, cols - 6)
+    val h = if (rows < 18) rows - 2 else MinInt(24, rows - 4)
+    val rowsArr = helpRows()
+    val title = TextStyled(" Help · keys & mouse ", DefaultStyle().WithBold().WithReverse())
+    val widgets = rowsArr.Map((r) => Fixed(1, TextStyled(r, DefaultStyle())))
+    val footer = TextStyled("  Esc / F6 close", DefaultStyle().WithDim())
+    val body = Column(ArrayOf[LayoutChild](
+        Fixed(1, title),
+        Fixed(1, FillCh('-')),
+    ).AppendAll(widgets).Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
+    return Overlay(base, Modal(w, h, body))
+}
+
+// helpRows is the parity matrix laid out as a flat list of "key  →
+// action" rows. Mouse counterparts are appended where they exist.
+func helpRows() Array[string] = ArrayOf(
+    "  Enter             submit prompt to lead       (or click ▶ in composer)",
+    "  Tab / Ctrl+L      toggle composer ↔ sidebar   (or click panel)",
+    "  Backspace         delete last rune in composer",
+    "  ↑ / ↓             navigate sidebar / history",
+    "  Space             fold/unfold a role group    (sidebar focus)",
+    "  PgUp / PgDn       scroll conversation pane",
+    "  End               re-stick conversation to bottom",
+    "  Ctrl+P            command palette             (click ⌘ in header)",
+    "  Ctrl+T            consult viewer modal",
+    "  Ctrl+H            session-history browser",
+    "  Ctrl+Y            yank conversation to clipboard",
+    "  Ctrl+V            paste from clipboard",
+    "  Ctrl+A            approve summary (open PR)",
+    "  Ctrl+R            reject summary (back to chat)",
+    "  Ctrl+M            merge PR after creation",
+    "  Ctrl+N            erase session (twice to confirm)",
+    "  Ctrl+, / Ctrl+.   compact-left toggle (team panel)",
+    "  F1 / F2 / F3      Default split / Focus / Grid",
+    "  F4 / F5 / F6      Pipeline / Activity / Help",
+    "  Ctrl+Q / Ctrl+C   quit (twice to confirm)",
+    "  Esc               close any open modal / drop focus",
+)
+
+// projectInfoOverlay shows project metadata in a centered modal —
+// matches DESIGN.md Frame S.
+func projectInfoOverlay(m AppModel, base Widget) Widget {
+    val (cols, rows) = TermSize()
+    val w = if (cols < 60) cols - 4 else MinInt(72, cols - 8)
+    val h = if (rows < 14) rows - 2 else MinInt(18, rows - 4)
+    val gh = m.Project.Github.GetOrElse("(none — git remote get-url origin failed)")
+    val title = TextStyled(s" Project: ${m.Project.Name} ", DefaultStyle().WithBold().WithReverse())
+    val rowsArr = ArrayOf(
+        s"  Description:  ${m.Team.Description}",
+        s"  Repo:         ${m.Project.Repo}",
+        s"  GitHub:       ${gh}",
+        s"  Branch:       ${m.Project.DefaultBranch}",
+        s"  Team:         ${m.Team.Name} (${m.Team.Members.Size()} members)",
+        s"  Workspace:    ${workspaceName(m)}",
+    )
+    val widgets = rowsArr.Map((r) => Fixed(1, TextStyled(r, DefaultStyle())))
+    val footer = TextStyled("  Esc to close", DefaultStyle().WithDim())
+    val body = Column(ArrayOf[LayoutChild](
+        Fixed(1, title),
+        Fixed(1, FillCh('-')),
+    ).AppendAll(widgets).Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
+    return Overlay(base, Modal(w, h, body))
+}
+
+// workspaceName mirrors the policy.WorkspaceModeName helper so we
+// don't have to dot-import the policy package here.
+func workspaceName(m AppModel) string = policy.WorkspaceModeName(m.Policy.WorkspaceMode)
+
+// guidanceOverlay surfaces the project guidance docs (§5.7). The
+// current model still has the field stub on the AppModel; this
+// overlay renders an empty state until the Guidance loader lands —
+// the modal infrastructure is what unblocks the rest.
+func guidanceOverlay(m AppModel, base Widget) Widget {
+    val (cols, rows) = TermSize()
+    val w = if (cols < 60) cols - 4 else MinInt(80, cols - 8)
+    val h = if (rows < 14) rows - 2 else MinInt(20, rows - 4)
+    val title = TextStyled(" Project guidance · standing orders ", DefaultStyle().WithBold().WithReverse())
+    val rowsArr = guidanceRows(m)
+    val widgets = rowsArr.Map((r) => Fixed(1, TextStyled(r, DefaultStyle())))
+    val footer = TextStyled("  Esc to close · `g` to reopen", DefaultStyle().WithDim())
+    val body = Column(ArrayOf[LayoutChild](
+        Fixed(1, title),
+        Fixed(1, FillCh('-')),
+    ).AppendAll(widgets).Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
+    return Overlay(base, Modal(w, h, body))
+}
+
+// guidanceRows formats the loaded guidance docs as one row per slot.
+// Stub for §5.7 — the loader hasn't landed yet, so we always show the
+// configuration hint. Will read m.Guidance.Docs once the type is wired.
+func guidanceRows(m AppModel) Array[string] {
+    return ArrayOf(
+        "  (no guidance docs configured yet)",
+        "",
+        "  Add a `guidance:` block to .gala_team.yaml pointing at",
+        "  TESTING.md / ARCHITECTURE.md / SECURITY.md / CLAUDE.md.",
+        "  See DESIGN.md §5.7 for the full schema.",
+    )
+}
+
+// recoveryModalOverlay is the §5.6 Resume / Inspect / Start-fresh
+// modal. Replaces the legacy single-line "↻ Restored …" banner.
+func recoveryModalOverlay(m AppModel, base Widget) Widget {
+    val (cols, rows) = TermSize()
+    val w = if (cols < 60) cols - 4 else MinInt(70, cols - 8)
+    val h = if (rows < 14) rows - 2 else MinInt(16, rows - 4)
+    val choice = m.RecoveryFocus
+    val lines = m.Conversation.Size()
+    val agents = m.RecoveredMembers.Size()
+    val title = TextStyled(" ↺  Resume previous session? ", DefaultStyle().WithBold().WithReverse())
+    val info = ArrayOf(
+        s"  Project:    ${m.Project.Name}",
+        s"  Team:       ${m.Team.Name}",
+        s"  Lines:      ${lines}",
+        s"  Pending:    ${agents} agent(s)",
+    )
+    val infoWidgets = info.Map((r) => Fixed(1, TextStyled(r, DefaultStyle())))
+    val buttons = TextStyled(recoveryButtonsLine(choice), DefaultStyle())
+    val footer = TextStyled("  Tab cycle · Enter confirm · Esc cancel", DefaultStyle().WithDim())
+    val body = Column(ArrayOf[LayoutChild](
+        Fixed(1, title),
+        Fixed(1, FillCh('-')),
+    ).AppendAll(infoWidgets).Append(Fixed(1, Empty())).Append(Fixed(1, buttons))
+        .Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
+    return Overlay(base, Modal(w, h, body))
+}
+
+// recoveryButtonsLine renders the three buttons with the focused one
+// in reverse video so the user sees which is active.
+func recoveryButtonsLine(c RecoveryChoice) string = c match {
+    case ResumeFocus()     => "  [ Resume ]    Inspect      Start fresh"
+    case InspectFocus()    => "    Resume    [ Inspect ]    Start fresh"
+    case StartFreshFocus() => "    Resume      Inspect    [ Start fresh ]"
 }
 
 // paletteOverlay paints the fuzzy-search action picker centered over

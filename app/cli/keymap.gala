@@ -95,6 +95,10 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+y"))           { return KeyYankConversation() }
     if (KeyMatchesAny(ev, "ctrl+v"))           { return KeyPasteClipboard() }
     if (KeyMatchesAny(ev, "ctrl+p"))           { return KeyTogglePalette() }
+    if (KeyMatchesAny(ev, "ctrl+,"))           { return KeyToggleCompactSidebar() }
+    if (KeyMatchesAny(ev, "ctrl+."))           { return KeyToggleCompactSidebar() }
+    // Help overlay: bound to F6 (free function key) AND palette entry.
+    // Bare `?` would compete with composer typing; F-keys are unambiguous.
     return ev.Key match {
         case Backspace()  => KeyBackspace()
         case Enter()      => KeySubmit()
@@ -113,12 +117,14 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
 
 // fnKeyToMsg maps function keys to view-mode toggles. F1 returns to
 // the default split layout; F2/F3/F4/F5 set focus / grid / pipeline /
-// activity (Frame P of the design — reverse-chronological event log).
+// activity (Frame P). F6 toggles the help overlay (a printable `?`
+// would clash with composer typing; F6 is unambiguous).
 func fnKeyToMsg(n int) AppMsg {
     if n == 1 { return KeySetViewMode(Mode = ViewDefault()) }
     if n == 2 { return KeySetViewMode(Mode = ViewFocus()) }
     if n == 3 { return KeySetViewMode(Mode = ViewGrid()) }
     if n == 4 { return KeySetViewMode(Mode = ViewPipeline()) }
     if n == 5 { return KeySetViewMode(Mode = ViewActivity()) }
+    if n == 6 { return KeyToggleHelp() }
     return NoOp()
 }

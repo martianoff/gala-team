@@ -330,11 +330,19 @@ func loadArchives(proj Project) Array[session.SnapshotMeta] =
 // SavedAt / ProjectName are read but unused for now — they would
 // drive cross-project mismatch detection if a user moved their
 // .gala_team/sessions/ directory between repos.
+// primeFromSnapshot loads the prior session's conversation log and
+// kicks the §5.6 recovery modal — the user picks Resume / Inspect /
+// Start fresh before any orchestration spawns. ResumeChoice = Some
+// is the modal-active sentinel; the legacy banner stays present too
+// so users with old muscle-memory still get the inline indicator,
+// but the modal owns the actual decision.
 func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match {
     case None()       => m
     case Some(snap)   => m.Copy(
         Conversation          = snap.Conversation,
         RecoveredMembers      = snap.ActiveMembers,
         RecoveryBannerVisible = true,
+        RecoveryModalOpen     = true,
+        RecoveryFocus         = ResumeFocus(),
     )
 }

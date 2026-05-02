@@ -228,7 +228,46 @@ struct AppModel(
     // TL relay turn (#28). Empty string if a member finished via EOF
     // without an explicit @done block.
     MemberDoneBodies HashMap[string, string],
+    // Toggles the help overlay. Bound to `?` and to a clickable `?`
+    // button in the header (DESIGN.md §8.5). The overlay is a
+    // floating modal that auto-renders the key + mouse parity matrix.
+    HelpVisible bool,
+    // Toggles the project-info modal (Frame S). Opened via clicking
+    // the project name in the header or the palette entry. Shows
+    // project / repo / github / branch / team / config metadata.
+    ProjectInfoOpen bool,
+    // Toggles the guidance modal (§5.7). The 📚 header button + `g`
+    // open this; lists every loaded guidance doc with sha + path +
+    // loaded-at. Loaded data lives in m.Guidance.
+    GuidanceOpen bool,
+    // RecoveryModalOpen + RecoveryFocus drive the §5.6 modal. We use
+    // a bool + plain sealed type rather than Option[RecoveryChoice]
+    // because gala 0.41+'s transpiler initialises Option-of-sealed-
+    // type as a non-None default (the inner sealed case looks like a
+    // zero-valued struct), which would render the recovery modal on
+    // every fresh launch instead of only when a prior session
+    // actually exists.
+    RecoveryModalOpen bool,
+    RecoveryFocus     RecoveryChoice,
+    // ReadOnlyMode = true when the user picked "Inspect" on the
+    // recovery modal — sessions don't spawn, the composer is locked,
+    // PR-related shortcuts are no-ops. Used purely for read-only
+    // audit of a prior session.
+    ReadOnlyMode bool,
+    // CompactSidebar toggles the team-panel layout between wide
+    // (default, 28-cell rows) and compact (single-line rows, ~24
+    // members visible). Bound to Ctrl+, / Ctrl+. — DESIGN.md §8.5.
+    CompactSidebar bool,
 )
+
+// RecoveryChoice tracks which option of the §5.6 recovery modal is
+// currently focused. The buttons are clickable; Tab cycles; Enter
+// fires the focused choice.
+sealed type RecoveryChoice {
+    case ResumeFocus
+    case InspectFocus
+    case StartFreshFocus
+}
 
 // FocusState selects which panel handles directional / activation
 // keys. Mouse and global shortcuts are unaffected.
@@ -329,6 +368,13 @@ func InitialModelWithTeams(
     MemberBuffers         = EmptyHashMap[string, string](),
     MemberDirectivesFired = EmptyHashMap[string, int](),
     MemberDoneBodies      = EmptyHashMap[string, string](),
+    HelpVisible           = false,
+    ProjectInfoOpen       = false,
+    GuidanceOpen          = false,
+    RecoveryModalOpen     = false,
+    RecoveryFocus         = ResumeFocus(),
+    ReadOnlyMode          = false,
+    CompactSidebar        = false,
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -468,6 +514,22 @@ sealed type AppMsg {
     // pressed again returns to ViewDefault. F1 always goes back to
     // ViewDefault for predictability.
     case KeySetViewMode(Mode ViewMode)
+    // Help overlay (`?` key, header `?` button). Toggles HelpVisible.
+    case KeyToggleHelp
+    // Project-info modal (Frame S). Toggled by clicking project name
+    // in the header or palette → "Project info".
+    case KeyToggleProjectInfo
+    // Guidance modal (§5.7). Toggled by `g` key or 📚 header button.
+    case KeyToggleGuidance
+    // Compact-left toggle for the team panel (Ctrl+, / Ctrl+.).
+    case KeyToggleCompactSidebar
+    // Recovery modal navigation (§5.6). Tab cycles focus across
+    // [Resume] / [Inspect] / [Start fresh]; Enter activates the
+    // currently-focused button. The handlers map to in-place model
+    // mutations (Inspect = ReadOnlyMode=true) plus the same effects
+    // the legacy banner triggered.
+    case KeyRecoveryCycle
+    case KeyRecoveryConfirm
     // Stderr pump for live claude subprocesses. StderrArrived
     // surfaces the line as a warning toast + LastError so the user
     // sees auth / permission / install errors that would otherwise

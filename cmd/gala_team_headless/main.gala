@@ -49,6 +49,7 @@ func main() {
     val teamPath = flagValue("--team", "")
     val projDir  = flagValue("--project", ".")
     val prompt   = flagValue("--prompt", "")
+    val member   = flagValue("--member", "")
     if teamPath == "" {
         die("--team is required (path to team.yaml)")
     }
@@ -74,7 +75,13 @@ func main() {
         die(s"--project: ${projTry.GetError().Error()}")
     }
     val proj = projTry.Get()
-    val outcome = RunHeadless(proj, cfg.Team, prompt)
+    // --member targets a specific role (engineer / QA name) instead of
+    // the team lead. Used by multi-member E2E tests that orchestrate
+    // each role manually. Defaults to the lead when omitted.
+    val outcome = if (member == "")
+        RunHeadless(proj, cfg.Team, prompt)
+    else
+        RunHeadlessAs(proj, cfg.Team, member, prompt)
     outcome match {
         case Left(err) => {
             val _ = os.Stderr.WriteString(s"gala_team_headless: ${err}\n")

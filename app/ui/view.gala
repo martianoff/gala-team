@@ -465,13 +465,8 @@ func activityBody(m AppModel) Widget {
     // entry wraps across multiple visible rows.
     val keepCount = MinInt(n, viewportH * 2)
     val skip = n - keepCount
-    var taken = EmptyArray[session.ConversationLine]()
-    var i = skip
-    for i < n {
-        taken = taken.Append(convo.Get(i))
-        i = i + 1
-    }
-    val rows = taken.Reverse().Map((cl) =>
+    val taken = convo.Drop(skip)
+    val rows = taken.Reverse().Map((cl session.ConversationLine) =>
         TextStyled(s"  ${activityGlyphFor(cl.Speaker)} ${cl.Speaker}  →  ${activityFirstLine(cl.Text)}",
             speakerStyle(m.Team, cl.Speaker)),
     )

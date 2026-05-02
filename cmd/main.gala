@@ -344,7 +344,7 @@ func loadArchives(proj Project) Array[session.SnapshotMeta] =
 // but don't sink startup — DESIGN.md §5.7 calls them "drop the
 // slot" failures.
 func loadGuidance(proj Project, pairs Array[GuidancePair]) Tuple[Guidance, Array[string]] {
-    val tuples = pairs.Map((p) => Tuple[string, string](V1 = p.Slot, V2 = p.Path))
+    val tuples = pairs.Map((p) => (p.Slot, p.Path))
     return guidance.LoadAll(proj.Repo, tuples)
 }
 

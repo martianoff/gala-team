@@ -167,6 +167,10 @@ func TestKeyApprove_InApproval_TransitionsToIdleAndLogs(t T) T {
     return Eq(t2, m.Conversation.Get(0).Text, "/approve")
 }
 
+// Reject now logs the user's `/reject` line PLUS a one-line system
+// hint reminding the user to type a follow-up prompt for the lead.
+// The audit trail shows both what was rejected and what the
+// orchestrator is now waiting on.
 func TestKeyReject_InApproval_TransitionsToIdleAndLogs(t T) T {
     val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))
     val (m, _) = Update(seed, KeyReject())
@@ -174,8 +178,9 @@ func TestKeyReject_InApproval_TransitionsToIdleAndLogs(t T) T {
         case Idle() => IsTrue(t, true)
         case _      => IsTrue(t, false)
     }
-    val t2 = Eq(t1, m.Conversation.Size(), 1)
-    return Eq(t2, m.Conversation.Get(0).Text, "/reject")
+    val t2 = Eq(t1, m.Conversation.Size(), 2)
+    val t3 = Eq(t2, m.Conversation.Get(0).Text, "/reject")
+    return Eq(t3, m.Conversation.Get(1).Speaker, "system")
 }
 
 func TestKeyReject_OutsideApproval_NoOp(t T) T {

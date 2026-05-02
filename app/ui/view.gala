@@ -74,6 +74,7 @@ func View(m AppModel) Widget {
         case ViewFocus()    => focusBody(m, mainPanel)
         case ViewGrid()     => gridBody(m)
         case ViewPipeline() => pipelineBody(m)
+        case ViewActivity() => activityBody(m)
         case ViewDefault()  => Row(ArrayOf[LayoutChild](
             Fixed(28, sidebarPanel),
             Flex(1, Column(ArrayOf[LayoutChild](
@@ -179,6 +180,88 @@ func pipelineBody(m AppModel) Widget = BorderOf(
     )),
     RoundedBorder(),
 )
+
+// activityBody renders the reverse-chronological event log (Frame P).
+// We don't keep a separate event-stream model; the existing
+// Conversation slice already records every notable event (user
+// prompts, member chunks, dispatch markers, policy hooks, gh PR
+// outcomes). Showing the most recent N entries with their speaker
+// gives the same audit-trail surface the design specifies.
+func activityBody(m AppModel) Widget {
+    val (_, h) = TermSize()
+    val viewportH = MaxInt(4, h - 8)
+    val convo = m.Conversation
+    val n = convo.Size()
+    // Take the last `viewportH * 2` entries — long enough to show
+    // recent activity, short enough to fit on screen even after each
+    // entry wraps across multiple visible rows.
+    val keepCount = MinInt(n, viewportH * 2)
+    val skip = n - keepCount
+    var taken = EmptyArray[session.ConversationLine]()
+    var i = skip
+    for i < n {
+        taken = taken.Append(convo.Get(i))
+        i = i + 1
+    }
+    val rows = taken.Reverse().Map((cl) =>
+        TextStyled(s"  ${activityGlyphFor(cl.Speaker)} ${cl.Speaker}  →  ${activityFirstLine(cl.Text)}",
+            speakerStyle(m.Team, cl.Speaker)),
+    )
+    val body = if (rows.IsEmpty())
+        Column(ArrayOf[LayoutChild](
+            Fixed(1, TextStyled("  (no activity yet)", DefaultStyle().WithDim())),
+        ))
+    else
+        Column(rows.Map((r) => Fixed(1, r)))
+    return BorderOf(
+        Column(ArrayOf[LayoutChild](
+            Fixed(1, TextStyled("  Activity log (F5 · most recent first)",
+                DefaultStyle().WithBold())),
+            Fixed(1, FillCh('-')),
+            Flex(1, body),
+        )),
+        RoundedBorder(),
+    )
+}
+
+// activityGlyphFor picks a glyph for the activity row by speaker
+// kind. Mirrors DESIGN.md Frame P glyph language: ▣ user prompt, ⠋
+// active work, ✓ done, ⊘ system. For unknown / member speakers we
+// fall through to a bullet so the row still has a left-edge anchor.
+func activityGlyphFor(speaker string) string {
+    if speaker == "you"      { return "▣" }
+    if speaker == "system"   { return "⊘" }
+    if speaker == "policy"   { return "✓" }
+    if speaker == "gh"       { return "▲" }
+    if speaker == "shutdown" { return "⨯" }
+    return "·"
+}
+
+// activityFirstLine returns the first non-empty line of `text`,
+// trimmed and capped to 120 columns so each event row stays a single
+// line in the activity view. Multi-line bodies (engineer summaries,
+// TL drafts) wouldn't fit anyway.
+func activityFirstLine(text string) string {
+    val parts = strings.Split(text, "\n")
+    var i = 0
+    val n = len(parts)
+    var first = ""
+    for i < n {
+        val ln = strings.TrimSpace(parts[i])
+        if ln != "" { first = ln; i = n }
+        i = i + 1
+    }
+    if first == "" { return "(empty)" }
+    val rs = ToRunes(first)
+    if len(rs) <= 120 { return first }
+    var prefix = EmptyArray[string]()
+    var k = 0
+    for k < 117 {
+        prefix = prefix.Append(string(rs[k]))
+        k = k + 1
+    }
+    return prefix.MkString("") + "…"
+}
 
 // memberDetailModalOverlay paints the full transcript + role meta for
 // `name` as a centered modal on top of `base`. Closes via Esc; the

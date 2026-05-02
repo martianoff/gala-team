@@ -125,16 +125,27 @@ func applyOneCommand(m AppModel, term TermDims, raw string) DriverStep {
         emitFrame(m, t1, None[string]())
         return ContinueDriver(M = m, T = t1)
     }
-    val maybeMsg = decodeAppMsg(kind, d)
-    return maybeMsg match {
-        case None() => {
-            emitError(s"unknown command type '${kind}'")
+    // Wrap the rest of the decode in a Try so malformed payloads (a
+    // single-quoted JSON value injected by a buggy shell heredoc, an
+    // unterminated string, an unexpected number-vs-string mismatch)
+    // surface as an error frame instead of crashing the harness. This
+    // is the safety net the live-audit scripts rely on.
+    val msgTry = Try[Option[AppMsg]](() => decodeAppMsg(kind, d))
+    return msgTry match {
+        case Failure(err) => {
+            emitError(s"decode '${kind}' failed: ${err.Error()}")
             return ContinueDriver(M = m, T = term)
         }
-        case Some(msg) => {
-            val (m1, _) = Update(m, msg)
-            emitFrame(m1, term, None[string]())
-            return ContinueDriver(M = m1, T = term)
+        case Success(maybeMsg) => maybeMsg match {
+            case None() => {
+                emitError(s"unknown command type '${kind}'")
+                return ContinueDriver(M = m, T = term)
+            }
+            case Some(msg) => {
+                val (m1, _) = Update(m, msg)
+                emitFrame(m1, term, None[string]())
+                return ContinueDriver(M = m1, T = term)
+            }
         }
     }
 }
@@ -158,11 +169,16 @@ func readType(d *json.JsonDecoderImpl) Tuple[string, bool] {
 // None if the field is missing or comes in a different order than
 // expected. Decoder is positionally consumed, so out-of-order field
 // reads silently drop subsequent fields.
+//
+// Skip() (rather than ReadString()) is used for unknown fields so the
+// driver doesn't crash when a chunk-line value is an array / object /
+// int / null. Real claude stream-json envelopes routinely carry
+// `"tools":["Read","Write",...]` etc.
 func readOptionalString(d *json.JsonDecoderImpl, target string) Option[string] {
     for d.HasMoreFields() {
         val key = d.ReadKey()
         if key == target { return Some(d.ReadString()) }
-        d.ReadString()  // consume any value type best-effort
+        d.Skip()
     }
     return None[string]()
 }
@@ -171,7 +187,7 @@ func readOptionalInt(d *json.JsonDecoderImpl, target string) Option[int] {
     for d.HasMoreFields() {
         val key = d.ReadKey()
         if key == target { return Some(d.ReadInt()) }
-        d.ReadString()
+        d.Skip()
     }
     return None[int]()
 }
@@ -197,7 +213,7 @@ func decodeKey(d *json.JsonDecoderImpl) Option[AppMsg] {
         val k = d.ReadKey()
         if k == "key"  { keyName = d.ReadString() }
         else if k == "char" { keyChar = d.ReadString() }
-        else { d.ReadString() }
+        else { d.Skip() }
     }
     if keyChar != "" {
         val rs = ToRunes(keyChar)
@@ -233,7 +249,7 @@ func decodeMouse(d *json.JsonDecoderImpl) Option[AppMsg] {
         if k == "x"           { x = d.ReadInt() }
         else if k == "y"      { y = d.ReadInt() }
         else if k == "pressed" { pressed = d.ReadBool() }
-        else                  { d.ReadString() }
+        else                  { d.Skip() }
     }
     return Some[AppMsg](MouseAt(X = x, Y = y, Pressed = pressed))
 }
@@ -251,7 +267,7 @@ func decodeNamedMsg(d *json.JsonDecoderImpl) Option[AppMsg] {
         else if k == "member" { member = d.ReadString() }
         else if k == "line"   { line = d.ReadString() }
         else if k == "err"    { err = d.ReadString() }
-        else                  { d.ReadString() }
+        else                  { d.Skip() }
     }
     if name == "ChunkArrived"  { return Some[AppMsg](ChunkArrived(Member = member, Line = line)) }
     if name == "SessionFailed" { return Some[AppMsg](SessionFailed(Member = member, ErrText = err)) }

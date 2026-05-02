@@ -128,17 +128,31 @@ func WorktreeBranchFor(proj Project, m Member) string =
     "gala_team/" + proj.Name + "/" + m.Name
 
 // ensureWorktree creates `<proj.Repo>/.gala_team/worktrees/<m.Name>`
-// if it doesn't already exist by shelling out to `git worktree add
-// -B gala_team/<proj.Name>/<m.Name> <path>`. If the directory already
-// exists, returns the path without re-running git (idempotent).
+// if it isn't already a registered worktree. If the dir exists but git
+// doesn't know about it (stale from a prior run / filesystem leftover),
+// the dir is wiped and re-created so the engineer always lands in a
+// clean checkout of `gala_team/<proj.Name>/<m.Name>`.
+//
+// Without this, `?? crypto/` and other untracked files from the prior
+// engineer leak through and the new engineer reads them as legitimate
+// in-progress work, which derails their dispatch.
 func ensureWorktree(proj Project, m Member) Try[string] = Try[string](() => {
     val wtPath = filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
     val branch = WorktreeBranchFor(proj, m)
-    val info, statErr = os.Stat(wtPath)
-    if statErr == nil && info.IsDir() { return wtPath }
+    if isRegisteredWorktree(proj, wtPath) {
+        return wtPath
+    }
+    // Either the dir doesn't exist yet, or it's a stale leftover. Either
+    // way, ensure parent exists and wipe whatever is at wtPath so the
+    // fresh `git worktree add` doesn't trip over leftover content.
     val parent = filepath.Dir(wtPath)
     val mkErr = os.MkdirAll(parent, os.FileMode(0755))
     if mkErr != nil { panic(s"worktree mkdir ${parent}: ${mkErr.Error()}") }
+    val info, statErr = os.Stat(wtPath)
+    if statErr == nil && info.IsDir() {
+        val rmErr = os.RemoveAll(wtPath)
+        if rmErr != nil { panic(s"worktree clean ${wtPath}: ${rmErr.Error()}") }
+    }
     val opts = subprocess.NewSpawnOpts(
         "git",
         ArrayOf("worktree", "add", "-B", branch, wtPath).ToGoSlice(),
@@ -153,6 +167,44 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try[string](() => {
     if code != 0 { panic(s"git worktree add ${wtPath} exited with code ${code}") }
     return wtPath
 })
+
+// isRegisteredWorktree returns true iff `git worktree list --porcelain`
+// includes `wtPath` as a registered worktree. The dir merely existing
+// on disk is not enough — a stale dir from a `git worktree remove`
+// failure or a manual `rm` of `.git/worktrees/<name>/gitdir` leaves
+// untracked files that confuse engineers.
+func isRegisteredWorktree(proj Project, wtPath string) bool {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("worktree", "list", "--porcelain").ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val procTry = subprocess.Spawn(opts)
+    if procTry.IsFailure() { return false }
+    val proc = procTry.Get()
+    var lines = EmptyArray[string]()
+    var stopped = false
+    for !stopped {
+        val ln = proc.ReadLine()
+        if ln.IsFailure() {
+            stopped = true
+        } else {
+            lines = lines.Append(ln.Get())
+        }
+    }
+    val _ = proc.Wait()
+    val abs, absErr = filepath.Abs(wtPath)
+    if absErr != nil { return false }
+    val needle = "worktree " + filepath.ToSlash(abs)
+    val needleAlt = "worktree " + abs
+    return lines.Exists((l) => {
+        val t = strings.TrimSpace(l)
+        return t == needle || t == needleAlt ||
+               strings.EqualFold(t, needle) ||
+               strings.EqualFold(t, needleAlt)
+    })
+}
 
 // RemoveWorktree drops the per-engineer worktree on shutdown so the
 // repo doesn't accumulate stale checkouts. Best-effort: a failure

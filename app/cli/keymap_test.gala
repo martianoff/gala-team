@@ -78,11 +78,14 @@ func TestKeyToAppMsg_Space_KeyChar(t T) T {
     }
 }
 
-// Unknown / unmapped keys (FKey, Home, PageUp, ArrowLeft/Right, Delete, Insert,
-// the explicit Unknown case) all collapse to NoOp so the runtime keeps
+// F1-F5 set view modes (Default / Focus / Grid / Pipeline / Activity);
+// F-keys outside that range fall through to NoOp so the runtime keeps
 // dispatching events without flooding the model.
-func TestKeyToAppMsg_FKey_NoOp(t T) T =
-    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 5))), "NoOp")
+func TestKeyToAppMsg_F5_Activity(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 5))), "KeySetViewMode")
+
+func TestKeyToAppMsg_F8_NoOp(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 8))), "NoOp")
 
 func TestKeyToAppMsg_ArrowLeft_NoOp(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(ArrowLeft())), "NoOp")

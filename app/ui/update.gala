@@ -566,6 +566,7 @@ func viewModeTag(v ViewMode) string = v match {
     case ViewFocus()    => "focus"
     case ViewGrid()     => "grid"
     case ViewPipeline() => "pipeline"
+    case ViewActivity() => "activity"
 }
 
 // onTogglePalette opens the palette with the freshly-built action
@@ -631,6 +632,16 @@ func paletteActions(m AppModel) Array[PaletteAction[AppMsg]] {
         PaletteAction[AppMsg](Label = "Erase session", Category = "Session", Msg = KeyEraseSession()),
         PaletteAction[AppMsg](Label = "Yank conversation to clipboard", Category = "Session", Msg = KeyYankConversation()),
         PaletteAction[AppMsg](Label = "History browser", Category = "View", Msg = KeyToggleHistory()),
+        PaletteAction[AppMsg](Label = "View: Default split (F1)", Category = "View", Msg = KeySetViewMode(Mode = ViewDefault())),
+        PaletteAction[AppMsg](Label = "View: Focus mode (F2)", Category = "View", Msg = KeySetViewMode(Mode = ViewFocus())),
+        PaletteAction[AppMsg](Label = "View: Member grid (F3)", Category = "View", Msg = KeySetViewMode(Mode = ViewGrid())),
+        PaletteAction[AppMsg](Label = "View: Pipeline org chart (F4)", Category = "View", Msg = KeySetViewMode(Mode = ViewPipeline())),
+        PaletteAction[AppMsg](Label = "View: Activity log (F5)", Category = "View", Msg = KeySetViewMode(Mode = ViewActivity())),
+        PaletteAction[AppMsg](Label = "Toggle composer / sidebar focus", Category = "Navigate", Msg = KeyToggleFocus()),
+        PaletteAction[AppMsg](Label = "Toggle consult viewer", Category = "Navigate", Msg = KeyToggleConsultViewer()),
+        PaletteAction[AppMsg](Label = "Approve summary (open PR)", Category = "Approval", Msg = KeyApprove()),
+        PaletteAction[AppMsg](Label = "Reject summary", Category = "Approval", Msg = KeyReject()),
+        PaletteAction[AppMsg](Label = "Merge open PR", Category = "Approval", Msg = KeyMerge()),
         PaletteAction[AppMsg](Label = "Quit", Category = "App", Msg = QuitMsg()),
     )
     val members = m.Team.Members.Map((mem) =>
@@ -1580,12 +1591,21 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 }
 
 // buildQAReviewPrompt assembles the review prompt seen by every QA
-// member. Lists each engineer's @finished body so QA has concrete
-// deliverables to evaluate. Engineers who exited without an explicit
-// @finished block get a generic "they were silent" line so QA still
-// sees their existence.
+// member. Lists each engineer's @finished body PLUS the concrete
+// workspace pointers QA needs to read the work — without these, QA
+// can't find engineer files when WorkspaceMode = WorktreePerEngineer
+// (their checkouts live under .gala_team/worktrees/<name>) and they
+// fall back to guessing. Engineers who exited without an explicit
+// @finished block get a generic line so QA still sees their existence.
+//
+// The "Deliverable manifest" block at the top is the file-exchange
+// protocol QA reads first: for each engineer, name + role + cwd +
+// branch + the suggested `git diff` command that lists their changed
+// files. QA's instructions point at it so the review is grounded in
+// actual diffs, not just engineer summaries.
 func buildQAReviewPrompt(m AppModel) string {
     val engineers = MembersOf(m.Team, Engineer())
+    val manifest = buildDeliverableManifest(m, engineers)
     val sections = engineers.Map((eng) => {
         val body = m.MemberDoneBodies.Get(eng.Name).GetOrElse("")
         if body == "" {
@@ -1594,7 +1614,40 @@ func buildQAReviewPrompt(m AppModel) string {
         return s"## ${eng.Name} reported:\n\n${body}"
     })
     val joined = sections.MkString("\n\n")
-    return s"# QA review\n\nThe engineers have reported back. Review their deliverables for correctness, edge cases, and adherence to the brief. When you're done, reply with:\n\n- `@finished ... @end` if the work passes review (body = a 1-3 line approval note)\n- `@blocked ... @end` if there are issues that block sign-off (body = the issues, prioritised)\n\n${joined}"
+    return s"# QA review\n\nThe engineers have reported back. Review their deliverables for correctness, edge cases, and adherence to the brief.\n\n${manifest}\n\n# Engineer reports\n\n${joined}\n\n# Sign-off protocol\n\nWhen you're done, reply with:\n\n- `@finished ... @end` if the work passes review. Body = a 1-3 line approval note PLUS, on its own line, `Files reviewed: <comma-separated relative paths>` so the TL knows what you actually inspected.\n- `@blocked ... @end` if there are issues that block sign-off. Body = the issues prioritised; cite each engineer + file path so the TL can route fixes."
+}
+
+// buildDeliverableManifest renders the per-engineer workspace pointers
+// QA needs to read engineer files. For Shared workspace mode the cwd
+// is the project repo for every engineer; for WorktreePerEngineer it
+// points at each engineer's isolated worktree. The diff command is
+// suggested so QA doesn't have to invent it.
+//
+// Branch resolution is delegated to policy.BranchForMember (which we
+// added so update.gala doesn't have to dot-import the policy package
+// just to pattern-match on WorkspaceMode here).
+func buildDeliverableManifest(m AppModel, engineers Array[Member]) string {
+    val rows = engineers.Map((eng) => {
+        val cwd = onboarding.WorkspacePathFor(m.Project, eng, m.Policy.WorkspaceMode)
+        val branch = manifestBranchFor(m, eng)
+        val diffHint = s"git -C ${cwd} diff --name-only ${m.Project.DefaultBranch}..HEAD"
+        return s"- **${eng.Name}** (${RoleName(eng.Role)})\n  - cwd:    ${cwd}\n  - branch: ${branch}\n  - files:  run \\`${diffHint}\\` to enumerate changes"
+    })
+    return s"# Deliverable manifest\n\nEach engineer's workspace + branch + suggested diff command. Read files directly from the listed cwd — that's where their work lives.\n\n${rows.MkString("\n")}"
+}
+
+// manifestBranchFor picks the branch each engineer's work lives on.
+// Worktree mode → `gala_team/<proj>/<member>`; shared mode → the
+// project's default branch (no per-engineer branching). Lifted out of
+// buildDeliverableManifest so update.gala can stay free of a dot-
+// imported `policy` (which conflicts with the local `policy` symbol
+// used elsewhere in this file).
+func manifestBranchFor(m AppModel, eng Member) string {
+    val name = policy.WorkspaceModeName(m.Policy.WorkspaceMode)
+    if name == "worktree-per-engineer" {
+        return WorktreeBranchFor(m.Project, eng)
+    }
+    return m.Project.DefaultBranch
 }
 
 // findMemberByName scans the team for a Member whose Name matches.
@@ -1860,20 +1913,40 @@ func isBareJsonCloser(s string) bool {
 // claude only reports total_cost_usd on the final result event;
 // the cost field updates once at turn end.
 //
-// No sanitisation: whatever the codec returned is what we render.
-// See the top-of-section comment for the rationale.
+// Safety net: a chunk's joined text is dropped if it looks like a
+// raw stream-json envelope. This is belt-and-braces — the codec is
+// expected to skip unknown fields, but historical regressions on
+// the gala json side have shown up as a tool_use chunk whose Text
+// got mis-attributed to the JSON envelope. Better to drop than to
+// leak `{"type":"assistant",...}` into the chat pane.
 func assistantEventChunk(evt ClaudeAssistantEvent) ClaudeChunk {
     val texts = evt.Message.Content.Collect({
         case ClaudePart(kind, text) if kind == "text" => text
     })
     val joined = texts.MkString("\n")
+    val safe = if (looksLikeStreamJson(joined)) "" else joined
     return ClaudeChunk(
-        Visible   = joined,
+        Visible   = safe,
         ErrorText = "",
         LiveTurn  = Some(evt.Message.Usage),
         FinalTurn = None[ClaudeUsage](),
         CostUsd   = 0.0,
     )
+}
+
+// looksLikeStreamJson is the JSON-leak guard. Returns true when `text`
+// trims to a `{"...` opener AND contains stream-json field markers
+// that no real assistant prose would carry verbatim. Conservative —
+// real text that happens to start with `{` won't be dropped unless it
+// also includes one of the marker substrings.
+func looksLikeStreamJson(text string) bool {
+    val t = strings.TrimSpace(text)
+    if !strings.HasPrefix(t, "{\"") { return false }
+    return strings.Contains(t, "\"type\":\"assistant\"") ||
+           strings.Contains(t, "\"type\":\"tool_use\"") ||
+           strings.Contains(t, "\"type\":\"tool_result\"") ||
+           strings.Contains(t, "\"stop_reason\":") ||
+           strings.Contains(t, "\"session_id\":")
 }
 
 // resultEventChunk dispatches result events: errors surface as
@@ -2119,6 +2192,22 @@ func resetAllStatuses(m AppModel) AppModel {
 }
 
 func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
+    // PR-readiness pre-check: refuse to launch `gh pr create` when the
+    // current branch has no commits ahead of the default branch.
+    // Without this, hitting Ctrl+A on a chat-only summary (or before
+    // engineers' worktree commits have landed on the lead's branch)
+    // crashes `gh` with an opaque "no commits" error and the user is
+    // left wondering why the PR didn't open.
+    val readiness = checkPrReady(m.Project)
+    if readiness.IsDefined() {
+        val reason = readiness.GetOrElse("")
+        return (m.Copy(
+            LastError    = Some(s"approval: ${reason}"),
+            Conversation = m.Conversation.Append(
+                session.ConversationLine(Speaker = "policy", Text = s"approval blocked: ${reason}"),
+            ),
+        ), NoCmd[AppMsg]())
+    }
     val nextState = Transition(m.State, ApprovalAccepted(), transitionContext(m))
     val withState = m.Copy(
         State        = nextState,
@@ -2133,6 +2222,52 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
         ),
     )
     return (noted, hooksFutureCmd(m.Project, m.Policy.PreMerge, body))
+}
+
+// checkPrReady returns Some(reason) when the project's current branch
+// is NOT in a state that `gh pr create` will accept. Returns None when
+// it looks safe to fire the PR-creation pipeline. Reasons we surface
+// (instead of letting `gh` crash with an opaque message):
+//   - HEAD == defaultBranch (no diverged work, nothing to PR)
+//   - HEAD has zero commits ahead of defaultBranch
+// We deliberately do NOT call out to the network (`gh repo view`,
+// `git fetch`) — the check should be quick and offline-safe so the
+// approval banner stays responsive.
+func checkPrReady(proj Project) Option[string] {
+    if proj.DefaultBranch == "" { return None[string]() }
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("rev-list", "--count", proj.DefaultBranch + "..HEAD").ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val procTry = subprocess.Spawn(opts)
+    if procTry.IsFailure() { return None[string]() }
+    val proc = procTry.Get()
+    var lastLine = ""
+    var stopped = false
+    for !stopped {
+        val ln = proc.ReadLine()
+        if ln.IsFailure() {
+            stopped = true
+        } else {
+            val t = strings.TrimSpace(ln.Get())
+            if t != "" { lastLine = t }
+        }
+    }
+    val codeTry = proc.Wait()
+    if codeTry.IsFailure() { return None[string]() }
+    val code = codeTry.Get()
+    if code != 0 {
+        // `git rev-list <branch>..HEAD` failed — probably the default
+        // branch ref doesn't exist locally. Don't block the approval;
+        // let `gh pr create` produce its own error.
+        return None[string]()
+    }
+    if lastLine == "0" {
+        return Some(s"no commits ahead of ${proj.DefaultBranch} — nothing to PR")
+    }
+    return None[string]()
 }
 
 // hooksFutureCmd lifts policy.RunHooksFuture into a Cmd[AppMsg]. The
@@ -2179,11 +2314,22 @@ func onReject(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     }
 }
 
+// rejectAndIdle clears the approval banner and surfaces a short hint
+// directing the user to type a follow-up prompt explaining what TL
+// should change. We don't auto-spawn a TL turn here — the user owns
+// the rejection reason; pre-filling the composer would leak our
+// opinion into theirs. The hint goes through the conversation log so
+// the audit trail captures what was rejected.
 func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val nextState = Transition(m.State, ApprovalRejected(), transitionContext(m))
     val withState = m.Copy(
         State = nextState,
-        Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = "/reject")),
+        Conversation = m.Conversation
+            .Append(session.ConversationLine(Speaker = "you", Text = "/reject"))
+            .Append(session.ConversationLine(
+                Speaker = "system",
+                Text = "Approval rejected. Type a prompt to redirect the team — the lead picks it up as the next turn.",
+            )),
     )
     return (withState, NoCmd[AppMsg]())
 }

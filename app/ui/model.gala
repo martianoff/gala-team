@@ -239,12 +239,15 @@ sealed type FocusState {
 
 // ViewMode picks the top-level layout. ViewDefault is the launching
 // split (sidebar + conversation); the others are fullscreen
-// alternatives toggled via function keys (Frame M/N/O of the design).
+// alternatives toggled via function keys (Frame M/N/O/P of the
+// design). ViewActivity is the reverse-chronological event stream
+// (DESIGN.md Frame P, F5).
 sealed type ViewMode {
     case ViewDefault
     case ViewFocus
     case ViewGrid
     case ViewPipeline
+    case ViewActivity
 }
 
 

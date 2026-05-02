@@ -112,12 +112,13 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
 }
 
 // fnKeyToMsg maps function keys to view-mode toggles. F1 returns to
-// the default split layout; F2/F3/F4 set focus / grid / pipeline.
-// F5 is reserved for activity mode (not yet implemented).
+// the default split layout; F2/F3/F4/F5 set focus / grid / pipeline /
+// activity (Frame P of the design — reverse-chronological event log).
 func fnKeyToMsg(n int) AppMsg {
     if n == 1 { return KeySetViewMode(Mode = ViewDefault()) }
     if n == 2 { return KeySetViewMode(Mode = ViewFocus()) }
     if n == 3 { return KeySetViewMode(Mode = ViewGrid()) }
     if n == 4 { return KeySetViewMode(Mode = ViewPipeline()) }
+    if n == 5 { return KeySetViewMode(Mode = ViewActivity()) }
     return NoOp()
 }

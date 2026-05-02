@@ -1,12 +1,11 @@
 # gala_team
 
-A terminal orchestrator that turns a team of Claude CLI sessions into a single
-chain-of-command. You talk to the **Team Lead**. The Team Lead delegates to
-**Engineers** and **QAs**, reviews their work, and hands you back a summary and
-a pull request for sign-off.
+Multi-agent Claude CLI orchestrator -- a Team Lead delegates to **Engineers**
+and **QAs**, reviews their work, and hands you back a summary and a pull
+request for sign-off.
 
 Written in [GALA](https://github.com/martianoff/gala) with the
-[`gala_tui`](https://github.com/martianoff/gala_tui) Elm-style TUI framework.
+[`gala_tui`](https://github.com/martianoff/gala-tui) Elm-style TUI framework.
 
 > Status: alpha. Schema and key bindings may shift between commits.
 

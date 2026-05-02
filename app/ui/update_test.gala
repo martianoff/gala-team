@@ -1311,6 +1311,31 @@ func TestKeyToggleHelp_F6_FlipsHelpVisible(t T) T {
     return IsFalse(t1, m2.HelpVisible)
 }
 
+// rate_limit_event JSON lines must be dropped entirely — they are
+// neither assistant nor result, just claude's metadata, and must not
+// appear in the user-facing conversation.
+func TestOnChunk_RateLimitEvent_IsDropped(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":1777750200},\"uuid\":\"cc0\",\"session_id\":\"abc\"}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
+    return Eq(t, entries.Size(), 0)
+}
+
+// Legitimate prose that happens to contain JSON-shaped substrings
+// (e.g. the lead explaining stream-json format to engineers) must
+// pass through UNTRUNCATED. Earlier filter aggressively chopped at
+// `"stop_reason":` regardless of context, leaving the user with
+// empty entries when prose continued past such substrings.
+func TestOnChunk_LegitimateProseWithJsonSubstrings_PassesThrough(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"To parse claude output, look for the field named stop_reason — it tells you why the turn ended.\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":20,\"cache_read_input_tokens\":0}}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
+    val t1 = Eq(t, entries.Size(), 1)
+    return IsTrue(t1, strings.Contains(entries.Get(0).Text, "stop_reason — it tells you"))
+}
+
 // dispatchOneConsult must filter the main team out of the in-project
 // team list before passing to DispatchConsult — otherwise a lead's
 // `@consult(<own-key>)` would loop back to itself instead of

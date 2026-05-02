@@ -81,12 +81,15 @@ func ExtractClaudeText(line string) string {
     return ""
 }
 
-// sanitizeHeadlessText is the leak guard pair: whole-envelope drop
-// then partial-tail truncate. Same shape as the UI's sanitizer.
+// sanitizeHeadlessText is the leak guard. ONE check: drop the chunk
+// entirely if the text is a recognisable stream-json envelope.
+// Same rationale as the UI sanitizer — partial-tail truncation was
+// over-aggressive on legitimate prose containing JSON-shaped
+// substrings, and the codec has been verified not to overshoot.
 func sanitizeHeadlessText(text string) string {
     if text == "" { return "" }
     if isHeadlessStreamJson(text) { return "" }
-    return truncateAtHeadlessMarker(text)
+    return text
 }
 
 func isHeadlessStreamJson(text string) bool {

@@ -2177,14 +2177,23 @@ func assistantEventChunk(evt ClaudeAssistantEvent) ClaudeChunk {
     )
 }
 
-// sanitizeAssistantText runs both leak guards in order. If the whole
-// text is recognisably a stream-json envelope, drop it; otherwise
-// truncate at the first leaked-envelope marker so legitimate prose
-// up to the leak is still rendered. Empty input passes through.
+// sanitizeAssistantText is the leak guard. ONE check only: drop the
+// chunk entirely if the trimmed text is a recognisable stream-json
+// envelope opener. Anything else passes through verbatim.
+//
+// The previous incarnation also called truncateAtEnvelopeMarker to
+// chop at substrings like `"stop_reason":` mid-text, which was
+// over-aggressive: claude's prose can legitimately contain those
+// substrings (when the lead is explaining stream-json format,
+// quoting JSON output, etc.). The marker truncation produced "empty
+// entries" the user reported — prose that ended at byte N because
+// byte N was the start of a marker substring inside a legitimate
+// quote. The codec has been verified not to overshoot strings, so
+// truncation isn't load-bearing.
 func sanitizeAssistantText(text string) string {
     if text == "" { return "" }
     if looksLikeStreamJson(text) { return "" }
-    return truncateAtEnvelopeMarker(text)
+    return text
 }
 
 // looksLikeStreamJson is the whole-envelope guard: matches when the

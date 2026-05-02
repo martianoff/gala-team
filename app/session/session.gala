@@ -3,6 +3,7 @@ package session
 import (
     "os"
     "path/filepath"
+    "strings"
     "time"
     "martianoff/gala/json"
     . "martianoff/gala/std"
@@ -130,3 +131,73 @@ func LoadOrError(repoDir string) Either[string, Snapshot] {
 // pre-0.41.0 because Codec[T] couldn't decode `Conversation
 // Array[ConversationLine]`. PR #314 closed that gap, so we no longer
 // need them.
+
+// EnsureGitignore appends `.gala_team/` to the project's .gitignore
+// if (a) the file doesn't already mention it, and (b) the project is
+// a git repo (we don't litter random folders with stray .gitignore
+// files). Returns Success(true) when an append happened, Success(false)
+// when nothing changed, Failure on IO error.
+//
+// Per DESIGN.md §4.6: "`.gala_team/` is appended to the project's
+// `.gitignore` automatically on first run (with a Don't strip if
+// present guard so we don't fight the user)."
+func EnsureGitignore(repoDir string) Try[bool] = Try[bool](() => {
+    val gitDir = filepath.Join(repoDir, ".git")
+    val gitInfo, gitErr = os.Stat(gitDir)
+    val _ = gitInfo
+    if gitErr != nil {
+        return false
+    }
+    val path = filepath.Join(repoDir, ".gitignore")
+    val existing, readErr = os.ReadFile(path)
+    val current = if (readErr == nil) string(existing) else ""
+    if hasGalaTeamLine(current) {
+        return false
+    }
+    val sep = if (current == "" || strings.HasSuffix(current, "\n")) "" else "\n"
+    val updated = current + sep + ".gala_team/\n"
+    val writeErr = os.WriteFile(path, ToBytes(updated), os.FileMode(0644))
+    if writeErr != nil { panic(s"session: write ${path}: ${writeErr.Error()}") }
+    return true
+})
+
+// hasGalaTeamLine returns true iff `body` already mentions the
+// `.gala_team` path in some form — covers `.gala_team`,
+// `.gala_team/`, `.gala_team/*`, and any leading whitespace. Avoids
+// re-appending the line on every launch.
+func hasGalaTeamLine(body string) bool {
+    val lines = strings.Split(body, "\n")
+    var i = 0
+    val n = len(lines)
+    for i < n {
+        val t = strings.TrimSpace(lines[i])
+        if strings.HasPrefix(t, ".gala_team") { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// AppendEvent appends one JSON line to the per-session events.jsonl
+// file under .gala_team/sessions/events.jsonl. Each event is a
+// caller-supplied JSON object (free-form for now — future versions
+// can wire a typed Event sealed type). Returns Success(true) on the
+// happy path; failures land as Failure so the caller can decide to
+// surface in LastError or silently drop.
+//
+// Per DESIGN.md §4.6: "events.jsonl — append-only, one JSON object
+// per line. Every state-machine transition, every dispatch, every
+// status flip, every hook result, every chunk hash. Cheap to fsync,
+// cheap to replay."
+func AppendEvent(repoDir string, eventJson string) Try[bool] = Try[bool](() => {
+    val path = filepath.Join(repoDir, ".gala_team", "sessions", "events.jsonl")
+    val parent = filepath.Dir(path)
+    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
+    if mkErr != nil { panic(s"session: mkdir ${parent}: ${mkErr.Error()}") }
+    val f, openErr = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.FileMode(0644))
+    if openErr != nil { panic(s"session: open ${path}: ${openErr.Error()}") }
+    val _, writeErr = f.WriteString(eventJson + "\n")
+    val closeErr = f.Close()
+    if writeErr != nil { panic(s"session: write ${path}: ${writeErr.Error()}") }
+    if closeErr != nil { panic(s"session: close ${path}: ${closeErr.Error()}") }
+    return true
+})

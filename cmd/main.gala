@@ -277,6 +277,10 @@ func main() {
         die("--team is required (path to team.yaml)\n  see --help for usage")
     }
     val proj   = resolveProject(projDir)
+    // Append .gala_team/ to .gitignore on first run so engineer
+    // worktrees + session snapshots don't leak into the user's
+    // commits. Best-effort — non-git dirs and IO errors are silent.
+    val _ = session.EnsureGitignore(proj.Repo)
     val cfgRaw = loadTeamConfig(teamPath)
     val cfg = PickMainTeam(cfgRaw, teamKey) match {
         case Success(c) => c

@@ -2,6 +2,7 @@ package main
 
 import (
     "os"
+    "strings"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
@@ -192,11 +193,16 @@ func TestKeyReject_OutsideApproval_NoOp(t T) T {
 // onPrCreated also appends a "Press Ctrl+M to merge" hint line, so
 // the conversation has 2 entries — TestPrCreated_AppendsBothLogLines
 // covers the count; this one focuses on the URL line itself.
+// The PR-created log line embeds an OSC 8 escape so terminals that
+// support it render the URL as a clickable hyperlink. Tests check for
+// the URL substring rather than equality so the escape wrapping
+// doesn't make the assertion brittle.
 func TestPrCreated_AppendsUrlToConversationLog(t T) T {
     val (m, _) = Update(sampleModel(), PrCreated(Url = "https://github.com/x/y/pull/1"))
     val first = m.Conversation.Get(0)
     val t1 = Eq(t, first.Speaker, "gh")
-    return Eq(t1, first.Text, "PR created: https://github.com/x/y/pull/1")
+    val t2 = IsTrue(t1, strings.HasPrefix(first.Text, "PR created: "))
+    return IsTrue(t2, strings.Contains(first.Text, "https://github.com/x/y/pull/1"))
 }
 
 func TestPrFailed_SetsLastErrorWithGhPrefix(t T) T {
@@ -270,7 +276,7 @@ func TestPrCreated_StoresUrlInLastPrUrl(t T) T {
 func TestPrCreated_AppendsBothLogLines(t T) T {
     val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7"))
     val t1 = Eq(t, m.Conversation.Size(), 2)
-    val t2 = Eq(t1, m.Conversation.Get(0).Text, "PR created: https://x/y/pull/7")
+    val t2 = IsTrue(t1, strings.Contains(m.Conversation.Get(0).Text, "https://x/y/pull/7"))
     return IsTrue(t2, m.Conversation.Get(1).Text == "Press Ctrl+M to merge with --squash.")
 }
 

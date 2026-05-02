@@ -2444,12 +2444,36 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // in headless / CI contexts) and don't auto-merge (the user always
 // gets a confirmation step).
 func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
+    // Wrap the URL in OSC 8 so terminals that support it (Windows
+    // Terminal / iTerm2 / kitty / modern xterm) render it as a real
+    // clickable hyperlink. Terminals that don't recognise the escape
+    // drop it silently and the URL still renders inline.
+    val linkified = prOscOpen(url) + url + prOscClose()
+    val toast = m.Toasts.PushInfo(s"PR ready · ${url}", time_utils.Now(), time_utils.Seconds(int64(8)))
     return (m.Copy(
         LastPrUrl    = Some(url),
+        Toasts       = toast,
         Conversation = m.Conversation
-            .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${url}"))
+            .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${linkified}"))
             .Append(session.ConversationLine(Speaker = "gh", Text = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.")),
     ), NoCmd[AppMsg]())
+}
+
+// prOscOpen / prOscClose emit the OSC 8 escape sequence pair. The gala-tui
+// package exports its own oscOpen/oscClose names so we prefix to avoid
+// the dot-import collision. \x1b]8;;<url>\x1b\\ opens; \x1b]8;;\x1b\\
+// closes. We can't reuse gala-tui's Link helper here (it returns a
+// Widget; this code path needs to embed raw chars in a string field
+// that flows through ConversationLog), so we duplicate the byte
+// sequence — same shape as the gala-tui implementation.
+func prOscOpen(url string) string {
+    val esc = string(rune(27))
+    return s"${esc}]8;;${url}${esc}\\"
+}
+
+func prOscClose() string {
+    val esc = string(rune(27))
+    return s"${esc}]8;;${esc}\\"
 }
 
 // onMerge fires when the user presses Ctrl+M after a PrCreated. Only

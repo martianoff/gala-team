@@ -475,7 +475,14 @@ func memberDetailBody(m AppModel, name string, width int) Widget {
         TextStyled("  (no transcript yet for this member)", DefaultStyle().WithDim())
     else
         ConversationLogView(log, viewportH)
-    val footer = TextStyled("  Esc to close · scroll wheel / PgUp/PgDn to scroll",
+    // Footer carries the action buttons + key hints. Copy transcript
+    // is bound to `c` while the modal is focused (also reachable via
+    // palette → "Yank conversation"). Frame I in DESIGN.md asks for
+    // [Copy transcript] and [Save to file…]; Save is captured as a
+    // palette-only action for now to keep the modal footer terse.
+    val actionRow = TextStyled("  [ Copy transcript: Ctrl+Y ]   [ Close: Esc ]",
+        DefaultStyle())
+    val footer = TextStyled("  scroll wheel / PgUp/PgDn to scroll",
         DefaultStyle().WithDim())
     return Column(ArrayOf[LayoutChild](
         Fixed(1, titleBar),
@@ -485,6 +492,7 @@ func memberDetailBody(m AppModel, name string, width int) Widget {
         Fixed(1, FillCh('-')),
         Flex(1, transcript),
         Fixed(1, FillCh('-')),
+        Fixed(1, actionRow),
         Fixed(1, footer),
     ))
 }

@@ -1630,3 +1630,53 @@ func TestQaAutoSpawnNudge_SingularPlural(t T) T {
     return IsTrue(t1, strings.Contains(two, "Theo, Aria are a QA member"))
 }
 
+// ---------------------------------------------------------------------------
+// JSON buffer-and-extract regression — the actual leak from the live
+// session screenshot (Felix's tool_result content for a Read of a
+// BUILD.bazel file). Split into two chunks at a sub-line boundary
+// inside the envelope's `content` string. The tail chunk has zero
+// `{` characters (BUILD.bazel uses parens) — the previous fast-path
+// would have rendered it as plain prose.
+// ---------------------------------------------------------------------------
+
+func TestJsonExtract_SplitToolResult_TailDoesNotLeakAsProse(t T) T {
+    val seed = sampleModel()
+    // Chunk 1: open envelope + first half of content string.
+    val chunk1 = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01\",\"type\":\"tool_result\",\"content\":\"gala_bootstrap_transpile(\\n  name = \\\"naming_go\\\",\\n  src = \\\"naming.g"
+    // Chunk 2: tail of content + envelope close. Has ZERO `{`.
+    val chunk2 = "ala\\\",\\n  out = \\\"naming.gen.go\\\",\\n)\",\"numLines\":67}]},\"session_id\":\"abc\"}"
+    val (m1, _) = Update(seed, ChunkArrived(Member = "Felix", Line = chunk1))
+    val (m2, _) = Update(m1,   ChunkArrived(Member = "Felix", Line = chunk2))
+    // Expect: zero conversation lines from Felix. The whole thing is
+    // a `type:"user"` envelope which the whitelist drops.
+    val felixLines = m2.Conversation.Filter((cl) => cl.Speaker == "Felix")
+    return Eq(t, felixLines.Size(), 0)
+}
+
+func TestJsonExtract_BraceCountedExtraction_PullsCompleteEnvelope(t T) T {
+    val ext = extractCompleteEnvelopes("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}\n")
+    val t1 = Eq(t, ext.Envelopes.Size(), 1)
+    return Eq(t1, ext.Leftover, "")
+}
+
+func TestJsonExtract_PartialEnvelope_HeldInLeftover(t T) T {
+    // Open envelope, no close — should produce zero envelopes and
+    // hold the entire input as leftover for the next chunk.
+    val ext = extractCompleteEnvelopes("{\"type\":\"assistant\",\"message\":{\"content\":[{")
+    val t1 = Eq(t, ext.Envelopes.Size(), 0)
+    return IsTrue(t1, len(ext.Leftover) > 0)
+}
+
+func TestJsonExtract_BraceInsideString_DoesNotConfuseCounter(t T) T {
+    // Content string contains literal `{` and `}` — must NOT be
+    // counted by the brace tracker.
+    val ext = extractCompleteEnvelopes("{\"x\":\"{nested}\"}\n")
+    return Eq(t, ext.Envelopes.Size(), 1)
+}
+
+func TestJsonExtract_EscapedQuoteInsideString_StillTracksProperly(t T) T {
+    // Escaped quote inside a string must NOT close the string.
+    val ext = extractCompleteEnvelopes("{\"x\":\"a\\\"b\"}\n")
+    return Eq(t, ext.Envelopes.Size(), 1)
+}
+

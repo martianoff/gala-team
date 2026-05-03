@@ -1346,14 +1346,26 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     if pending > 0 {
         return (m.Copy(PendingClosures = m.PendingClosures.Put(name, pending - 1)), NoCmd[AppMsg]())
     }
-    // Plain-prose fast path. If the line contains NO `{` at all,
-    // buffer-and-extract has nothing to do and the line is either
-    // (a) a test harness injecting bare text, or (b) the rare case
-    // where claude is NOT running with --output-format=stream-json.
-    // Render verbatim. The buffer is left alone — non-JSON prose is
-    // independent of any in-progress envelope.
+    // Plain-prose fast path. STRICT: only kick in when ALL of:
+    //   1. Line has zero `{` characters (no JSON open).
+    //   2. Buffer is empty (not mid-envelope — a tool_result tail
+    //      with no `{` would otherwise wrongly fast-path).
+    //   3. Line has zero JSON-fingerprint characters (no `"`, no
+    //      `\` — real prose almost never has either, but JSON
+    //      fragments that lost their `{` always do).
+    // Production claude in --output-format=stream-json never emits
+    // a line satisfying all three. Tests + non-stream-json modes
+    // injecting bare ASCII text still pass through. JSON tail
+    // fragments that lost their leading `{` upstream (claude
+    // restart, --resume mid-envelope, line buffer split inside a
+    // string) get dropped silently — there's no safe way to
+    // reconstruct them and rendering raw is the bug we're fixing.
+    val priorBufQuick = m.MemberJsonBuf.Get(name).GetOrElse("")
     val trimmedLine = strings.TrimSpace(line)
-    val isAllProse = trimmedLine != "" && !strings.Contains(line, "{")
+    val hasNoJsonShapes = !strings.Contains(line, "{") &&
+                          !strings.Contains(line, "\"") &&
+                          !strings.Contains(line, "\\")
+    val isAllProse = trimmedLine != "" && hasNoJsonShapes && priorBufQuick == ""
     if isAllProse {
         val proseChunk = ClaudeChunk(
             Visible   = line,
@@ -1746,21 +1758,53 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         //     pending set and advances to QAGate / TLReview / relay.
         if name == cleaned.Team.Lead.Name {
             val dirs = Parse(cleaned.TurnBuffer)
-            // Malformed-dispatch nudge for the TL. If the lead emitted
-            // zero valid directives but their TurnBuffer contains tell-
-            // tale signs of an attempted dispatch (arrow notation,
-            // markdown headings naming members, multi-target @dispatch,
-            // missing @end), the most likely cause is the lead writing
-            // in prose without the strict @dispatch(<Name>) ... @end
-            // form. Send a system nudge back to the lead. Without
-            // this, the user sees the lead "talk about" dispatching
-            // but no work fires — silent stall.
-            val malformedReason = detectMalformedDispatch(cleaned.TurnBuffer, cleaned.Team)
-            if dirs.IsEmpty() && malformedReason != "" {
+            // Empty-dispatch guard. If the lead's turn parsed zero
+            // directives at all (no @dispatch, no @summary, nothing),
+            // the FSM must NOT transition to Delegating — that would
+            // cascade into the QAGate auto-spawn and fire QA against
+            // an empty review set, which the user reported as "Theo
+            // @blocked because no engineer output". Two paths from
+            // here:
+            //   1. Buffer has tell-tale signs of an attempted dispatch
+            //      (arrow notation, multi-target, missing @end) →
+            //      send a malformed-dispatch nudge so Iris retries.
+            //   2. Buffer is plain chat → stay in Idle, the user sees
+            //      Iris's reply and decides what to do next.
+            // Either way, no Delegating, no auto-QA.
+            if dirs.IsEmpty() {
+                val malformedReason = detectMalformedDispatch(cleaned.TurnBuffer, cleaned.Team)
+                if malformedReason != "" {
+                    val (m1, nudgeCmds) = spawnTLNudge(
+                        setStatus(cleaned, name, StIdle()),
+                        "malformed-dispatch",
+                        buildMalformedDispatchPrompt(malformedReason, cleaned.Team),
+                    )
+                    return (m1, batchAll(nudgeCmds))
+                }
+                // Plain chat — return to Idle, no orchestration.
+                return (setStatus(cleaned.Copy(State = Idle()), name, StIdle()), NoCmd[AppMsg]())
+            }
+            // Empty-after-QA-filter guard. If every dispatch target
+            // resolved to a QA member (and qa_required is on), the
+            // partition step would drop them all, leaving zero
+            // engineer dispatches. Same anti-cascade: nudge the lead
+            // and stay out of Delegating.
+            val dispatchTargets = dirs.Collect({ case Dispatch(n, b) => (n, b) })
+            val nonQa = if (cleaned.Workflow.QARequired) {
+                val (allowed, _) = partitionQaTargets(dispatchTargets, cleaned.Team)
+                allowed
+            } else {
+                dispatchTargets
+            }
+            if !dispatchTargets.IsEmpty() && nonQa.IsEmpty() {
+                val droppedNames = dispatchTargets.Map((p) => p match {
+                    case (n, _) => n
+                    case _      => ""
+                })
                 val (m1, nudgeCmds) = spawnTLNudge(
                     setStatus(cleaned, name, StIdle()),
-                    "malformed-dispatch",
-                    buildMalformedDispatchPrompt(malformedReason, cleaned.Team),
+                    "qa-only-dispatch",
+                    buildQaAutoSpawnNudge(droppedNames),
                 )
                 return (m1, batchAll(nudgeCmds))
             }

@@ -13,6 +13,7 @@ gala_library(
         "//app/session",
         "//app/team",
         "@gala//collection_immutable",
+        "@gala//go_interop",
         "@gala//json",
     ],
     visibility = ["//visibility:public"],

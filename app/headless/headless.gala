@@ -247,13 +247,20 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
                 // complete `{...}` object out, hold the leftover for
                 // the next ChunkArrived. ExtractClaudeText then sees
                 // only complete envelopes — no fragment leaks.
+                val priorBufBeforeAppend = jsonBuf
                 jsonBuf = jsonBuf + line + "\n"
                 val (envs, leftover) = extractHeadlessEnvelopes(jsonBuf)
                 jsonBuf = leftover
-                if envs.IsEmpty() && !strings.Contains(line, "{") {
-                    // Plain prose with no `{` at all (rare — claude in
-                    // stream-json mode wraps everything in JSON, but
-                    // tests / non-stream-json modes inject bare text).
+                val hasNoJsonShapesHl = !strings.Contains(line, "{") &&
+                                        !strings.Contains(line, "\"") &&
+                                        !strings.Contains(line, "\\")
+                if envs.IsEmpty() && hasNoJsonShapesHl && priorBufBeforeAppend == "" {
+                    // Plain prose: zero `{`, zero `"`, zero `\`, and
+                    // the buffer was empty before this chunk. Real
+                    // assistant prose rendered through tests fits;
+                    // tail-of-envelope JSON fragments that lost their
+                    // leading `{` upstream do not (they always carry
+                    // quotes / escapes), and they're dropped.
                     val visible = strings.TrimSpace(line)
                     if visible != "" && !isDuplicateOfLast(convo, name, visible) {
                         convo = convo.Append(session.ConversationLine(Speaker = name, Text = visible))

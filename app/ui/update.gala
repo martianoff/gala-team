@@ -1691,6 +1691,24 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         //     pending set and advances to QAGate / TLReview / relay.
         if name == cleaned.Team.Lead.Name {
             val dirs = Parse(cleaned.TurnBuffer)
+            // Malformed-dispatch nudge for the TL. If the lead emitted
+            // zero valid directives but their TurnBuffer contains tell-
+            // tale signs of an attempted dispatch (arrow notation,
+            // markdown headings naming members, multi-target @dispatch,
+            // missing @end), the most likely cause is the lead writing
+            // in prose without the strict @dispatch(<Name>) ... @end
+            // form. Send a system nudge back to the lead. Without
+            // this, the user sees the lead "talk about" dispatching
+            // but no work fires — silent stall.
+            val malformedReason = detectMalformedDispatch(cleaned.TurnBuffer, cleaned.Team)
+            if dirs.IsEmpty() && malformedReason != "" {
+                val (m1, nudgeCmds) = spawnTLNudge(
+                    setStatus(cleaned, name, StIdle()),
+                    "malformed-dispatch",
+                    buildMalformedDispatchPrompt(malformedReason, cleaned.Team),
+                )
+                return (m1, batchAll(nudgeCmds))
+            }
             val nextState = Transition(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
             val withState = setStatus(cleaned.Copy(State = nextState), name, StIdle())
             // If the new state is Delegating, fan out: spawn each
@@ -1702,6 +1720,27 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 return spawnDispatchedMembers(withState, dirs)
             }
             return (withState, NoCmd[AppMsg]())
+        }
+        // Non-TL member turn end. Same idea as the TL nudge: if the
+        // member's turn buffer carries fingerprints of an attempted
+        // protocol directive (TL-only directives like @dispatch /
+        // @summary used incorrectly, OR @finished / @blocked / @help /
+        // @review without a proper @end close, OR a "review approve /
+        // reject" verdict not wrapped in @review), nudge them back to
+        // the right form so the FSM doesn't sit waiting on a turn that
+        // already happened informally.
+        val memberBuffer = cleaned.MemberBuffers.Get(name).GetOrElse("")
+        val mem = findMemberByName(cleaned.Team.Members, name)
+        val memberMalformed = mem match {
+            case Some(mm) => detectMalformedMemberReport(memberBuffer, mm)
+            case None()   => ""
+        }
+        val parsedDirs = Parse(memberBuffer)
+        if parsedDirs.IsEmpty() && memberMalformed != "" {
+            return mem match {
+                case None() => (cleaned, NoCmd[AppMsg]())
+                case Some(mm) => sendMemberNudge(cleaned, mm, memberMalformed)
+            }
         }
         val body = cleaned.MemberDoneBodies.Get(name).GetOrElse("")
         val nextState = Transition(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
@@ -1994,6 +2033,148 @@ func isDuplicateOfLastConvoLine(convo Array[session.ConversationLine], speaker s
         case None()     => false
         case Some(last) => last.Speaker == speaker && last.Text == text
     }
+
+// detectMalformedDispatch scans the TL's turn buffer for fingerprints
+// of an attempted-but-invalid dispatch. Returns a short human-readable
+// reason describing what was seen, or "" when nothing looks malformed.
+// Used after Parse() returns zero directives — if there are clear
+// signs the TL TRIED to dispatch (named members in headings, used
+// arrow notation, used multi-target @dispatch), the orchestrator
+// nudges them back to the protocol instead of silently dropping the
+// turn.
+//
+// Patterns we flag:
+//   - `→ <MemberName>:` / `-> <MemberName>:` — arrow notation
+//   - `**<MemberName>:**` — bold heading
+//   - `@dispatch(<Name>, <Name>)` — multi-target (parser only takes first)
+//   - `@dispatch(<Name>)` without a matching `@end` line below
+//   - Member name on its own line followed by `:` — probable header
+func detectMalformedDispatch(buffer string, tm Team) string {
+    if buffer == "" { return "" }
+    // (1) Multi-target @dispatch — has a comma inside the args.
+    if strings.Contains(buffer, "@dispatch(") {
+        val afterTag = strings.SplitN(buffer, "@dispatch(", 2)
+        if len(afterTag) == 2 {
+            val argsAndRest = strings.SplitN(afterTag[1], ")", 2)
+            if len(argsAndRest) == 2 && strings.Contains(argsAndRest[0], ",") {
+                // The parser takes only the first comma-separated target;
+                // a comma inside the args is the multi-target shape.
+                return "@dispatch(...) with multiple comma-separated names — only the first is dispatched. Open a separate @dispatch(...)...@end block for each engineer."
+            }
+        }
+        // (2) @dispatch without a matching @end.
+        if !strings.Contains(buffer, "\n@end") && !strings.HasSuffix(strings.TrimSpace(buffer), "@end") {
+            return "@dispatch(...) opening tag without a matching @end line. Each directive must close with @end on its own line."
+        }
+    }
+    // (3) / (4) Arrow notation + markdown heading naming a member.
+    val members = tm.Members.Map((m) => m.Name)
+    val anyArrow = members.Find((n) =>
+        strings.Contains(buffer, s"→ ${n}:") || strings.Contains(buffer, s"-> ${n}:")
+    )
+    if anyArrow.IsDefined() {
+        return s"arrow-notation header (e.g. `→ ${anyArrow.Get()}:`) addressed to a team member — that's decorative prose, not a dispatch. Replace each with `@dispatch(${anyArrow.Get()})`...`@end`."
+    }
+    val anyBold = members.Find((n) =>
+        strings.Contains(buffer, s"**${n}:**") || strings.Contains(buffer, s"**${n}**:")
+    )
+    if anyBold.IsDefined() {
+        return s"bold heading naming a team member (e.g. `**${anyBold.Get()}:**`) — that's decorative prose, not a dispatch. Replace each with `@dispatch(${anyBold.Get()})`...`@end`."
+    }
+    return ""
+}
+
+// buildMalformedDispatchPrompt assembles the nudge prompt sent back
+// to the TL when detectMalformedDispatch fires. Inlines the suspected
+// failure mode plus the canonical protocol example so the model has
+// everything it needs to retry correctly in one turn.
+func buildMalformedDispatchPrompt(reason string, tm Team) string {
+    val names = tm.Members
+        .Filter((m) => !SameRole(m.Role, TeamLead()))
+        .Map((m) => m.Name)
+        .MkString(" / ")
+    return s"System: I tried to parse your last turn for orchestration directives but found none. Likely cause:\n\n${reason}\n\nThe orchestrator only recognises the literal form:\n\n@dispatch(<MemberName>)\n<task body>\n@end\n\nOpen ONE block per engineer (e.g. one for each of: ${names}). Naming members in prose, headings, or arrow lines does nothing — the engineer never sees that text.\n\nRewrite your previous response now using the strict @dispatch(...)...@end form for each engineer you intended to delegate to. The body of each block IS what that engineer reads as their task — write it as a direct task description, not as if you were narrating to the user."
+}
+
+// detectMalformedMemberReport scans a non-TL member's turn buffer for
+// fingerprints of an attempted-but-invalid status directive. Returns
+// a short reason or "" when nothing looks malformed.
+//
+// Patterns we flag:
+//   - TL-only directive (@dispatch / @summary) emitted by a non-TL
+//   - @finished / @blocked / @help / @review opener without a close
+//   - "REVIEW APPROVE" / "REVIEW REJECT" plain text by a QA member
+//     who forgot the @review wrapper
+//   - "DONE" / "FINISHED" markers by an engineer who forgot @finished
+func detectMalformedMemberReport(buffer string, mem Member) string {
+    if buffer == "" { return "" }
+    val trimmed = strings.TrimSpace(buffer)
+    // (1) TL-only directives emitted by a non-TL member.
+    if strings.Contains(buffer, "@dispatch(") || strings.Contains(buffer, "@summary") {
+        return "you emitted @dispatch / @summary — those are Team Lead directives. Members report status via @finished / @help / @blocked (and QA reviewers via @review)."
+    }
+    // (2) Opener without close. Each opener tag must close with @end
+    // on its own line.
+    val openers = ArrayOf("@finished", "@blocked", "@help", "@review")
+    val openerHit = openers.Find((tag) => strings.Contains(buffer, tag))
+    if openerHit.IsDefined() {
+        val tag = openerHit.Get()
+        if !strings.Contains(buffer, "\n@end") && !strings.HasSuffix(trimmed, "@end") {
+            return s"${tag} opening tag without a matching @end line. Each directive must close with @end on its own line."
+        }
+    }
+    // (3) QA-specific: "@review APPROVE" / "@review REJECT" or
+    // unwrapped "REVIEW APPROVE" / "REVIEW REJECT" — only matters when
+    // the whole turn carries such a verdict in prose with no @review
+    // open / @end close pair. SameRole excludes accidental matches in
+    // engineer prose ("the qa review failed").
+    if SameRole(mem.Role, QA()) && !strings.Contains(buffer, "@review") {
+        val upper = strings.ToUpper(trimmed)
+        if strings.Contains(upper, "REVIEW APPROVE") ||
+           strings.Contains(upper, "REVIEW REJECT") ||
+           strings.HasPrefix(upper, "APPROVE") ||
+           strings.HasPrefix(upper, "REJECT") {
+            return "your turn carries a review verdict in prose but no @review block. Wrap it as `@review APPROVE` or `@review REJECT` followed by findings, then `@end` on its own line."
+        }
+    }
+    // (4) Engineer-specific: turn ends with a clear "DONE" / "FINISHED"
+    // marker but no @finished tag — rare but observed.
+    if SameRole(mem.Role, Engineer()) && !strings.Contains(buffer, "@finished") {
+        val upper = strings.ToUpper(trimmed)
+        if strings.HasSuffix(upper, "DONE.") ||
+           strings.HasSuffix(upper, "FINISHED.") ||
+           strings.HasSuffix(upper, "TASK COMPLETE.") {
+            return "your turn ends with a `done` / `finished` marker but no @finished block. Wrap your deliverable as `@finished` followed by file paths and a one-line note, then `@end` on its own line."
+        }
+    }
+    return ""
+}
+
+// sendMemberNudge re-prompts a non-TL member with a system message
+// pointing at their malformed report. Mirrors spawnTLNudge but sends
+// to the named member's existing session.
+func sendMemberNudge(m AppModel, mem Member, reason string) Tuple[AppModel, Cmd[AppMsg]] {
+    val prompt = buildMemberNudgePrompt(reason, mem)
+    return ensureSession(m, mem) match {
+        case Left(err)  => (m.Copy(LastError = Some(s"nudge ${mem.Name}: ${err}")), NoCmd[AppMsg]())
+        case Right(m1)  => {
+            val withStatus = setStatus(m1, mem.Name, StWorking())
+            return (withStatus, sendAndPumpCmd(withStatus, mem, prompt))
+        }
+    }
+}
+
+// buildMemberNudgePrompt is the per-role equivalent of
+// buildMalformedDispatchPrompt: lists the suspected failure mode plus
+// the canonical reporting protocol the role should use.
+func buildMemberNudgePrompt(reason string, mem Member) string {
+    val protocol = mem.Role match {
+        case TeamLead() => "@dispatch(<Name>)...<body>...@end / @summary...<body>...@end"
+        case Engineer() => "@finished / @help / @blocked — each opens on its own line and closes with @end on its own line"
+        case QA()       => "@review APPROVE | @review REJECT followed by your findings, then @end on its own line. (Other status forms — @finished / @help / @blocked — are also valid if the review hasn't reached a verdict yet.)"
+    }
+    return s"System: I tried to parse your last turn for a status directive but found none. Likely cause:\n\n${reason}\n\nValid forms for your role:\n\n${protocol}\n\nRewrite your previous response using the strict directive form. The body of the block is what your Team Lead reads."
+}
 
 // ----------------------------------------------------------------------------
 // Claude stream-json filtering — typed Codec[T] decode.

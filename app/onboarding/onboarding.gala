@@ -282,6 +282,13 @@ func protocolSection(isTL bool) string {
             "- Plain prose between directives is rendered as your message to the user.\n" +
             "- If you simply want to chat (no orchestration), reply with prose only — no directives needed.\n" +
             "- Don't fabricate member names; only dispatch to members listed in '# Your team' above.\n\n" +
+            "**STRICT — read this twice:** the only thing the orchestrator recognises as a dispatch is the literal token `@dispatch(<Name>)` on its own line, followed by the body, followed by `@end` on its own line. None of the following do anything:\n" +
+            "- `→ Felix:` / `-> Felix:` (arrow notation — this is just decorative prose, no dispatch fires)\n" +
+            "- `**Felix:**` / `## Felix` (markdown heading — same, decorative only)\n" +
+            "- `@dispatch(Felix, Mira)` (multi-target — only Felix would dispatch; the rest is dropped)\n" +
+            "- Mentioning a member by name in prose (\"Felix should handle the parser\") — they will NOT see your prose, only the body of an `@dispatch(<their-name>)` block\n" +
+            "- Any of the above without a matching `@end` line\n\n" +
+            "If you intend to dispatch two engineers in parallel, that means TWO `@dispatch(...) ... @end` blocks back to back, one per engineer. Not one block listing both names.\n\n" +
             "Example dispatch:\n\n" +
             "```\n" +
             "I'll split this two ways.\n\n" +

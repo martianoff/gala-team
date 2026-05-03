@@ -41,6 +41,44 @@ struct PipelineState(Nodes Array[PipelineEvent])
 func EmptyPipelineState() PipelineState =
     PipelineState(Nodes = EmptyArray[PipelineEvent]())
 
+// PipelineUpsert appends a node for `name` if not already present, or
+// overwrites the existing node's status when it is. Used by the spawn
+// paths so each newly-dispatched member shows up in the chain-of-command
+// graph as soon as their turn opens.
+func PipelineUpsert(state PipelineState, name string, status Status) PipelineState {
+    val idx = findPipelineIndex(state.Nodes, name)
+    val event = PipelineEvent(Member = name, Status = status)
+    if idx < 0 {
+        return PipelineState(Nodes = state.Nodes.Append(event))
+    }
+    return PipelineState(Nodes = state.Nodes.Updated(idx, event))
+}
+
+// PipelinePatch updates an existing node's status WITHOUT adding a new
+// one. Used by setStatus so a status change on a member who isn't in
+// the active turn doesn't pollute the pipeline graph (idle members
+// shouldn't appear).
+func PipelinePatch(state PipelineState, name string, status Status) PipelineState {
+    val idx = findPipelineIndex(state.Nodes, name)
+    if idx < 0 { return state }
+    val event = PipelineEvent(Member = name, Status = status)
+    return PipelineState(Nodes = state.Nodes.Updated(idx, event))
+}
+
+// findPipelineIndex returns the index of the node whose Member matches
+// `name`, or -1 when no such node exists. Linear scan — pipelines are
+// at most one row per team member (≤ ~10 in practice).
+func findPipelineIndex(nodes Array[PipelineEvent], name string) int {
+    val n = nodes.Size()
+    var i = 0
+    var found = -1
+    for i < n && found < 0 {
+        if nodes.Get(i).Member == name { found = i }
+        i = i + 1
+    }
+    return found
+}
+
 // PipelineView renders the pipeline mini-graph.  Pure: takes a snapshot,
 // returns a Widget — no state, no animation logic (the caller drives
 // the spinner frame via TickSub).

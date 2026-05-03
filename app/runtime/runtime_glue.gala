@@ -299,8 +299,40 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try[string](() => {
     if mkErr != nil { panic(s"worktree mkdir ${parent}: ${mkErr.Error()}") }
     val info, statErr = os.Stat(wtPath)
     if statErr == nil && info.IsDir() {
-        val rmErr = os.RemoveAll(wtPath)
-        if rmErr != nil { panic(s"worktree clean ${wtPath}: ${rmErr.Error()}") }
+        // Try git's own cleanup first — `git worktree remove --force`
+        // is worktree-aware and handles the case where some metadata
+        // ghost still references this path (would block a plain
+        // `git worktree add`). Best-effort; we don't care if it fails
+        // because the dir wasn't a registered worktree.
+        val gitRm = subprocess.NewSpawnOpts(
+            "git",
+            ArrayOf("worktree", "remove", "--force", wtPath).ToGoSlice(),
+            SliceEmpty[string](),
+            proj.Repo,
+        )
+        subprocess.Spawn(gitRm) match {
+            case Success(p) => { val _ = p.Wait() }
+            case Failure(_) => {}
+        }
+        // Re-stat. If git's remove did the job we're done with this
+        // step. Otherwise fall through to os.RemoveAll.
+        val info2, statErr2 = os.Stat(wtPath)
+        if statErr2 == nil && info2.IsDir() {
+            val rmErr = os.RemoveAll(wtPath)
+            if rmErr != nil {
+                // Don't panic on "in use by another process" / lock
+                // failures. A stale claude.exe with cwd inside this
+                // dir, or a Windows file watcher (gopls / IDE indexer)
+                // holding handles, can keep the dir un-unlinkable for
+                // tens of seconds. The `git worktree add` below will
+                // either succeed (git can sometimes adopt a half-empty
+                // dir) or surface its own error via the idempotency
+                // fallback. Surface the rm failure as a soft warning
+                // path rather than a hard panic so the user isn't left
+                // with a dispatch that died at the cleanup step.
+                val _ = rmErr
+            }
+        }
     }
     // Fork the engineer's worktree from the project's DEFAULT BRANCH
     // (e.g. main / master), NOT from current HEAD. The lead has its

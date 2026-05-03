@@ -36,6 +36,64 @@ func TestPipeline_FailedNode_StillRenders(t T) T {
     return IsTrue(t, pContains(rendered, "Felix"))
 }
 
+// PipelineUpsert / PipelinePatch behavioural tests — the view's the
+// thing the user sees, so verify the state evolves the way the spawn
+// path expects.
+
+func TestPipelineUpsert_AppendsNewMember(t T) T {
+    val s0 = EmptyPipelineState()
+    val s1 = PipelineUpsert(s0, "Iris", StWorking())
+    val s2 = PipelineUpsert(s1, "Felix", StWorking())
+    val t1 = Eq(t, s2.Nodes.Size(), 2)
+    val t2 = Eq(t1, s2.Nodes.Get(0).Member, "Iris")
+    return Eq(t2, s2.Nodes.Get(1).Member, "Felix")
+}
+
+func TestPipelineUpsert_ReplacesExistingStatus(t T) T {
+    val s0 = PipelineUpsert(EmptyPipelineState(), "Felix", StWorking())
+    val s1 = PipelineUpsert(s0, "Felix", StFailed(Reason = "x"))
+    val t1 = Eq(t, s1.Nodes.Size(), 1)
+    return IsTrue(t1, isFailedStatus(s1.Nodes.Get(0).Status))
+}
+
+func TestPipelinePatch_UpdatesExisting(t T) T {
+    val s0 = PipelineUpsert(EmptyPipelineState(), "Iris", StWorking())
+    val s1 = PipelinePatch(s0, "Iris", StDone())
+    val t1 = Eq(t, s1.Nodes.Size(), 1)
+    return IsTrue(t1, isDoneStatus(s1.Nodes.Get(0).Status))
+}
+
+func TestPipelinePatch_NoOpForUnknownMember(t T) T {
+    val s0 = PipelineUpsert(EmptyPipelineState(), "Iris", StWorking())
+    val s1 = PipelinePatch(s0, "Felix", StWorking())
+    return Eq(t, s1.Nodes.Size(), 1)
+}
+
+func TestPipeline_Sequence_DispatchAndComplete(t T) T {
+    // Simulate a full turn: prompt → dispatch two engineers → both
+    // finish → lead summarises → all idle.
+    val s0 = PipelineUpsert(EmptyPipelineState(), "Iris", StWorking())
+    val s1 = PipelineUpsert(s0, "Felix", StWorking())
+    val s2 = PipelineUpsert(s1, "Mira",  StWorking())
+    val s3 = PipelinePatch(s2, "Felix", StDone())
+    val s4 = PipelinePatch(s3, "Mira",  StDone())
+    val s5 = PipelinePatch(s4, "Iris",  StDone())
+    val t1 = Eq(t, s5.Nodes.Size(), 3)
+    val t2 = IsTrue(t1, isDoneStatus(s5.Nodes.Get(0).Status))
+    val t3 = IsTrue(t2, isDoneStatus(s5.Nodes.Get(1).Status))
+    return IsTrue(t3, isDoneStatus(s5.Nodes.Get(2).Status))
+}
+
+func isDoneStatus(s Status) bool = s match {
+    case StDone() => true
+    case _        => false
+}
+
+func isFailedStatus(s Status) bool = s match {
+    case StFailed(_) => true
+    case _           => false
+}
+
 // pContains: same shape as the team_panel test helper; duplicated here
 // to keep the pipeline test self-contained.
 func pContains(haystack string, needle string) bool {

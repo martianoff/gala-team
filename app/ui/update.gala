@@ -1075,6 +1075,11 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // continue, so the "type to resume · Esc to discard" hint
         // has done its job.
         RecoveryBannerVisible = false,
+        // Reset the pipeline graph for the new turn. The lead is
+        // always the first node — they're the one we're about to
+        // spawn for this prompt. Engineers / QA append later as
+        // dispatches fire.
+        Pipeline = PipelineUpsert(EmptyPipelineState(), m.Team.Lead.Name, StWorking()),
     )
     val lead = m.Team.Lead
     // First-turn detection keys on whether we have a SessionId for
@@ -1808,7 +1813,11 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
             case Some(mem) => ensureSession(curM, mem) match {
                 case Left(err)  => (curM.Copy(LastError = Some(s"dispatch ${name}: ${err}")), curCmds)
                 case Right(m1)  => {
-                    val withStatus = setStatus(m1, name, StWorking())
+                    // Pipeline upsert: append (or refresh status of)
+                    // the dispatched member's node so the chain-of-
+                    // command graph picks up the new branch.
+                    val pipelinePushed = m1.Copy(Pipeline = PipelineUpsert(m1.Pipeline, name, StWorking()))
+                    val withStatus = setStatus(pipelinePushed, name, StWorking())
                     // First-turn detection mirrors onSubmit's pattern: if
                     // we don't yet have a session id for this member, this
                     // is their first claude session and the body needs
@@ -1864,7 +1873,10 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return ensureSession(curM, mem) match {
             case Left(err)  => (curM.Copy(LastError = Some(s"qa ${mem.Name}: ${err}")), curCmds)
             case Right(m1)  => {
-                val withStatus = setStatus(m1, mem.Name, StWorking())
+                // Pipeline upsert mirrors the engineer-dispatch path —
+                // QA branches off the same Iris node visually.
+                val pipelinePushed = m1.Copy(Pipeline = PipelineUpsert(m1.Pipeline, mem.Name, StWorking()))
+                val withStatus = setStatus(pipelinePushed, mem.Name, StWorking())
                 val wrapped = if (firstTurn) {
                     val (w, _) = onboarding.WrapPromptSafe(curM.Project, curM.Team, mem, curM.Policy.WorkspaceMode, reviewBody)
                     w
@@ -2777,10 +2789,15 @@ func setStatus(m AppModel, name string, st Status) AppModel {
     val prior = m.Statuses.Get(name).GetOrElse(StIdle())
     val wasWorking = isWorkingStatus(prior)
     val nowWorking = isWorkingStatus(st)
+    // Pipeline patch: only update existing nodes (don't add new ones
+    // here — that would pollute the graph with idle members getting
+    // routine status pokes). Spawn paths handle the upsert.
+    val pipelinePatched = PipelinePatch(m.Pipeline, name, st)
     if !wasWorking && nowWorking {
         return m.Copy(
             Statuses      = m.Statuses.Put(name, st),
             WorkStartedAt = m.WorkStartedAt.Put(name, m.NowAt),
+            Pipeline      = pipelinePatched,
         )
     }
     if wasWorking && !nowWorking {
@@ -2798,9 +2815,10 @@ func setStatus(m AppModel, name string, st Status) AppModel {
             Statuses      = m.Statuses.Put(name, st),
             WorkElapsedNs = m.WorkElapsedNs.Put(name, priorAccum + seg),
             WorkStartedAt = m.WorkStartedAt.Remove(name),
+            Pipeline      = pipelinePatched,
         )
     }
-    return m.Copy(Statuses = m.Statuses.Put(name, st))
+    return m.Copy(Statuses = m.Statuses.Put(name, st), Pipeline = pipelinePatched)
 }
 
 // isWorkingStatus returns true for any status that should accrue

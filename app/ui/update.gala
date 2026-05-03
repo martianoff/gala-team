@@ -1854,8 +1854,21 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
     val targets = dirs.Collect({
         case Dispatch(name, body) => (name, body)
     })
+    // Drop @dispatch() targets that point at a QA member when the
+    // workflow auto-spawns QA. Without this, Iris including a QA
+    // member in her first @dispatch list would fan out QA in parallel
+    // with engineers — the QA member spawns immediately, finds nothing
+    // to review (engineers haven't shipped yet), and emits @blocked.
+    // The orchestrator owns the QA spawn step (spawnQAReview, fired
+    // when engineers complete and the FSM transitions to QAGate);
+    // the lead's job is engineers only.
+    val (allowed, droppedQa) = if (m.Workflow.QARequired) {
+        partitionQaTargets(targets, m.Team)
+    } else {
+        (targets, EmptyArray[string]())
+    }
     val seed = (m, EmptyArray[Cmd[AppMsg]]())
-    val (after, cmds) = targets.FoldLeft(seed, (acc, t) => {
+    val (after, cmds) = allowed.FoldLeft(seed, (acc, t) => {
         val (curM, curCmds) = acc
         val (name, body) = t
         return findMemberByName(curM.Team.Members, name) match {
@@ -1889,7 +1902,41 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
             }
         }
     })
+    // If the lead tried to dispatch QA member(s) directly, send a
+    // one-shot system nudge back so they understand for next turn.
+    // Run AFTER the engineer fanout so the engineers do start (the
+    // user shouldn't be blocked by Iris's protocol slip).
+    if !droppedQa.IsEmpty() {
+        val (afterNudge, nudgeCmds) = spawnTLNudge(after, "qa-auto-spawn", buildQaAutoSpawnNudge(droppedQa))
+        return (afterNudge, batchAll(cmds.Append(batchAll(nudgeCmds))))
+    }
     return (after, batchAll(cmds))
+}
+
+// partitionQaTargets splits dispatch targets into (allowed, droppedQaNames)
+// — entries pointing at a QA team member end up in droppedQaNames; the
+// rest pass through unchanged. Used by spawnDispatchedMembers when the
+// workflow auto-spawns QA so we don't double-dispatch.
+func partitionQaTargets(targets Array[Tuple[string, string]], tm Team) Tuple[Array[Tuple[string, string]], Array[string]] {
+    val seed = (EmptyArray[Tuple[string, string]](), EmptyArray[string]())
+    return targets.FoldLeft(seed, (acc, t) => {
+        val (kept, dropped) = acc
+        val (name, _) = t
+        val mem = findMemberByName(tm.Members, name)
+        return mem match {
+            case Some(mm) => if (SameRole(mm.Role, QA())) (kept, dropped.Append(name)) else (kept.Append(t), dropped)
+            case None()   => (kept.Append(t), dropped)
+        }
+    })
+}
+
+// buildQaAutoSpawnNudge tells the lead, via a system message, that
+// their QA dispatch was dropped and why. Pluralised correctly when
+// multiple QA members were targeted.
+func buildQaAutoSpawnNudge(droppedNames Array[string]) string {
+    val list = droppedNames.MkString(", ")
+    val verbBe = if (droppedNames.Size() == 1) "is" else "are"
+    return s"System: I dropped your @dispatch(${list}) — ${list} ${verbBe} a QA member, and this team has qa_required: true so the orchestrator auto-spawns QA after engineer @finished bodies arrive. Your engineers HAVE been dispatched (their work is starting now). When they finish, ${list} will receive a synthesised review prompt with all engineer deliverables. For future turns: only @dispatch engineers; QA happens automatically."
 }
 
 // spawnQAReview kicks off a QA review session for every QA member on

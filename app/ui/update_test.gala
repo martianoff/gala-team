@@ -1570,3 +1570,63 @@ func TestComposerBackspace_RemovesBeforeCursor(t T) T {
     return Eq(t1, m1.ComposerCursor, 2)
 }
 
+// ---------------------------------------------------------------------------
+// QA auto-spawn guard: if the lead @dispatches a QA member directly
+// when qa_required is true, spawnDispatchedMembers drops it. Engineers
+// in the same fan-out still go through.
+// ---------------------------------------------------------------------------
+
+func teamWithQa() Team {
+    val iris  = Member(Name = "Iris",  Role = TeamLead(), Personality = "", Model = None[string](), Extra = "", Onboarding = EmptyArray[string]())
+    val felix = Member(Name = "Felix", Role = Engineer(), Personality = "", Model = None[string](), Extra = "", Onboarding = EmptyArray[string]())
+    val mira  = Member(Name = "Mira",  Role = Engineer(), Personality = "", Model = None[string](), Extra = "", Onboarding = EmptyArray[string]())
+    val theo  = Member(Name = "Theo",  Role = QA(),       Personality = "", Model = None[string](), Extra = "", Onboarding = EmptyArray[string]())
+    return Team(
+        Key                        = "main",
+        Name                       = "Skunkworks",
+        Description                = "",
+        Members                    = ArrayOf[Member](iris, felix, mira, theo),
+        Lead                       = iris,
+        Onboarding                 = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
+    )
+}
+
+func TestPartitionQaTargets_DropsQaKeepsEngineers(t T) T {
+    val tm = teamWithQa()
+    val targets = ArrayOf[Tuple[string, string]](
+        ("Felix", "build the parser"),
+        ("Theo",  "review please"),
+        ("Mira",  "build the validator"),
+    )
+    val (allowed, dropped) = partitionQaTargets(targets, tm)
+    val t1 = Eq(t, allowed.Size(), 2)
+    val t2 = Eq(t1, dropped.Size(), 1)
+    val t3 = Eq(t2, dropped.Get(0), "Theo")
+    val keptNames = allowed.Map((p) => firstOfStringPair(p))
+    return IsTrue(t3, keptNames.Contains("Felix") && keptNames.Contains("Mira"))
+}
+
+func firstOfStringPair(p Tuple[string, string]) string = p match {
+    case (n, _) => n
+    case _      => ""
+}
+
+func TestPartitionQaTargets_AllEngineers_Untouched(t T) T {
+    val tm = teamWithQa()
+    val targets = ArrayOf[Tuple[string, string]](
+        ("Felix", "x"),
+        ("Mira",  "y"),
+    )
+    val (allowed, dropped) = partitionQaTargets(targets, tm)
+    val t1 = Eq(t, allowed.Size(), 2)
+    return IsTrue(t1, dropped.IsEmpty())
+}
+
+func TestQaAutoSpawnNudge_SingularPlural(t T) T {
+    val one = buildQaAutoSpawnNudge(ArrayOf("Theo"))
+    val two = buildQaAutoSpawnNudge(ArrayOf("Theo", "Aria"))
+    val t1 = IsTrue(t, strings.Contains(one, "Theo is a QA member"))
+    return IsTrue(t1, strings.Contains(two, "Theo, Aria are a QA member"))
+}
+

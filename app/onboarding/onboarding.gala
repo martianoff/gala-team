@@ -123,7 +123,8 @@ func roleSection(proj Project, team Team, member Member, mode WorkspaceMode) str
     val isTL = SameRole(member.Role, TeamLead())
     val roster = if (isTL) s"\n\n${teamRosterSection(team, member)}" else ""
     val workspace = s"\n\n${workspaceSection(proj, member, mode)}"
-    val protocol = s"\n\n${protocolSection(isTL)}"
+    val hasQa = !MembersOf(team, QA()).IsEmpty()
+    val protocol = s"\n\n${protocolSection(isTL, hasQa)}"
     return s"${header}${personality}${extra}${roster}${workspace}${protocol}"
 }
 
@@ -270,7 +271,7 @@ func firstLine(s string) string {
 // member inbound-reporting directives. Both end blocks with `@end`
 // because the parser is line-based and the closing tag is what makes
 // streaming chunks safe to parse incrementally.
-func protocolSection(isTL bool) string {
+func protocolSection(isTL bool, hasQa bool) string {
     if isTL {
         return "# How to delegate (orchestration protocol)\n\n" +
             "You are operating inside an orchestrator that watches your output for special directives. Use these to coordinate the team:\n\n" +
@@ -289,6 +290,9 @@ func protocolSection(isTL bool) string {
             "- Mentioning a member by name in prose (\"Felix should handle the parser\") — they will NOT see your prose, only the body of an `@dispatch(<their-name>)` block\n" +
             "- Any of the above without a matching `@end` line\n\n" +
             "If you intend to dispatch two engineers in parallel, that means TWO `@dispatch(...) ... @end` blocks back to back, one per engineer. Not one block listing both names.\n\n" +
+            (if (hasQa)
+                "**QA dispatch is automatic — do NOT @dispatch QA members yourself.** When `qa_required` is set on this team (which it is, because there's a QA member listed in your roster), the orchestrator auto-spawns QA AFTER engineer `@finished` bodies arrive. The QA member then receives a synthesised review prompt with all the engineer deliverables. If you `@dispatch(<QA-name>)` in the same turn as engineers, the QA member spawns immediately, finds nothing to review (engineers haven't shipped yet), and emits `@blocked` — wasted turn. Just `@dispatch` the engineers; the orchestrator handles QA. The orchestrator will silently drop any `@dispatch(<QA-name>)` you emit and surface a nudge.\n\n"
+             else "") +
             "Example dispatch:\n\n" +
             "```\n" +
             "I'll split this two ways.\n\n" +

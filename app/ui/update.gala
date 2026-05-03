@@ -2143,17 +2143,14 @@ func filterClaudeStreamJsonFor(member string, line string) ClaudeChunk {
         return emptyChunk()
     }
     if !strings.HasPrefix(trimmed, "{") {
-        // Plain text — render verbatim unless the line is a bare JSON
-        // closer (`}` / `]}`). Those bare closers are the only stream
-        // shape we still drop, on the premise that real assistant
-        // text basically never trims to a single closing brace and
-        // a malformed claude stdout line that *was* the second half
-        // of a JSON envelope would otherwise leak into the chat.
-        // False positives (e.g. an assistant turn that genuinely ends
-        // with the literal token "}") are accepted as the lesser evil
-        // versus the silent-drop bug we just removed.
-        if isBareJsonCloser(trimmed) {
-            TraceClaudeLine(member, line, "", "", true, "non-json bare closer")
+        // Non-JSON line. Could be real prose (rare — claude with
+        // --output-format=stream-json wraps everything) or a fragment
+        // where the line buffer split mid-envelope and we got the
+        // tail without its leading `{`. Drop bare closers AND anything
+        // that contains stream-json field markers — both signal a
+        // truncated envelope, not real chat text.
+        if isBareJsonCloser(trimmed) || looksLikeStreamJsonFragment(trimmed) {
+            TraceClaudeLine(member, line, "", "", true, "non-json bare closer or fragment")
             return emptyChunk()
         }
         TraceClaudeLine(member, line, line, "", false, "")
@@ -2165,67 +2162,95 @@ func filterClaudeStreamJsonFor(member string, line string) ClaudeChunk {
             CostUsd   = 0.0,
         )
     }
-    // Type-discriminator pre-filter: drop known non-renderable event
-    // types BEFORE attempting codec decode. The codec sometimes
-    // mis-handles unknown nested objects (tool_use's `input`/`caller`,
-    // user.message.content's tool_result blocks) and produces
-    // garbage; the type prefix is unambiguous and cheap to match.
-    // Anything caught here would have rendered as raw JSON in the
-    // transcript otherwise — see user reports of rate_limit_event /
-    // tool_use_result / system / user envelopes leaking through.
-    if hasJsonTypePrefix(trimmed, "rate_limit_event") ||
-       hasJsonTypePrefix(trimmed, "tool_use_result") ||
-       hasJsonTypePrefix(trimmed, "system") ||
-       hasJsonTypePrefix(trimmed, "user") ||
-       hasJsonTypePrefix(trimmed, "control_request") ||
-       hasJsonTypePrefix(trimmed, "control_response") {
-        TraceClaudeLine(member, line, "", "", true, "non-renderable event type")
-        return emptyChunk()
-    }
-    val asAssistant = claudeAssistantCodec.Decode(trimmed)
-    asAssistant match {
-        case Success(evt) => {
-            if evt.Type == "assistant" {
+    // Whitelist by stream-json `type`. ONLY `assistant` (text content)
+    // and `result` (final-turn text/error) are renderable to the
+    // transcript. Every other type — system, user (tool_result),
+    // tool_use, tool_use_result, rate_limit_event, control_request,
+    // control_response, partial-message-delta, message_start,
+    // message_delta, anything claude introduces in the future — is
+    // orchestration noise that gets dropped. This is the user's
+    // explicit "ONLY allow json entities that we know and reject
+    // everything else" requirement. Without it, unknown envelope
+    // shapes the codec couldn't extract a Visible from leaked their
+    // raw JSON into the chat (the screenshots from the live E2E run).
+    val kind = extractJsonType(trimmed)
+    if kind == "assistant" {
+        return claudeAssistantCodec.Decode(trimmed) match {
+            case Success(evt) => {
                 val chunk = assistantEventChunk(evt)
-                // Assistant chunks with no text parts (thinking-only,
-                // tool_use-only) produce empty Visible. They're not
-                // dropped from the orchestration stream — onChunk still
-                // sees the chunk and accrues usage tokens — but from
-                // a "where did the text go?" debugging perspective they
-                // contributed nothing visible. Mark as dropped with a
-                // reason so the trace makes the distinction clear.
                 val dropped = chunk.Visible == ""
                 val reason = if (dropped) "assistant chunk with no text parts" else ""
                 TraceClaudeLine(member, line, chunk.Visible, "", dropped, reason)
                 return chunk
             }
-            // result / user / system / control_request / etc — fall
-            // through to the result codec which can pull the error
-            // text. The codec doesn't fail on these; it just decodes
-            // a no-op assistant event with empty Content.
-        }
-        case Failure(_) => {}
-    }
-    val asResult = claudeResultCodec.Decode(trimmed)
-    return asResult match {
-        case Success(evt) => {
-            val chunk = resultEventChunk(evt)
-            // The result codec also accepts unknown event types
-            // (system / rate_limit_event / control_request — Codec[T]
-            // ignores unknown fields). Their Type field is intact, so
-            // the trace reason explicitly carries it for post-mortem.
-            val typeStr = if (evt.Type == "") "<empty>" else evt.Type
-            val dropped = chunk.Visible == "" && chunk.ErrorText == ""
-            val reason = if (!dropped) "" else if (evt.Type == "result") "result event with no error" else s"non-rendering event type: ${typeStr}"
-            TraceClaudeLine(member, line, chunk.Visible, chunk.ErrorText, dropped, reason)
-            return chunk
-        }
-        case Failure(_) => {
-            TraceClaudeLine(member, line, "", "", true, "json decoded as neither assistant nor result")
-            return emptyChunk()
+            case Failure(_) => {
+                TraceClaudeLine(member, line, "", "", true, "assistant envelope failed to decode")
+                return emptyChunk()
+            }
         }
     }
+    if kind == "result" {
+        return claudeResultCodec.Decode(trimmed) match {
+            case Success(evt) => {
+                val chunk = resultEventChunk(evt)
+                val dropped = chunk.Visible == "" && chunk.ErrorText == ""
+                val reason = if (dropped) "result event with no rendering payload" else ""
+                TraceClaudeLine(member, line, chunk.Visible, chunk.ErrorText, dropped, reason)
+                return chunk
+            }
+            case Failure(_) => {
+                TraceClaudeLine(member, line, "", "", true, "result envelope failed to decode")
+                return emptyChunk()
+            }
+        }
+    }
+    // Unknown / non-whitelisted type (system, user, tool_use_result,
+    // rate_limit_event, control_*, message_*, anything else). Drop
+    // unconditionally rather than letting the codec try to extract
+    // something from a shape it doesn't model.
+    val typeStr = if (kind == "") "<no type>" else kind
+    TraceClaudeLine(member, line, "", "", true, s"non-whitelisted event type: ${typeStr}")
+    return emptyChunk()
 }
+
+// extractJsonType returns the value of the top-level `"type":"…"`
+// field for stream-json envelopes claude emits, or `""` when the
+// line doesn't carry one in canonical form. Cheap string match —
+// avoids a full codec decode for the whitelist gate above.
+//
+// Canonical form claude uses is `{"type":"<kind>",…` (no spaces, type
+// first). We don't try to handle whitespace-formatted JSON because
+// claude --output-format=stream-json never emits it; the cost of
+// false-negative dropping a whitespace-formatted assistant envelope
+// is acceptable (the user's TUI would lose ONE chunk per session
+// max, and that's never been observed in practice).
+func extractJsonType(trimmed string) string {
+    val needle = "\"type\":\""
+    val parts = strings.SplitN(trimmed, needle, 2)
+    if len(parts) < 2 { return "" }
+    val rest = parts[1]
+    val tail = strings.SplitN(rest, "\"", 2)
+    if len(tail) < 2 { return "" }
+    return tail[0]
+}
+
+// looksLikeStreamJsonFragment returns true when a non-`{`-prefixed
+// line still carries fingerprints of a stream-json envelope. This
+// catches the second half of a buffer-split envelope (e.g. when a
+// huge tool_result line got split across reads and the tail came
+// through as `u_01XXX","type":"tool_result",…`). Markers cherry-
+// picked for low false-positive rate: real assistant prose virtually
+// never contains the literal `"type":"<envelope-kind>"` substring.
+func looksLikeStreamJsonFragment(trimmed string) bool =
+    strings.Contains(trimmed, "\"type\":\"tool_use\"") ||
+    strings.Contains(trimmed, "\"type\":\"tool_result\"") ||
+    strings.Contains(trimmed, "\"type\":\"tool_use_result\"") ||
+    strings.Contains(trimmed, "\"type\":\"rate_limit_event\"") ||
+    strings.Contains(trimmed, "\"type\":\"system\"") ||
+    strings.Contains(trimmed, "\"type\":\"user\"") ||
+    strings.Contains(trimmed, "\"stop_reason\":") ||
+    strings.Contains(trimmed, "\"session_id\":") ||
+    strings.Contains(trimmed, "\"parent_tool_use_id\":")
 
 // filterClaudeStreamJson preserves the no-member entry point used by
 // existing tests and ad-hoc callers. Tracing under "" lands in

@@ -226,6 +226,17 @@ struct AppModel(
     // completed @done / @help / @blocked blocks each chunk. Cleared
     // when the member's session ends.
     MemberBuffers HashMap[string, string],
+    // Per-member raw-byte buffer for assembling complete claude
+    // stream-json envelopes from chunked stdout. claude emits one
+    // envelope per line in stream-json mode, but the runtime line
+    // reader can split a giant envelope mid-content when the OS
+    // flushes claude's stdout buffer at a sub-line boundary. We
+    // accumulate every ChunkArrived line into this per-member buffer
+    // and use brace-counted extraction to pull out only COMPLETE
+    // `{...}` JSON objects before applying the whitelist. Fragments
+    // are never processed — they sit in the buffer until their other
+    // half arrives. Cleared on session end.
+    MemberJsonBuf HashMap[string, string],
     // Per-member watermark of how many directives the buffer parser
     // has already dispatched. Same shape as ConsultsFired but for
     // member-emitted directives. The parser returns directives in
@@ -386,6 +397,7 @@ func InitialModelWithTeams(
     RetryCount            = EmptyHashMap[string, int](),
     Toasts                = NewToastQueue(5),
     MemberBuffers         = EmptyHashMap[string, string](),
+    MemberJsonBuf         = EmptyHashMap[string, string](),
     MemberDirectivesFired = EmptyHashMap[string, int](),
     MemberDoneBodies      = EmptyHashMap[string, string](),
     TurnVisibleChunks     = EmptyHashMap[string, int](),

@@ -1346,73 +1346,108 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     if pending > 0 {
         return (m.Copy(PendingClosures = m.PendingClosures.Put(name, pending - 1)), NoCmd[AppMsg]())
     }
-    val chunk = filterClaudeStreamJsonFor(name, line)
-    // Fold token + cost totals from result events into the model.
-    // Done before any visible-text branching so even drop-only
-    // chunks (success result with no rendered text) still accrue.
+    // Plain-prose fast path. If the line contains NO `{` at all,
+    // buffer-and-extract has nothing to do and the line is either
+    // (a) a test harness injecting bare text, or (b) the rare case
+    // where claude is NOT running with --output-format=stream-json.
+    // Render verbatim. The buffer is left alone — non-JSON prose is
+    // independent of any in-progress envelope.
+    val trimmedLine = strings.TrimSpace(line)
+    val isAllProse = trimmedLine != "" && !strings.Contains(line, "{")
+    if isAllProse {
+        val proseChunk = ClaudeChunk(
+            Visible   = line,
+            ErrorText = "",
+            LiveTurn  = None[ClaudeUsage](),
+            FinalTurn = None[ClaudeUsage](),
+            CostUsd   = 0.0,
+        )
+        val (m1, c) = applyChunkVisible(m, name, proseChunk)
+        val pumpCmd = m1.Sessions.Get(name) match {
+            case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
+            case None()  => NoCmd[AppMsg]()
+        }
+        return (m1.Copy(LastChunkAt = m1.LastChunkAt.Put(name, time_utils.Now())), batchAll(ArrayOf[Cmd[AppMsg]](c, pumpCmd)))
+    }
+    // Buffer-and-extract: append this chunk to the member's running
+    // raw-byte buffer, then pull out every COMPLETE `{...}` envelope
+    // we can. Anything still mid-envelope sits in Leftover and waits
+    // for the next ChunkArrived to complete it. This is the proper
+    // fix for the "JSON tail leaks into chat" class of bugs — never
+    // process partial envelopes, always assemble first.
+    val priorBuf = m.MemberJsonBuf.Get(name).GetOrElse("")
+    val combined = priorBuf + line + "\n"
+    val extracted = extractCompleteEnvelopes(combined)
+    val mWithBuf = m.Copy(MemberJsonBuf = m.MemberJsonBuf.Put(name, extracted.Leftover))
+    if extracted.Envelopes.IsEmpty() {
+        // No complete envelope yet — keep the read pump alive, do
+        // nothing visible. Pre-junk (text before the first `{`) is
+        // also held for now; if it's a real prose line that survived
+        // until end-of-stream, we'll surface it on session close.
+        val pumpCmd = mWithBuf.Sessions.Get(name) match {
+            case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
+            case None()  => NoCmd[AppMsg]()
+        }
+        return (mWithBuf.Copy(LastChunkAt = mWithBuf.LastChunkAt.Put(name, time_utils.Now())), pumpCmd)
+    }
+    // Process each complete envelope through the visible-text /
+    // token-accrual / directive pipeline in source order. Fold the
+    // model across them so multiple envelopes from one ChunkArrived
+    // (rare but possible when claude flushes a batch) compose
+    // correctly.
+    val seedAcc = (mWithBuf, EmptyArray[Cmd[AppMsg]]())
+    val (mFinal, foldedCmds) = extracted.Envelopes.FoldLeft(seedAcc, (acc, env) => {
+        val (curM, curCmds) = acc
+        val (nextM, envCmd) = applyOneEnvelope(curM, name, env)
+        return (nextM, curCmds.Append(envCmd))
+    })
+    val pumpCmd = mFinal.Sessions.Get(name) match {
+        case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
+        case None()  => NoCmd[AppMsg]()
+    }
+    return (mFinal.Copy(LastChunkAt = mFinal.LastChunkAt.Put(name, time_utils.Now())), batchAll(foldedCmds.Append(pumpCmd)))
+}
+
+// applyOneEnvelope runs the per-envelope pipeline: whitelist-filter
+// the envelope to a ClaudeChunk, then thread it through the visible-
+// text / token-accrual / directive pipeline.
+func applyOneEnvelope(m AppModel, name string, envelope string) Tuple[AppModel, Cmd[AppMsg]] {
+    return applyChunkVisible(m, name, filterClaudeStreamJsonFor(name, envelope))
+}
+
+// applyChunkVisible is the post-filter pipeline. Token accrual, error
+// toast, transcript append (dedup-guarded), status flip, directive
+// parse (consults + member directives). Used by both the JSON
+// envelope path (via applyOneEnvelope) and the plain-prose fast path
+// in onChunk.
+func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppModel, Cmd[AppMsg]] {
     val mAccrued = accrueTokens(m, name, chunk)
     val displayText = chunk.Visible
-    // Surface claude error events (rate-limit, max-turns, etc.) as a
-    // toast + LastError instead of into the transcript — the chat
-    // pane is for conversation, not error frames.
     val withErrSurface = if (chunk.ErrorText == "") mAccrued else {
         val toast = mAccrued.Toasts.PushError(s"${name}: ${chunk.ErrorText}", time_utils.Now(), time_utils.Seconds(int64(8)))
         mAccrued.Copy(Toasts = toast, LastError = Some(s"${name}: ${chunk.ErrorText}"))
     }
     if displayText == "" {
-        // Init/result/tool-use chunks are noise — keep the read pump
-        // alive but don't append to the transcript.
-        val pumpCmd = withErrSurface.Sessions.Get(name) match {
-            case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
-            case None()  => NoCmd[AppMsg]()
-        }
-        return (withErrSurface.Copy(LastChunkAt = withErrSurface.LastChunkAt.Put(name, time_utils.Now())), pumpCmd)
+        return (withErrSurface, NoCmd[AppMsg]())
     }
-    // Hide bare directive marker lines (@dispatch/@consult/@summary/@end/
-    // @done/@finished/@help/@blocked openings + the matching @end) from the
-    // user-facing transcript — they're orchestration glue, not chat. The
-    // body text between markers is kept so users still see the substance.
-    // The directive parser still walks the full text via the unfiltered
-    // path below.
     val visible = formatDirectiveMarkers(displayText)
     val nextConvo = if (visible == "") {
         withErrSurface.Conversation
     } else if (isDuplicateOfLastConvoLine(withErrSurface.Conversation, name, visible)) {
-        // claude often emits an intermediate streamed assistant chunk
-        // and a final consolidated assistant message that decode to
-        // the SAME visible text. Without this guard the same paragraph
-        // appears twice in a row in the transcript — see the duplicate
-        // Iris-scoping-questions block users hit during live runs.
         withErrSurface.Conversation
     } else {
         withErrSurface.Conversation.Append(session.ConversationLine(Speaker = name, Text = visible, At = time_utils.Now().UnixNanos()))
     }
-    val withLastSeen = withErrSurface.Copy(
-        LastChunkAt = withErrSurface.LastChunkAt.Put(name, time_utils.Now()),
-        RetryCount  = withErrSurface.RetryCount.Remove(name),
-    )
-    // Only flip to StWorking if the member isn't already in a sticky
-    // "needs attention" state. StFailed (after retries / @blocked) and
-    // StHelpWaiting (paused awaiting TL clarification) must persist
-    // even if a stray late chunk arrives — otherwise the UI silently
-    // moves on past the user's blocker.
+    val withLastSeen = withErrSurface.Copy(RetryCount = withErrSurface.RetryCount.Remove(name))
     val current = withLastSeen.Statuses.Get(name).GetOrElse(StIdle())
     val nextStatus = if (isStickyStatus(current)) current else mkWorkingStatus()
     val withLine = setStatus(persistConversation(withLastSeen, nextConvo), name, nextStatus)
-    // Use the filtered display text — not the raw stream-json wrapper —
-    // when feeding the per-turn directive buffers. The JSON wrapper hides
-    // the @summary / @dispatch / @end opening tags inside an escaped
-    // string, so Parse() against the raw line yields no directives and
-    // the TL turn never transitions to Approval / Delegating.
     val (m1, consultCmds) = maybeDispatchConsults(withLine, name, displayText)
     val (m2, memberCmds)  = maybeHandleMemberDirectives(m1, name, displayText)
-    val pumpCmd = m2.Sessions.Get(name) match {
-        case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
-        case None()  => NoCmd[AppMsg]()
-    }
-    val allCmds = memberCmds.FoldLeft(consultCmds, (a, c) => a.Append(c)).Append(pumpCmd)
+    val allCmds = memberCmds.FoldLeft(consultCmds, (a, c) => a.Append(c))
     return (m2, batchAll(allCmds))
 }
+
 
 // maybeHandleMemberDirectives parses non-TL streams for newly-completed
 // @done / @help / @blocked blocks (the member-emitted directives). The
@@ -2309,15 +2344,6 @@ struct ClaudeChunk(
     CostUsd   float64,
 )
 
-// hasJsonTypePrefix returns true when `trimmed` starts with the
-// stream-json type discriminator `{"type":"<kind>"`. Cheap string
-// match used as the pre-filter for non-renderable event types
-// (rate_limit_event, tool_use_result, system, user, control_*) —
-// dropping them by prefix avoids relying on the codec which
-// sometimes mis-handles their nested-object shapes.
-func hasJsonTypePrefix(trimmed string, kind string) bool =
-    strings.HasPrefix(trimmed, "{\"type\":\"" + kind + "\"")
-
 // emptyChunk is the "drop this line" marker.
 func emptyChunk() ClaudeChunk = ClaudeChunk(
     Visible   = "",
@@ -2345,42 +2371,29 @@ func emptyChunk() ClaudeChunk = ClaudeChunk(
 // Trust-the-codec policy: whatever the codec returns as the joined
 // `text` parts is rendered verbatim. No post-processing. If gala's
 // JSON decoder produces dirty output, the fix is in the decoder.
-func filterClaudeStreamJsonFor(member string, line string) ClaudeChunk {
-    val trimmed = strings.TrimSpace(line)
-    if trimmed == "" {
+// filterClaudeStreamJsonFor classifies ONE complete `{...}` JSON
+// envelope. The caller (onChunk via extractCompleteEnvelopes) is
+// responsible for assembling fragments; this function only sees
+// whole envelopes. Fragment / partial / bare-closer detection has
+// been removed entirely — those cases are eliminated upstream by
+// the buffer-and-extract pipeline.
+//
+// Whitelist: only `type:"assistant"` (extract content[].text) and
+// `type:"result"` (extract Result / ErrorText) produce visible text.
+// Every other type — system, user (tool_result), tool_use,
+// tool_use_result, rate_limit_event, control_request,
+// control_response, message_*, anything claude introduces later —
+// drops to emptyChunk unconditionally.
+func filterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
+    val trimmed = strings.TrimSpace(envelope)
+    if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+        // The buffer-and-extract pipeline only feeds us complete
+        // `{...}` envelopes. Anything else (empty, plain prose
+        // somehow leaking past the extractor) is dropped — the
+        // contract is "envelopes only".
+        TraceClaudeLine(member, envelope, "", "", true, "non-envelope reached filter")
         return emptyChunk()
     }
-    if !strings.HasPrefix(trimmed, "{") {
-        // Non-JSON line. Could be real prose (rare — claude with
-        // --output-format=stream-json wraps everything) or a fragment
-        // where the line buffer split mid-envelope and we got the
-        // tail without its leading `{`. Drop bare closers AND anything
-        // that contains stream-json field markers — both signal a
-        // truncated envelope, not real chat text.
-        if isBareJsonCloser(trimmed) || looksLikeStreamJsonFragment(trimmed) {
-            TraceClaudeLine(member, line, "", "", true, "non-json bare closer or fragment")
-            return emptyChunk()
-        }
-        TraceClaudeLine(member, line, line, "", false, "")
-        return ClaudeChunk(
-            Visible   = line,
-            ErrorText = "",
-            LiveTurn  = None[ClaudeUsage](),
-            FinalTurn = None[ClaudeUsage](),
-            CostUsd   = 0.0,
-        )
-    }
-    // Whitelist by stream-json `type`. ONLY `assistant` (text content)
-    // and `result` (final-turn text/error) are renderable to the
-    // transcript. Every other type — system, user (tool_result),
-    // tool_use, tool_use_result, rate_limit_event, control_request,
-    // control_response, partial-message-delta, message_start,
-    // message_delta, anything claude introduces in the future — is
-    // orchestration noise that gets dropped. This is the user's
-    // explicit "ONLY allow json entities that we know and reject
-    // everything else" requirement. Without it, unknown envelope
-    // shapes the codec couldn't extract a Visible from leaked their
-    // raw JSON into the chat (the screenshots from the live E2E run).
     val kind = extractJsonType(trimmed)
     if kind == "assistant" {
         return claudeAssistantCodec.Decode(trimmed) match {
@@ -2388,11 +2401,11 @@ func filterClaudeStreamJsonFor(member string, line string) ClaudeChunk {
                 val chunk = assistantEventChunk(evt)
                 val dropped = chunk.Visible == ""
                 val reason = if (dropped) "assistant chunk with no text parts" else ""
-                TraceClaudeLine(member, line, chunk.Visible, "", dropped, reason)
+                TraceClaudeLine(member, envelope, chunk.Visible, "", dropped, reason)
                 return chunk
             }
             case Failure(_) => {
-                TraceClaudeLine(member, line, "", "", true, "assistant envelope failed to decode")
+                TraceClaudeLine(member, envelope, "", "", true, "assistant envelope failed to decode")
                 return emptyChunk()
             }
         }
@@ -2403,35 +2416,23 @@ func filterClaudeStreamJsonFor(member string, line string) ClaudeChunk {
                 val chunk = resultEventChunk(evt)
                 val dropped = chunk.Visible == "" && chunk.ErrorText == ""
                 val reason = if (dropped) "result event with no rendering payload" else ""
-                TraceClaudeLine(member, line, chunk.Visible, chunk.ErrorText, dropped, reason)
+                TraceClaudeLine(member, envelope, chunk.Visible, chunk.ErrorText, dropped, reason)
                 return chunk
             }
             case Failure(_) => {
-                TraceClaudeLine(member, line, "", "", true, "result envelope failed to decode")
+                TraceClaudeLine(member, envelope, "", "", true, "result envelope failed to decode")
                 return emptyChunk()
             }
         }
     }
-    // Unknown / non-whitelisted type (system, user, tool_use_result,
-    // rate_limit_event, control_*, message_*, anything else). Drop
-    // unconditionally rather than letting the codec try to extract
-    // something from a shape it doesn't model.
     val typeStr = if (kind == "") "<no type>" else kind
-    TraceClaudeLine(member, line, "", "", true, s"non-whitelisted event type: ${typeStr}")
+    TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${typeStr}")
     return emptyChunk()
 }
 
 // extractJsonType returns the value of the top-level `"type":"…"`
-// field for stream-json envelopes claude emits, or `""` when the
-// line doesn't carry one in canonical form. Cheap string match —
-// avoids a full codec decode for the whitelist gate above.
-//
-// Canonical form claude uses is `{"type":"<kind>",…` (no spaces, type
-// first). We don't try to handle whitespace-formatted JSON because
-// claude --output-format=stream-json never emits it; the cost of
-// false-negative dropping a whitespace-formatted assistant envelope
-// is acceptable (the user's TUI would lose ONE chunk per session
-// max, and that's never been observed in practice).
+// field. Cheap string match used by the whitelist gate to avoid
+// running the codec on envelopes we already know we're going to drop.
 func extractJsonType(trimmed string) string {
     val needle = "\"type\":\""
     val parts = strings.SplitN(trimmed, needle, 2)
@@ -2442,160 +2443,101 @@ func extractJsonType(trimmed string) string {
     return tail[0]
 }
 
-// looksLikeStreamJsonFragment returns true when a non-`{`-prefixed
-// line still carries fingerprints of a stream-json envelope. This
-// catches the second half of a buffer-split envelope (e.g. when a
-// huge tool_result line got split across reads and the tail came
-// through as `u_01XXX","type":"tool_result",…`). Markers cherry-
-// picked for low false-positive rate: real assistant prose virtually
-// never contains the literal `"type":"<envelope-kind>"` substring.
-func looksLikeStreamJsonFragment(trimmed string) bool =
-    strings.Contains(trimmed, "\"type\":\"tool_use\"") ||
-    strings.Contains(trimmed, "\"type\":\"tool_result\"") ||
-    strings.Contains(trimmed, "\"type\":\"tool_use_result\"") ||
-    strings.Contains(trimmed, "\"type\":\"rate_limit_event\"") ||
-    strings.Contains(trimmed, "\"type\":\"system\"") ||
-    strings.Contains(trimmed, "\"type\":\"user\"") ||
-    strings.Contains(trimmed, "\"stop_reason\":") ||
-    strings.Contains(trimmed, "\"session_id\":") ||
-    strings.Contains(trimmed, "\"parent_tool_use_id\":")
+// ExtractedEnvelopes carries the result of one buffer-and-extract
+// pass on a member's stdout: every complete `{…}` JSON object found
+// in the buffer plus the un-parsed leftover (held back for the next
+// chunk to complete). PreJunk is anything that appeared BEFORE the
+// first `{` — non-JSON garbage that claude stream-json mode shouldn't
+// emit but we capture for the trace anyway. PreJunk never reaches
+// the transcript; only Envelopes are processed downstream.
+struct ExtractedEnvelopes(
+    PreJunk   string,
+    Envelopes Array[string],
+    Leftover  string,
+)
 
-// filterClaudeStreamJson preserves the no-member entry point used by
-// existing tests and ad-hoc callers. Tracing under "" lands in
-// $GALA_TEAM_TRACE_DIR/_/<stamp>.jsonl after sanitisation.
-func filterClaudeStreamJson(line string) ClaudeChunk =
-    filterClaudeStreamJsonFor("", line)
-
-// isBareJsonCloser detects lines that, after trim, are JUST `}` or
-// `]}`. The bufio buffer is large enough (4 MiB, see
-// gala_simple/subprocess/subprocess.go:maxLineBytes) that real
-// stream-json fragmentation effectively does not happen, so we no
-// longer need the broader marker-substring heuristics that the prior
-// looksLikeJsonFragment() used. Keeping just the bare-closer check
-// covers the rare leftover case where the OS pipe delivers a JSON
-// trailer on its own without the opening brace.
-//
-// We do NOT special-case lines that *contain* the substrings
-// "stop_reason" / "usage" / "session_id" / "input_tokens" — those
-// are real words an assistant might use when explaining claude's
-// stream-json format, and the previous suffix-truncation against
-// them was the bug we just removed.
-func isBareJsonCloser(s string) bool {
-    if s == "}"  { return true }
-    if s == "]}" { return true }
-    return false
+// extractCompleteEnvelopes walks `buf` rune by rune, tracking JSON
+// brace depth (string-aware: `{` / `}` inside string literals don't
+// count, and `\"` inside a string doesn't close it). Emits each
+// complete top-level `{...}` object as a separate envelope. Anything
+// after the last complete envelope that's still inside a `{...}`
+// pair (depth > 0) becomes Leftover — held until the next chunk
+// completes it. The buffer-and-extract approach replaces the old
+// "guess if it's a fragment by substring" heuristic, which was the
+// architectural mistake the user called out: never process partial
+// envelopes, always assemble first.
+func extractCompleteEnvelopes(buf string) ExtractedEnvelopes {
+    val rs = ToRunes(buf)
+    val n = len(rs)
+    var envelopes = EmptyArray[string]()
+    var preJunk = ""
+    var i = 0
+    var start = -1
+    var depth = 0
+    var inString = false
+    var escaped = false
+    var preJunkEnd = -1
+    for i < n {
+        val c = rs[i]
+        if escaped {
+            escaped = false
+        } else if inString {
+            if c == '\\' {
+                escaped = true
+            } else if c == '"' {
+                inString = false
+            }
+        } else {
+            if c == '"' {
+                inString = true
+            } else if c == '{' {
+                if depth == 0 {
+                    if start < 0 {
+                        // Capture any text before the first `{` as
+                        // pre-junk on the FIRST top-level open only.
+                        if preJunkEnd < 0 { preJunkEnd = i }
+                    }
+                    start = i
+                }
+                depth = depth + 1
+            } else if c == '}' {
+                depth = depth - 1
+                if depth == 0 && start >= 0 {
+                    val tail = SliceFrom(rs, start)
+                    val window = SliceTo(tail, i + 1 - start)
+                    envelopes = envelopes.Append(string(window))
+                    start = -1
+                }
+            }
+        }
+        i = i + 1
+    }
+    if preJunkEnd > 0 {
+        preJunk = strings.TrimSpace(string(SliceTo(rs, preJunkEnd)))
+    } else if preJunkEnd < 0 && envelopes.IsEmpty() && depth == 0 {
+        preJunk = strings.TrimSpace(buf)
+    }
+    val leftover = if (start < 0) "" else string(SliceFrom(rs, start))
+    return ExtractedEnvelopes(PreJunk = preJunk, Envelopes = envelopes, Leftover = leftover)
 }
 
-// assistantEventChunk extracts the joined text from an assistant
-// event's content[]. Filters parts to `text` only — tool_use,
-// tool_result, thinking parts are dropped (the sidebar spinner
-// already conveys "tools are running" without flooding the chat).
-//
-// Tokens carry the message.usage block so accrueTokens can update
-// the header live during streaming. Cost stays 0 here because
-// claude only reports total_cost_usd on the final result event;
-// the cost field updates once at turn end.
-//
-// Safety net (TWO layers — the codec is the first defence, this is
-// the second):
-//   1. If the text TRIMS to a stream-json envelope opener, drop it.
-//   2. If the text CONTAINS one of the trailing-envelope markers
-//      (`"stop_reason":`, `"session_id":`, `"usage":{"input_tokens`),
-//      truncate at the first marker. This covers the real-world bug
-//      where the codec extracted the legitimate `text` field but
-//      ALSO swallowed the trailing envelope (seen with long base64
-//      payloads — gala json's string-termination heuristic gets
-//      confused by certain characters in the value).
+// assistantEventChunk extracts the joined text from a complete
+// `assistant` envelope's content[]. Filters parts to `text` only —
+// tool_use / tool_result / thinking are dropped (the sidebar spinner
+// already conveys "tools are running"). Buffer-and-extract upstream
+// guarantees we only ever see complete envelopes here, so the old
+// sanitize / truncate / looksLikeStreamJson guards are gone.
 func assistantEventChunk(evt ClaudeAssistantEvent) ClaudeChunk {
     val texts = evt.Message.Content.Collect({
         case ClaudePart(kind, text) if kind == "text" => text
     })
-    val joined = texts.MkString("\n")
-    val safe = sanitizeAssistantText(joined)
     return ClaudeChunk(
-        Visible   = safe,
+        Visible   = texts.MkString("\n"),
         ErrorText = "",
         LiveTurn  = Some(evt.Message.Usage),
         FinalTurn = None[ClaudeUsage](),
         CostUsd   = 0.0,
     )
-}
-
-// sanitizeAssistantText is the leak guard. ONE check only: drop the
-// chunk entirely if the trimmed text is a recognisable stream-json
-// envelope opener. Anything else passes through verbatim.
-//
-// The previous incarnation also called truncateAtEnvelopeMarker to
-// chop at substrings like `"stop_reason":` mid-text, which was
-// over-aggressive: claude's prose can legitimately contain those
-// substrings (when the lead is explaining stream-json format,
-// quoting JSON output, etc.). The marker truncation produced "empty
-// entries" the user reported — prose that ended at byte N because
-// byte N was the start of a marker substring inside a legitimate
-// quote. The codec has been verified not to overshoot strings, so
-// truncation isn't load-bearing.
-func sanitizeAssistantText(text string) string {
-    if text == "" { return "" }
-    if looksLikeStreamJson(text) { return "" }
-    return text
-}
-
-// looksLikeStreamJson is the whole-envelope guard: matches when the
-// trimmed text starts with `{"` AND carries a stream-json field
-// marker. Conservative — real prose that happens to start with `{`
-// won't be dropped unless one of the marker substrings is present.
-func looksLikeStreamJson(text string) bool {
-    val t = strings.TrimSpace(text)
-    if !strings.HasPrefix(t, "{\"") { return false }
-    return strings.Contains(t, "\"type\":\"assistant\"") ||
-           strings.Contains(t, "\"type\":\"tool_use\"") ||
-           strings.Contains(t, "\"type\":\"tool_use_result\"") ||
-           strings.Contains(t, "\"type\":\"tool_result\"") ||
-           strings.Contains(t, "\"type\":\"rate_limit_event\"") ||
-           strings.Contains(t, "\"type\":\"system\"") ||
-           strings.Contains(t, "\"stop_reason\":") ||
-           strings.Contains(t, "\"session_id\":") ||
-           strings.Contains(t, "\"rate_limit_info\":") ||
-           strings.Contains(t, "\"tool_use_result\":") ||
-           strings.Contains(t, "\"parent_tool_use_id\":")
-}
-
-// truncateAtEnvelopeMarker is the partial-leak guard: when the text
-// contains a stream-json envelope marker partway through (the codec
-// ate the legitimate text PLUS the closing envelope), cut at the
-// first marker so the user sees clean prose up to the leak point.
-//
-// Markers chosen for low false-positive rate: real assistant prose
-// almost never contains literal `"stop_reason":` or `"usage":{"input_tokens`
-// — they'd have to be inside a code block, in which case they'd be
-// fenced and likely escaped. Acceptable cost of false-positive: a
-// rare assistant message about claude's API gets clipped at a
-// substring; we'd rather under-render than leak.
-//
-// Uses strings.SplitN(prefix-only) per marker rather than slicing —
-// gala doesn't allow s[0:cut] on raw strings.
-func truncateAtEnvelopeMarker(text string) string {
-    val markers = ArrayOf(
-        "\"stop_reason\":",
-        "\"stop_sequence\":",
-        "\"session_id\":",
-        "\"usage\":{\"input_tokens",
-        "\"usage\":{\"output_tokens",
-        "\"parent_tool_use_id\":",
-        "}],\"stop_reason\"",
-        "}],\"usage\":",
-    )
-    var truncated = text
-    var i = 0
-    val n = markers.Size()
-    for i < n {
-        val parts = strings.SplitN(truncated, markers.Get(i), 2)
-        if len(parts) > 1 {
-            truncated = parts[0]
-        }
-        i = i + 1
-    }
-    return strings.TrimRight(truncated, " \t\n\"}],")
 }
 
 // resultEventChunk dispatches result events: errors surface as
@@ -2631,9 +2573,8 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
     // a stream-json envelope re-encoding. Duplicate display in case (a)
     // is the lesser evil vs. silent drop in case (b) — DESIGN.md says
     // "we'd rather under-format than under-render".
-    val visibleResult = sanitizeAssistantText(evt.Result)
     return ClaudeChunk(
-        Visible   = visibleResult,
+        Visible   = evt.Result,
         ErrorText = "",
         LiveTurn  = None[ClaudeUsage](),
         FinalTurn = tokens,

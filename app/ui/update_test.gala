@@ -1569,3 +1569,4 @@ func TestComposerBackspace_RemovesBeforeCursor(t T) T {
     val t1 = Eq(t, m1.Composer, "abc")
     return Eq(t1, m1.ComposerCursor, 2)
 }
+

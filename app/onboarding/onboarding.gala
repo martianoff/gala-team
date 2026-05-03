@@ -273,27 +273,16 @@ func firstLine(s string) string {
 // streaming chunks safe to parse incrementally.
 func protocolSection(isTL bool, hasQa bool) string {
     if isTL {
+        val qaNote = if (hasQa)
+            "QA runs automatically after engineers `@finished` — only `@dispatch` engineers, not QA.\n"
+        else
+            ""
         return "# How to delegate (orchestration protocol)\n\n" +
-            "You are operating inside an orchestrator that watches your output for special directives. Use these to coordinate the team:\n\n" +
-            "- `@dispatch(<MemberName>) ... @end` — assign the body text to that member as their next task. The orchestrator will spawn them with the body as their prompt and feed their @finished response back to you. You can dispatch multiple members in the same turn (parallel work).\n" +
-            "- `@consult(<TeamKey>) ... @end` — ask another team for input. Used cross-team. Less common.\n" +
-            "- `@summary ... @end` — finalize the turn for the user. After @summary, the user is asked to approve and the turn ends. Use @summary when the work is done OR when you cannot make progress.\n\n" +
-            "Rules:\n" +
-            "- Each directive opens with the tag on its own line and closes with `@end` on its own line.\n" +
-            "- Plain prose between directives is rendered as your message to the user.\n" +
-            "- If you simply want to chat (no orchestration), reply with prose only — no directives needed.\n" +
-            "- Don't fabricate member names; only dispatch to members listed in '# Your team' above.\n\n" +
-            "**STRICT — read this twice:** the only thing the orchestrator recognises as a dispatch is the literal token `@dispatch(<Name>)` on its own line, followed by the body, followed by `@end` on its own line. None of the following do anything:\n" +
-            "- `→ Felix:` / `-> Felix:` (arrow notation — this is just decorative prose, no dispatch fires)\n" +
-            "- `**Felix:**` / `## Felix` (markdown heading — same, decorative only)\n" +
-            "- `@dispatch(Felix, Mira)` (multi-target — only Felix would dispatch; the rest is dropped)\n" +
-            "- Mentioning a member by name in prose (\"Felix should handle the parser\") — they will NOT see your prose, only the body of an `@dispatch(<their-name>)` block\n" +
-            "- Any of the above without a matching `@end` line\n\n" +
-            "If you intend to dispatch two engineers in parallel, that means TWO `@dispatch(...) ... @end` blocks back to back, one per engineer. Not one block listing both names.\n\n" +
-            (if (hasQa)
-                "**QA dispatch is automatic — do NOT @dispatch QA members yourself.** When `qa_required` is set on this team (which it is, because there's a QA member listed in your roster), the orchestrator auto-spawns QA AFTER engineer `@finished` bodies arrive. The QA member then receives a synthesised review prompt with all the engineer deliverables. If you `@dispatch(<QA-name>)` in the same turn as engineers, the QA member spawns immediately, finds nothing to review (engineers haven't shipped yet), and emits `@blocked` — wasted turn. Just `@dispatch` the engineers; the orchestrator handles QA. The orchestrator will silently drop any `@dispatch(<QA-name>)` you emit and surface a nudge.\n\n"
-             else "") +
-            "Example dispatch:\n\n" +
+            "Three directives drive the orchestrator. Use them to coordinate the team:\n\n" +
+            "- `@dispatch(<MemberName>) ... @end` — assign the body text to that member as their next task. Multiple back-to-back `@dispatch` blocks fan out in parallel.\n" +
+            "- `@consult(<TeamKey>) ... @end` — ask another team for input. Cross-team. Less common.\n" +
+            "- `@summary ... @end` — finalize the turn for the user. The user is then asked to approve and the turn ends.\n\n" +
+            "## Example — two engineers in parallel\n\n" +
             "```\n" +
             "I'll split this two ways.\n\n" +
             "@dispatch(Felix)\n" +
@@ -303,12 +292,26 @@ func protocolSection(isTL bool, hasQa bool) string {
             "Implement the validator. Acceptance: rejects malformed input with a useful error.\n" +
             "@end\n" +
             "```\n\n" +
-            "Example summary:\n\n" +
+            "## Example — closing out the turn\n\n" +
             "```\n" +
             "@summary\n" +
             "Both engineers reported back. PR is ready for review at <url>.\n" +
             "@end\n" +
             "```\n\n" +
+            "## Rules\n\n" +
+            "- Each directive opens with the tag on its own line and closes with `@end` on its own line.\n" +
+            "- Plain prose between directives is rendered as your message to the user.\n" +
+            "- If you simply want to chat (no orchestration), reply with prose only — no directives needed.\n" +
+            "- Only dispatch to members listed in '# Your team' above; don't fabricate names.\n" +
+            qaNote +
+            "\n" +
+            "## What does NOT dispatch\n\n" +
+            "Only the literal `@dispatch(<Name>)` form is recognised. These look similar but do nothing:\n\n" +
+            "- `→ Felix:` / `-> Felix:` (decorative arrow)\n" +
+            "- `**Felix:**` / `## Felix` (markdown heading)\n" +
+            "- `@dispatch(Felix, Mira)` (multi-target — open one block per name instead)\n" +
+            "- `@dispatch(Felix)` without a matching `@end` line\n" +
+            "- Mentioning a member by name in prose (they read only the body of an `@dispatch` block)\n\n" +
             "## Cross-team consult etiquette\n\n" +
             "If the **first** prompt of this turn arrived from another team via `@consult`, the orchestrator is bridging two teams. The **body of your `@summary` block** is what gets sent back to the consulting team's TL — not your full transcript. So:\n\n" +
             "- Treat the prompt as a question from a peer TL, not the user.\n" +

@@ -347,7 +347,12 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     }
     return msg match {
     case KeyChar(c)                  => onKeyChar(m, c)
-    case KeyBackspace()              => (m.Copy(Composer = trimLastRune(m.Composer)),  NoCmd[AppMsg]())
+    case KeyBackspace()              => onComposerBackspace(m)
+    case KeyDelete()                 => onComposerDelete(m)
+    case KeyComposerLeft()           => onComposerCursor(m, -1)
+    case KeyComposerRight()          => onComposerCursor(m, 1)
+    case KeyComposerHome()           => onComposerCursorJump(m, 0)
+    case KeyComposerEnd()            => onComposerEndKey(m)
     case KeySubmit()                 => onSubmit(m)
     case KeyApprove()                => onApprove(m)
     case KeyReject()                 => onReject(m)
@@ -482,7 +487,12 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 func onKeyChar(m AppModel, c rune) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
     case FocusSidebar() => if (c == ' ') onSidebarToggleGroup(m)
                            else          (m, NoCmd[AppMsg]())
-    case FocusComposer() => (m.Copy(Composer = m.Composer + string(c)), NoCmd[AppMsg]())
+    case FocusComposer() => {
+        // Insert at cursor — not append. The cursor advances by one
+        // rune so the next character lands AFTER the just-inserted one.
+        val (next, cur) = composerInsertAt(m.Composer, m.ComposerCursor, string(c))
+        return (m.Copy(Composer = next, ComposerCursor = cur), NoCmd[AppMsg]())
+    }
 }
 
 // onCursorMove routes Up/Down to whichever cursor is "live": the
@@ -865,7 +875,10 @@ func onPasteClipboard(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = readClipboard()
     case Success(txt) => {
         val clean = strings.TrimRight(txt, " \t\r\n")
         val toast = m.Toasts.PushInfo(s"pasted ${len(clean)} chars", time_utils.Now(), time_utils.Seconds(int64(2)))
-        return (m.Copy(Composer = m.Composer + clean, Toasts = toast), NoCmd[AppMsg]())
+        // Insert at cursor — same path as KeyChar — so paste lands
+        // wherever the user's editing cursor is, not always at the end.
+        val (next, cur) = composerInsertAt(m.Composer, m.ComposerCursor, clean)
+        return (m.Copy(Composer = next, ComposerCursor = cur, Toasts = toast), NoCmd[AppMsg]())
     }
 }
 
@@ -1020,6 +1033,7 @@ func clearSessionState(m AppModel) AppModel {
         EraseSessionPending   = false,
         QuitPending           = false,
         Composer              = "",
+        ComposerCursor        = 0,
         LastError             = None[string](),
     )
 }
@@ -1063,6 +1077,7 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val withState = m.Copy(
         State = nextState,
         Composer = "",
+        ComposerCursor = 0,
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt, At = time_utils.Now().UnixNanos())),
         // Sending a new message means the user is acting "now" — re-stick
         // to the bottom of the conversation so they see their own line
@@ -3241,6 +3256,112 @@ func trimLastRune(s string) string {
     val rs = ToRunes(s)
     val n = len(rs)
     return if (n == 0) "" else string(SliceTo(rs, n - 1))
+}
+
+// composerInsertAt inserts `chunk` into the rune-indexed composer at
+// `cursor`, returning the new (text, cursor) tuple. The cursor advances
+// past the inserted runes so the next character lands AFTER what was
+// just typed (standard text-input behaviour).
+func composerInsertAt(text string, cursor int, chunk string) Tuple[string, int] {
+    val rs = ToRunes(text)
+    val n = len(rs)
+    val cur = clampCursor(cursor, n)
+    val left = string(SliceTo(rs, cur))
+    val right = string(SliceFrom(rs, cur))
+    val inserted = chunk
+    val nextCur = cur + len(ToRunes(inserted))
+    return (left + inserted + right, nextCur)
+}
+
+// composerDeleteBefore removes the rune to the LEFT of the cursor
+// (Backspace semantics). Cursor moves left by one; no-op when at 0.
+func composerDeleteBefore(text string, cursor int) Tuple[string, int] {
+    val rs = ToRunes(text)
+    val n = len(rs)
+    val cur = clampCursor(cursor, n)
+    if cur == 0 { return (text, 0) }
+    val left = string(SliceTo(rs, cur - 1))
+    val right = string(SliceFrom(rs, cur))
+    return (left + right, cur - 1)
+}
+
+// composerDeleteAt removes the rune AT the cursor (forward Delete).
+// Cursor stays put; no-op when already at end.
+func composerDeleteAt(text string, cursor int) Tuple[string, int] {
+    val rs = ToRunes(text)
+    val n = len(rs)
+    val cur = clampCursor(cursor, n)
+    if cur >= n { return (text, n) }
+    val left = string(SliceTo(rs, cur))
+    val right = string(SliceFrom(rs, cur + 1))
+    return (left + right, cur)
+}
+
+// clampCursor folds cursor into [0, n] so callers don't have to check
+// bounds individually. Negative → 0; past-end → n. Used everywhere
+// composerCursor is consumed because external callers (paste, etc.)
+// can produce out-of-range indices.
+func clampCursor(cursor int, n int) int {
+    if cursor < 0 { return 0 }
+    if cursor > n { return n }
+    return cursor
+}
+
+// onComposerBackspace handles Backspace when focus is the composer:
+// remove the rune before the cursor and pull the cursor back. When
+// focus is the sidebar, no-op (Backspace is ignored there).
+func onComposerBackspace(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
+    case FocusSidebar() => (m, NoCmd[AppMsg]())
+    case FocusComposer() => {
+        val (next, cur) = composerDeleteBefore(m.Composer, m.ComposerCursor)
+        return (m.Copy(Composer = next, ComposerCursor = cur), NoCmd[AppMsg]())
+    }
+}
+
+// onComposerDelete handles forward-Delete when focus is composer.
+// Sidebar focus → no-op.
+func onComposerDelete(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
+    case FocusSidebar() => (m, NoCmd[AppMsg]())
+    case FocusComposer() => {
+        val (next, cur) = composerDeleteAt(m.Composer, m.ComposerCursor)
+        return (m.Copy(Composer = next, ComposerCursor = cur), NoCmd[AppMsg]())
+    }
+}
+
+// onComposerCursor moves the composer cursor by `delta` (-1 for Left,
+// +1 for Right), clamped. Sidebar focus → no-op so arrow-left/right
+// stays a composer-only behaviour.
+func onComposerCursor(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
+    case FocusSidebar() => (m, NoCmd[AppMsg]())
+    case FocusComposer() => {
+        val n = len(ToRunes(m.Composer))
+        val next = clampCursor(m.ComposerCursor + delta, n)
+        return (m.Copy(ComposerCursor = next), NoCmd[AppMsg]())
+    }
+}
+
+// onComposerCursorJump sets the composer cursor to an absolute index
+// (clamped). Used by Home (jump to 0). Sidebar focus → no-op.
+func onComposerCursorJump(m AppModel, target int) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
+    case FocusSidebar() => (m, NoCmd[AppMsg]())
+    case FocusComposer() => {
+        val n = len(ToRunes(m.Composer))
+        return (m.Copy(ComposerCursor = clampCursor(target, n)), NoCmd[AppMsg]())
+    }
+}
+
+// onComposerEndKey handles the End key. When focus is the composer,
+// jump cursor to the end of the draft. When focus is the sidebar,
+// fall back to the legacy "stick conversation pane to bottom" binding
+// — End meant "scroll to latest" before the composer cursor existed,
+// and that's still useful when navigating the chat log via the
+// sidebar.
+func onComposerEndKey(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
+    case FocusSidebar() => (m.Copy(ConversationSticky = true), NoCmd[AppMsg]())
+    case FocusComposer() => {
+        val n = len(ToRunes(m.Composer))
+        return (m.Copy(ComposerCursor = n), NoCmd[AppMsg]())
+    }
 }
 
 // ----------------------------------------------------------------------------

@@ -115,6 +115,12 @@ struct AppModel(
     // cleanly without the Option-of-generic-struct quirk.
     ViewMode ViewMode,
     Composer     string,                           // current draft prompt text
+    // Cursor position (rune offset, 0..len(Composer in runes)) for
+    // edit-in-place. Without this, every keystroke could only append
+    // and Backspace could only chop the last character — no way to
+    // fix mistakes mid-line. Left/Right/Home/End/Delete now use this
+    // index to insert/remove anywhere in the draft.
+    ComposerCursor int,
     Tick         int,                              // monotonic tick counter (drives spinners)
     LastError    Option[string],                   // most recent runtime error, footer
     LastPrUrl    Option[string],                   // PR awaiting `gh pr merge` after PrCreated
@@ -352,6 +358,7 @@ func InitialModelWithTeams(
     Palette = NewPalette[AppMsg](EmptyArray[PaletteAction[AppMsg]]()),
     ViewMode = ViewDefault(),
     Composer     = "",
+    ComposerCursor = 0,
     Tick         = 0,
     LastError    = None[string](),
     LastPrUrl    = None[string](),
@@ -400,6 +407,11 @@ sealed type AppMsg {
     // Composer keyboard input
     case KeyChar(C rune)
     case KeyBackspace
+    case KeyDelete                  // forward-delete (the rune at cursor)
+    case KeyComposerLeft            // move cursor one rune left
+    case KeyComposerRight           // move cursor one rune right
+    case KeyComposerHome            // jump cursor to start of composer
+    case KeyComposerEnd             // jump cursor to end of composer
     case KeySubmit                  // Enter: send composer to TL
     // Approval keys (only meaningful when State is Approval; otherwise
     // ignored). Routed by cmd/main.gala's keyToAppMsg from 'a'/'r'.

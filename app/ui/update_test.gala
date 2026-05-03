@@ -1480,3 +1480,92 @@ func TestDispatchOneConsult_DoesNotLoopBackToMainTeam(t T) T {
     // session and crashed the test (no claude binary on PATH).
     return Eq(t, m.ConsultsFired, 1)
 }
+
+// ---------------------------------------------------------------------------
+// Composer cursor: insert / delete / cursor moves
+// ---------------------------------------------------------------------------
+
+func TestComposerInsertAt_AtEnd(t T) T {
+    val (next, cur) = composerInsertAt("hello", 5, "!")
+    val t1 = Eq(t, next, "hello!")
+    return Eq(t1, cur, 6)
+}
+
+func TestComposerInsertAt_InMiddle(t T) T {
+    val (next, cur) = composerInsertAt("helo", 2, "l")
+    val t1 = Eq(t, next, "hello")
+    return Eq(t1, cur, 3)
+}
+
+func TestComposerInsertAt_AtStart(t T) T {
+    val (next, cur) = composerInsertAt("world", 0, "hello ")
+    val t1 = Eq(t, next, "hello world")
+    return Eq(t1, cur, 6)
+}
+
+func TestComposerInsertAt_NegativeCursorClamps(t T) T {
+    val (next, cur) = composerInsertAt("x", -5, "y")
+    val t1 = Eq(t, next, "yx")
+    return Eq(t1, cur, 1)
+}
+
+func TestComposerInsertAt_PastEndClamps(t T) T {
+    val (next, cur) = composerInsertAt("ab", 99, "c")
+    val t1 = Eq(t, next, "abc")
+    return Eq(t1, cur, 3)
+}
+
+func TestComposerDeleteBefore_AtCursor(t T) T {
+    val (next, cur) = composerDeleteBefore("hello", 3)
+    val t1 = Eq(t, next, "helo")
+    return Eq(t1, cur, 2)
+}
+
+func TestComposerDeleteBefore_AtStart_NoOp(t T) T {
+    val (next, cur) = composerDeleteBefore("hi", 0)
+    val t1 = Eq(t, next, "hi")
+    return Eq(t1, cur, 0)
+}
+
+func TestComposerDeleteAt_Forward(t T) T {
+    val (next, cur) = composerDeleteAt("hello", 0)
+    val t1 = Eq(t, next, "ello")
+    return Eq(t1, cur, 0)
+}
+
+func TestComposerDeleteAt_AtEnd_NoOp(t T) T {
+    val (next, cur) = composerDeleteAt("hi", 2)
+    val t1 = Eq(t, next, "hi")
+    return Eq(t1, cur, 2)
+}
+
+func TestComposer_FullEditCycle_FixMidLineMistake(t T) T {
+    // User types "abdc" then realises the d/c are swapped. Recovery
+    // pattern: arrow-left twice (cursor 4→2), Delete the d, jump End,
+    // type d. Result: "abcd". This is the regression scenario the
+    // user reported — without cursor support every keystroke just
+    // appended.
+    val m0 = sampleModel().Copy(Composer = "abdc", ComposerCursor = 4)
+    val (m1, _) = onComposerCursor(m0, -1)
+    val (m2, _) = onComposerCursor(m1, -1)
+    val (m3, _) = onComposerDelete(m2)
+    val t1 = Eq(t, m3.Composer, "abc")
+    val t2 = Eq(t1, m3.ComposerCursor, 2)
+    val (m4, _) = onComposerEndKey(m3)
+    val (m5, _) = onKeyChar(m4, 'd')
+    val t3 = Eq(t2, m5.Composer, "abcd")
+    return Eq(t3, m5.ComposerCursor, 4)
+}
+
+func TestComposerHome_JumpsCursorToZero(t T) T {
+    val m0 = sampleModel().Copy(Composer = "hello", ComposerCursor = 5)
+    val (m1, _) = onComposerCursorJump(m0, 0)
+    return Eq(t, m1.ComposerCursor, 0)
+}
+
+func TestComposerBackspace_RemovesBeforeCursor(t T) T {
+    val m0 = sampleModel().Copy(Composer = "abXc", ComposerCursor = 3)
+    val (m1, _) = onComposerBackspace(m0)
+    val t1 = Eq(t, m1.Composer, "abc")
+    return Eq(t1, m1.ComposerCursor, 2)
+}

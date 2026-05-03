@@ -116,12 +116,16 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
     // Bare `?` would compete with composer typing; F-keys are unambiguous.
     return ev.Key match {
         case Backspace()  => KeyBackspace()
+        case Delete()     => KeyDelete()
         case Enter()      => KeySubmit()
         case Up()         => HistoryCursorUp()
         case Down()       => HistoryCursorDown()
+        case ArrowLeft()  => KeyComposerLeft()
+        case ArrowRight() => KeyComposerRight()
+        case Home()       => KeyComposerHome()
         case PageUp()     => KeyConvoPageUp()
         case PageDown()   => KeyConvoPageDown()
-        case End()        => KeyConvoStickToBottom()
+        case End()        => KeyComposerEnd()
         case Esc()        => HistoryDeselect()
         case Char(c)      => KeyChar(C = c)
         case Space()      => KeyChar(C = ' ')

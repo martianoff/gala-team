@@ -48,6 +48,21 @@ func TestKeyToAppMsg_Down_HistoryCursorDown(t T) T =
 func TestKeyToAppMsg_Esc_HistoryDeselect(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(Esc())), "HistoryDeselect")
 
+func TestKeyToAppMsg_ArrowLeft_ComposerLeft(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(ArrowLeft())), "KeyComposerLeft")
+
+func TestKeyToAppMsg_ArrowRight_ComposerRight(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(ArrowRight())), "KeyComposerRight")
+
+func TestKeyToAppMsg_Home_ComposerHome(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(Home())), "KeyComposerHome")
+
+func TestKeyToAppMsg_End_ComposerEnd(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(End())), "KeyComposerEnd")
+
+func TestKeyToAppMsg_Delete_KeyDelete(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(Delete())), "KeyDelete")
+
 // Char keys go to the composer. The exact rune is preserved.
 func TestKeyToAppMsg_Char_KeyChar(t T) T {
     val m = KeyToAppMsg(PlainKey(Char('h')))
@@ -118,19 +133,12 @@ func TestKeyToAppMsg_Ctrl5_Activity(t T) T =
 func TestKeyToAppMsg_Ctrl6_Help(t T) T =
     expectMsg(t, KeyToAppMsg(Ctrl(Char('6'))), "KeyToggleHelp")
 
-func TestKeyToAppMsg_ArrowLeft_NoOp(t T) T =
-    expectMsg(t, KeyToAppMsg(PlainKey(ArrowLeft())), "NoOp")
-
-func TestKeyToAppMsg_ArrowRight_NoOp(t T) T =
-    expectMsg(t, KeyToAppMsg(PlainKey(ArrowRight())), "NoOp")
-
-func TestKeyToAppMsg_Home_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Home())), "NoOp")
-// PgUp/PgDn/End now drive the conversation scroll (sticky-bottom
-// `ConversationLog`), not the no-op fallthrough they used to.
-func TestKeyToAppMsg_End_StickToBottom(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(End())), "KeyConvoStickToBottom")
+// Arrow / Home / End / Delete now drive the composer cursor — see the
+// dedicated tests above (TestKeyToAppMsg_{ArrowLeft,ArrowRight,Home,
+// End,Delete}). End used to KeyConvoStickToBottom; the focus-aware
+// fallback for sidebar mode lives in update.gala::onComposerEndKey.
 func TestKeyToAppMsg_PageUp_ConvoPageUp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(PageUp())), "KeyConvoPageUp")
 func TestKeyToAppMsg_PageDown_ConvoPageDown(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(PageDown())), "KeyConvoPageDown")
-func TestKeyToAppMsg_Delete_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Delete())), "NoOp")
 func TestKeyToAppMsg_Insert_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Insert())), "NoOp")
 func TestKeyToAppMsg_Unknown_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Unknown())), "NoOp")
 
@@ -183,6 +191,11 @@ func expectMsg(t T, msg AppMsg, expected string) T = Eq(t, appMsgVariant(msg), e
 func appMsgVariant(msg AppMsg) string = msg match {
     case KeyChar(_)                  => "KeyChar"
     case KeyBackspace()              => "KeyBackspace"
+    case KeyDelete()                 => "KeyDelete"
+    case KeyComposerLeft()           => "KeyComposerLeft"
+    case KeyComposerRight()          => "KeyComposerRight"
+    case KeyComposerHome()           => "KeyComposerHome"
+    case KeyComposerEnd()            => "KeyComposerEnd"
     case KeySubmit()                 => "KeySubmit"
     case KeyApprove()                => "KeyApprove"
     case KeyReject()                 => "KeyReject"

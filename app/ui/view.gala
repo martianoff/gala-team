@@ -1469,18 +1469,31 @@ func consultEntryRows(m AppModel, name string, sess ConsultSession) Array[Layout
 }
 
 func composerWidget(m AppModel) Widget {
-    val prompt = if (m.Composer == "") s"Type to ${m.Team.Lead.Name}…" else m.Composer
     val style = if (m.Composer == "")
                     DefaultStyle().WithDim()
                 else
                     DefaultStyle().WithFg(BrightWhite())
+    val rendered = if (m.Composer == "") {
+        s"  Type to ${m.Team.Lead.Name}…▌"
+    } else {
+        // Render the cursor INSIDE the text, not always at end.
+        // Without this, every keystroke looks identical regardless
+        // of where the user pointed Left/Right/Home — the user has
+        // no visual feedback for the cursor position.
+        val rs = ToRunes(m.Composer)
+        val n = len(rs)
+        val cur = clampCursor(m.ComposerCursor, n)
+        val left = string(SliceTo(rs, cur))
+        val right = string(SliceFrom(rs, cur))
+        s"  ${left}▌${right}"
+    }
     // Long prompts wrap inside the composer panel via Paragraph
     // instead of clipping at the right edge. The composer panel
     // itself is Fixed(3, ...) — three rows = ~2 wrapped lines plus
     // the cursor row. After-paste of a multi-line block, the user
     // can scroll the input by deleting characters; further scroll-
     // ability is the textarea-rewrite follow-up (#12 in the queue).
-    return ParagraphStyled(s"  ${prompt}▌", style)
+    return ParagraphStyled(rendered, style)
 }
 
 // footerWidget chooses what one-line legend to render at the

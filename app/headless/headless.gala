@@ -281,6 +281,14 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
                 // the next ChunkArrived. ExtractClaudeText then sees
                 // only complete envelopes — no fragment leaks.
                 val priorBufBeforeAppend = jsonBuf
+                // Truncation recovery — same rationale as the UI
+                // onChunk path: a fresh envelope opener while we
+                // have leftover means the prior chunk was truncated
+                // upstream. Drop the corrupt leftover so the brace
+                // counter doesn't glue half + whole into garbage.
+                if priorBufBeforeAppend != "" && looksLikeHeadlessEnvelope(strings.TrimSpace(line)) {
+                    jsonBuf = ""
+                }
                 jsonBuf = jsonBuf + line + "\n"
                 val (envs, leftover) = extractHeadlessEnvelopes(jsonBuf)
                 jsonBuf = leftover

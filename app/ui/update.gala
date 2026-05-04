@@ -1505,7 +1505,18 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     // fix for the "JSON tail leaks into chat" class of bugs — never
     // process partial envelopes, always assemble first.
     val priorBuf = m.MemberJsonBuf.Get(name).GetOrElse("")
-    val combined = priorBuf + line + "\n"
+    // Truncation recovery: if the new chunk visibly starts a fresh
+    // envelope (`{"type":` after trimming) AND we have leftover from
+    // a prior chunk, the prior was truncated upstream — likely
+    // Claude's stream-json line was cut mid-write. Concatenating
+    // them would feed the brace counter a half-envelope + a full
+    // envelope, balance braces by accident, and produce a malformed
+    // blob that fails to decode. Drop the corrupt leftover and
+    // reframe from the new chunk. The prior partial is unrecoverable
+    // anyway; this stops the cascade where one truncation eats the
+    // next legitimate envelope too.
+    val safePriorBuf = if (priorBuf != "" && looksLikeClaudeEnvelope(strings.TrimSpace(line))) "" else priorBuf
+    val combined = safePriorBuf + line + "\n"
     val extracted = extractCompleteEnvelopes(combined)
     val mWithBuf = m.Copy(MemberJsonBuf = m.MemberJsonBuf.Put(name, extracted.Leftover))
     if extracted.Envelopes.IsEmpty() {
@@ -1927,6 +1938,34 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 )
                 return (m1, batchAll(nudgeCmds))
             }
+            // Pre-Approval gate: if the TL emitted @summary but the
+            // lead branch has no commits ahead of master, the
+            // resulting Approval modal would dead-end (the user
+            // would press Ctrl+A only to see "no commits — nothing
+            // to PR"). Catch it here and nudge the TL EXPLICITLY
+            // instead of advancing the FSM. The nudge spells out
+            // *why* the @summary was rejected so the lead can
+            // either: (a) @dispatch an engineer to commit + merge,
+            // (b) merge engineer branches into lead via a designated
+            // step, or (c) revise the @summary if there's genuinely
+            // nothing to ship.
+            val provisionalState = Transition(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
+            val provisionalIsApproval = provisionalState match {
+                case Approval(_) => true
+                case _           => false
+            }
+            if provisionalIsApproval {
+                val readiness = checkPrReady(cleaned.Project)
+                if readiness.IsDefined() {
+                    val reason = readiness.GetOrElse("")
+                    val (m1, nudgeCmds) = spawnTLNudge(
+                        setStatus(cleaned, name, StIdle()),
+                        "summary-without-pr-ready",
+                        buildSummaryNotPrReadyNudge(reason, cleaned.Team, cleaned.Project),
+                    )
+                    return (m1, batchAll(nudgeCmds))
+                }
+            }
             val nextState = transitionLogged(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
             val withState = setStatus(cleaned.Copy(State = nextState), name, StIdle())
             // If the new state is Delegating, fan out: spawn each
@@ -2106,6 +2145,64 @@ func buildQaAutoSpawnNudge(droppedNames Array[string]) string {
     val list = droppedNames.MkString(", ")
     val verbBe = if (droppedNames.Size() == 1) "is" else "are"
     return s"System: I dropped your @dispatch(${list}) — ${list} ${verbBe} a QA member, and this team has qa_required: true so the orchestrator auto-spawns QA after engineer @finished bodies arrive. Your engineers HAVE been dispatched (their work is starting now). When they finish, ${list} will receive a synthesised review prompt with all engineer deliverables. For future turns: only @dispatch engineers; QA happens automatically."
+}
+
+// buildSummaryNotPrReadyNudge tells the TL their @summary was
+// rejected because the lead branch isn't in a state `gh pr create`
+// would accept (typically: zero commits ahead of the default
+// branch). Without this nudge, the user sees the Approval modal
+// dismiss with a policy block — confusing because the TL just
+// declared the work done.
+//
+// The nudge spells out the three legitimate next moves so the TL
+// has a clear path forward: re-dispatch an engineer to commit the
+// work, designate a merger to roll engineer branches into lead, or
+// revise the @summary if there's nothing to ship yet.
+func buildSummaryNotPrReadyNudge(reason string, tm Team, proj Project) string {
+    val engineers = MembersOf(tm, Engineer())
+    val engineerList = if (engineers.IsEmpty())
+        "(no engineers on team)"
+    else
+        engineers.Map((e) => e.Name).MkString(", ")
+    val leadBranch = "gala_team/" + gitSlugForTeam(proj.Name) + "/lead"
+    val engineerBranchPattern = "gala_team/" + gitSlugForTeam(proj.Name) + "/<EngineerName>"
+    val nl = "\n"
+    return "System: Your @summary was rejected because " + reason + ". The Approval modal would have dead-ended." + nl + nl +
+        "The lead branch (`" + leadBranch + "`) has nothing committed past `" + proj.DefaultBranch + "`. Engineers' work — if they did any — is on their own per-engineer branches (`" + engineerBranchPattern + "`), and those branches were never merged into lead. `gh pr create` runs against lead, so it has no diff to push." + nl + nl +
+        "Pick ONE of these recovery paths:" + nl + nl +
+        "  (A) Re-dispatch the engineer who has the work and explicitly tell them: \"commit your changes on your branch (git add + git commit), then emit @finished\". Once their commit lands on their branch, the merger step (B) becomes meaningful." + nl + nl +
+        "  (B) Designate a merger turn — issue @dispatch(" + engineerList + ") (or any team member you trust with git) saying: \"fast-forward `" + leadBranch + "` to include every engineer's committed work, then emit @finished. Use `git merge --ff-only <engineer-branch>` from each engineer in turn.\" After this turn, lead will have commits and re-emitting @summary will let Approval succeed." + nl + nl +
+        "  (C) If the engineers genuinely produced nothing PR-able yet, revise your @summary to reflect that — say what's blocking, what the user should do next — and the orchestrator will route it as plain chat (no Approval modal)." + nl + nl +
+        "Pick exactly one path, emit the corresponding directive(s), and end the turn."
+}
+
+// gitSlugForTeam mirrors gitSlug from app/runtime so the nudge
+// builder can show the user-visible branch name without a runtime
+// dep. Same rules as the source-of-truth gitSlug — lowercased,
+// non-[a-z0-9-_./] runs collapsed to '-'.
+func gitSlugForTeam(s string) string {
+    if s == "" { return "project" }
+    val lower = strings.ToLower(s)
+    val rs = ToRunes(lower)
+    var out = EmptyArray[string]()
+    var i = 0
+    val n = len(rs)
+    var lastWasDash = false
+    for i < n {
+        val c = rs[i]
+        val safe = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/'
+        if safe {
+            out = out.Append(string(c))
+            lastWasDash = false
+        } else {
+            if !lastWasDash {
+                out = out.Append("-")
+                lastWasDash = true
+            }
+        }
+        i = i + 1
+    }
+    return strings.Trim(out.MkString(""), "-/.")
 }
 
 // spawnQAReview kicks off a QA review session for every QA member on
@@ -3088,11 +3185,26 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
     // engineers' worktree commits have landed on the lead's branch)
     // crashes `gh` with an opaque "no commits" error and the user is
     // left wondering why the PR didn't open.
+    //
+    // CRITICAL: when the check fails we MUST dismiss the modal too.
+    // The 2026-05-04 audit caught a session where the user was stuck
+    // on Approval for 30 minutes — Ctrl+A reached onApprove, the
+    // check failed (lead branch had 0 commits ahead of master), and
+    // the original code returned without changing State. Modal
+    // stayed up, conversation log update was hidden behind it, the
+    // user pressed every key and got nothing visible. Now: transition
+    // via ApprovalRejected (so the FSM exits Approval) AND push a
+    // toast (visible above any modal) AND keep the conversation log
+    // entry so the audit trail records the why.
     val readiness = checkPrReady(m.Project)
     if readiness.IsDefined() {
         val reason = readiness.GetOrElse("")
+        val nextState = transitionLogged(m.State, ApprovalRejected(), transitionContext(m))
+        val toast = m.Toasts.PushError(s"approval blocked: ${reason}", time_utils.Now(), time_utils.Seconds(int64(8)))
         return (m.Copy(
+            State        = nextState,
             LastError    = Some(s"approval: ${reason}"),
+            Toasts       = toast,
             Conversation = m.Conversation.Append(
                 session.ConversationLine(Speaker = "policy", Text = s"approval blocked: ${reason}"),
             ),

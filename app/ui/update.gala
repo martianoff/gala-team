@@ -523,10 +523,16 @@ func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
 // allowed (rejection routes through the chat composer for the
 // next prompt).
 func approvalIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg]]] = msg match {
-    case KeySubmit()                              => Some(onApprove(m))
-    case KeyChar(c) if c == 'y' || c == 'Y'       => Some(onApprove(m))
-    case KeyChar(c) if c == 'n' || c == 'N'       => Some(onReject(m))
-    case _                                        => None[Tuple[AppModel, Cmd[AppMsg]]]()
+    // Enter only approves when the composer is EMPTY. If the user
+    // typed something, they obviously meant to submit that text —
+    // silently approving would discard their typed redirect. With
+    // text in the composer, fall through so onSubmit handles it
+    // (the prompt becomes the next user turn, implicitly rejecting
+    // the approval).
+    case KeySubmit() if m.Composer == ""    => Some(onApprove(m))
+    case KeyChar(c) if c == 'y' || c == 'Y' => Some(onApprove(m))
+    case KeyChar(c) if c == 'n' || c == 'N' => Some(onReject(m))
+    case _                                  => None[Tuple[AppModel, Cmd[AppMsg]]]()
 }
 
 // onRecoveryCycle advances the focus across the recovery modal's
@@ -1579,14 +1585,22 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     if displayText == "" {
         return (withErrSurface, NoCmd[AppMsg]())
     }
-    val visible = formatDirectiveMarkers(displayText)
-    val nextConvo = if (visible == "") {
+    // Store displayText RAW (with @summary / @end / @dispatch
+    // markers intact). The view renderer applies formatDirective-
+    // Markers at display time. Storing raw lets resume-time
+    // recovery use the directive parser directly to find the last
+    // @summary, instead of having to recognize the rendered form.
+    // The `formatDirectiveMarkers(displayText) == ""` check is
+    // preserved so all-marker chunks (e.g. a bare `@end` line)
+    // still drop without being persisted.
+    val rendered = formatDirectiveMarkers(displayText)
+    val nextConvo = if (rendered == "") {
         withErrSurface.Conversation
-    } else if (isDuplicateOfLastConvoLine(withErrSurface.Conversation, name, visible)) {
+    } else if (isDuplicateOfLastConvoLine(withErrSurface.Conversation, name, displayText)) {
         withErrSurface.Conversation
     } else {
-        LogMemberOutput(name, visible)
-        withErrSurface.Conversation.Append(session.ConversationLine(Speaker = name, Text = visible, At = time_utils.Now().UnixNanos()))
+        LogMemberOutput(name, displayText)
+        withErrSurface.Conversation.Append(session.ConversationLine(Speaker = name, Text = displayText, At = time_utils.Now().UnixNanos()))
     }
     val withLastSeen = withErrSurface.Copy(RetryCount = withErrSurface.RetryCount.Remove(name))
     val current = withLastSeen.Statuses.Get(name).GetOrElse(StIdle())
@@ -3257,12 +3271,19 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
 }
 
 // recoverApprovalIfReady scans `m.Conversation` in reverse for the
-// last lead-spoken line containing an `@summary` directive and, if
-// the lead branch is currently PR-ready, sets State = Approval(body)
-// so resume drops the user back where they were.
+// last lead-spoken summary and, if the lead branch is currently
+// PR-ready, sets State = Approval(body) so resume drops the user
+// back where they were.
+//
+// Looks for two forms:
+//   1. Raw directive: `@summary ... @end` (early-session text the
+//      pipeline saved before formatDirectiveMarkers ran)
+//   2. Rendered form: line trimmed exactly to "Summary:" followed
+//      by body lines (formatDirectiveMarkers's transformation —
+//      what's actually in latest.json after a turn)
 //
 // Two guards prevent surprise re-entry into Approval:
-//   - Only the LATEST lead @summary counts (the conversation may
+//   - Only the LATEST lead summary counts (the conversation may
 //     contain older summaries from prior turns the user already
 //     rejected — those shouldn't reactivate)
 //   - checkPrReady must succeed (lead has commits past master);
@@ -3280,10 +3301,9 @@ func recoverApprovalIfReady(m AppModel) AppModel {
     for i >= 0 && !found {
         val line = convo.Get(i)
         if line.Speaker == leadName {
-            val dirs = Parse(line.Text)
-            val summaries = dirs.Collect({ case Summary(body) => body })
-            if !summaries.IsEmpty() {
-                foundBody = summaries.Get(summaries.Size() - 1)
+            val raw = extractSummaryFromText(line.Text)
+            if raw != "" {
+                foundBody = raw
                 found = true
             }
         }
@@ -3293,6 +3313,65 @@ func recoverApprovalIfReady(m AppModel) AppModel {
     val readiness = checkPrReady(m.Project)
     if readiness.IsDefined() { return m }
     return m.Copy(State = Approval(SummaryBody = foundBody))
+}
+
+// extractSummaryFromText finds a summary body inside `text`,
+// recognizing both the raw directive (`@summary\n<body>\n@end`)
+// and the rendered form that formatDirectiveMarkers produces
+// (a line trimmed to exactly `Summary:` followed by body text
+// until the end of the entry).
+//
+// Empty return means no summary present — caller skips this line.
+// The raw form is checked first (it's more specific); the
+// rendered form is the fallback for conversation lines that have
+// already been through the renderer (i.e. anything in the
+// persisted snapshot).
+func extractSummaryFromText(text string) string {
+    val raw = parseRawSummary(text)
+    if raw != "" { return raw }
+    return parseRenderedSummary(text)
+}
+
+func parseRawSummary(text string) string {
+    val dirs = Parse(text)
+    val summaries = dirs.Collect({ case Summary(body) => body })
+    if summaries.IsEmpty() { return "" }
+    return summaries.Get(summaries.Size() - 1)
+}
+
+// parseRenderedSummary scans `text` line-by-line for a line
+// trimmed exactly to "Summary:" and returns everything after it
+// joined by newlines. Matches formatDirectiveMarkers's transform:
+//   `@summary` → "Summary:"
+//   body lines pass through unchanged
+//   `@end` → dropped
+// So in the persisted form a summary block looks like:
+//
+//   Summary:
+//   **body line 1**
+//   body line 2
+//
+// (continuing until end of entry — the rendered form has no
+// terminator). Returns "" if no "Summary:" line found.
+func parseRenderedSummary(text string) string {
+    val lines = strings.Split(text, "\n")
+    var i = 0
+    val n = len(lines)
+    var startIdx = -1
+    for i < n {
+        if strings.TrimSpace(lines[i]) == "Summary:" {
+            startIdx = i + 1
+        }
+        i = i + 1
+    }
+    if startIdx < 0 || startIdx >= n { return "" }
+    var body = EmptyArray[string]()
+    var j = startIdx
+    for j < n {
+        body = body.Append(lines[j])
+        j = j + 1
+    }
+    return strings.TrimSpace(body.MkString("\n"))
 }
 
 // checkPrReady returns Some(reason) when the project's current branch

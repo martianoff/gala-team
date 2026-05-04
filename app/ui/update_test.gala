@@ -300,10 +300,12 @@ func resumedModel(proj Project, convo Array[session.ConversationLine]) AppModel 
     )
 
 // Resume into Approval when conversation ends with lead @summary
-// AND lead branch has commits ahead of master.
+// AND lead branch has commits ahead of master. Fixture: branch
+// off main and commit so checkPrReady returns None.
 func TestResume_RecoversApprovalWhenSummaryAndCommitsExist(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
     val convo = EmptyArray[session.ConversationLine]()
@@ -335,9 +337,13 @@ func TestResume_StaysIdleWhenLeadBranchEmpty(t T) T {
 
 // Resume stays Idle when no @summary exists in conversation.
 // Conversation has only chat / dispatch text, no terminal summary.
+// (PR-readiness is also satisfied — checkout a feature branch with
+// a commit so the only thing distinguishing this from the recovery
+// case is the absence of @summary.)
 func TestResume_StaysIdleWhenNoSummary(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
     val convo = EmptyArray[session.ConversationLine]()
@@ -356,6 +362,7 @@ func TestResume_StaysIdleWhenNoSummary(t T) T {
 func TestResume_LatestSummaryWinsWhenMultiple(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
     val convo = EmptyArray[session.ConversationLine]()
@@ -370,12 +377,37 @@ func TestResume_LatestSummaryWinsWhenMultiple(t T) T {
     }
 }
 
+// In production the persisted conversation contains the RENDERED
+// summary ("Summary:\n<body>") not the raw directive — formatDirective-
+// Markers strips the @summary/@end markers before we save. Recovery
+// must recognize this rendered form too, otherwise resume after a
+// real session never recovers Approval. The 2026-05-04 audit caught
+// this exact case.
+func TestResume_RecoversApprovalFromRenderedSummary(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
+    runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "--allow-empty", "-q", "-m", "lead work"))
+    val rendered = "Picking path C.\n  Summary:\n**Status: ready to ship**\nDetails follow."
+    val convo = EmptyArray[session.ConversationLine]()
+        .Append(session.ConversationLine(Speaker = "Iris", Text = rendered))
+    val seed = resumedModel(proj, convo)
+    val (m, _) = Update(seed, KeyRecoveryConfirm())
+    return m.State match {
+        case Approval(body) => IsTrue(t, strings.Contains(body, "ready to ship"))
+        case _              => IsTrue(t, false)
+    }
+}
+
 // @summary spoken by a non-lead member (e.g. an engineer pasting
 // the directive in their report) must NOT trigger recovery — only
-// the lead's voice opens Approval.
+// the lead's voice opens Approval. Branch+commit fixture so PR
+// readiness alone isn't what's blocking recovery.
 func TestResume_IgnoresSummaryFromNonLead(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
     val convo = EmptyArray[session.ConversationLine]()
@@ -1868,14 +1900,17 @@ func TestJsonExtract_PartialEnvelope_HeldInLeftover(t T) T {
 
 func TestJsonExtract_BraceInsideString_DoesNotConfuseCounter(t T) T {
     // Content string contains literal `{` and `}` — must NOT be
-    // counted by the brace tracker.
-    val ext = extractCompleteEnvelopes("{\"x\":\"{nested}\"}\n")
+    // counted by the brace tracker. Use a real Claude-shape
+    // envelope (`{"type":...}` prefix) since looksLikeClaudeEnvelope
+    // now drops anything else as buffer-state garbage.
+    val ext = extractCompleteEnvelopes("{\"type\":\"assistant\",\"x\":\"{nested}\"}\n")
     return Eq(t, ext.Envelopes.Size(), 1)
 }
 
 func TestJsonExtract_EscapedQuoteInsideString_StillTracksProperly(t T) T {
     // Escaped quote inside a string must NOT close the string.
-    val ext = extractCompleteEnvelopes("{\"x\":\"a\\\"b\"}\n")
+    // Use Claude-shape envelope to satisfy the shape gate.
+    val ext = extractCompleteEnvelopes("{\"type\":\"assistant\",\"x\":\"a\\\"b\"}\n")
     return Eq(t, ext.Envelopes.Size(), 1)
 }
 

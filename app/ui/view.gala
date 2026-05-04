@@ -1220,10 +1220,16 @@ func renderConversationLine(m AppModel, cl session.ConversationLine, width int) 
     val codeStyle = DefaultStyle().WithFg(BrightCyan())
     val codeBarStyle = DefaultStyle().WithFg(BrightCyan()).WithDim()
     val prefix = s"  ${cl.Speaker}: "
+    // Render directive markers at display time — the conversation
+    // log stores raw `@summary` / `@end` / `@dispatch` directives
+    // so resume-time Approval recovery can parse them. The view
+    // applies formatDirectiveMarkers to swap them for human-readable
+    // forms ("Summary:", "→ Target:") before laying out the chunk.
+    val displayText = formatDirectiveMarkers(cl.Text)
     // Walk the text line by line, toggling between prose and code on
     // fence markers. The first prose segment keeps the speaker prefix;
     // subsequent prose segments are unprefixed continuations.
-    val lines = strings.Split(cl.Text, "\n")
+    val lines = strings.Split(displayText, "\n")
     var entries = EmptyArray[ConversationEntry]()
     var prose = EmptyArray[string]()
     var code = EmptyArray[string]()

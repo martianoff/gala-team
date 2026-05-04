@@ -606,7 +606,26 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
     val title = ghTitle(body)
     val bodyWithFooter = body + "\n\n---\n🍎 orchestrated by [Gala Team](https://github.com/martianoff/gala-team)"
     val args = ArrayOf("pr", "create", "--title", title, "--body", bodyWithFooter)
+    val leadBranch = LeadBranchFor(proj)
     return concurrent.FutureApply[Msg](() => {
+        // Push HEAD to origin before invoking gh — without this, gh
+        // pr create exits 1 because origin doesn't have the branch
+        // to PR from. The audit log on 2026-05-04 caught a session
+        // where the lead branch had a valid commit ahead of master
+        // (Felix's update-ref worked), the Approval modal opened
+        // correctly, but `gh pr create` immediately failed with
+        // "exit code 1" — the actual reason ("must push branch
+        // first") was lost because we weren't draining gh's stderr
+        // and we never pushed in the first place.
+        //
+        // Restrict the push to the gala_team-owned branch namespace
+        // (`refs/heads/gala_team/<project>/lead`) so we never
+        // touch the user's own branches even if HEAD is somehow
+        // pointed elsewhere.
+        val pushResult = pushLeadBranch(proj, leadBranch)
+        if pushResult != "" {
+            return RtPrFailed(Err = errors.New(s"git push lead failed: ${pushResult}"))
+        }
         val opts = subprocess.NewSpawnOpts(
             "gh",
             args.ToGoSlice(),
@@ -620,9 +639,73 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
     })
 }
 
-// readGhPrUrl drains gh's stdout, looking for the URL line. `gh pr
-// create` prints assorted status to stderr and the final PR URL on
-// stdout; the URL is the last non-empty stdout line.
+// pushLeadBranch shells `git push -u origin <leadBranch>:<leadBranch>`
+// inside `proj.Repo`. Explicit src:dst form so we push EXACTLY the
+// gala_team-owned branch — never HEAD (which might be checked out
+// somewhere unexpected) and never another ref. -u sets the upstream
+// so subsequent pushes from any worktree pointing at this branch
+// auto-target origin.
+//
+// Returns "" on success; non-empty error string with stderr inlined
+// on failure. Pushing an already-up-to-date branch exits 0 with no
+// stderr — safe to call on every approval.
+func pushLeadBranch(proj Project, leadBranch string) string {
+    val refspec = leadBranch + ":" + leadBranch
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("push", "-u", "origin", refspec).ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    return subprocess.Spawn(opts) match {
+        case Failure(err) => err.Error()
+        case Success(p)   => drainGitPushResult(p)
+    }
+}
+
+// drainGitPushResult reads the push process to completion, capturing
+// stderr (where git emits its progress + errors) and surfacing it
+// only on a non-zero exit. git push prints "Everything up-to-date"
+// or push counts to stderr even on success, so we don't surface
+// stderr unless the exit code says it actually failed.
+func drainGitPushResult(p subprocess.Process) string {
+    for {
+        val line = p.ReadLine()
+        if line.IsFailure() { break }
+    }
+    var stderrAcc = EmptyArray[string]()
+    for {
+        val line = p.ReadStderrLine()
+        if line.IsFailure() { break }
+        val trimmed = strings.TrimSpace(line.Get())
+        if trimmed != "" {
+            stderrAcc = stderrAcc.Append(trimmed)
+        }
+    }
+    return p.Wait() match {
+        case Failure(err)  => err.Error()
+        case Success(code) => {
+            if code == 0 {
+                return ""
+            }
+            val joined = stderrAcc.MkString(" | ")
+            return s"exit ${code}: ${joined}"
+        }
+    }
+}
+
+// readGhPrUrl drains gh's stdout AND stderr, looking for the URL
+// line on stdout (last non-empty stdout line) and capturing stderr
+// in case gh fails. gh pr create writes the actual error reason
+// (auth, no remote, branch not pushed, PR already exists, etc.)
+// to stderr — without draining it we'd surface only "exited with
+// code N" which leaves the user with no path to fix the failure.
+//
+// Drain order: stdout first (one line at a time), then stderr in
+// bulk after Wait. The OS buffers small stderr writes, so reading
+// stderr after stdout is drained keeps the code linear without
+// risking deadlock for the size of output gh pr create produces
+// (stderr is typically a few short lines).
 func readGhPrUrl(p subprocess.Process) Msg {
     var lastLine = ""
     for {
@@ -633,11 +716,27 @@ func readGhPrUrl(p subprocess.Process) Msg {
             lastLine = trimmed
         }
     }
+    var stderrAcc = EmptyArray[string]()
+    for {
+        val line = p.ReadStderrLine()
+        if line.IsFailure() { break }
+        val trimmed = strings.TrimSpace(line.Get())
+        if trimmed != "" {
+            stderrAcc = stderrAcc.Append(trimmed)
+        }
+    }
+    val stderrJoined = stderrAcc.MkString(" | ")
     return p.Wait() match {
         case Failure(err)  => RtPrFailed(Err = err)
         case Success(code) =>
-            if (code != 0)           RtPrFailed(Err = errors.New(s"gh pr create exited with code ${code}"))
-            else if (lastLine == "") RtPrFailed(Err = errors.New("gh pr create produced no output"))
+            if (code != 0) {
+                val detail = if (stderrJoined != "") s": ${stderrJoined}" else ""
+                RtPrFailed(Err = errors.New(s"gh pr create exited with code ${code}${detail}"))
+            }
+            else if (lastLine == "") {
+                val detail = if (stderrJoined != "") s": ${stderrJoined}" else ""
+                RtPrFailed(Err = errors.New(s"gh pr create produced no output${detail}"))
+            }
             else                     RtPrCreated(Url = lastLine)
     }
 }

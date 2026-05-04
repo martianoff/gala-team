@@ -13,7 +13,12 @@ build --action_env=PATH
 # Re-runs the link step for stamped targets only when STABLE_* values
 # change (commit, tag), so day-to-day rebuilds stay cached.
 #
-# The status script lives in repo-relative `tools/`; bash is required on
-# PATH (Git for Windows ships it; Linux/macOS have it natively).
+# Platform split: on Windows cmd.exe interprets `/` as a switch prefix
+# and strips it from `bash tools/workspace_status.sh`, so we go through
+# a .bat wrapper that uses %~dp0 to feed bash an unambiguous path.
+# On Linux/macOS the .sh runs directly via its shebang.
 build --stamp
-build --workspace_status_command="bash tools/workspace_status.sh"
+build --enable_platform_specific_config
+build:windows --workspace_status_command=tools/workspace_status.bat
+build:linux   --workspace_status_command=tools/workspace_status.sh
+build:macos   --workspace_status_command=tools/workspace_status.sh

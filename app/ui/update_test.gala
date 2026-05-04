@@ -3,10 +3,12 @@ package ui
 import (
     "os"
     "strings"
+    "martianoff/gala/subprocess"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
@@ -187,6 +189,91 @@ func TestKeyReject_OutsideApproval_NoOp(t T) T {
     val seed = sampleModel().Copy(Tick = 5)
     val (m, _) = Update(seed, KeyReject())
     return Eq(t, m.Tick, 5)  // unchanged
+}
+
+// runGitInTmp shells out to `git` inside `dir` for one command. Tests
+// use it to set up tiny fixture repos for the PR-readiness path,
+// since checkPrReady actually runs `git rev-list --count`.
+func runGitInTmp(dir string, args Array[string]) {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        args.ToGoSlice(),
+        SliceEmpty[string](),
+        dir,
+    )
+    val proc = subprocess.Spawn(opts).Get()
+    val _ = proc.Wait().Get()
+}
+
+// emptyLeadBranchProject returns a Project whose repo is a real git
+// init'd dir with HEAD == main + zero commits ahead. Triggers
+// checkPrReady's Some(reason) early return — the precondition for
+// the Bug 1 nudge path. Test fixture only; no network, no branches
+// other than main.
+func emptyLeadBranchProject() Project {
+    val dir, err = os.MkdirTemp("", "gala_team_pr_ready_test_")
+    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    runGitInTmp(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInTmp(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                             "commit", "--allow-empty", "-q", "-m", "base"))
+    return Project(
+        Name = "demo", Repo = dir,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+}
+
+// Bug 1 regression: when the TL emits @summary but the lead branch
+// has zero commits ahead of master, the FSM must NOT enter Approval
+// — that would dead-end the user on a modal that can only be
+// dismissed (Ctrl+A → "no commits to PR"). Instead, the orchestrator
+// nudges the TL with the recovery-paths prompt and stays in the
+// prior FSM state.
+//
+// Setup: real git fixture with HEAD == main + 0 commits ahead, TL
+// session active, TurnBuffer holds an @summary directive. On
+// SessionFailed("Iris", "EOF") the TLDone path fires.
+//
+// Asserts:
+//   - State did NOT become Approval
+//   - Conversation does NOT contain "/approve" (Approval branch
+//     would have appended it).
+func TestTLSummary_BlocksApprovalWhenLeadBranchEmpty(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    val seedConvo = EmptyArray[session.ConversationLine]()
+    val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
+        State        = TLThinking(),
+        TurnBuffer   = "@summary\nship it\n@end",
+        Conversation = seedConvo,
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val notApproval = m.State match {
+        case Approval(_) => IsTrue(t, false)
+        case _           => IsTrue(t, true)
+    }
+    val noApproveLine = m.Conversation.ForAll((cl) => cl.Text != "/approve")
+    return IsTrue(notApproval, noApproveLine)
+}
+
+// Companion: when the lead branch DOES have commits ahead, the
+// @summary path must enter Approval as before. Same fixture except
+// we add a divergent commit so checkPrReady returns None.
+func TestTLSummary_EntersApprovalWhenLeadBranchHasCommits(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "feature"))
+    runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "--allow-empty", "-q", "-m", "feature work"))
+    val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
+        State      = TLThinking(),
+        TurnBuffer = "@summary\nship it\n@end",
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    return m.State match {
+        case Approval(body) => Eq(t, body, "ship it")
+        case _              => IsTrue(t, false)
+    }
 }
 
 // onPrCreated also appends a "Press Ctrl+M to merge" hint line, so

@@ -555,10 +555,19 @@ func onRecoveryCycle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if !m.RecoveryModalOpen { return (m, NoCmd[AppMsg]()) }
     return m.RecoveryFocus match {
-        case ResumeFocus() => (m.Copy(
-            RecoveryModalOpen = false,
-            RecoveryBannerVisible = false,
-        ), NoCmd[AppMsg]())
+        case ResumeFocus() => {
+            // Recover Approval state if the prior session left an
+            // unconfirmed @summary on the lead's pen and the lead
+            // branch is still PR-ready. Without this, the user
+            // resumes into Idle and has to re-prompt the TL to
+            // re-summarize before they can ship — the 2026-05-04
+            // workflow audit caught this as a real friction point.
+            val recovered = recoverApprovalIfReady(m)
+            return (recovered.Copy(
+                RecoveryModalOpen = false,
+                RecoveryBannerVisible = false,
+            ), NoCmd[AppMsg]())
+        }
         case InspectFocus() => (m.Copy(
             RecoveryModalOpen = false,
             RecoveryBannerVisible = false,
@@ -2335,29 +2344,50 @@ func buildDeliverableManifest(m AppModel, engineers Array[Member]) string {
     val rows = engineers.Map((eng) => {
         val cwd = onboarding.WorkspacePathFor(m.Project, eng, m.Policy.WorkspaceMode)
         val branch = manifestBranchFor(m, eng)
-        val files = listChangedFiles(cwd, m.Project.DefaultBranch)
-        val filesBlock = if (files.IsEmpty())
-            "  - files:  (none — engineer didn't commit any changes)"
+        val deliverable = listEngineerDeliverable(cwd, m.Project.DefaultBranch)
+        val filesBlock = if (deliverable.IsEmpty())
+            "  - files:  (none — worktree is clean and no commits past " + m.Project.DefaultBranch + ")"
         else
-            s"  - files:\n${files.Map((f) => s"      ${f}").MkString("\n")}"
+            s"  - files (committed=C, modified=M, new=?):\n${deliverable.Map((row) => s"      ${row}").MkString("\n")}"
         return s"- **${eng.Name}** (${RoleName(eng.Role)})\n  - cwd:    ${cwd}\n  - branch: ${branch}\n${filesBlock}"
     })
-    return s"# Deliverable manifest\n\nEach engineer's workspace + branch + the files they actually changed (pre-aggregated by the orchestrator — read directly, no need to run git yourself).\n\n${rows.MkString("\n")}"
+    return s"# Deliverable manifest\n\nEach engineer's workspace + branch + the files they actually changed (pre-aggregated by the orchestrator — read directly, no need to run git yourself).\n\nFile prefixes: `C` = committed past ${m.Project.DefaultBranch}, `M` = uncommitted modification (tracked file with edits), `?` = untracked new file. Inspect every entry — uncommitted work is part of the deliverable too even if the engineer forgot to commit.\n\n${rows.MkString("\n")}"
 }
 
-// listChangedFiles returns the file list git would print for
-// `git diff --name-only <default>..HEAD` in `cwd`. Empty array on any
-// failure (cwd doesn't exist, default branch missing, no commits). The
-// "fail soft" policy keeps the QA prompt from blowing up because of a
-// stale worktree — the manifest just says "(none)" and QA falls back
-// to the engineer reports. Failure modes ARE legitimate: an engineer
-// might emit @finished without committing if their work is purely
-// analytical (a recommendation, not a code change).
-func listChangedFiles(cwd string, defaultBranch string) Array[string] {
-    if defaultBranch == "" { return EmptyArray[string]() }
+// listEngineerDeliverable returns the union of (a) committed-past-
+// default-branch files, (b) tracked-but-uncommitted modifications,
+// and (c) untracked new files in `cwd`, each tagged with a single-
+// char status prefix (C / M / ?) so QA can tell at a glance whether
+// the file is on the engineer's branch or only in their working
+// tree. The 2026-05-04 audit caught QA blocking every turn because
+// listChangedFiles only returned (a); engineers routinely emit
+// @finished with uncommitted work, the manifest then claimed
+// "(none)", and QA had nothing to review.
+func listEngineerDeliverable(cwd string, defaultBranch string) Array[string] {
+    val committed = gitFilesList(cwd, ArrayOf("diff", "--name-only", defaultBranch + "..HEAD"))
+    val modified  = gitFilesList(cwd, ArrayOf("diff", "--name-only", "HEAD"))
+    val untracked = gitFilesList(cwd, ArrayOf("ls-files", "--others", "--exclude-standard"))
+    // Dedupe in priority order: committed > modified > untracked.
+    // A file edited then committed shows as C only; a tracked file
+    // modified-but-not-committed shows as M only. Lists are short
+    // (typical engineer turn touches <50 files), so the O(n²)
+    // Contains lookup is fine.
+    val acc1 = committed.Map((f) => "C  " + f)
+    val acc2 = modified.FoldLeft(acc1, (out, f) =>
+        if (committed.Contains(f)) out else out.Append("M  " + f))
+    return untracked.FoldLeft(acc2, (out, f) =>
+        if (committed.Contains(f) || modified.Contains(f)) out else out.Append("?  " + f))
+}
+
+// gitFilesList runs `git <args>` in `cwd` and returns each non-empty
+// stdout line as an element. Empty array on any failure (failure
+// modes are deliberately silent so a stale worktree doesn't blow up
+// the manifest — the prefix-tagged display already conveys "no
+// files in this category").
+func gitFilesList(cwd string, args Array[string]) Array[string] {
     val opts = subprocess.NewSpawnOpts(
         "git",
-        ArrayOf("diff", "--name-only", defaultBranch + "..HEAD").ToGoSlice(),
+        args.ToGoSlice(),
         SliceEmpty[string](),
         cwd,
     )
@@ -3224,6 +3254,45 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
         ),
     )
     return (noted, hooksFutureCmd(m.Project, m.Policy.PreMerge, body))
+}
+
+// recoverApprovalIfReady scans `m.Conversation` in reverse for the
+// last lead-spoken line containing an `@summary` directive and, if
+// the lead branch is currently PR-ready, sets State = Approval(body)
+// so resume drops the user back where they were.
+//
+// Two guards prevent surprise re-entry into Approval:
+//   - Only the LATEST lead @summary counts (the conversation may
+//     contain older summaries from prior turns the user already
+//     rejected — those shouldn't reactivate)
+//   - checkPrReady must succeed (lead has commits past master);
+//     otherwise resume into Approval would dead-end on the same
+//     "no commits to PR" block the workflow already covers
+//
+// Returns m unchanged when neither condition holds — the user lands
+// in Idle and re-prompts the TL the way they would today.
+func recoverApprovalIfReady(m AppModel) AppModel {
+    val leadName = m.Team.Lead.Name
+    val convo = m.Conversation
+    var i = convo.Size() - 1
+    var foundBody = ""
+    var found = false
+    for i >= 0 && !found {
+        val line = convo.Get(i)
+        if line.Speaker == leadName {
+            val dirs = Parse(line.Text)
+            val summaries = dirs.Collect({ case Summary(body) => body })
+            if !summaries.IsEmpty() {
+                foundBody = summaries.Get(summaries.Size() - 1)
+                found = true
+            }
+        }
+        i = i - 1
+    }
+    if !found { return m }
+    val readiness = checkPrReady(m.Project)
+    if readiness.IsDefined() { return m }
+    return m.Copy(State = Approval(SummaryBody = foundBody))
 }
 
 // checkPrReady returns Some(reason) when the project's current branch

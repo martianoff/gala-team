@@ -639,21 +639,46 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
     })
 }
 
-// pushLeadBranch shells `git push -u origin <leadBranch>:<leadBranch>`
-// inside `proj.Repo`. Explicit src:dst form so we push EXACTLY the
-// gala_team-owned branch — never HEAD (which might be checked out
-// somewhere unexpected) and never another ref. -u sets the upstream
-// so subsequent pushes from any worktree pointing at this branch
-// auto-target origin.
+// pushLeadBranch shells `git push --force-with-lease -u origin
+// <leadBranch>:<leadBranch>` inside `proj.Repo`. Explicit src:dst
+// form so we push EXACTLY the gala_team-owned branch — never HEAD
+// (which might be checked out somewhere unexpected) and never
+// another ref.
+//
+// Why --force-with-lease: the `gala_team/<project>/lead` namespace
+// is ORCHESTRATOR-OWNED and ephemeral. Each session resets it,
+// engineers fast-forward into it, and we push it for the sole
+// purpose of opening a PR. Plain push fails on non-fast-forward
+// when the user did a Start fresh (lead reset to master) but
+// origin still holds the prior session's commit — exactly what the
+// 2026-05-04 audit captured. --force-with-lease overwrites remote
+// safely: it won't push if local doesn't know about origin's
+// current tip, so an unexpected concurrent writer is still
+// protected. We pre-fetch the lead ref so the lease check has
+// up-to-date local knowledge of origin.
 //
 // Returns "" on success; non-empty error string with stderr inlined
 // on failure. Pushing an already-up-to-date branch exits 0 with no
 // stderr — safe to call on every approval.
 func pushLeadBranch(proj Project, leadBranch string) string {
+    // Best-effort fetch so --force-with-lease has accurate local
+    // knowledge of origin's tip. Failures here are non-fatal — the
+    // push attempt below will surface a real error message if the
+    // remote is genuinely unreachable.
+    val fetchOpts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("fetch", "--quiet", "origin", leadBranch).ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    subprocess.Spawn(fetchOpts) match {
+        case Failure(_)   => {}
+        case Success(p)   => { val _ = drainGitPushResult(p) }
+    }
     val refspec = leadBranch + ":" + leadBranch
     val opts = subprocess.NewSpawnOpts(
         "git",
-        ArrayOf("push", "-u", "origin", refspec).ToGoSlice(),
+        ArrayOf("push", "--force-with-lease", "-u", "origin", refspec).ToGoSlice(),
         SliceEmpty[string](),
         proj.Repo,
     )

@@ -317,15 +317,19 @@ func isStartFreshFocus(c RecoveryChoice) bool = c match {
 
 // approvalModalOverlay paints the §6.1 / Frame G approval dialog —
 // a centered modal with the summary preview + Branch / Base / Title
-// metadata + [ Yes ] / [ No ] buttons. Replaces the legacy single-
-// line approval banner, which is still rendered as a dim breadcrumb
-// underneath in case the user dismissed the modal accidentally.
+// metadata + clickable [ Yes ] / [ No ] buttons. Mirrors the
+// recovery modal's ButtonClick pattern so a mouse click picks AND
+// confirms in one action.
 func approvalModalOverlay(m AppModel, body string, base Widget) Widget {
     val (cols, rows) = TermSize()
     val w = if (cols < 70) cols - 4 else MinInt(78, cols - 8)
     val h = if (rows < 18) rows - 2 else MinInt(20, rows - 4)
     val title = TextStyled(" Open PR? ", DefaultStyle().WithBold().WithReverse())
-    val firstLine = approvalFirstLine(body)
+    // Cap the summary to what fits inside the modal: subtract the
+    // "  Summary:  " prefix (12 chars) plus a 2-col safety margin
+    // so the row never overflows the modal frame visually.
+    val summaryCap = MaxInt(20, w - 14)
+    val firstLine = approvalFirstLine(body, summaryCap)
     val summaryRow = TextStyled(s"  Summary:  ${firstLine}", DefaultStyle())
     val branchHint = approvalBranchHint(m)
     val info = ArrayOf(
@@ -334,29 +338,49 @@ func approvalModalOverlay(m AppModel, body string, base Widget) Widget {
         s"  Repo:     ${m.Project.Name}",
     )
     val infoWidgets = info.Map((r) => Fixed(1, TextStyled(r, DefaultStyle().WithDim())))
-    val buttons = TextStyled("           [ Yes — Ctrl+A ]     [ No — Ctrl+R ]",
-        DefaultStyle().WithBold())
-    val footer = TextStyled("  Yes runs pre-merge hooks then `gh pr create`. Esc dismisses the modal (banner stays).",
+    val buttonRow = approvalButtonRow()
+    val footer = TextStyled("  Yes runs pre-merge hooks then `gh pr create`. Enter / Ctrl+A approves · Esc / Ctrl+R rejects.",
         DefaultStyle().WithDim())
     val body2 = Column(ArrayOf[LayoutChild](
         Fixed(1, title),
         Fixed(1, FillCh('-')),
         Fixed(1, summaryRow),
         Fixed(1, Empty()),
-    ).AppendAll(infoWidgets).Append(Fixed(1, Empty())).Append(Fixed(1, buttons))
+    ).AppendAll(infoWidgets).Append(Fixed(1, Empty())).Append(Fixed(1, buttonRow))
         .Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
     return Overlay(base, Modal(w, h, body2))
 }
 
+// approvalButtonRow renders Yes/No as ButtonClick widgets so a
+// mouse click directly dispatches KeyApprove / KeyReject. Without
+// this, the modal had plain text buttons and the only way to act
+// on it was Ctrl+A / Ctrl+R from the keyboard — which on some
+// terminals (Windows console, certain SSH clients) gets eaten by
+// the host before reaching gala-tui.
+func approvalButtonRow() Widget {
+    val yesBtn = ButtonClick[AppMsg]("Yes — open PR", true,  KeyApprove())
+    val noBtn  = ButtonClick[AppMsg]("No — back",     false, KeyReject())
+    return Row(ArrayOf[LayoutChild](
+        Flex(1, Empty()),
+        Fixed(18, yesBtn),
+        Fixed(2, Empty()),
+        Fixed(14, noBtn),
+        Flex(1, Empty()),
+    ))
+}
+
 // approvalFirstLine flattens the summary's first non-empty line and
-// caps it to 70 cols so the modal width stays predictable.
-func approvalFirstLine(body string) string {
+// caps it to `cap` runes (caller-supplied so the renderer can match
+// the modal width) — `cap` includes ellipsis room. Without a width-
+// aware cap the row visually clips at the modal frame mid-word.
+func approvalFirstLine(body string, cap int) string {
     val flat = strings.Join(strings.Fields(body), " ")
     val rs = ToRunes(flat)
-    if len(rs) <= 70 { return string(rs) }
+    if len(rs) <= cap { return string(rs) }
+    val keep = MaxInt(1, cap - 3)
     var prefix = EmptyArray[string]()
     var i = 0
-    for i < 67 {
+    for i < keep {
         prefix = prefix.Append(string(rs[i]))
         i = i + 1
     }

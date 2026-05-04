@@ -411,6 +411,22 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
             return intercepted.GetOrElse((m, NoCmd[AppMsg]()))
         }
     }
+    // Approval-modal interception: when the FSM is in Approval, Enter
+    // approves (default action) and Esc rejects. Gives keyboard
+    // fallbacks for terminals that eat Ctrl+A / Ctrl+R (Windows
+    // console intercepts Ctrl+A as Select-All; some SSH clients eat
+    // Ctrl+R as reverse-i-search). Click handlers on the modal's
+    // ButtonClick widgets cover the mouse path.
+    val inApproval = m.State match {
+        case Approval(_) => true
+        case _           => false
+    }
+    if inApproval {
+        val intercepted = approvalIntercept(m, msg)
+        if intercepted.IsDefined() {
+            return intercepted.GetOrElse((m, NoCmd[AppMsg]()))
+        }
+    }
     return msg match {
     case KeyChar(c)                  => onKeyChar(m, c)
     case KeyBackspace()              => onComposerBackspace(m)
@@ -490,6 +506,27 @@ func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
     case KeyToggleFocus() => Some(onRecoveryCycle(m))
     case KeySubmit()      => Some(onRecoveryConfirm(m))
     case _                => None[Tuple[AppModel, Cmd[AppMsg]]]()
+}
+
+// approvalIntercept gives the user keyboard fallbacks when the
+// FSM is in Approval, on top of Ctrl+A / Ctrl+R from the keymap:
+//
+//   Enter / y / Y  → KeyApprove
+//   n / N          → KeyReject
+//
+// The y/n keys cover the case where Ctrl combos are eaten by the
+// terminal / host (Windows Console intercepts Ctrl+A as Select-All
+// in some configurations; some SSH clients eat Ctrl+R as
+// reverse-i-search). The modal's ButtonClick widgets cover the
+// mouse path. Returns None for any other message so the regular
+// dispatch still runs — composer typing in Approval is otherwise
+// allowed (rejection routes through the chat composer for the
+// next prompt).
+func approvalIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg]]] = msg match {
+    case KeySubmit()                              => Some(onApprove(m))
+    case KeyChar(c) if c == 'y' || c == 'Y'       => Some(onApprove(m))
+    case KeyChar(c) if c == 'n' || c == 'N'       => Some(onReject(m))
+    case _                                        => None[Tuple[AppModel, Cmd[AppMsg]]]()
 }
 
 // onRecoveryCycle advances the focus across the recovery modal's
@@ -1437,7 +1474,15 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     val hasNoJsonShapes = !strings.Contains(line, "{") &&
                           !strings.Contains(line, "\"") &&
                           !strings.Contains(line, "\\")
-    val isAllProse = trimmedLine != "" && hasNoJsonShapes && priorBufQuick == ""
+    // NUL bytes pass the "no JSON shapes" test trivially (`\x00`
+    // doesn't contain `{`, `"`, or `\`), so a chunk of pure NUL
+    // bytes was being fast-pathed as prose and appended to the
+    // conversation. The 2026-05-04 audit log captured a 2162-byte
+    // NUL run rendering as Felix output. Real assistant prose never
+    // contains NUL — reject the whole chunk if any NUL byte is
+    // present.
+    val hasControlBytes = strings.Contains(line, "\x00")
+    val isAllProse = trimmedLine != "" && hasNoJsonShapes && !hasControlBytes && priorBufQuick == ""
     if isAllProse {
         val proseChunk = ClaudeChunk(
             Visible   = line,

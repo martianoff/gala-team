@@ -287,7 +287,12 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
                 val hasNoJsonShapesHl = !strings.Contains(line, "{") &&
                                         !strings.Contains(line, "\"") &&
                                         !strings.Contains(line, "\\")
-                if envs.IsEmpty() && hasNoJsonShapesHl && priorBufBeforeAppend == "" {
+                // NUL byte filter — same rationale as the UI-side
+                // onChunk fast-path: a chunk of pure NULs passes the
+                // no-JSON-shapes test trivially and was rendering as
+                // member output. Real assistant prose never has NULs.
+                val hasControlBytesHl = strings.Contains(line, "\x00")
+                if envs.IsEmpty() && hasNoJsonShapesHl && !hasControlBytesHl && priorBufBeforeAppend == "" {
                     // Plain prose: zero `{`, zero `"`, zero `\`, and
                     // the buffer was empty before this chunk. Real
                     // assistant prose rendered through tests fits;

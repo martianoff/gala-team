@@ -362,10 +362,12 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try[string](() => {
         // Only panic when we genuinely failed to land a worktree at
         // this location.
         if isRegisteredWorktree(proj, wtPath) {
+            LogWorktreeCreate(m.Name, wtPath, branch)
             return wtPath
         }
         panic(s"git worktree add ${wtPath} exited with code ${code}")
     }
+    LogWorktreeCreate(m.Name, wtPath, branch)
     return wtPath
 })
 

@@ -10,8 +10,10 @@ import (
     . "martianoff/gala/time_utils"
     "github.com/martianoff/gala_team/app/consult"
     "github.com/martianoff/gala_team/app/guidance"
+    "github.com/martianoff/gala_team/app/runtime"
     "github.com/martianoff/gala_team/app/session"
     "github.com/martianoff/gala_team/app/testdriver"
+    "github.com/martianoff/gala_team/app/version"
     . "github.com/martianoff/gala_team/app/cli"
     . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/guidance"
@@ -82,7 +84,7 @@ func hasFlag(names Array[string]) bool {
 // than reject so the user can pipe additional context through if a
 // future flag wants it.
 func validateArgs() {
-    val known = ArrayOf("--help", "-h", "--project", "--team", "--teams", "--team-key", "--test-mode")
+    val known = ArrayOf("--help", "-h", "--version", "-V", "--project", "--team", "--teams", "--team-key", "--test-mode")
     val takesValue = ArrayOf("--project", "--team", "--teams", "--team-key")
     val args = ArrayOf(os.Args...)
     val n = args.Size()
@@ -277,6 +279,10 @@ func main() {
         printUsage()
         os.Exit(0)
     }
+    if hasFlag(ArrayOf("--version", "-V")) {
+        val _ = os.Stdout.WriteString(s"gala_team ${version.Version()} (${version.GitDescribe()}) commit ${version.Commit()}\n")
+        os.Exit(0)
+    }
     validateArgs()
     val projDir  = flagValue(ArrayOf("--project"),         ".")
     val teamPath = flagValue(ArrayOf("--team", "--teams"), "")
@@ -285,6 +291,12 @@ func main() {
         die("--team is required (path to team.yaml)\n  see --help for usage")
     }
     val proj   = resolveProject(projDir)
+    // Register the project repo with the debug logger so subsequent
+    // runtime.LogEvent / TraceClaudeLine calls can derive their
+    // target paths without threading repoDir through every dispatch
+    // site. Both calls are no-ops when GALA_TEAM_DEBUG is unset.
+    runtime.SetDebugRepo(proj.Repo)
+    runtime.LogSessionInit()
     // Append .gala_team/ to .gitignore on first run so engineer
     // worktrees + session snapshots don't leak into the user's
     // commits. Best-effort — non-git dirs and IO errors are silent.
@@ -297,6 +309,14 @@ func main() {
             sampleTeamConfig()  // unreachable — die() called os.Exit
         }
     }
+    // Surface leftover worktree dirs from prior sessions whose
+    // member name isn't in the current team config. Caused the
+    // ghost-Mira incident — TL inspected .gala_team/worktrees/Mira/
+    // (left from a prior team config that had Mira on the roster)
+    // and reasoned about a non-existent team member. Each ghost dir
+    // emits a kind=stale_worktree event so a debug audit shows
+    // "we noticed Mira's worktree but ignored her".
+    scanStaleWorktrees(proj, cfg.Team)
     // Restore the prior conversation log if a snapshot exists under
     // <repo>/.gala_team/sessions/latest.json. None on first launch.
     val registry = loadRegistry(proj)
@@ -321,6 +341,7 @@ func main() {
         // deterministic; the driver injects whatever runtime events
         // it wants to simulate.
         testdriver.RunTestDriver(initial)
+        runtime.LogSessionDone("test_driver_exit")
         return
     }
     val tickSub = TickSub[AppMsg](Interval = Milliseconds(int64(120)), Make = () => TickMsg())
@@ -329,6 +350,39 @@ func main() {
     // confirmation flow + CloseAllSessions cleanup before exit.
     SetEscapeHatchOnCtrlC(false)
     val _ = RunWithMouse[AppModel, AppMsg](program, (ev) => InputToAppMsg(ev), tickSub)
+    // Reached only on clean TUI exit — onQuit's two-press flow or
+    // the runtime returning normally. A crash exit / panic skips this
+    // and leaves the events.jsonl without a session_done marker, so
+    // a replayer can detect "the process died" by the absence.
+    runtime.LogSessionDone("tui_exit")
+}
+
+// scanStaleWorktrees lists `<repo>/.gala_team/worktrees/` and emits
+// a kind=stale_worktree debug event for any subdir whose name isn't
+// in the current team's member list. The TL otherwise can — and did,
+// see the ghost-Mira incident from the 2026-05-03 audit log — read
+// the on-disk worktree state and treat it as authoritative team
+// membership, leading to reasoning about phantom engineers.
+//
+// Best-effort: if the worktrees dir doesn't exist yet (first run),
+// or the read fails, we silently skip. The events are diagnostic-
+// only — orchestration logic still treats `cfg.Team.Members` as the
+// source of truth.
+func scanStaleWorktrees(proj Project, tm Team) {
+    if !runtime.DebugEnabled() { return }
+    val wtDir = filepath.Join(proj.Repo, ".gala_team", "worktrees")
+    val entries, readErr = os.ReadDir(wtDir)
+    if readErr != nil { return }
+    val memberNames = tm.Members.Map((m) => m.Name)
+    var i = 0
+    val n = len(entries)
+    for i < n {
+        val name = entries[i].Name()
+        if entries[i].IsDir() && !memberNames.Contains(name) {
+            runtime.LogStaleWorktree(name, filepath.Join(wtDir, name))
+        }
+        i = i + 1
+    }
 }
 
 // loadArchives reads .gala_team/sessions/archive/ at startup so the

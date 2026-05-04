@@ -122,10 +122,29 @@ func extractHeadlessEnvelopes(buf string) Tuple[Array[string], string] {
                 depth = depth + 1
             } else if c == '}' {
                 depth = depth - 1
+                // Same desync recovery as the UI extractor: if depth
+                // goes negative, the buffer is out of sync (more
+                // closes than opens). Reset parser state so the next
+                // top-level `{` is treated as a clean envelope start.
+                if depth < 0 {
+                    depth = 0
+                    inString = false
+                    escaped = false
+                    start = -1
+                }
                 if depth == 0 && start >= 0 {
                     val tail = SliceFrom(rs, start)
                     val window = SliceTo(tail, i + 1 - start)
-                    envelopes = envelopes.Append(string(window))
+                    val candidate = string(window)
+                    // Drop brace-counting false-positives that
+                    // don't have the Claude-envelope shape. See the
+                    // UI-side counterpart for the rationale —
+                    // tool_use `old_string` fragments and
+                    // tool_result blobs can balance braces but
+                    // aren't valid envelopes.
+                    if looksLikeHeadlessEnvelope(candidate) {
+                        envelopes = envelopes.Append(candidate)
+                    }
                     start = -1
                 }
             }
@@ -134,6 +153,15 @@ func extractHeadlessEnvelopes(buf string) Tuple[Array[string], string] {
     }
     val leftover = if (start < 0) "" else string(SliceFrom(rs, start))
     return (envelopes, leftover)
+}
+
+// looksLikeHeadlessEnvelope mirrors the UI's looksLikeClaudeEnvelope.
+// Local copy rather than a shared helper because app/headless and
+// app/ui have no shared utility module yet — duplicating one short
+// predicate is cheaper than introducing a dep.
+func looksLikeHeadlessEnvelope(s string) bool {
+    val t = strings.TrimSpace(s)
+    return strings.HasPrefix(t, "{\"type\":")
 }
 
 // ============================================================================
@@ -227,6 +255,11 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
         .Append(session.ConversationLine(Speaker = "you", Text = displayPrompt))
     val name = s.Member.Name
 
+    // Headless equivalent of the TUI's onSubmit log call: record
+    // the user's prompt as the start of an auditable run. No-op when
+    // GALA_TEAM_DEBUG is off.
+    LogUserInput(displayPrompt)
+
     // Fire the prompt write — SendFuture writes the prompt and
     // closes stdin so claude (running with --print) sees the
     // request as a complete transaction and produces output.
@@ -263,12 +296,20 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
                     // quotes / escapes), and they're dropped.
                     val visible = strings.TrimSpace(line)
                     if visible != "" && !isDuplicateOfLast(convo, name, visible) {
+                        TraceClaudeLine(name, line, visible, "", false, "plain-prose")
+                        LogMemberOutput(name, visible)
                         convo = convo.Append(session.ConversationLine(Speaker = name, Text = visible))
+                    } else if visible == "" {
+                        TraceClaudeLine(name, line, "", "", true, "plain-prose-empty")
                     }
                 } else {
                     envs.ForEach((env) => {
                         val visible = ExtractClaudeText(env)
+                        val dropped = visible == ""
+                        val reason = if (dropped) "non-whitelisted or empty envelope" else ""
+                        TraceClaudeLine(name, env, visible, "", dropped, reason)
                         if visible != "" && !isDuplicateOfLast(convo, name, visible) {
+                            LogMemberOutput(name, visible)
                             convo = convo.Append(session.ConversationLine(Speaker = name, Text = visible))
                         }
                     })

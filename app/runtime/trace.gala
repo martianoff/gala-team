@@ -91,6 +91,13 @@ var traceProcessStamp = ""
 // and then suppressed so a misconfigured trace dir doesn't flood the
 // terminal with errors during a normal session.
 func TraceClaudeLine(member string, raw string, visible string, errText string, dropped bool, reason string) {
+    // Always emit a one-line summary into events.jsonl when
+    // GALA_TEAM_DEBUG is on. The raw envelope path (below) requires
+    // a configured trace dir; the summary works as long as a debug
+    // repo is registered. Both calls are no-ops when their gating
+    // condition is unmet.
+    LogClaudeChunk(member, dropped, reason, visible, errText)
+
     val dir = TraceDir()
     if dir == "" { return }
     if traceProcessStamp == "" {

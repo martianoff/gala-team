@@ -1,5 +1,9 @@
 load("@gala//:gala.bzl", "gala_binary")
 
+# x_defs is consumed by rules_go's link step: each key is a fully-
+# qualified `<importpath>.<Var>` and each value is either a literal or
+# a `{KEY}` reference into the workspace status output. The STABLE_*
+# keys come from tools/workspace_status.sh (wired via .bazelrc).
 gala_binary(
     name = "gala_team",
     srcs = ["main.gala"],
@@ -7,13 +11,16 @@ gala_binary(
         "@gala_tui//:gala_tui",
     ],
     deps = [
+        "//app/buildinfo",
         "//app/cli",
+        "//app/version",
         "//app/config",
         "//app/consult",
         "//app/fsm",
         "//app/guidance",
         "//app/policy",
         "//app/project",
+        "//app/runtime",
         "//app/session",
         "//app/team",
         "//app/testdriver",
@@ -21,5 +28,10 @@ gala_binary(
         "@gala//collection_immutable",
         "@gala//time_utils",
     ],
+    x_defs = {
+        "github.com/martianoff/gala_team/app/buildinfo.Version": "{STABLE_GALA_TEAM_VERSION}",
+        "github.com/martianoff/gala_team/app/buildinfo.Commit": "{STABLE_GIT_COMMIT}",
+        "github.com/martianoff/gala_team/app/buildinfo.GitDescribe": "{STABLE_GIT_TAG}",
+    },
     visibility = ["//visibility:public"],
 )

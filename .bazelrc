@@ -7,3 +7,13 @@ build --enable_runfiles
 # sets, etc.). Required for cross-language type inference.
 build --action_env=GOROOT
 build --action_env=PATH
+
+# Build-time stamping — bakes git commit, git describe output, and the
+# closest release tag into //app/buildinfo via x_defs in cmd/BUILD.bazel.
+# Re-runs the link step for stamped targets only when STABLE_* values
+# change (commit, tag), so day-to-day rebuilds stay cached.
+#
+# The status script lives in repo-relative `tools/`; bash is required on
+# PATH (Git for Windows ships it; Linux/macOS have it natively).
+build --stamp
+build --workspace_status_command="bash tools/workspace_status.sh"

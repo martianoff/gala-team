@@ -1,0 +1,295 @@
+package runtime
+
+import (
+    "os"
+    "time"
+    "martianoff/gala/json"
+    . "martianoff/gala/std"
+    "github.com/martianoff/gala_team/app/version"
+)
+
+// ============================================================================
+// app/runtime/debuglog — single-flag comprehensive event log.
+//
+// Activated by setting GALA_TEAM_DEBUG=1 (also accepts true/yes/on,
+// case-insensitive). When off, every LogEvent call short-circuits
+// after one env-var read — no allocations, no file IO.
+//
+// When on, every event lands in <repo>/.gala_team/sessions/debug/
+// events.jsonl as one JSON object per line:
+//
+//     {"ts":"2026-05-03T14:23:45.123Z","kind":"user_input",
+//      "member":"Iris","payload":{"text_len":42}}
+//
+// The companion per-member chunk traces (raw Claude stream-json) go
+// to <repo>/.gala_team/sessions/debug/traces/<member>/<stamp>.jsonl —
+// see trace.gala. Both share the same on/off flag.
+//
+// Reset semantics: when the user picks "Start fresh" in the recovery
+// modal, the entire .gala_team/sessions/debug/ tree is wiped and a
+// new session_init event is emitted. This keeps events.jsonl mapping
+// 1:1 to the live conversation so a debugging session never has to
+// disambiguate "is this from before or after the reset?".
+//
+// Initialization: cmd/main.gala calls SetDebugRepo(proj.Repo) once
+// after resolving the project, then InitSession() to emit the first
+// session_init record (build provenance + start timestamp). Calling
+// InitSession when GALA_TEAM_DEBUG is off is a no-op.
+// ============================================================================
+
+// EventEnvelope is the on-disk shape of one event.
+//
+//   Ts:      UTC RFC3339 with milliseconds (matches TraceRecord.Ts so
+//            both streams sort lexicographically on the same axis).
+//   Kind:    short snake_case event tag — see KindXxx vals below.
+//            New kinds can be added without touching this struct;
+//            consumers should treat unknown kinds as opaque.
+//   Member:  speaker / target the event is attributed to. Empty for
+//            session-level events (session_init, session_reset).
+//   Payload: caller-supplied JSON object literal as a raw string. Kept
+//            opaque so each call site can record the fields most
+//            useful for that event without forcing a sealed shape.
+//            Always valid JSON — callers MUST encode-then-pass.
+struct EventEnvelope(
+    Ts      string,
+    Kind    string,
+    Member  string,
+    Payload string,
+)
+
+// envelopeCodec serialises EventEnvelope to one JSON line. Snake-case
+// matches the trace stream so a future combined-replay tool can use
+// one schema across both files.
+val envelopeCodec = json.Codec[EventEnvelope](json.SnakeCase())
+
+// Event kind constants — use these instead of bare strings so a typo
+// at a call site fails to compile rather than silently producing an
+// orphan kind nobody can grep.
+val KindSessionInit       = "session_init"
+val KindSessionReset      = "session_reset"
+val KindSessionDone       = "session_done"
+val KindUserInput         = "user_input"
+val KindMemberOutput      = "member_output"
+val KindDispatch          = "dispatch"
+val KindFsmTransition     = "fsm_transition"
+val KindClaudeChunk       = "claude_chunk"
+val KindHookResult        = "hook_result"
+val KindWorktreeCreate    = "worktree_create"
+val KindStaleWorktree     = "stale_worktree"
+val KindError             = "error"
+
+// LogEvent appends one event to events.jsonl. No-op when
+// GALA_TEAM_DEBUG is off OR when SetDebugRepo hasn't been called
+// yet (very early startup). `payloadJson` MUST be a valid JSON
+// object literal — pass `"{}"` if there's no payload to attach.
+//
+// Failures are swallowed: this is a debug surface, never a hard
+// dependency of the running TUI. A misconfigured filesystem must
+// not be able to crash the chunk pump.
+func LogEvent(kind string, member string, payloadJson string) {
+    if !DebugEnabled() { return }
+    val rec = EventEnvelope(
+        Ts      = time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+        Kind    = kind,
+        Member  = member,
+        Payload = payloadJson,
+    )
+    val encoded = envelopeCodec.Encode(rec)
+    if encoded.IsFailure() { return }
+    val _ = AppendDebugEvent(encoded.Get())
+}
+
+// SessionInitPayload is the payload of a session_init event.
+// Captured fresh on every InitSession call so a log replay tool can
+// correlate behavior with the exact binary that produced it.
+struct SessionInitPayload(
+    Version     string,
+    Commit      string,
+    GitDescribe string,
+    Pid         int,
+)
+
+val sessionInitCodec = json.Codec[SessionInitPayload](json.SnakeCase())
+
+// LogSessionInit emits the first event of a session, capturing build
+// provenance:
+//   - gala_team release version (closest semver tag)
+//   - full git describe output (with -dirty if applicable)
+//   - git commit SHA
+//   - process PID (lets multi-process traces disambiguate)
+//
+// Called from cmd/main.gala on startup AND from ResetSession() so
+// every fresh session begins with one of these.
+func LogSessionInit() {
+    if !DebugEnabled() { return }
+    val payload = SessionInitPayload(
+        Version     = version.Version(),
+        Commit      = version.Commit(),
+        GitDescribe = version.GitDescribe(),
+        Pid         = os.Getpid(),
+    )
+    val encoded = sessionInitCodec.Encode(payload)
+    if encoded.IsFailure() { return }
+    LogEvent(KindSessionInit, "", encoded.Get())
+}
+
+// ResetSession wipes the entire debug-log tree and emits a fresh
+// session_init record. Called by the "Start fresh" recovery flow in
+// app/ui/update so a new session never inherits stale events from
+// the prior one. No-op when GALA_TEAM_DEBUG is off — the dir won't
+// exist anyway and the init event is suppressed.
+func ResetSession() {
+    if !DebugEnabled() { return }
+    val _ = ResetDebugDir()
+    ResetTraceState()
+    LogSessionInit()
+}
+
+// ----- typed convenience helpers ------------------------------------
+//
+// Each helper builds a small typed payload struct, JSON-encodes it,
+// and forwards to LogEvent. Keeping the encoding here means call
+// sites in update.gala / fsm don't deal with json.Codec, and the
+// payload schema for each kind stays in one place.
+
+// Payloads carry the full text — not just lengths — so events.jsonl
+// is sufficient on its own to reproduce a session for correctness
+// audits. The conversation snapshot in latest.json gets reset on
+// "Start fresh" and the per-member trace files only have raw Claude
+// envelopes (not user prompts or dispatch bodies); without the full
+// text here, replay would require correlating multiple files.
+
+struct UserInputPayload(Text string, TextLen int)
+val userInputCodec = json.Codec[UserInputPayload](json.SnakeCase())
+
+func LogUserInput(text string) {
+    if !DebugEnabled() { return }
+    val enc = userInputCodec.Encode(UserInputPayload(Text = text, TextLen = len(text)))
+    if enc.IsFailure() { return }
+    LogEvent(KindUserInput, "lead", enc.Get())
+}
+
+struct MemberOutputPayload(Text string, TextLen int)
+val memberOutputCodec = json.Codec[MemberOutputPayload](json.SnakeCase())
+
+func LogMemberOutput(member string, visible string) {
+    if !DebugEnabled() { return }
+    val enc = memberOutputCodec.Encode(MemberOutputPayload(Text = visible, TextLen = len(visible)))
+    if enc.IsFailure() { return }
+    LogEvent(KindMemberOutput, member, enc.Get())
+}
+
+struct DispatchPayload(Body string, BodyLen int)
+val dispatchCodec = json.Codec[DispatchPayload](json.SnakeCase())
+
+func LogDispatch(target string, body string) {
+    if !DebugEnabled() { return }
+    val enc = dispatchCodec.Encode(DispatchPayload(Body = body, BodyLen = len(body)))
+    if enc.IsFailure() { return }
+    LogEvent(KindDispatch, target, enc.Get())
+}
+
+struct FsmTransitionPayload(
+    From   string,
+    Event  string,
+    Detail string,
+    To     string,
+)
+val fsmCodec = json.Codec[FsmTransitionPayload](json.SnakeCase())
+
+// LogFsmTransition records a single FSM hop. `event` is the
+// constructor name (e.g. "MemberCrashed"); `detail` carries the
+// trigger payload that won't appear elsewhere in events.jsonl —
+// member name, retry count, error text, blocked reason, help
+// question. For TLDone and UserPrompted detail is empty (directives
+// surface as separate dispatch events; the user prompt is already
+// logged as user_input).
+//
+// The schema stays opaque (textual `event` + free-form `detail`)
+// rather than struct-shaped so a new Event variant doesn't break
+// downstream replay tooling.
+func LogFsmTransition(from string, event string, detail string, to string) {
+    if !DebugEnabled() { return }
+    val enc = fsmCodec.Encode(FsmTransitionPayload(
+        From   = from,
+        Event  = event,
+        Detail = detail,
+        To     = to,
+    ))
+    if enc.IsFailure() { return }
+    LogEvent(KindFsmTransition, "", enc.Get())
+}
+
+struct ClaudeChunkPayload(
+    Dropped    bool,
+    Reason     string,
+    Visible    string,
+    Error      string,
+    VisibleLen int,
+    ErrorLen   int,
+)
+val claudeChunkCodec = json.Codec[ClaudeChunkPayload](json.SnakeCase())
+
+// SessionDonePayload marks the end of a session run. Reason is a
+// short tag — "user_quit", "ctrl_c", "ended_by_test_driver", etc. —
+// so a replayer can distinguish clean shutdown from crash exit (no
+// session_done event at all).
+struct SessionDonePayload(Reason string)
+val sessionDoneCodec = json.Codec[SessionDonePayload](json.SnakeCase())
+
+func LogSessionDone(reason string) {
+    if !DebugEnabled() { return }
+    val enc = sessionDoneCodec.Encode(SessionDonePayload(Reason = reason))
+    if enc.IsFailure() { return }
+    LogEvent(KindSessionDone, "", enc.Get())
+}
+
+// WorktreePayload captures where a member's worktree got materialised
+// and on what branch. Lets a replayer correlate "TL dispatched to
+// Felix" → "Felix's worktree created at <path> on <branch>" → later
+// member outputs.
+struct WorktreePayload(Path string, Branch string)
+val worktreeCodec = json.Codec[WorktreePayload](json.SnakeCase())
+
+func LogWorktreeCreate(member string, path string, branch string) {
+    if !DebugEnabled() { return }
+    val enc = worktreeCodec.Encode(WorktreePayload(Path = path, Branch = branch))
+    if enc.IsFailure() { return }
+    LogEvent(KindWorktreeCreate, member, enc.Get())
+}
+
+// StaleWorktreePayload flags an on-disk worktree dir whose member
+// name isn't in the loaded team config. Caused the ghost-Mira
+// incident — the TL reasoned about a non-team member because the
+// dir existed. Surfaced at startup so debugging logs show "we
+// noticed Mira's worktree but ignored her".
+struct StaleWorktreePayload(Name string, Path string)
+val staleWorktreeCodec = json.Codec[StaleWorktreePayload](json.SnakeCase())
+
+func LogStaleWorktree(name string, path string) {
+    if !DebugEnabled() { return }
+    val enc = staleWorktreeCodec.Encode(StaleWorktreePayload(Name = name, Path = path))
+    if enc.IsFailure() { return }
+    LogEvent(KindStaleWorktree, name, enc.Get())
+}
+
+// LogClaudeChunk records the full per-chunk classifier result —
+// dropped flag, drop reason, the extracted visible text, and any
+// error text. The raw envelope still goes to the per-member trace
+// file via TraceClaudeLine; this stream lets a replayer reconstruct
+// the full conversation from events.jsonl alone (the trace file is
+// only needed for envelope-level forensics like which tool_use
+// fired or what the system:init blob contained).
+func LogClaudeChunk(member string, dropped bool, reason string, visible string, errText string) {
+    if !DebugEnabled() { return }
+    val enc = claudeChunkCodec.Encode(ClaudeChunkPayload(
+        Dropped    = dropped,
+        Reason     = reason,
+        Visible    = visible,
+        Error      = errText,
+        VisibleLen = len(visible),
+        ErrorLen   = len(errText),
+    ))
+    if enc.IsFailure() { return }
+    LogEvent(KindClaudeChunk, member, enc.Get())
+}

@@ -1,12 +1,28 @@
 package version
 
-// Version is the gala_team release tag rendered in the TUI header
-// brand bar. Keep this in sync with MODULE.bazel's `module(version =
-// "..."`); a stamping pass will eventually inject it at build time
-// (rules_go x_defs / linker --ldflags), but for now bump both files
-// together when cutting a release.
+import (
+    "github.com/martianoff/gala_team/app/buildinfo"
+)
+
+// Version is the gala_team release version rendered in the TUI brand
+// bar and emitted into the debug session_init event. The value comes
+// from `app/buildinfo` which is link-time stamped by Bazel via the
+// `STABLE_GALA_TEAM_VERSION` workspace_status key (see
+// `tools/workspace_status.sh`). Unstamped builds (`go run`, `go
+// build`) get the package default `"unknown"`.
+//
 // Function rather than `val` so callers get a plain `string` —
 // gala's package-level `val` lowers to `Immutable[T]` whose `%v`
 // format renders as `{value}`, which leaks the wrapper braces into
 // any s-string interpolation that uses it.
-func Version() string = "0.0.1"
+func Version() string = buildinfo.Version
+
+// Commit is the full git SHA at build time. Used by the debug
+// session_init event for build-provenance auditing. Empty-tree
+// builds and non-stamped builds get `"unknown"`.
+func Commit() string = buildinfo.Commit
+
+// GitDescribe is the verbose `git describe --tags --always --dirty`
+// output — useful in the debug log for spotting builds shipped from
+// a tree with uncommitted changes.
+func GitDescribe() string = buildinfo.GitDescribe

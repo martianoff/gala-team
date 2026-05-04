@@ -1,13 +1,26 @@
 load("@gala//:gala.bzl", "gala_binary")
 
+# x_defs mirrors //cmd:gala_team — same STABLE_* keys from
+# tools/workspace_status.sh. Both binaries report the same version /
+# commit so a debug log lifted from either is self-consistent with
+# the other.
 gala_binary(
     name = "gala_team_headless",
     srcs = ["main.gala"],
     deps = [
+        "//app/buildinfo",
         "//app/config",
         "//app/headless",
         "//app/project",
+        "//app/runtime",
+        "//app/team",
+        "//app/version",
         "@gala//collection_immutable",
     ],
+    x_defs = {
+        "github.com/martianoff/gala_team/app/buildinfo.Version": "{STABLE_GALA_TEAM_VERSION}",
+        "github.com/martianoff/gala_team/app/buildinfo.Commit": "{STABLE_GIT_COMMIT}",
+        "github.com/martianoff/gala_team/app/buildinfo.GitDescribe": "{STABLE_GIT_TAG}",
+    },
     visibility = ["//visibility:public"],
 )

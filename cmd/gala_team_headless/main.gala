@@ -2,11 +2,15 @@ package main
 
 import (
     "os"
+    "path/filepath"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/config"
     . "github.com/martianoff/gala_team/app/headless"
     . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/team"
+    "github.com/martianoff/gala_team/app/runtime"
+    "github.com/martianoff/gala_team/app/version"
 )
 
 // ============================================================================
@@ -46,6 +50,14 @@ func die(msg string) {
 }
 
 func main() {
+    // --version short-circuits before arg validation so CI / scripts
+    // can probe the binary without supplying a team.yaml. Mirrors the
+    // TUI binary's flag.
+    val args = ArrayOf(os.Args...)
+    if args.Contains("--version") || args.Contains("-V") {
+        val _ = os.Stdout.WriteString(s"gala_team_headless ${version.Version()} (${version.GitDescribe()}) commit ${version.Commit()}\n")
+        os.Exit(0)
+    }
     val teamPath = flagValue("--team", "")
     val projDir  = flagValue("--project", ".")
     val prompt   = flagValue("--prompt", "")
@@ -75,6 +87,14 @@ func main() {
         die(s"--project: ${projTry.GetError().Error()}")
     }
     val proj = projTry.Get()
+    // Register the project repo with the debug logger so headless
+    // runs (CI, audit scripts, consult driver) emit the same
+    // events.jsonl + per-member chunk traces as the TUI binary
+    // when GALA_TEAM_DEBUG=1. Both calls are no-ops when the flag
+    // is unset.
+    runtime.SetDebugRepo(proj.Repo)
+    runtime.LogSessionInit()
+    scanStaleWorktrees(proj, cfg.Team)
     // --member targets a specific role (engineer / QA name) instead of
     // the team lead. Used by multi-member E2E tests that orchestrate
     // each role manually. Defaults to the lead when omitted.
@@ -85,6 +105,7 @@ func main() {
     outcome match {
         case Left(err) => {
             val _ = os.Stderr.WriteString(s"gala_team_headless: ${err}\n")
+            runtime.LogSessionDone("headless_error")
             os.Exit(1)
         }
         case Right(result) => {
@@ -96,5 +117,28 @@ func main() {
                 case Failure(e) => die(s"encode result: ${e.Error()}")
             }
         }
+    }
+    runtime.LogSessionDone("headless_complete")
+}
+
+// scanStaleWorktrees mirrors the TUI binary's logic — list any
+// .gala_team/worktrees/<name>/ dir whose name isn't in the current
+// team config, and emit a kind=stale_worktree event for each. Lets
+// CI / audit runs surface ghost worktrees the same way the
+// interactive TUI does.
+func scanStaleWorktrees(proj Project, tm Team) {
+    if !runtime.DebugEnabled() { return }
+    val wtDir = filepath.Join(proj.Repo, ".gala_team", "worktrees")
+    val entries, readErr = os.ReadDir(wtDir)
+    if readErr != nil { return }
+    val memberNames = tm.Members.Map((mem) => mem.Name)
+    var i = 0
+    val n = len(entries)
+    for i < n {
+        val name = entries[i].Name()
+        if entries[i].IsDir() && !memberNames.Contains(name) {
+            runtime.LogStaleWorktree(name, filepath.Join(wtDir, name))
+        }
+        i = i + 1
     }
 }

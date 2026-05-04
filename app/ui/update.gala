@@ -106,6 +106,64 @@ func buildRelayPrompt(m AppModel, members Array[Member]) string {
     return s"System: dispatched members have reported back.\n${joined}\nDecide: send follow-up @dispatch(name) directives, request QA, or @summary the turn for the user."
 }
 
+// eventTag projects an FSM Event to a short stable label, mirroring
+// the constructor name. Used by transitionLogged so events.jsonl
+// records the trigger of each FSM hop ("UserPrompted", "MemberDone",
+// …) without leaking the payload — keeps the log replay schema
+// stable across changes to the Event variants' fields.
+func eventTag(e Event) string = e match {
+    case UserPrompted()              => "UserPrompted"
+    case TLDone(_)                   => "TLDone"
+    case MemberDone(_, _)            => "MemberDone"
+    case MemberHelpRequested(_, _)   => "MemberHelpRequested"
+    case MemberBlocked(_, _)         => "MemberBlocked"
+    case MemberStuck(_)              => "MemberStuck"
+    case MemberAbandoned(_)          => "MemberAbandoned"
+    case MemberCrashed(_, _, _)      => "MemberCrashed"
+    case QADone()                    => "QADone"
+    case ApprovalAccepted()          => "ApprovalAccepted"
+    case ApprovalRejected()          => "ApprovalRejected"
+}
+
+// eventDetail captures the trigger-side payload that wouldn't
+// otherwise show up in events.jsonl. Member names, retry counts,
+// error text, blocked reasons, help questions — the bits a replayer
+// needs to reproduce the conditions that drove a state hop.
+//
+// TLDone(dirs) deliberately returns empty: the directives become
+// individual dispatch events, so duplicating them here would just
+// inflate the line. UserPrompted similarly: the prompt text is
+// already logged as kind=user_input with the matching timestamp.
+//
+// MemberDone returns just the member name — the body lands as a
+// separate member_output event right before this transition.
+func eventDetail(e Event) string = e match {
+    case UserPrompted()                     => ""
+    case TLDone(_)                          => ""
+    case MemberDone(name, _)                => s"member=${name}"
+    case MemberHelpRequested(name, q)       => s"member=${name} question=${q}"
+    case MemberBlocked(name, reason)        => s"member=${name} reason=${reason}"
+    case MemberStuck(name)                  => s"member=${name}"
+    case MemberAbandoned(name)              => s"member=${name}"
+    case MemberCrashed(name, err, retry)    => s"member=${name} retry=${retry} err=${err}"
+    case QADone()                           => ""
+    case ApprovalAccepted()                 => ""
+    case ApprovalRejected()                 => ""
+}
+
+// transitionLogged wraps fsm.Transition with a debug-event emit so
+// every FSM hop lands in events.jsonl as kind=fsm_transition. The
+// wrapper is a no-op when GALA_TEAM_DEBUG is off (LogFsmTransition
+// short-circuits internally) — at runtime the only added cost on
+// the hot path is one struct allocation + one env-var read. All
+// callers in this file go through transitionLogged rather than
+// fsm.Transition directly so coverage is exhaustive.
+func transitionLogged(state AppState, event Event, ctx TransitionContext) AppState {
+    val next = Transition(state, event, ctx)
+    LogFsmTransition(stateTag(state), eventTag(event), eventDetail(event), stateTag(next))
+    return next
+}
+
 // stateTag projects an AppState to a stable string so the wrapper can
 // detect FSM transitions without comparing payloads (Pending HashSet
 // shifts inside Delegating/QAGate are NOT transitions for our purposes
@@ -164,10 +222,18 @@ func pruneToasts(q ToastQueue, now time_utils.Instant) ToastQueue = q.Prune(now)
 func updateLivenessStatuses(
     m AppModel, members Array[Member], now time_utils.Instant,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    val leadName = m.Team.Lead.Name
     val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyArray[string]())
     val (m1, cmds, stuckNames) = members.FoldLeft(seed, (acc, mem) => {
         val (curM, curCmds, curStuck) = acc
         val name = mem.Name
+        // Lead is driven by direct user prompts + relay turns, not
+        // by the heartbeat-stuck/abandon machinery. A long TLReview
+        // pause (waiting on the user) would otherwise flip the lead
+        // to Stuck/Failed and emit a spurious MemberStuck/Abandoned
+        // FSM event — see the 2026-05-03 log audit where Iris hit
+        // MemberAbandoned at TLReview→TLReview.
+        if name == leadName { return (curM, curCmds, curStuck) }
         val current = curM.Statuses.Get(name).GetOrElse(StIdle())
         val derived = livenessStatus(curM, name, current, now)
         if statusTag(current) == statusTag(derived) { return (curM, curCmds, curStuck) }
@@ -178,7 +244,7 @@ func updateLivenessStatuses(
         return derived match {
             case StStuck() => (withStatus, curCmds, curStuck.Append(name))
             case StFailed(_) => {
-                val nextState = Transition(withStatus.State, MemberAbandoned(MemberName = name), transitionContext(withStatus))
+                val nextState = transitionLogged(withStatus.State, MemberAbandoned(MemberName = name), transitionContext(withStatus))
                 return (withStatus.Copy(State = nextState), curCmds, curStuck)
             }
             case _ => (withStatus, curCmds, curStuck)
@@ -199,7 +265,7 @@ func spawnAggregatedStuckNudge(
     now time_utils.Instant,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val first = stuck.Get(0)
-    val nextState = Transition(m.State, MemberStuck(MemberName = first), transitionContext(m))
+    val nextState = transitionLogged(m.State, MemberStuck(MemberName = first), transitionContext(m))
     val withState = m.Copy(State = nextState)
     val prompt = buildAggregatedStuckPrompt(withState, stuck, now)
     val (afterSpawn, spawnCmds) = spawnTLNudge(withState, s"stuck-batch-${stuck.Size()}", prompt)
@@ -463,6 +529,11 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         ), NoCmd[AppMsg]())
         case StartFreshFocus() => {
             wipeMemberWorktrees(m)
+            // Wipe the debug log tree and emit a fresh session_init
+            // so the events.jsonl maps 1:1 to the live conversation
+            // — no archaeology across resets. No-op when
+            // GALA_TEAM_DEBUG is off.
+            ResetSession()
             val empty = EmptyArray[session.ConversationLine]()
             val cleared = m.Copy(
                 RecoveryModalOpen = false,
@@ -1072,8 +1143,9 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return (m, NoCmd[AppMsg]())
     }
     val prompt = m.Composer
+    LogUserInput(prompt)
     val ctx = transitionContext(m)
-    val nextState = Transition(m.State, UserPrompted(), ctx)
+    val nextState = transitionLogged(m.State, UserPrompted(), ctx)
     val withState = m.Copy(
         State = nextState,
         Composer = "",
@@ -1448,6 +1520,7 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     } else if (isDuplicateOfLastConvoLine(withErrSurface.Conversation, name, visible)) {
         withErrSurface.Conversation
     } else {
+        LogMemberOutput(name, visible)
         withErrSurface.Conversation.Append(session.ConversationLine(Speaker = name, Text = visible, At = time_utils.Now().UnixNanos()))
     }
     val withLastSeen = withErrSurface.Copy(RetryCount = withErrSurface.RetryCount.Remove(name))
@@ -1560,7 +1633,7 @@ func onMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppM
 // TL's response is parsed normally — it can re-dispatch with new
 // instructions, abandon the task, or escalate further.
 func onMemberHelp(m AppModel, name string, question string) Tuple[AppModel, Cmd[AppMsg]] {
-    val nextState = Transition(m.State, MemberHelpRequested(MemberName = name, Question = question), transitionContext(m))
+    val nextState = transitionLogged(m.State, MemberHelpRequested(MemberName = name, Question = question), transitionContext(m))
     val toast = m.Toasts.PushInfo(s"${name} needs help", time_utils.Now(), time_utils.Seconds(int64(5)))
     // Kill the member's subprocess once they've asked for help — any
     // post-@help output is the model rambling rather than waiting.
@@ -1596,7 +1669,7 @@ func mkHelpWaitingStatus(question string) Status = StHelpWaiting(question)
 // other text), and the StFailed sidebar badge keeps the situation
 // glanceable.
 func onMemberBlocked(m AppModel, name string, reason string) Tuple[AppModel, Cmd[AppMsg]] {
-    val nextState = Transition(m.State, MemberBlocked(MemberName = name, Reason = reason), transitionContext(m))
+    val nextState = transitionLogged(m.State, MemberBlocked(MemberName = name, Reason = reason), transitionContext(m))
     val toast = m.Toasts.PushError(s"${name} blocked", time_utils.Now(), time_utils.Seconds(int64(5)))
     val failedStatus Status = StFailed(Reason = truncateForToast(reason))
     // Kill the subprocess on @blocked — keeping it alive lets late
@@ -1651,6 +1724,7 @@ func maybeDispatchConsults(m AppModel, speaker string, line string) Tuple[AppMod
 // an immediate ConsultFailed via MsgCmd so the existing failure
 // handler logs and forwards to the TL.
 func dispatchOneConsult(m AppModel, target string, body string) Tuple[AppModel, Cmd[AppMsg]] {
+    LogDispatch(target, body)
     val withDispatchLog = m.Copy(
         Conversation = m.Conversation.Append(session.ConversationLine(
             Speaker = "consult",
@@ -1808,7 +1882,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 )
                 return (m1, batchAll(nudgeCmds))
             }
-            val nextState = Transition(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
+            val nextState = transitionLogged(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
             val withState = setStatus(cleaned.Copy(State = nextState), name, StIdle())
             // If the new state is Delegating, fan out: spawn each
             // dispatched member's session with their per-target body
@@ -1842,7 +1916,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             }
         }
         val body = cleaned.MemberDoneBodies.Get(name).GetOrElse("")
-        val nextState = Transition(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
+        val nextState = transitionLogged(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
         return (setStatus(cleaned.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
     }
     val maxRetries = maxAutoRetriesOf(m)
@@ -1915,6 +1989,12 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
     val (after, cmds) = allowed.FoldLeft(seed, (acc, t) => {
         val (curM, curCmds) = acc
         val (name, body) = t
+        // Log every TL→engineer/QA dispatch so events.jsonl carries
+        // the full intent ledger. Combined with the FSM transitions
+        // and member_output stream, this makes a "TL said X, spawned
+        // Y" mismatch detectable from the log alone — which is the
+        // class of bug that surfaced as the ghost-Mira investigation.
+        LogDispatch(name, body)
         return findMemberByName(curM.Team.Members, name) match {
             case None() => (curM, curCmds)
             case Some(mem) => ensureSession(curM, mem) match {
@@ -2010,6 +2090,11 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         if isCurrentlyDispatched(curM, mem.Name) {
             return (curM, curCmds)
         }
+        // Log auto-QA fanout the same way as engineer @dispatch so
+        // the events.jsonl ledger shows every spawn, regardless of
+        // whether the lead asked for it (engineer @dispatch path) or
+        // the orchestrator drove it (this auto-QA path).
+        LogDispatch(mem.Name, reviewBody)
         val firstTurn = !curM.SessionIds.Get(mem.Name).IsDefined()
         return ensureSession(curM, mem) match {
             case Left(err)  => (curM.Copy(LastError = Some(s"qa ${mem.Name}: ${err}")), curCmds)
@@ -2060,7 +2145,22 @@ func isCurrentlyDispatched(m AppModel, name string) bool =
 // files. QA's instructions point at it so the review is grounded in
 // actual diffs, not just engineer summaries.
 func buildQAReviewPrompt(m AppModel) string {
-    val engineers = MembersOf(m.Team, Engineer())
+    val allEngineers = MembersOf(m.Team, Engineer())
+    // Filter to engineers the TL actually dispatched in this turn —
+    // anyone with a status entry has been touched (working, done,
+    // stuck, failed). Without this filter the QA inspects every
+    // engineer in team.yaml whether or not the TL routed work to
+    // them — caused the ghost-Mira incident where Theo wasted
+    // cycles diagnosing a worktree the TL never spawned for the
+    // current task.
+    val engineers = allEngineers.Filter((eng) => m.Statuses.Get(eng.Name).IsDefined())
+    val skippedNames = allEngineers.Collect({
+        case eng if !m.Statuses.Get(eng.Name).IsDefined() => eng.Name
+    })
+    val rosterNote = if (skippedNames.IsEmpty())
+        ""
+    else
+        s"\n\n_Note: team.yaml lists these engineers too but the TL did not dispatch them this turn — do NOT review their worktrees: ${skippedNames.MkString(", ")}._"
     val manifest = buildDeliverableManifest(m, engineers)
     val sections = engineers.Map((eng) => {
         val body = m.MemberDoneBodies.Get(eng.Name).GetOrElse("")
@@ -2070,7 +2170,7 @@ func buildQAReviewPrompt(m AppModel) string {
         return s"## ${eng.Name} reported:\n\n${body}"
     })
     val joined = sections.MkString("\n\n")
-    return s"# QA review\n\nThe engineers have reported back. Review their deliverables for correctness, edge cases, and adherence to the brief.\n\n${manifest}\n\n# Engineer reports\n\n${joined}\n\n# Sign-off protocol\n\nWhen you're done, reply with:\n\n- `@finished ... @end` if the work passes review. Body = a 1-3 line approval note PLUS, on its own line, `Files reviewed: <comma-separated relative paths>` so the TL knows what you actually inspected.\n- `@blocked ... @end` if there are issues that block sign-off. Body = the issues prioritised; cite each engineer + file path so the TL can route fixes."
+    return s"# QA review\n\nThe engineers have reported back. Review their deliverables for correctness, edge cases, and adherence to the brief.${rosterNote}\n\n${manifest}\n\n# Engineer reports\n\n${joined}\n\n# Sign-off protocol\n\nWhen you're done, reply with:\n\n- `@finished ... @end` if the work passes review. Body = a 1-3 line approval note PLUS, on its own line, `Files reviewed: <comma-separated relative paths>` so the TL knows what you actually inspected.\n- `@blocked ... @end` if there are issues that block sign-off. Body = the issues prioritised; cite each engineer + file path so the TL can route fixes."
 }
 
 // buildDeliverableManifest renders the per-engineer workspace pointers
@@ -2593,10 +2693,37 @@ func extractCompleteEnvelopes(buf string) ExtractedEnvelopes {
                 depth = depth + 1
             } else if c == '}' {
                 depth = depth - 1
+                // Negative depth means buffer is desynced: more
+                // closing braces seen than opens. Recover by
+                // resetting parser state (depth/inString/escaped to
+                // their empty values, start to -1) so the next
+                // top-level `{` is treated as a fresh envelope. The
+                // pre-resync byte run becomes orphaned (we don't try
+                // to reconstruct it — it's already garbage); the
+                // member buffer will be force-cleared upstream when
+                // the surrounding chunk fails to classify.
+                if depth < 0 {
+                    depth = 0
+                    inString = false
+                    escaped = false
+                    start = -1
+                }
                 if depth == 0 && start >= 0 {
                     val tail = SliceFrom(rs, start)
                     val window = SliceTo(tail, i + 1 - start)
-                    envelopes = envelopes.Append(string(window))
+                    val candidate = string(window)
+                    // Shape-validate the envelope. Real Claude
+                    // stream-json envelopes always begin with
+                    // `{"type":` (with optional whitespace). Anything
+                    // else is buffer-state garbage — code fragments
+                    // from a tool_use's `old_string` field, partial
+                    // tool_use_result blobs, etc. — that the depth
+                    // counter happened to balance through. Drop them
+                    // here so the downstream classifier never sees
+                    // malformed JSON.
+                    if looksLikeClaudeEnvelope(candidate) {
+                        envelopes = envelopes.Append(candidate)
+                    }
                     start = -1
                 }
             }
@@ -2610,6 +2737,20 @@ func extractCompleteEnvelopes(buf string) ExtractedEnvelopes {
     }
     val leftover = if (start < 0) "" else string(SliceFrom(rs, start))
     return ExtractedEnvelopes(PreJunk = preJunk, Envelopes = envelopes, Leftover = leftover)
+}
+
+// looksLikeClaudeEnvelope tests whether `s` has the shape of a real
+// Claude stream-json envelope. Claude emits compact (non-pretty)
+// JSON with `type` always as the first key, so a real envelope
+// starts with the literal byte sequence `{"type":`. Anything else —
+// code fragments from a tool_use's `old_string` field, partial
+// tool_use_result blobs, JSON file content from a Read tool — gets
+// dropped here so the downstream JSON decoder never sees malformed
+// input (which previously surfaced as `assistant envelope failed to
+// decode` and silent content loss).
+func looksLikeClaudeEnvelope(s string) bool {
+    val t = strings.TrimSpace(s)
+    return strings.HasPrefix(t, "{\"type\":")
 }
 
 // assistantEventChunk extracts the joined text from a complete
@@ -2912,7 +3053,7 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
             ),
         ), NoCmd[AppMsg]())
     }
-    val nextState = Transition(m.State, ApprovalAccepted(), transitionContext(m))
+    val nextState = transitionLogged(m.State, ApprovalAccepted(), transitionContext(m))
     val withState = m.Copy(
         State        = nextState,
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = "/approve")),
@@ -3025,7 +3166,7 @@ func onReject(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // opinion into theirs. The hint goes through the conversation log so
 // the audit trail captures what was rejected.
 func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
-    val nextState = Transition(m.State, ApprovalRejected(), transitionContext(m))
+    val nextState = transitionLogged(m.State, ApprovalRejected(), transitionContext(m))
     val withState = m.Copy(
         State = nextState,
         Conversation = m.Conversation

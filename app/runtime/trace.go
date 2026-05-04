@@ -65,12 +65,18 @@ func AppendTraceLine(path, data string) error {
 	return nil
 }
 
-// TraceDir returns the value of GALA_TEAM_TRACE_DIR, or "" when unset.
-// Pulled into a Go helper because gala's `os.Getenv` interop returns a
-// (string, bool) tuple in some toolchain versions; this normalises to
-// a single string the gala caller can branch on with a plain `!=  ""`.
+// TraceDir returns the per-member chunk-trace directory according to
+// the precedence rules in EffectiveTraceDir (in debuglog.go):
+//
+//  1. GALA_TEAM_TRACE_DIR (explicit override)
+//  2. <repo>/.gala_team/sessions/debug/traces when GALA_TEAM_DEBUG=1
+//  3. "" (tracing disabled)
+//
+// Pulled into a Go helper because gala's `os.Getenv` interop returns
+// a (string, bool) tuple in some toolchain versions; this normalises
+// to a single string the gala caller can branch on with `!= ""`.
 func TraceDir() string {
-	return os.Getenv("GALA_TEAM_TRACE_DIR")
+	return EffectiveTraceDir()
 }
 
 // errTraceShortCircuit is returned to the gala caller when a prior
@@ -78,3 +84,17 @@ func TraceDir() string {
 // writes. Distinguishing it from a fresh write error lets the gala
 // side suppress repeated stderr noise.
 var errTraceShortCircuit = errors.New("trace short-circuited after prior failure")
+
+// ResetTraceState closes and forgets every cached trace file handle.
+// Called by ResetSession so a "Start fresh" wipe of the debug dir
+// doesn't leave the chunk pump writing to deleted (Linux) or
+// erroring (Windows) inodes — the next TraceClaudeLine reopens
+// against whatever path EffectiveTraceDir now resolves to.
+func ResetTraceState() {
+	traceMu.Lock()
+	defer traceMu.Unlock()
+	for path, f := range traceFiles {
+		_ = f.Close()
+		delete(traceFiles, path)
+	}
+}

@@ -3,11 +3,13 @@ load("@gala//:gala.bzl", "gala_go_test", "gala_library")
 gala_library(
     name = "runtime",
     srcs = [
+        "debuglog.gala",
         "runtime_glue.gala",
         "session_id.gala",
         "trace.gala",
     ],
     go_srcs = [
+        "debuglog.go",
         "trace.go",
     ],
     importpath = "github.com/martianoff/gala_team/app/runtime",
@@ -15,6 +17,7 @@ gala_library(
         "//app/policy",
         "//app/project",
         "//app/team",
+        "//app/version",
         "@com_github_google_uuid//:uuid",
         "@gala//collection_immutable",
         "@gala//concurrent",

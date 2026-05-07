@@ -632,27 +632,33 @@ func MsgMember(msg Msg) string = msg match {
 func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
     val title = GhTitle(body)
     val bodyWithFooter = body + "\n\n---\n🍎 orchestrated by [Gala Team](https://github.com/martianoff/gala-team)"
-    val args = ArrayOf("pr", "create", "--title", title, "--body", bodyWithFooter)
     val leadBranch = LeadBranchFor(proj)
     return concurrent.FutureApply[Msg](() => {
-        // Push HEAD to origin before invoking gh — without this, gh
-        // pr create exits 1 because origin doesn't have the branch
-        // to PR from. The audit log on 2026-05-04 caught a session
-        // where the lead branch had a valid commit ahead of master
-        // (Felix's update-ref worked), the Approval modal opened
-        // correctly, but `gh pr create` immediately failed with
-        // "exit code 1" — the actual reason ("must push branch
-        // first") was lost because we weren't draining gh's stderr
-        // and we never pushed in the first place.
+        // Snapshot the lead branch's current tip onto a UNIQUE
+        // per-PR branch so multiple PRs from this team can coexist
+        // without colliding. The 2026-05-07 audit captured the bug
+        // this prevents: every PR shipped from
+        // `gala_team/<project>/lead`, so the second time the user
+        // hit Approve in the same workspace, `gh pr create` failed
+        // with "a pull request for branch ... already exists".
         //
-        // Restrict the push to the gala_team-owned branch namespace
-        // (`refs/heads/gala_team/<project>/lead`) so we never
-        // touch the user's own branches even if HEAD is somehow
-        // pointed elsewhere.
-        val pushResult = pushLeadBranch(proj, leadBranch)
-        if pushResult != "" {
-            return RtPrFailed(Err = errors.New(s"git push lead failed: ${pushResult}"))
+        // Naming: `gala_team/<project>/pr/<short-sha>` — short SHA
+        // is stable and deterministic per content (same lead state
+        // → same PR branch, so a re-Approve after a hook failure
+        // doesn't proliferate ghost branches). The lead branch
+        // itself stays put as the orchestrator's working ref;
+        // engineers / future turns continue to fast-forward INTO
+        // lead, and each PR snapshots out from there.
+        val sha = readShortSha(proj.Repo, leadBranch)
+        if sha == "" {
+            return RtPrFailed(Err = errors.New("could not resolve lead branch tip — is the branch present?"))
         }
+        val prBranch = "gala_team/" + gitSlug(proj.Name) + "/pr/" + sha
+        val pushResult = pushSnapshotBranch(proj, leadBranch, prBranch)
+        if pushResult != "" {
+            return RtPrFailed(Err = errors.New(s"git push pr branch failed: ${pushResult}"))
+        }
+        val args = ArrayOf("pr", "create", "--head", prBranch, "--title", title, "--body", bodyWithFooter)
         val opts = subprocess.NewSpawnOpts(
             "gh",
             args.ToGoSlice(),
@@ -666,46 +672,47 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
     })
 }
 
-// pushLeadBranch shells `git push --force-with-lease -u origin
-// <leadBranch>:<leadBranch>` inside `proj.Repo`. Explicit src:dst
-// form so we push EXACTLY the gala_team-owned branch — never HEAD
-// (which might be checked out somewhere unexpected) and never
-// another ref.
-//
-// Why --force-with-lease: the `gala_team/<project>/lead` namespace
-// is ORCHESTRATOR-OWNED and ephemeral. Each session resets it,
-// engineers fast-forward into it, and we push it for the sole
-// purpose of opening a PR. Plain push fails on non-fast-forward
-// when the user did a Start fresh (lead reset to master) but
-// origin still holds the prior session's commit — exactly what the
-// 2026-05-04 audit captured. --force-with-lease overwrites remote
-// safely: it won't push if local doesn't know about origin's
-// current tip, so an unexpected concurrent writer is still
-// protected. We pre-fetch the lead ref so the lease check has
-// up-to-date local knowledge of origin.
-//
-// Returns "" on success; non-empty error string with stderr inlined
-// on failure. Pushing an already-up-to-date branch exits 0 with no
-// stderr — safe to call on every approval.
-func pushLeadBranch(proj Project, leadBranch string) string {
-    // Best-effort fetch so --force-with-lease has accurate local
-    // knowledge of origin's tip. Failures here are non-fatal — the
-    // push attempt below will surface a real error message if the
-    // remote is genuinely unreachable.
-    val fetchOpts = subprocess.NewSpawnOpts(
-        "git",
-        ArrayOf("fetch", "--quiet", "origin", leadBranch).ToGoSlice(),
-        SliceEmpty[string](),
-        proj.Repo,
-    )
-    subprocess.Spawn(fetchOpts) match {
-        case Failure(_)   => {}
-        case Success(p)   => { val _ = drainGitPushResult(p) }
-    }
-    val refspec = leadBranch + ":" + leadBranch
+// readShortSha runs `git rev-parse --short=10 <ref>` in `cwd` and
+// returns the trimmed first line. Empty string on any failure
+// (branch missing, git not installed). 10 chars is enough to be
+// collision-free across a session's worth of commits while
+// keeping the resulting branch name short enough to read.
+func readShortSha(cwd string, ref string) string {
     val opts = subprocess.NewSpawnOpts(
         "git",
-        ArrayOf("push", "--force-with-lease", "-u", "origin", refspec).ToGoSlice(),
+        ArrayOf("rev-parse", "--short=10", ref).ToGoSlice(),
+        SliceEmpty[string](),
+        cwd,
+    )
+    return subprocess.Spawn(opts) match {
+        case Failure(_) => ""
+        case Success(p) => {
+            val line = p.ReadLine()
+            val _ = p.Wait()
+            line match {
+                case Failure(_)  => ""
+                case Success(s)  => strings.TrimSpace(s)
+            }
+        }
+    }
+}
+
+// pushSnapshotBranch pushes `srcBranch`'s current commit to
+// origin under the name `dstBranch`, replacing any prior content
+// at that name. Used to materialize per-PR snapshot branches off
+// the orchestrator's lead ref without touching lead itself on
+// origin (lead stays a local-only working ref).
+//
+// Force-push semantics: the gala_team/<project>/pr/<sha>
+// namespace is owned entirely by this orchestrator. No human
+// commits there. Plain --force is appropriate; the SHA in the
+// branch name means "same content → same dest", so re-pushing
+// after a no-op rebuild is also safe.
+func pushSnapshotBranch(proj Project, srcBranch string, dstBranch string) string {
+    val refspec = srcBranch + ":refs/heads/" + dstBranch
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("push", "--force", "origin", refspec).ToGoSlice(),
         SliceEmpty[string](),
         proj.Repo,
     )

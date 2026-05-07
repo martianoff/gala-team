@@ -3610,17 +3610,18 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 
 // onPrCreated records the URL in LastPrUrl + the conversation log
 // so the user has a copy-paste-friendly link AND a hint for Ctrl+M
-// to trigger the merge step. Best-effort opens the URL in the OS
-// default browser via OpenInBrowser — failures are silent (headless
-// / CI contexts have no browser; we don't want to surface that as
-// an error). The user can always click the OSC 8 hyperlink in the
-// conversation log if the auto-open didn't fire.
+// to trigger the merge step. Returns a Cmd that opens the URL in
+// the OS default browser — Cmd, not direct call, so unit tests
+// (which call Update directly with synthetic PR URLs like
+// `https://x/y/pull/7`) discard the Cmd and don't actually spawn
+// a browser process. The 2026-05-07 audit caught this: every test
+// run was launching real browser windows for the fake URLs.
+//
+// Production runtime executes the Cmd, which calls OpenInBrowser
+// (per-OS launcher, async, silent on failure — headless / CI /
+// sandboxed envs have no browser). The OSC 8 hyperlink in the
+// conversation log is the fallback if the launcher misfires.
 func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
-    val _ = OpenInBrowser(url)
-    // Wrap the URL in OSC 8 so terminals that support it (Windows
-    // Terminal / iTerm2 / kitty / modern xterm) render it as a real
-    // clickable hyperlink. Terminals that don't recognise the escape
-    // drop it silently and the URL still renders inline.
     val linkified = prOscOpen(url) + url + prOscClose()
     val toast = m.Toasts.PushInfo(s"PR ready · ${url}", time_utils.Now(), time_utils.Seconds(int64(8)))
     return (m.Copy(
@@ -3629,8 +3630,26 @@ func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
         Conversation = m.Conversation
             .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${linkified}"))
             .Append(session.ConversationLine(Speaker = "gh", Text = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.")),
-    ), NoCmd[AppMsg]())
+    ), openBrowserCmd(url))
 }
+
+// openBrowserCmd produces a Cmd[AppMsg] that runs OpenInBrowser
+// off the event loop. Wrapping as a FutureCmd (not a direct
+// runtime call inside Update) is what keeps unit tests safe:
+// tests construct the model + dispatch synthetic PR URLs and
+// then DROP the returned Cmd, so the side effect never runs.
+// Production runtime polls the Future and shells the launcher.
+//
+// Future returns NoOp regardless of OpenInBrowser's outcome —
+// failure to open a browser is a UX softness (the OSC 8 link in
+// the conversation log is the fallback), not something we want
+// to surface as a model-level error.
+func openBrowserCmd(url string) Cmd[AppMsg] = FutureCmd[AppMsg](
+    Fut = concurrent.FutureApply[AppMsg](() => {
+        val _ = OpenInBrowser(url)
+        return NoOp()
+    }),
+)
 
 // prOscOpen / prOscClose emit the OSC 8 escape sequence pair. The gala-tui
 // package exports its own oscOpen/oscClose names so we prefix to avoid

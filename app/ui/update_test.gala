@@ -322,6 +322,49 @@ func TestTLSummary_NudgesWhenBodyMentionsMemberName(t T) T {
     }
 }
 
+// Regression for the 2026-05-07 "Theo abandoned 59ms after dispatch"
+// bug. setStatus(idle→working) must reset LastChunkAt to NowAt so
+// the heartbeat FSM doesn't immediately escalate to StFailed because
+// of a stale prior-turn timestamp. Theo had LastChunkAt from his
+// first QA review (06:31:31), got re-dispatched 7 minutes later
+// (06:38:56), and was abandoned by the next tick because elapsed
+// (445s) > AbandonAfterSeconds (300s).
+func TestSetStatus_ResetsLastChunkAtOnIdleToWorking(t T) T {
+    val seed = sampleModel()
+    val staleTime = time_utils.FromUnixSeconds(int64(1000))
+    val nowTime   = time_utils.FromUnixSeconds(int64(9999))
+    val withStale = seed.Copy(
+        Statuses    = seed.Statuses.Put("Felix", StIdle()),
+        LastChunkAt = seed.LastChunkAt.Put("Felix", staleTime),
+        NowAt       = nowTime,
+    )
+    val after = setStatus(withStale, "Felix", StWorking())
+    return after.LastChunkAt.Get("Felix") match {
+        case Some(at) => Eq(t, at.UnixNanos(), nowTime.UnixNanos())
+        case None()   => IsTrue(t, false)
+    }
+}
+
+// Working→working keeps LastChunkAt untouched (only reset on the
+// transition INTO working, not on every status update during the
+// same turn). Without this guarantee, a re-poll of an already-
+// working member would mask the heartbeat clock.
+func TestSetStatus_KeepsLastChunkAtOnWorkingToWorking(t T) T {
+    val seed = sampleModel()
+    val chunkTime = time_utils.FromUnixSeconds(int64(5000))
+    val nowTime   = time_utils.FromUnixSeconds(int64(9999))
+    val withWorking = seed.Copy(
+        Statuses    = seed.Statuses.Put("Felix", StWorking()),
+        LastChunkAt = seed.LastChunkAt.Put("Felix", chunkTime),
+        NowAt       = nowTime,
+    )
+    val after = setStatus(withWorking, "Felix", StWorking())
+    return after.LastChunkAt.Get("Felix") match {
+        case Some(at) => Eq(t, at.UnixNanos(), chunkTime.UnixNanos())
+        case None()   => IsTrue(t, false)
+    }
+}
+
 // Direct unit test for dedupTargetsByName — first occurrence wins,
 // order preserved. The 2026-05-07 audit captured Iris's claude
 // stream emitting one logical turn but two identical chunks; without

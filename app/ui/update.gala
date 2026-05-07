@@ -3521,8 +3521,14 @@ func onApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 //   - Working → working (within working bucket): no-op; the segment
 //     keeps running.
 //
-// LastChunkAt is left untouched — the liveness FSM in onTick still
-// reads it to decide StSlow / StStuck thresholds.
+// LastChunkAt is RESET on idle→working transitions so the liveness
+// FSM clock starts fresh per turn. Without this, a member who sat
+// idle for >AbandonAfterSeconds (default 300s) between turns gets
+// abandoned by the next heartbeat tick BEFORE their newly-spawned
+// claude has a chance to emit anything — the 2026-05-07 audit
+// captured this as Theo (QA) being abandoned 59ms after dispatch
+// because his prior LastChunkAt was 7 minutes stale. Working→working
+// keeps LastChunkAt untouched; non-working transitions don't read it.
 func setStatus(m AppModel, name string, st Status) AppModel {
     val prior = m.Statuses.Get(name).GetOrElse(StIdle())
     val wasWorking = isWorkingStatus(prior)
@@ -3535,6 +3541,7 @@ func setStatus(m AppModel, name string, st Status) AppModel {
         return m.Copy(
             Statuses      = m.Statuses.Put(name, st),
             WorkStartedAt = m.WorkStartedAt.Put(name, m.NowAt),
+            LastChunkAt   = m.LastChunkAt.Put(name, m.NowAt),
             Pipeline      = pipelinePatched,
         )
     }

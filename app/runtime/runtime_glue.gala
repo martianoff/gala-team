@@ -603,7 +603,7 @@ func MsgMember(msg Msg) string = msg match {
 // browser directly via `gh pr view --web` but that bypasses the audit
 // trail of "what summary did the team agree to".
 func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
-    val title = ghTitle(body)
+    val title = GhTitle(body)
     val bodyWithFooter = body + "\n\n---\n🍎 orchestrated by [Gala Team](https://github.com/martianoff/gala-team)"
     val args = ArrayOf("pr", "create", "--title", title, "--body", bodyWithFooter)
     val leadBranch = LeadBranchFor(proj)
@@ -818,10 +818,113 @@ func awaitMergeExit(p subprocess.Process, url string) Msg {
 // chars (with an ellipsis when truncated) for use as the PR title.
 // strings.SplitN returns a Go []string at the interop boundary so we
 // rebuild as an Array for GALA-side access.
-func ghTitle(body string) string {
-    val parts = ArrayOf(strings.SplitN(body, "\n", 2)...)
-    val firstLine = parts.HeadOption().GetOrElse("")
-    val trimmed = strings.TrimSpace(firstLine)
-    return if (len(trimmed) <= 70) trimmed
-           else                    string(SliceTo(ToRunes(trimmed), 67)) + "..."
+// GhTitle derives a PR title from `body`. GitHub renders titles as
+// plain text (no markdown), so we strip the markdown emphasis
+// markers a TL summary typically opens with (`**`, `__`, surrounding
+// backticks). The result is capped at 70 characters AT A WORD
+// BOUNDARY so titles don't end mid-word like
+// "**Crypto MVP — hash functions only. Lead is now 3 commits ahead of ...".
+//
+// Title source is the first non-empty line of the body — TL
+// @summary blocks conventionally start with a one-line headline.
+//
+// Exported (capitalized) so external tests in app/runtime can
+// exercise it directly without an internal-test build.
+func GhTitle(body string) string {
+    val firstLine = firstNonEmptyLine(body)
+    val cleaned = stripTitleMarkdown(firstLine)
+    return capTitleAtWordBoundary(cleaned, 70)
+}
+
+// firstNonEmptyLine returns the first line of `body` that has
+// non-whitespace content. Falls back to "Untitled" when every line
+// is empty (defensive — TL summaries should never be blank, but
+// avoid producing a literal empty PR title).
+func firstNonEmptyLine(body string) string {
+    val lines = strings.Split(body, "\n")
+    var i = 0
+    val n = len(lines)
+    for i < n {
+        val t = strings.TrimSpace(lines[i])
+        if t != "" { return t }
+        i = i + 1
+    }
+    return "Untitled"
+}
+
+// stripTitleMarkdown removes the markdown emphasis markers a
+// TL summary typically wraps its headline in: leading/trailing
+// `**` (bold), `__` (bold), `*` / `_` (italic), and surrounding
+// backticks. Inner markdown is left alone — collapsing every
+// `**word**` mid-string would mangle technical terms.
+func stripTitleMarkdown(s string) string {
+    var out = strings.TrimSpace(s)
+    // Repeatedly strip wrapping pairs so `**__foo__**` collapses
+    // cleanly. Each iteration strips at most one pair from each
+    // end; loop until no change.
+    var changed = true
+    for changed {
+        changed = false
+        out = strings.TrimSpace(out)
+        if strings.HasPrefix(out, "**") && strings.HasSuffix(out, "**") && len(out) >= 4 {
+            out = stripWrap(out, 2)
+            changed = true
+        } else if strings.HasPrefix(out, "__") && strings.HasSuffix(out, "__") && len(out) >= 4 {
+            out = stripWrap(out, 2)
+            changed = true
+        } else if strings.HasPrefix(out, "`") && strings.HasSuffix(out, "`") && len(out) >= 2 {
+            out = stripWrap(out, 1)
+            changed = true
+        } else if strings.HasPrefix(out, "*") && strings.HasSuffix(out, "*") && len(out) >= 2 && !strings.HasPrefix(out, "**") {
+            out = stripWrap(out, 1)
+            changed = true
+        } else if strings.HasPrefix(out, "_") && strings.HasSuffix(out, "_") && len(out) >= 2 && !strings.HasPrefix(out, "__") {
+            out = stripWrap(out, 1)
+            changed = true
+        }
+    }
+    return out
+}
+
+// stripWrap removes `n` runes from each end of `s`. Caller must
+// ensure len(s) >= 2*n (enforced by stripTitleMarkdown's len
+// guards). Used only for symmetric markdown-emphasis stripping;
+// kept narrow rather than exposing a generic substring helper.
+func stripWrap(s string, n int) string {
+    val rs = ToRunes(s)
+    val total = len(rs)
+    val keep = total - 2 * n
+    if keep <= 0 { return "" }
+    val tail = SliceFrom(rs, n)
+    val window = SliceTo(tail, keep)
+    return string(window)
+}
+
+// capTitleAtWordBoundary truncates `s` to at most `cap` BYTES (when
+// content is ASCII), rolling back to the most recent space within
+// ~10 chars of the hard limit so titles don't end mid-word.
+// Appends "..." (3 ASCII chars) when truncation happens. Using
+// ASCII dots — not the single "…" rune — keeps byte length
+// predictable: PR title byte budgets matter (some hosts impose
+// 256-byte limits) and "…" is 3 bytes in UTF-8, which would push
+// the total over the cap if we naïvely subtracted 1.
+func capTitleAtWordBoundary(s string, cap int) string {
+    val rs = ToRunes(s)
+    if len(rs) <= cap { return s }
+    // Reserve 3 chars for "...".
+    val hardLimit = cap - 3
+    var cutAt = hardLimit
+    var i = hardLimit
+    val rollbackFloor = if (hardLimit > 10) hardLimit - 10 else 0
+    var foundSpace = false
+    for i > rollbackFloor && !foundSpace {
+        val c = rs[i]
+        if c == ' ' || c == '\t' {
+            cutAt = i
+            foundSpace = true
+        }
+        i = i - 1
+    }
+    val tail = SliceTo(rs, cutAt)
+    return string(tail) + "..."
 }

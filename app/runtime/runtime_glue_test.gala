@@ -1,11 +1,13 @@
-package runtime
+package main
 
 import (
     "errors"
+    "strings"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
 )
 
@@ -113,4 +115,85 @@ func TestLeadBranchFor_AlphaNumPassthrough(t T) T {
         Github = None[string](), DefaultBranch = "main",
     )
     return Eq(t, LeadBranchFor(proj), "gala_team/skunkworks/lead")
+}
+
+// ----------------------------------------------------------------------------
+// ghTitle — derive a clean PR title from a TL @summary body
+// ----------------------------------------------------------------------------
+
+// Markdown bold wrap (`**foo**`) must be stripped from the title.
+// GitHub renders titles as plain text, so leaving the asterisks
+// produces "**Crypto MVP — hash...**" verbatim. PR #327 was the
+// regression that triggered this fix.
+func TestGhTitle_StripsBoldWrap(t T) T {
+    return Eq(t, GhTitle("**Crypto MVP shipped**"), "Crypto MVP shipped")
+}
+
+// Italic wrap (`_foo_`, `*foo*`) and code wrap (`` `foo` ``) get
+// the same treatment.
+func TestGhTitle_StripsItalicAndCode(t T) T {
+    val t1 = Eq(t, GhTitle("_release notes_"), "release notes")
+    val t2 = Eq(t1, GhTitle("`bazel build //...`"), "bazel build //...")
+    return Eq(t2, GhTitle("*lower italic*"), "lower italic")
+}
+
+// Nested wrappers (`**__foo__**`) collapse cleanly — the loop
+// strips one pair per iteration until none remain.
+func TestGhTitle_StripsNestedWraps(t T) T {
+    return Eq(t, GhTitle("**__double bold__**"), "double bold")
+}
+
+// Inner markdown (`shipped **crypto** package`) is NOT stripped —
+// only wrapping pairs at the very ends. Collapsing inner asterisks
+// would mangle technical terms.
+func TestGhTitle_PreservesInnerMarkdown(t T) T {
+    return Eq(t, GhTitle("Shipped **crypto** package"), "Shipped **crypto** package")
+}
+
+// Long titles must cap at a word boundary, NOT mid-word. PR #327
+// truncated to "...Lead is now 3 commits ahead of ..." which is
+// readable but the original cut at exactly 67 chars sometimes
+// landed mid-word.
+func TestGhTitle_CapsAtWordBoundary(t T) T {
+    val long = "Crypto MVP hash functions only and lead is now three commits ahead of master with full integration test coverage"
+    val title = GhTitle(long)
+    val t1 = IsTrue(t, len(title) <= 70)
+    val t2 = IsTrue(t1, strings.HasSuffix(title, "..."))
+    // Must end with a complete word + ellipsis, not a partial word.
+    val withoutEllipsis = strings.TrimSuffix(title, "...")
+    val trimmed = strings.TrimSpace(withoutEllipsis)
+    return IsTrue(t2, !strings.HasSuffix(trimmed, "func") && !strings.HasSuffix(trimmed, "comm"))
+}
+
+// Short titles (≤70 chars) pass through unchanged with no
+// ellipsis appended.
+func TestGhTitle_ShortTitlePassthrough(t T) T {
+    val title = GhTitle("fix(crypto): handle empty Bytes input")
+    return Eq(t, title, "fix(crypto): handle empty Bytes input")
+}
+
+// First-line extraction skips leading blank lines (TL summaries
+// occasionally start with whitespace before the headline).
+func TestGhTitle_SkipsLeadingBlankLines(t T) T {
+    return Eq(t, GhTitle("\n\n  \n**Real headline**\nbody starts here"),
+              "Real headline")
+}
+
+// Empty / whitespace-only body falls back to "Untitled" so we
+// never produce a literal empty PR title.
+func TestGhTitle_EmptyBodyFallsBackToUntitled(t T) T {
+    val t1 = Eq(t, GhTitle(""), "Untitled")
+    return Eq(t1, GhTitle("\n  \n  \n"), "Untitled")
+}
+
+// Regression test for the exact PR #327 body that produced the
+// "**Crypto MVP — hash functions only. Lead is now 3 commits
+// ahead of ..." title. After fix: stripped + word-boundary cap.
+func TestGhTitle_PR327Regression(t T) T {
+    val body = "**Crypto MVP — hash functions only. Lead is now 3 commits ahead of master.**\n```\n99a2ad1 feat..."
+    val title = GhTitle(body)
+    val t1 = IsTrue(t, !strings.Contains(title, "**"))
+    val t2 = IsTrue(t1, len(title) <= 70)
+    val t3 = IsTrue(t2, strings.HasPrefix(title, "Crypto MVP"))
+    return t3
 }

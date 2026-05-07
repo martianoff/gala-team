@@ -3745,20 +3745,32 @@ func parseRenderedSummary(text string) string {
     return strings.TrimSpace(body.MkString("\n"))
 }
 
-// checkPrReady returns Some(reason) when the project's current branch
-// is NOT in a state that `gh pr create` will accept. Returns None when
-// it looks safe to fire the PR-creation pipeline. Reasons we surface
-// (instead of letting `gh` crash with an opaque message):
-//   - HEAD == defaultBranch (no diverged work, nothing to PR)
-//   - HEAD has zero commits ahead of defaultBranch
+// checkPrReady returns Some(reason) when the lead branch is NOT in a
+// state that `gh pr create` will accept. Returns None when it looks
+// safe to fire the PR-creation pipeline. The check probes the
+// explicit lead ref (`gala_team/<proj>/lead`) — NOT `HEAD` of any
+// particular cwd — so the answer is independent of which worktree we
+// query from. Reasons we surface (instead of letting `gh` crash with
+// an opaque message):
+//   - lead has zero commits ahead of defaultBranch
+//
+// Bug history: 2026-05-07 audit captured `master..HEAD` querying the
+// user's main repo (where HEAD == master and no work lives — the
+// orchestrator now operates exclusively in `_lead/`). The lead
+// branch had 4 commits past master via the worktree, but checkPrReady
+// reported "nothing to PR" and the @summary gate kept rejecting the
+// TL's verdict. Five reformulated @summary attempts later the TL
+// gave up and asked the user to ship manually.
+//
 // We deliberately do NOT call out to the network (`gh repo view`,
 // `git fetch`) — the check should be quick and offline-safe so the
 // approval banner stays responsive.
 func checkPrReady(proj Project) Option[string] {
     if proj.DefaultBranch == "" { return None[string]() }
+    val leadRef = "gala_team/" + gitSlugForTeam(proj.Name) + "/lead"
     val opts = subprocess.NewSpawnOpts(
         "git",
-        ArrayOf("rev-list", "--count", proj.DefaultBranch + "..HEAD").ToGoSlice(),
+        ArrayOf("rev-list", "--count", proj.DefaultBranch + ".." + leadRef).ToGoSlice(),
         SliceEmpty[string](),
         proj.Repo,
     )
@@ -3780,15 +3792,57 @@ func checkPrReady(proj Project) Option[string] {
     if codeTry.IsFailure() { return None[string]() }
     val code = codeTry.Get()
     if code != 0 {
-        // `git rev-list <branch>..HEAD` failed — probably the default
-        // branch ref doesn't exist locally. Don't block the approval;
-        // let `gh pr create` produce its own error.
-        return None[string]()
+        // `git rev-list <default>..<leadRef>` failed. Two shapes
+        // produce non-zero here, and they want different responses:
+        //   (a) ref missing — the lead branch was never created (no
+        //       TL session has produced work yet). Should block the
+        //       Approval modal so the user gets an actionable nudge
+        //       instead of an opaque `gh pr create` failure.
+        //   (b) "not a git repo" / git binary missing / other
+        //       environment issue — can't reliably check; fall
+        //       through to None (let the downstream gh call surface
+        //       its own error).
+        // Distinguish via a fast follow-up rev-parse: if the leadRef
+        // verifies, the rev-list failure was env-shaped → None. If
+        // the leadRef DOESN'T verify, it's case (a) → block.
+        return refMissing(proj.Repo, leadRef) match {
+            case true  => Some(s"lead branch (${leadRef}) does not exist yet — nothing to PR")
+            case false => None[string]()
+        }
     }
     if lastLine == "0" {
         return Some(s"no commits ahead of ${proj.DefaultBranch} — nothing to PR")
     }
     return None[string]()
+}
+
+// refMissing returns true iff `ref` does NOT verify in `repo` AND
+// `repo` is queryable as a git repo. Used by checkPrReady to decide
+// whether a non-zero `git rev-list` exit means "lead branch missing"
+// (block Approval) or "git environment broken" (fall through to gh).
+// Returns false on any environmental failure so the fall-through
+// path stays the safe default.
+func refMissing(repo string, ref string) bool {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("rev-parse", "--verify", "--quiet", ref).ToGoSlice(),
+        SliceEmpty[string](),
+        repo,
+    )
+    val procTry = subprocess.Spawn(opts)
+    if procTry.IsFailure() { return false }
+    val proc = procTry.Get()
+    var stopped = false
+    for !stopped {
+        val ln = proc.ReadLine()
+        if ln.IsFailure() { stopped = true }
+    }
+    val codeTry = proc.Wait()
+    if codeTry.IsFailure() { return false }
+    // git rev-parse --verify --quiet exits 0 if the ref resolves,
+    // 1 if it doesn't (and 128 for "not a git repo" / other env
+    // failures). Only treat exit code 1 as "ref missing".
+    return codeTry.Get() == 1
 }
 
 // hooksFutureCmd lifts policy.RunHooksFuture into a Cmd[AppMsg]. The

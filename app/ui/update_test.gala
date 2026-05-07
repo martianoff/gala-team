@@ -262,9 +262,41 @@ func TestTLSummary_BlocksApprovalWhenLeadBranchEmpty(t T) T {
 func TestTLSummary_EntersApprovalWhenLeadBranchHasCommits(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "feature"))
+    // Create the actual lead branch with commits — checkPrReady
+    // probes the explicit `gala_team/<proj-slug>/lead` ref, not HEAD.
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
-                                   "commit", "--allow-empty", "-q", "-m", "feature work"))
+                                   "commit", "--allow-empty", "-q", "-m", "lead work"))
+    val goodBody = "## What\n- shipped the thing\n\n## Why\nthe user asked for it\n\n## Follow-ups\nnone"
+    val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
+        State      = TLThinking(),
+        TurnBuffer = "@summary\n" + goodBody + "\n@end",
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    return m.State match {
+        case Approval(body) => Eq(t, body, goodBody)
+        case _              => IsTrue(t, false)
+    }
+}
+
+// Regression for the 2026-05-07 "TL says orchestrator won't let me
+// PR" bug. The lead branch has commits past master, but the user's
+// HEAD (the cwd of `proj.Repo`) is on master with no work. Old
+// checkPrReady probed `master..HEAD` from proj.Repo, saw 0 commits,
+// and rejected the @summary. Now it probes the explicit lead ref so
+// HEAD location is irrelevant — the same lead state is visible
+// regardless of which worktree the user has checked out.
+func TestTLSummary_LeadHasCommitsButHeadOnMasterStillEntersApproval(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    // Create lead branch with a commit, then check the user back to master.
+    // proj.Repo's HEAD is now on master (zero commits past master),
+    // but the lead BRANCH has work — the bug was treating these as the
+    // same thing.
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
+    runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "--allow-empty", "-q", "-m", "lead work on its branch"))
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "main"))
     val goodBody = "## What\n- shipped the thing\n\n## Why\nthe user asked for it\n\n## Follow-ups\nnone"
     val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
         State      = TLThinking(),
@@ -577,7 +609,7 @@ func TestRecoveryModal_KeyCharDoesNotLeakToComposer(t T) T {
 func TestResume_RecoversApprovalWhenSummaryAndCommitsExist(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
     val convo = EmptyArray[session.ConversationLine]()
@@ -615,7 +647,7 @@ func TestResume_StaysIdleWhenLeadBranchEmpty(t T) T {
 func TestResume_StaysIdleWhenNoSummary(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
     val convo = EmptyArray[session.ConversationLine]()
@@ -634,7 +666,7 @@ func TestResume_StaysIdleWhenNoSummary(t T) T {
 func TestResume_LatestSummaryWinsWhenMultiple(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
     val convo = EmptyArray[session.ConversationLine]()
@@ -658,7 +690,7 @@ func TestResume_LatestSummaryWinsWhenMultiple(t T) T {
 func TestResume_RecoversApprovalFromRenderedSummary(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
     val rendered = "Picking path C.\n  Summary:\n**Status: ready to ship**\nDetails follow."
@@ -679,7 +711,7 @@ func TestResume_RecoversApprovalFromRenderedSummary(t T) T {
 func TestResume_IgnoresSummaryFromNonLead(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "lead-work"))
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
     val convo = EmptyArray[session.ConversationLine]()

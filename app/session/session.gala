@@ -89,7 +89,7 @@ func Save(
     projectName string,
     conversation Array[ConversationLine],
     activeMembers Array[string],
-) Try[bool] = Try[bool](() => {
+) Try[bool] = Try(() => {
     val snap = Snapshot(
         ProjectName   = projectName,
         SavedAt       = time.Now().UnixNano(),
@@ -146,7 +146,7 @@ func LoadOrError(repoDir string) Either[string, Snapshot] {
 // Per DESIGN.md §4.6: "`.gala_team/` is appended to the project's
 // `.gitignore` automatically on first run (with a Don't strip if
 // present guard so we don't fight the user)."
-func EnsureGitignore(repoDir string) Try[bool] = Try[bool](() => {
+func EnsureGitignore(repoDir string) Try[bool] = Try(() => {
     val gitDir = filepath.Join(repoDir, ".git")
     val gitInfo, gitErr = os.Stat(gitDir)
     val _ = gitInfo
@@ -193,7 +193,7 @@ func hasGalaTeamLine(body string) bool {
 // per line. Every state-machine transition, every dispatch, every
 // status flip, every hook result, every chunk hash. Cheap to fsync,
 // cheap to replay."
-func AppendEvent(repoDir string, eventJson string) Try[bool] = Try[bool](() => {
+func AppendEvent(repoDir string, eventJson string) Try[bool] = Try(() => {
     val path = filepath.Join(repoDir, ".gala_team", "sessions", "events.jsonl")
     val parent = filepath.Dir(path)
     val mkErr = os.MkdirAll(parent, os.FileMode(0755))

@@ -199,10 +199,8 @@ func LeadWorktreePath(proj Project) string =
 // worktree creation so non-git fixtures degrade cleanly instead of
 // failing every git op the orchestrator tries to run.
 func isGitRepoDir(dir string) bool {
-    val info, err = os.Stat(filepath.Join(dir, ".git"))
-    if err != nil { return false }
-    val _ = info
-    return true
+    val _, err = os.Stat(filepath.Join(dir, ".git"))
+    return err == nil
 }
 
 // EnsureLeadWorktree creates the team lead's worktree at
@@ -215,7 +213,7 @@ func isGitRepoDir(dir string) bool {
 // main checkout. ResetLeadBranch, pushSnapshotBranch, and gh pr create
 // all run with cwd set to this path; the user's `proj.Repo` is never
 // `git checkout`ed or `git reset`ed by the orchestrator.
-func EnsureLeadWorktree(proj Project) Try[string] = Try[string](() => {
+func EnsureLeadWorktree(proj Project) Try[string] = Try(() => {
     // Graceful degradation: if proj.Repo isn't even a git repo (test
     // fixtures with bare temp dirs, headless setups pointed at a
     // non-VCS workspace), the worktree machinery has nothing to bite
@@ -250,8 +248,7 @@ func EnsureLeadWorktree(proj Project) Try[string] = Try[string](() => {
         }
         val info2, statErr2 = os.Stat(wtPath)
         if statErr2 == nil && info2.IsDir() {
-            val rmErr = os.RemoveAll(wtPath)
-            val _ = rmErr
+            val _ = os.RemoveAll(wtPath)
         }
     }
     // Fork the lead worktree from the project's DEFAULT BRANCH so a
@@ -292,7 +289,7 @@ func EnsureLeadWorktree(proj Project) Try[string] = Try[string](() => {
 // worktree is created on demand if missing; the reset target is
 // origin/<defaultBranch> so a stale local default doesn't anchor lead
 // to a pre-merged ancestor.
-func ResetLeadBranch(proj Project) Try[bool] = Try[bool](() => {
+func ResetLeadBranch(proj Project) Try[bool] = Try(() => {
     val wtPath = EnsureLeadWorktree(proj).Get()
     // Fetch origin/<defaultBranch> first so the reset target reflects
     // the REMOTE's current state, not the user's possibly-stale
@@ -352,7 +349,7 @@ func WorktreeBranchFor(proj Project, m Member) string =
 // Without this, `?? crypto/` and other untracked files from the prior
 // engineer leak through and the new engineer reads them as legitimate
 // in-progress work, which derails their dispatch.
-func ensureWorktree(proj Project, m Member) Try[string] = Try[string](() => {
+func ensureWorktree(proj Project, m Member) Try[string] = Try(() => {
     val wtPath = filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
     val branch = WorktreeBranchFor(proj, m)
     if isRegisteredWorktree(proj, wtPath) {
@@ -480,7 +477,7 @@ func isRegisteredWorktree(proj Project, wtPath string) bool {
 // repo doesn't accumulate stale checkouts. Best-effort: a failure
 // here is informational, never fatal — the user can `git worktree
 // prune` manually.
-func RemoveWorktree(proj Project, m Member) Try[bool] = Try[bool](() => {
+func RemoveWorktree(proj Project, m Member) Try[bool] = Try(() => {
     val wtPath = filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
     return removeWorktreeAt(proj, wtPath)
 })
@@ -489,7 +486,7 @@ func RemoveWorktree(proj Project, m Member) Try[bool] = Try[bool](() => {
 // fresh / Ctrl+N so the next session starts from a freshly-created
 // worktree forked off origin/<defaultBranch>. Best-effort, same
 // shape as RemoveWorktree.
-func RemoveLeadWorktree(proj Project) Try[bool] = Try[bool](() => {
+func RemoveLeadWorktree(proj Project) Try[bool] = Try(() => {
     return removeWorktreeAt(proj, LeadWorktreePath(proj))
 })
 
@@ -519,7 +516,7 @@ func removeWorktreeAt(proj Project, wtPath string) bool {
 // subsequent `git worktree add -B <branch> <path>` calls.
 //
 // Best-effort: failures are silently swallowed via Try[].
-func PruneWorktrees(proj Project) Try[bool] = Try[bool](() => {
+func PruneWorktrees(proj Project) Try[bool] = Try(() => {
     val opts = subprocess.NewSpawnOpts(
         "git",
         ArrayOf("worktree", "prune").ToGoSlice(),

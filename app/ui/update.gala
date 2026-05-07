@@ -1031,7 +1031,7 @@ func onPasteClipboard(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = readClipboard()
 //   - Linux   → xclip / xsel (xclip first, xsel fallback)
 // Returns Try[string] so an unsupported environment surfaces a clean
 // error in LastError instead of a silent failure.
-func readClipboard() Try[string] = Try[string](() => {
+func readClipboard() Try[string] = Try(() => {
     val (cmd, args) = clipboardReadCmd()
     val opts = subprocess.NewSpawnOpts(cmd, args.ToGoSlice(), SliceEmpty[string](), ".")
     val proc = subprocess.Spawn(opts) match {

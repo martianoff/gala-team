@@ -43,7 +43,7 @@ func Compose(team Team, member Member) Array[string] =
 // each doc starts. Returns Failure on any read error — keeping the
 // failure surface narrow (Try[string]) so callers don't have to
 // invent partial-success semantics.
-func Load(proj Project, paths Array[string]) Try[string] = Try[string](() => {
+func Load(proj Project, paths Array[string]) Try[string] = Try(() => {
     return paths.FoldLeft(EmptyArray[string](), (acc, raw) => {
         val resolved = if (filepath.IsAbs(raw)) raw
                        else                     filepath.Join(proj.Repo, raw)

@@ -42,7 +42,7 @@ struct HookResult(
 //
 // This is the synchronous, in-process flavor. The Future variant below
 // wraps this same call site for the UI layer.
-func RunHooks(proj Project, hooks Array[Hook]) Try[bool] = Try[bool](() => {
+func RunHooks(proj Project, hooks Array[Hook]) Try[bool] = Try(() => {
     var i = 0
     val n = hooks.Size()
     for i < n {

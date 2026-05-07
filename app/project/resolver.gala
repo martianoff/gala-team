@@ -121,7 +121,7 @@ func detectDefaultBranch(repo string) Option[string] =
 // non-zero exit / spawn error / IO failure. Stderr is intentionally
 // dropped — the binary error message is rarely useful for the
 // auto-detection use case.
-func runGit(repo string, args Array[string]) Try[string] = Try[string](() => {
+func runGit(repo string, args Array[string]) Try[string] = Try(() => {
     val opts = subprocess.NewSpawnOpts(
         "git",
         args.ToGoSlice(),

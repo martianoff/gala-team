@@ -373,7 +373,7 @@ func extractSummary(convo Array[session.ConversationLine]) Option[string] =
 // EncodeJson serialises a HeadlessResult to a JSON string suitable for
 // piping into another tool. Conversation is a JSON array of
 // `{speaker, text}` objects; Summary and Err become null when None.
-func EncodeJson(r HeadlessResult) Try[string] = Try[string](() => {
+func EncodeJson(r HeadlessResult) Try[string] = Try(() => {
     val w = json.NewJsonEncoder()
     w.WriteStartObject()
     w.WriteKey("project_repo");  w.WriteString(r.Project.Repo)

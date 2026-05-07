@@ -69,7 +69,7 @@ func EmptyGuidance() Guidance = Guidance(Docs = EmptyArray[GuidanceDoc]())
 // against `repoDir`; absolute paths pass through. Missing files
 // surface as Failure so the caller can decide between strict and
 // forgiving behaviour (interactive UX panics; CI fall-through).
-func LoadDoc(repoDir string, slot string, rawPath string) Try[GuidanceDoc] = Try[GuidanceDoc](() => {
+func LoadDoc(repoDir string, slot string, rawPath string) Try[GuidanceDoc] = Try(() => {
     val resolved = if (filepath.IsAbs(rawPath)) rawPath else filepath.Join(repoDir, rawPath)
     val body, err = os.ReadFile(resolved)
     if err != nil { panic(s"guidance: cannot read '${resolved}': ${err.Error()}") }

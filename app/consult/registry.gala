@@ -99,7 +99,7 @@ func LoadFromString(yamlStr string) Try[Registry] = Try(() => decodeRegistry(yam
 //
 // IO failures on the user-scoped file are non-fatal — we don't want
 // a missing config dir to sink a perfectly valid project consult.
-func LoadWithFallback(projectPath string, userConfigPath string) Try[Registry] = Try[Registry](() => {
+func LoadWithFallback(projectPath string, userConfigPath string) Try[Registry] = Try(() => {
     val projReg = LoadFromFile(projectPath).GetOrElse(EmptyRegistry())
     val userReg = LoadFromFile(userConfigPath).GetOrElse(EmptyRegistry())
     val projNames = projReg.Entries.Map((e) => e.Name)

@@ -63,7 +63,7 @@ func ArchiveDir(repoDir string) string =
 //
 // If `latest.json` doesn't exist (no session yet), returns
 // Failure with a descriptive error rather than silently no-op'ing.
-func ArchiveLatest(repoDir string, label string) Try[string] = Try[string](() => {
+func ArchiveLatest(repoDir string, label string) Try[string] = Try(() => {
     val src = SessionPath(repoDir)
     val raw, err = os.ReadFile(src)
     if err != nil { panic(s"archive: read ${src}: ${err.Error()}") }

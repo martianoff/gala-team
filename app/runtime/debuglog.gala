@@ -140,8 +140,14 @@ func LogSessionInit() {
 // exist anyway and the init event is suppressed.
 func ResetSession() {
     if !DebugEnabled() { return }
-    val _ = ResetDebugDir()
+    // Order matters on Windows: close cached trace file handles
+    // BEFORE os.RemoveAll(debug/) — Windows refuses to delete a
+    // file that any process has open. Pre-2026-05-07 this ran
+    // RemoveAll first, which silently left every per-member
+    // traces/<member>/*.jsonl on disk because the chunk pump's
+    // long-lived handles kept the files locked.
     ResetTraceState()
+    val _ = ResetDebugDir()
     LogSessionInit()
 }
 

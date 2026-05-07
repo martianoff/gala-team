@@ -2113,6 +2113,23 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                     )
                     return (m1, batchAll(nudgeCmds))
                 }
+                // PR description quality gate. The @summary body
+                // becomes the PR description verbatim; once we let it
+                // through, the user has no chance to revise before
+                // gh pr create runs. Validate up front and nudge the
+                // TL to rewrite if the body lacks structure or
+                // mentions internal orchestration nuance.
+                val summaryBody = firstSummaryBody(dirs)
+                val bodyIssue = validatePrBody(summaryBody, cleaned.Team)
+                if bodyIssue.IsDefined() {
+                    val issueText = bodyIssue.GetOrElse("")
+                    val (m1, nudgeCmds) = spawnTLNudge(
+                        setStatus(cleaned, name, StIdle()),
+                        "summary-bad-body",
+                        buildBadSummaryBodyNudge(issueText, summaryBody),
+                    )
+                    return (m1, batchAll(nudgeCmds))
+                }
             }
             val nextState = transitionLogged(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
             val withState = setStatus(cleaned.Copy(State = nextState), name, StIdle())
@@ -2322,6 +2339,123 @@ func buildSummaryNotPrReadyNudge(reason string, tm Team, proj Project) string {
         "  (B) Designate a merger turn — issue @dispatch(" + engineerList + ") (or any team member you trust with git) saying: \"fast-forward `" + leadBranch + "` to include every engineer's committed work, then emit @finished. Use `git merge --ff-only <engineer-branch>` from each engineer in turn.\" After this turn, lead will have commits and re-emitting @summary will let Approval succeed." + nl + nl +
         "  (C) If the engineers genuinely produced nothing PR-able yet, revise your @summary to reflect that — say what's blocking, what the user should do next — and the orchestrator will route it as plain chat (no Approval modal)." + nl + nl +
         "Pick exactly one path, emit the corresponding directive(s), and end the turn."
+}
+
+// firstSummaryBody returns the body of the first @summary directive
+// in `dirs`, or "" if none exists. The PR-quality gate uses this to
+// inspect what the TL is about to ship as the PR description.
+func firstSummaryBody(dirs Array[Directive]) string {
+    val bodies = dirs.Collect({ case Summary(b) => b })
+    if bodies.IsEmpty() { return "" }
+    return bodies.Get(0)
+}
+
+// validatePrBody checks the about-to-ship @summary body against the
+// rules taught in TL onboarding (## What / ## Why / ## Follow-ups
+// sections; no member names; no orchestration trivia). Returns
+// Some(reason) describing the first failure, or None() if the body
+// passes. Reason is human-readable and gets embedded in the nudge
+// so the TL knows exactly what to fix.
+//
+// Conservative on substring matches: a member name only counts if
+// it appears as a standalone word (alphanumeric / underscore
+// boundaries on both sides) so `felix-config.yaml` or `MiraValidate`
+// in code don't trigger false positives.
+func validatePrBody(body string, tm Team) Option[string] {
+    val trimmed = strings.TrimSpace(body)
+    if trimmed == "" { return Some("body is empty") }
+    val lower = strings.ToLower(trimmed)
+    val hasSection = strings.Contains(lower, "## what") ||
+        strings.Contains(lower, "## why") ||
+        strings.Contains(lower, "## follow-ups") ||
+        strings.Contains(lower, "## follow ups") ||
+        strings.Contains(lower, "## gaps")
+    if !hasSection {
+        return Some("body lacks section headers — needs at least one of `## What`, `## Why`, `## Follow-ups` (and `## Gaps` if relevant)")
+    }
+    val nameReason = tm.Members.Find((mem) => containsWord(trimmed, mem.Name)) match {
+        case Some(mem) => Some(s"body mentions team member '${mem.Name}' — PR readers don't know who that is. Write the PR as if a single author wrote it.")
+        case None()    => None[string]()
+    }
+    if nameReason.IsDefined() { return nameReason }
+    val orchestrationPhrases = ArrayOf(
+        "i dispatched",
+        "after retries",
+        "the merger turn",
+        "merger turn",
+        "the engineer turn",
+        "@dispatch",
+        "@finished",
+        "@blocked",
+        "after three blocked",
+        "after several blocked",
+    )
+    return orchestrationPhrases.Find((p) => strings.Contains(lower, p)) match {
+        case Some(p) => Some(s"body contains orchestration trivia ('${p}') — PR readers don't see the chat. Describe the change, not how it got made.")
+        case None()  => None[string]()
+    }
+}
+
+// containsWord returns true if `needle` appears in `haystack` as a
+// standalone word — surrounded by non-alphanumeric / non-underscore
+// boundaries on both sides (or at start/end of string). Case-
+// insensitive ASCII match. Used by validatePrBody to spot member-name
+// mentions without false-positiving on substrings inside identifiers
+// or paths (`felix-config.yaml`, `MiraValidate`).
+func containsWord(haystack string, needle string) bool {
+    if needle == "" { return false }
+    val hRunes = ToRunes(strings.ToLower(haystack))
+    val nRunes = ToRunes(strings.ToLower(needle))
+    val hLen = len(hRunes)
+    val nLen = len(nRunes)
+    if nLen == 0 || nLen > hLen { return false }
+    var i = 0
+    val limit = hLen - nLen
+    for i <= limit {
+        var matched = true
+        var j = 0
+        for j < nLen {
+            if hRunes[i + j] != nRunes[j] {
+                matched = false
+                j = nLen
+            } else {
+                j = j + 1
+            }
+        }
+        if matched {
+            val beforeOk = if (i == 0) true else !isWordRune(hRunes[i - 1])
+            val afterPos = i + nLen
+            val afterOk = if (afterPos >= hLen) true else !isWordRune(hRunes[afterPos])
+            if beforeOk && afterOk { return true }
+        }
+        i = i + 1
+    }
+    return false
+}
+
+func isWordRune(r rune) bool {
+    return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+}
+
+// buildBadSummaryBodyNudge tells the TL their @summary body was
+// rejected by the PR-quality gate and quotes the offending text
+// back so they can rewrite it. The body becomes the PR description
+// verbatim once Approval succeeds, so we want this caught BEFORE
+// gh pr create runs — by the time the user sees the broken PR on
+// GitHub, the snapshot branch is already pushed.
+func buildBadSummaryBodyNudge(reason string, body string) string {
+    val nl = "\n"
+    val truncated = if (len(body) > 600) runesPrefix(body, 600) else body
+    return "System: Your @summary was rejected by the PR-description quality gate — " + reason + "." + nl + nl +
+        "The @summary body becomes the PR description verbatim. Reviewers see it cold without your transcript context, so the bar is: a reader who's never seen this orchestration should be able to understand what shipped and why." + nl + nl +
+        "Required structure (use ## headers, GitHub-flavored markdown):" + nl +
+        "  ## What — the change in 1-3 bullets. Concrete: 'Added X', 'Fixed Y', 'Removed Z'." + nl +
+        "  ## Why — the motivation. The bug, the goal, the constraint that drove the change." + nl +
+        "  ## Follow-ups — known gaps, deferred work, things the next PR should pick up. (Use ## Gaps instead if there's a known shortcoming the reviewer must accept.)" + nl + nl +
+        "Forbidden: member names, orchestration phrases ('I dispatched', 'after retries', 'the merger turn'), apology-and-postmortem voice. Write as if one author wrote the change." + nl + nl +
+        "Your rejected body, for reference:" + nl +
+        "```" + nl + truncated + nl + "```" + nl + nl +
+        "Re-emit a single @summary directive with a corrected body. End the turn after the @end."
 }
 
 // gitSlugForTeam mirrors gitSlug from app/runtime so the nudge

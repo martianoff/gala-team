@@ -265,15 +265,101 @@ func TestTLSummary_EntersApprovalWhenLeadBranchHasCommits(t T) T {
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "feature"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "feature work"))
+    val goodBody = "## What\n- shipped the thing\n\n## Why\nthe user asked for it\n\n## Follow-ups\nnone"
     val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
         State      = TLThinking(),
-        TurnBuffer = "@summary\nship it\n@end",
+        TurnBuffer = "@summary\n" + goodBody + "\n@end",
     )
     val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
     return m.State match {
-        case Approval(body) => Eq(t, body, "ship it")
+        case Approval(body) => Eq(t, body, goodBody)
         case _              => IsTrue(t, false)
     }
+}
+
+// PR-quality gate: when @summary body lacks ## What/## Why/## Follow-ups
+// sections, the FSM must NOT enter Approval — instead, it nudges the
+// TL with buildBadSummaryBodyNudge and respawns the lead session.
+// The reason: that body becomes the PR description verbatim, and a
+// reader-facing chat-recap PR is exactly what the user is trying to
+// avoid by putting this gate in place.
+func TestTLSummary_NudgesWhenBodyLacksSections(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "feature"))
+    runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "--allow-empty", "-q", "-m", "feature work"))
+    val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
+        State      = TLThinking(),
+        TurnBuffer = "@summary\nshipped the thing, all good\n@end",
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val notApproval = m.State match {
+        case Approval(_) => IsTrue(t, false)
+        case _           => IsTrue(t, true)
+    }
+    return notApproval
+}
+
+// PR-quality gate: when @summary body name-drops a team member, the
+// FSM nudges the TL to rewrite. The body has the right sections so
+// the section gate doesn't fire — only the member-name detector
+// should reject it.
+func TestTLSummary_NudgesWhenBodyMentionsMemberName(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "feature"))
+    runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "--allow-empty", "-q", "-m", "feature work"))
+    val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
+        State      = TLThinking(),
+        TurnBuffer = "@summary\n## What\nFelix added the parser\n\n## Why\nbug\n\n## Follow-ups\nnone\n@end",
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    return m.State match {
+        case Approval(_) => IsTrue(t, false)
+        case _           => IsTrue(t, true)
+    }
+}
+
+// Direct unit test for validatePrBody — empty body is rejected.
+func TestValidatePrBody_RejectsEmpty(t T) T {
+    val result = validatePrBody("", sampleTeam())
+    return IsTrue(t, result.IsDefined())
+}
+
+// Direct unit test for validatePrBody — well-formed body passes.
+func TestValidatePrBody_AcceptsWellFormed(t T) T {
+    val body = "## What\n- did the thing\n\n## Why\nuser asked\n\n## Follow-ups\nnone"
+    val result = validatePrBody(body, sampleTeam())
+    return IsTrue(t, !result.IsDefined())
+}
+
+// Direct unit test for validatePrBody — body without sections rejected.
+func TestValidatePrBody_RejectsMissingSections(t T) T {
+    val body = "we shipped the thing today, lots of work but it's done"
+    val result = validatePrBody(body, sampleTeam())
+    return IsTrue(t, result.IsDefined())
+}
+
+// Direct unit test for validatePrBody — orchestration phrase detected.
+func TestValidatePrBody_RejectsOrchestrationPhrase(t T) T {
+    val body = "## What\n- did stuff\n\n## Why\nI dispatched the engineer to do it"
+    val result = validatePrBody(body, sampleTeam())
+    return IsTrue(t, result.IsDefined())
+}
+
+// Direct unit test for containsWord — substring inside identifier
+// must NOT trigger a false positive (the whole point of word-boundary
+// matching). 'felix' inside 'felix-config.yaml' is a word match (dash
+// is non-word); 'felix' inside 'FelixValidate' is NOT (case-folded,
+// surrounded by word chars).
+func TestContainsWord_RespectsWordBoundaries(t T) T {
+    val a = IsTrue(t, containsWord("hello Felix world", "Felix"))
+    val b = IsTrue(a, containsWord("path/felix-config.yaml here", "felix"))
+    val c = IsTrue(b, !containsWord("FelixValidate fired", "felix"))
+    val d = IsTrue(c, !containsWord("HelloFelixWorld", "felix"))
+    return d
 }
 
 // ----------------------------------------------------------------------------

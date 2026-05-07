@@ -153,7 +153,7 @@ func sidebarColumn(
         val isCursor = (i == cursor)
         val widget = if (i == start && above > 0) scrollHint(s"  ↑ ${above} more above")
                      else if (i == end - 1 && below > 0) scrollHint(s"  ↓ ${below} more below")
-                     else renderSidebarRow(row, isCursor, tick, rightFields)
+                     else renderSidebarRow(team, row, isCursor, tick, rightFields)
         win = win.Append(Fixed(1, widget))
         i = i + 1
     }
@@ -256,11 +256,11 @@ func appendGroup(
 // timer map).
 val SidebarRightWidth = 14
 
-func renderSidebarRow(row SidebarRow, isCursor bool, tick int, rightFields HashMap[string, string]) Widget = row match {
+func renderSidebarRow(team Team, row SidebarRow, isCursor bool, tick int, rightFields HashMap[string, string]) Widget = row match {
     case GroupHeader(name, expanded) =>
         TextStyled(headerLabel(name, expanded, isCursor), rowStyle(isCursor, true))
     case MemberRow(m, status) => {
-        val style = rowStyle(isCursor, false)
+        val style = memberRowStyle(team, m, isCursor)
         val left  = TextStyled(memberLabel(memberRowText(m, status, tick), isCursor), style)
         val right = rightFields.GetOrElse(m.Name, "")
         if right == "" { return left }
@@ -296,6 +296,62 @@ func rowStyle(isCursor bool, bold bool) Style {
     if isCursor { return DefaultStyle().WithBold() }
     if bold     { return DefaultStyle().WithBold() }
     return DefaultStyle()
+}
+
+// memberRowStyle returns the style for an individual member row in
+// the sidebar — same color as the speaker's chat-message style so
+// the user can match a sidebar row to its transcript voice at a
+// glance. Cursor row stays bold; non-cursor rows are tinted but
+// not bold so the cursor remains the dominant visual focus.
+func memberRowStyle(team Team, mem Member, isCursor bool) Style {
+    val tinted = DefaultStyle().WithFg(MemberColor(team, mem))
+    if isCursor { return tinted.WithBold() }
+    return tinted
+}
+
+// MemberColor maps a Member to a foreground color slot. TL and QA each
+// get a single dedicated color; engineers cycle through a 3-color
+// palette by their order in the team roster, so a 4-engineer team
+// renders as Yellow / Magenta / Blue / Yellow rather than four
+// indistinguishable cyans. Exported so the conversation renderer
+// (app/ui/view.gala) and the sidebar can share a single source of
+// truth — colour drift between the two surfaces is the whole bug
+// this exists to prevent.
+func MemberColor(team Team, mem Member) Color = mem.Role match {
+    case TeamLead() => BrightCyan()
+    case QA()       => BrightGreen()
+    case Engineer() => EngineerColor(EngineerOrdinal(team, mem))
+}
+
+// EngineerOrdinal returns 0 for the first engineer in source order, 1
+// for the second, etc. Stable across renders because team_config
+// preserves YAML order. Falls back to 0 for an unknown name.
+func EngineerOrdinal(team Team, mem Member) int {
+    val engineers = MembersOf(team, Engineer())
+    val n = engineers.Size()
+    var i = 0
+    for i < n {
+        if engineers.Get(i).Name == mem.Name { return i }
+        i = i + 1
+    }
+    return 0
+}
+
+// EngineerColor cycles a 6-color palette so adjacent engineers are
+// visually distinct in the transcript and sidebar. Bright tones come
+// first (most contrast on dark terminals); their non-bright twins
+// follow before the cycle wraps. We deliberately skip BrightCyan
+// (taken by TL), BrightGreen (taken by QA), BrightWhite (the user),
+// BrightRed (reserved for errors / StFailed), and the very dim
+// non-bright colors (visually muddy on most themes).
+func EngineerColor(ordinal int) Color {
+    val mod = ordinal - (ordinal / 6) * 6
+    if mod == 0 { return BrightYellow() }
+    if mod == 1 { return BrightMagenta() }
+    if mod == 2 { return BrightBlue() }
+    if mod == 3 { return Yellow() }
+    if mod == 4 { return Magenta() }
+    return Cyan()
 }
 
 // memberRowText is the visual encoding of one member row.  Padded to a

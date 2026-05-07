@@ -23,6 +23,11 @@ gala_go_test(
         "pipeline_view_test.gala",
         "team_panel_test.gala",
     ],
+    pkg = "view",
+    lib_srcs = [
+        "pipeline_view.gala",
+        "team_panel.gala",
+    ],
     gala_deps = [
         "@gala_tui//:gala_tui",
     ],

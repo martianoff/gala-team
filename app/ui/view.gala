@@ -438,7 +438,7 @@ func gridBody(m AppModel) Widget {
 // Frame N in DESIGN.md.
 func memberCard(m AppModel, mem Member) Widget {
     val st = m.Statuses.Get(mem.Name).GetOrElse(StIdle())
-    val nameStyle = DefaultStyle().WithBold().WithFg(memberColor(m.Team, mem))
+    val nameStyle = DefaultStyle().WithBold().WithFg(MemberColor(m.Team, mem))
     val name = TextStyled(s"  ${mem.Name}", nameStyle)
     val role = TextStyled(s"  ${RoleName(mem.Role)}", DefaultStyle().WithDim())
     val status = TextStyled(s"  ${statusTagFor(st)}", DefaultStyle().WithDim())
@@ -1331,43 +1331,14 @@ func speakerStyle(team Team, speaker string) Style {
     }
     return MemberByName(team, speaker) match {
         case None()    => DefaultStyle().WithFg(BrightWhite()).WithDim()
-        case Some(mem) => DefaultStyle().WithBold().WithFg(memberColor(team, mem))
+        case Some(mem) => DefaultStyle().WithBold().WithFg(MemberColor(team, mem))
     }
 }
 
-// memberColor maps a Member to a foreground color slot. TL and QA each
-// get a single dedicated color; engineers cycle through a 3-color
-// palette by their order in the team roster, so a 4-engineer team
-// renders as Yellow / Magenta / Blue / Yellow rather than four
-// indistinguishable cyans.
-func memberColor(team Team, mem Member) Color = mem.Role match {
-    case TeamLead() => BrightCyan()
-    case QA()       => BrightGreen()
-    case Engineer() => engineerColor(engineerOrdinal(team, mem))
-}
-
-// engineerOrdinal returns 0 for the first engineer in source order, 1
-// for the second, etc. Stable across renders because team_config
-// preserves YAML order. Falls back to 0 for an unknown name.
-func engineerOrdinal(team Team, mem Member) int {
-    val engineers = MembersOf(team, Engineer())
-    val n = engineers.Size()
-    var i = 0
-    for i < n {
-        if engineers.Get(i).Name == mem.Name { return i }
-        i = i + 1
-    }
-    return 0
-}
-
-// engineerColor cycles a 3-color palette so adjacent engineers are
-// visually distinct in the transcript.
-func engineerColor(ordinal int) Color {
-    val mod = ordinal - (ordinal / 3) * 3
-    if mod == 0 { return BrightYellow() }
-    if mod == 1 { return BrightMagenta() }
-    return BrightBlue()
-}
+// memberColor / engineerColor / engineerOrdinal moved to
+// app/view/team_panel.gala (exported as MemberColor / EngineerColor /
+// EngineerOrdinal) so the sidebar can tint member rows in the same
+// hue as their transcript voice. One source of truth, no drift.
 
 // conversationPaneWidth returns how many cells the conversation pane
 // gets at the current terminal size: total width minus the 28-cell

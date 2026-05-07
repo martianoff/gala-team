@@ -47,6 +47,7 @@ sealed type Msg {
     case RtPrFailed(Err error)
     case RtMerged(Url string)
     case RtMergeFailed(Err error)
+    case RtWorktreesWiped()
 }
 
 // MemberSession pairs a Member with the live subprocess driving them.
@@ -330,8 +331,63 @@ func ResetLeadBranch(proj Project) Try[bool] = Try(() => {
     }
     val code = proc.Wait().Get()
     if code != 0 { panic(s"git reset --hard ${resetTarget} exited with code ${code}") }
+    // Drop untracked files left behind by the prior turn so the next
+    // session starts from a truly clean tree. `-f` force, `-d` recurse
+    // into directories, `-x` include .gitignored entries (the prior
+    // session's bazel-out/ etc. would otherwise persist). Best-effort
+    // — clean failures don't sink the reset.
+    val cleanOpts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("clean", "-fdx", "--quiet").ToGoSlice(),
+        SliceEmpty[string](),
+        wtPath,
+    )
+    subprocess.Spawn(cleanOpts) match {
+        case Success(p) => { val _ = p.Wait() }
+        case Failure(_) => {}
+    }
     return true
 })
+
+// WipeWorktreesFuture runs the heavy "Start fresh" cleanup off the UI
+// thread. The returned Future resolves to RtWorktreesWiped() once
+// every git op has completed; the UI shows a "wiping…" banner in
+// the meantime and clears it when the message arrives. Without this,
+// the synchronous version froze the TUI for ~5-10s on Start fresh
+// while git fetched + reset + per-engineer worktree-removed serially.
+//
+// Operations performed (in order):
+//   1. ResetLeadBranch — hard-reset the lead worktree to
+//      origin/<defaultBranch>, plus `git clean -fdx` to drop the
+//      prior session's untracked files. The lead WORKTREE is reused
+//      (no remove + re-create dance — the cheap "reset in place"
+//      gives the same end state without the worktree-add overhead).
+//   2. RemoveWorktree per engineer / QA member when in
+//      WorktreePerEngineer mode. Skipped in Shared mode.
+//   3. PruneWorktrees — clean up any orphan .git/worktrees/ entries
+//      left behind by out-of-band removes.
+//
+// Best-effort throughout — IO failures don't stop the rest of the
+// wipe. The user opted into "Start fresh = blank slate"; partial
+// cleanup is better than aborting on the first lockfile.
+func WipeWorktreesFuture(proj Project, members Array[Member], mode WorkspaceMode) concurrent.Future[Msg] {
+    return concurrent.FutureApply[Msg](() => {
+        val _ = ResetLeadBranch(proj)
+        val isWorktreeMode = mode match {
+            case Shared()              => false
+            case WorktreePerEngineer() => true
+        }
+        if isWorktreeMode {
+            members.ForEach((mem) => {
+                val isLead = SameRole(mem.Role, TeamLead())
+                if isLead { return }
+                val _ = RemoveWorktree(proj, mem)
+            })
+        }
+        val _ = PruneWorktrees(proj)
+        return RtWorktreesWiped()
+    })
+}
 
 // WorktreeBranchFor mirrors the branch-naming convention used by
 // ensureWorktree so other layers (onboarding prompts, view, log
@@ -660,6 +716,7 @@ func MsgMember(msg Msg) string = msg match {
     case RtPrFailed(_)              => ""
     case RtMerged(_)                => ""
     case RtMergeFailed(_)           => ""
+    case RtWorktreesWiped()         => ""
 }
 
 // ----------------------------------------------------------------------------

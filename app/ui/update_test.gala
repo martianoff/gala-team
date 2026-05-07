@@ -354,6 +354,26 @@ func TestTLSummary_NudgesWhenBodyMentionsMemberName(t T) T {
     }
 }
 
+// Async wipe: Start fresh / Ctrl+N must set WipingWorktrees=true
+// (so the view's "Wiping…" banner shows) and return a Cmd that
+// drives the future. The data side clears synchronously; the IO
+// runs off-thread. The previous synchronous wipe froze the TUI
+// for 5-10s while git fetched + reset + per-engineer worktrees
+// were removed serially.
+func TestEraseSession_SecondPressSetsWipingFlag(t T) T {
+    val seed = sampleModel().Copy(EraseSessionPending = true)
+    val (m, _) = Update(seed, KeyEraseSession())
+    return IsTrue(t, m.WipingWorktrees)
+}
+
+// WorktreesWiped (the future's resolution message) must clear the
+// WipingWorktrees flag so the banner disappears.
+func TestWorktreesWiped_ClearsWipingFlag(t T) T {
+    val seed = sampleModel().Copy(WipingWorktrees = true)
+    val (m, _) = Update(seed, WorktreesWiped())
+    return IsTrue(t, !m.WipingWorktrees)
+}
+
 // Regression for the "QA abandoned milliseconds after dispatch"
 // bug. setStatus(idle→working) must reset LastChunkAt to NowAt so
 // the heartbeat FSM doesn't immediately escalate to StFailed because

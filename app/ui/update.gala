@@ -463,6 +463,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case PreMergeHooksPassed(body)   => onPreMergeHooksPassed(m, body)
     case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
     case PrCreated(url)              => onPrCreated(m, url)
+    case WorktreesWiped()            => onWorktreesWiped(m)
     case PrFailed(err)               => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
     case OpenBrowser(url)            => onOpenBrowser(m, url)
     case KeyMerge()                  => onMerge(m)
@@ -642,8 +643,9 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             // freshSession helper Ctrl+N uses — single source of
             // truth for "wipe everything". Only difference is the
             // modal flag bookkeeping.
-            val cleared = freshSession(m).Copy(RecoveryModalOpen = false)
-            return (persistConversation(cleared, cleared.Conversation), NoCmd[AppMsg]())
+            val (clearedRaw, wipeCmd) = freshSession(m)
+            val cleared = clearedRaw.Copy(RecoveryModalOpen = false)
+            return (persistConversation(cleared, cleared.Conversation), wipeCmd)
         }
     }
 }
@@ -784,8 +786,8 @@ func onEraseSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if !m.EraseSessionPending {
         return (m.Copy(EraseSessionPending = true), NoCmd[AppMsg]())
     }
-    val cleared = freshSession(m)
-    return (persistConversation(cleared, cleared.Conversation), NoCmd[AppMsg]())
+    val (cleared, wipeCmd) = freshSession(m)
+    return (persistConversation(cleared, cleared.Conversation), wipeCmd)
 }
 
 // freshSession is the SHARED "wipe everything" routine. Called by
@@ -794,28 +796,44 @@ func onEraseSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // equivalent in their effects on disk + model state. Only the
 // triggering UI differs.
 //
-// What it wipes:
+// What it wipes synchronously (cheap data-side ops):
 //   - Live claude subprocesses (CloseAllSessions + PendingClosures
 //     bump so killed-pipe trailing chunks don't re-populate the
 //     fresh conversation).
-//   - Engineer / QA git worktrees on disk + lead branch reset to
-//     project's default branch (wipeMemberWorktrees).
 //   - .gala_team/sessions/debug/ (events.jsonl + traces/) via
 //     ResetSession — no-op when GALA_TEAM_DEBUG is off.
 //   - Every per-turn AppModel field (clearSessionState).
 //
-// Returns the cleared model. Caller persists it via
-// persistConversation. Recovery-modal callers add their own
-// modal-flag updates after via Copy.
-func freshSession(m AppModel) AppModel {
+// What it wipes asynchronously (heavy git IO, returned as Cmd):
+//   - Lead branch reset to origin/<defaultBranch> + git clean -fdx
+//   - Engineer / QA git worktrees (worktree-per-engineer mode only)
+//   - git worktree prune
+//
+// Returns (cleared model with WipingWorktrees=true, Cmd that drives
+// the async git work to completion). The UI shows a "Wiping
+// worktrees…" banner while WipingWorktrees is true; the
+// WorktreesWiped handler clears it. Without async wiping, the TUI
+// freezes for ~5-10s on Start fresh while git fetched + reset +
+// per-engineer worktree-removed serially.
+func freshSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val withPending = m.Sessions.FoldLeftKV(m.PendingClosures, (acc, name, _sess) => {
         val curr = acc.Get(name).GetOrElse(0)
         return acc.Put(name, curr + 1)
     })
     val _ = CloseAllSessions(m.Sessions)
-    wipeMemberWorktrees(m)
     ResetSession()
-    return clearSessionState(m.Copy(PendingClosures = withPending))
+    val cleared = clearSessionState(m.Copy(PendingClosures = withPending, WipingWorktrees = true))
+    val wipeCmd = runtimeFutureToCmd(WipeWorktreesFuture(m.Project, m.Team.Members, m.Policy.WorkspaceMode))
+    return (cleared, wipeCmd)
+}
+
+// onWorktreesWiped clears the WipingWorktrees flag once the async
+// git ops complete. The data-side reset already ran when freshSession
+// was called; this handler just acknowledges the IO half. No further
+// state changes — the user is back at Idle with empty conversation
+// and can prompt the TL whenever they like.
+func onWorktreesWiped(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    return (m.Copy(WipingWorktrees = false), NoCmd[AppMsg]())
 }
 
 // conversationPageSize is the line delta applied for PgUp / PgDn /
@@ -1134,49 +1152,10 @@ func onYankConversation(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
 }
 
-// wipeMemberWorktrees removes every member's git worktree (lead + any
-// per-engineer ones) so a fresh session starts from a clean filesystem.
-// Three halves:
-//
-//   1. Lead worktree wipe (always runs, regardless of workspace mode):
-//      `git worktree remove --force <_lead>`. The lead always has its
-//      own worktree now. Wiping + re-creating on the next session is
-//      cleaner than reset-in-place because it also drops untracked
-//      files that `git reset` would leave behind.
-//
-//   2. Engineer/QA worktree wipe (worktree-per-engineer only):
-//      `git worktree remove --force` per member. Without this,
-//      `?? crypto/` and other untracked files from the prior
-//      engineer leak into the new engineer's view.
-//
-//   3. `git worktree prune` to drop git's internal metadata for any
-//      out-of-band-removed entries.
-//
-// Best-effort — IO failures are silently ignored. The user opted into
-// "Start fresh = blank slate"; we don't want a partial cleanup to
-// abort the wipe because of one stale lockfile.
-func wipeMemberWorktrees(m AppModel) {
-    // (1) Lead worktree wipe + re-fork. RemoveLeadWorktree drops the
-    // dir + git's metadata; ResetLeadBranch then re-creates the
-    // worktree (via EnsureLeadWorktree) AND hard-resets the branch
-    // tip to origin/<default> so the next session starts from the
-    // remote's current state, not the user's possibly-stale local
-    // ref. Without this fetch+reset step, an old lead branch SHA
-    // could anchor the next session pre-merged work.
-    val _ = RemoveLeadWorktree(m.Project)
-    val _ = ResetLeadBranch(m.Project)
-    // (2) Engineer/QA worktree wipe. Worktree mode only.
-    val name = policy.WorkspaceModeName(m.Policy.WorkspaceMode)
-    if name == "worktree-per-engineer" {
-        m.Team.Members.ForEach((mem) => {
-            val isLead = SameRole(mem.Role, TeamLead())
-            if isLead { return }
-            val _ = RemoveWorktree(m.Project, mem)
-        })
-    }
-    // (3) Prune git's internal worktree metadata.
-    val _ = PruneWorktrees(m.Project)
-}
+// wipeMemberWorktrees was removed; the equivalent IO now lives in
+// runtime.WipeWorktreesFuture and runs off the UI thread via Cmd.
+// freshSession returns the cmd; the WorktreesWiped handler clears
+// the in-progress banner when the future resolves.
 
 // clearSessionState wipes every per-conversation field back to its
 // initial state. Pure data reset — no IO. Status map gets a fresh
@@ -4209,6 +4188,7 @@ func runtimeToAppMsg(rm Msg) AppMsg = rm match {
     case RtPrFailed(err)            => PrFailed(ErrText = err.Error())
     case RtMerged(url)              => Merged(Url = url)
     case RtMergeFailed(err)         => MergeFailed(ErrText = err.Error())
+    case RtWorktreesWiped()         => WorktreesWiped()
 }
 
 // transitionContext extracts the per-team facts the FSM needs from the
@@ -4369,7 +4349,8 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // for consistency. Without this, Esc would silently leave
         // stale worktrees on disk while the rest of the prior
         // session was wiped, creating the same staleness bug.
-        wipeMemberWorktrees(m)
+        // Async: wipe runs in a Future, banner shows progress.
+        val wipeCmd = runtimeFutureToCmd(WipeWorktreesFuture(m.Project, m.Team.Members, m.Policy.WorkspaceMode))
         val empty = EmptyArray[session.ConversationLine]()
         val cleared = m.Copy(
             RecoveryModalOpen     = false,
@@ -4378,12 +4359,13 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             Conversation          = empty,
             ConversationOffset    = 0,
             ConversationSticky    = true,
+            WipingWorktrees       = true,
         )
         // Persist the cleared conversation so the NEXT launch doesn't
         // load stale data from .gala_team/sessions/latest.json.
         // Without this, "discard → quit → reopen" round-trips the
         // prior conversation back in via primeFromSnapshot.
-        return (persistConversation(cleared, empty), NoCmd[AppMsg]())
+        return (persistConversation(cleared, empty), wipeCmd)
     }
     if m.GuidanceOpen {
         return (m.Copy(GuidanceOpen = false), NoCmd[AppMsg]())

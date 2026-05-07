@@ -180,6 +180,12 @@ struct AppModel(
     // "Erase session?" prompt; a second Ctrl+N within the next
     // few keystrokes performs the erase. Esc cancels.
     EraseSessionPending bool,
+    // True while the async Start fresh / Ctrl+N wipe is running its
+    // git ops in a Future (see runtime.WipeWorktreesFuture). The view
+    // shows a "Wiping worktrees…" banner so the user knows the
+    // (5-10s) freeze is expected progress, not a hang. Cleared by
+    // the WorktreesWiped message handler.
+    WipingWorktrees bool,
     // Which panel keystrokes target. FocusComposer is the default
     // (typing → composer); FocusSidebar redirects Up/Down to move
     // SidebarCursor and Space to fold/unfold the role group at the
@@ -392,6 +398,7 @@ func InitialModelWithTeams(
     RecoveryBannerVisible = false,
     QuitPending           = false,
     EraseSessionPending   = false,
+    WipingWorktrees       = false,
     Focus                 = FocusComposer(),
     SidebarCursor         = 0,
     CollapsedGroups       = EmptyArray[string](),
@@ -481,6 +488,12 @@ sealed type AppMsg {
     // so the back-to-TL forwarding handlers can stay reused.
     case ConsultChunkArrived(Name string, Line string)
     case ConsultEnded(Name string, ErrText Option[string])
+    // WorktreesWiped fires when WipeWorktreesFuture completes the
+    // async Start fresh / Ctrl+N IO. Handler clears the
+    // WipingWorktrees banner and persists the cleared conversation
+    // (the data-side reset already ran synchronously when freshSession
+    // was called; this just acknowledges the IO half).
+    case WorktreesWiped
     // Toggles the consult viewer modal overlay (Tab key).
     case KeyToggleConsultViewer
     // Toggles the session-history browser (Ctrl+H key). When opened

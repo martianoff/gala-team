@@ -765,6 +765,19 @@ func approvalBanner(m AppModel) LayoutChild = m.State match {
 // banner shows line count + agent count so the user understands
 // what's been brought back, plus the dismiss/continue hints.
 func recoveryBanner(m AppModel) LayoutChild {
+    // Wiping banner takes precedence — Start fresh / Ctrl+N / Esc-on-
+    // recovery-modal all spawn an async git wipe that can take 5-10s
+    // (fetch + reset + per-engineer worktree-removes). Without this
+    // surface, the user sees an empty conversation + idle sidebar
+    // and doesn't know the IO is still in flight.
+    if m.WipingWorktrees {
+        return Fixed(2, Column(ArrayOf[LayoutChild](
+            Fixed(1, TextStyled("  ⟳ Wiping worktrees (git fetch + reset + clean)…",
+                DefaultStyle().WithBold().WithFg(BrightYellow()))),
+            Fixed(1, TextStyled("    typically 5-10s; the TUI stays interactive while it runs",
+                DefaultStyle().WithDim())),
+        )))
+    }
     if !m.RecoveryBannerVisible { return Fixed(0, Empty()) }
     val lines = m.Conversation.Size()
     val agents = m.RecoveredMembers.Size()

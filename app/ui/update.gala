@@ -755,6 +755,13 @@ func onEraseSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     // recreated on the next `ensureSession` call (ensureWorktree
     // detects unregistered dirs and refreshes them).
     wipeMemberWorktrees(m)
+    // Wipe the debug log tree too — Ctrl+N is a "fresh slate" hotkey
+    // and should match the recovery-modal "Start fresh" button which
+    // also wipes debug. Without this, every Ctrl+N preserved the
+    // accumulating events.jsonl + traces/ from prior sessions, which
+    // confused log audits ("why is there May 4 data when I just
+    // erased?"). No-op when GALA_TEAM_DEBUG is off.
+    ResetSession()
     val cleared = clearSessionState(m.Copy(PendingClosures = withPending))
     val saved = persistConversation(cleared, cleared.Conversation)
     return (saved, NoCmd[AppMsg]())

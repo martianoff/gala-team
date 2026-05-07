@@ -464,6 +464,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
     case PrCreated(url)              => onPrCreated(m, url)
     case PrFailed(err)               => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
+    case OpenBrowser(url)            => onOpenBrowser(m, url)
     case KeyMerge()                  => onMerge(m)
     case Merged(url)                 => onMerged(m, url)
     case MergeFailed(err)            => (m.Copy(LastError = Some(s"gh pr merge: ${err}")), NoCmd[AppMsg]())
@@ -3630,26 +3631,24 @@ func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
         Conversation = m.Conversation
             .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${linkified}"))
             .Append(session.ConversationLine(Speaker = "gh", Text = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.")),
-    ), openBrowserCmd(url))
+    ), MsgCmd[AppMsg](Msg = OpenBrowser(Url = url)))
 }
 
-// openBrowserCmd produces a Cmd[AppMsg] that runs OpenInBrowser
-// off the event loop. Wrapping as a FutureCmd (not a direct
-// runtime call inside Update) is what keeps unit tests safe:
-// tests construct the model + dispatch synthetic PR URLs and
-// then DROP the returned Cmd, so the side effect never runs.
-// Production runtime polls the Future and shells the launcher.
+// onOpenBrowser fires the OS browser-launcher for `url`. Reached
+// only via the OpenBrowser AppMsg, which onPrCreated schedules as
+// a Cmd. Going through a message instead of a direct call inside
+// Update is what makes the unit-test path safe: tests dispatch
+// PrCreated, get back a Cmd[AppMsg], drop it, and nothing fires.
+// Only the production runtime that PROCESSES the Cmd (running
+// OpenBrowser through Update again) actually shells the launcher.
 //
-// Future returns NoOp regardless of OpenInBrowser's outcome —
-// failure to open a browser is a UX softness (the OSC 8 link in
-// the conversation log is the fallback), not something we want
-// to surface as a model-level error.
-func openBrowserCmd(url string) Cmd[AppMsg] = FutureCmd[AppMsg](
-    Fut = concurrent.FutureApply[AppMsg](() => {
-        val _ = OpenInBrowser(url)
-        return NoOp()
-    }),
-)
+// Failures are silent — headless / CI / sandboxed envs have no
+// browser; the OSC 8 hyperlink in the conversation log is the
+// fallback.
+func onOpenBrowser(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
+    val _ = OpenInBrowser(url)
+    return (m, NoCmd[AppMsg]())
+}
 
 // prOscOpen / prOscClose emit the OSC 8 escape sequence pair. The gala-tui
 // package exports its own oscOpen/oscClose names so we prefix to avoid

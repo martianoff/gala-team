@@ -217,13 +217,22 @@ func worktreeWorkspaceSection(proj Project, member Member, isTL bool, cwd string
         val leadBranch = leadBranchOf(proj)
         return header +
             s"Your cwd is the project root at `${proj.Repo}`. **You are checked out on branch `${leadBranch}`** — your own dedicated branch forked from `${proj.DefaultBranch}`. " +
-            "Commit your work to this branch; the user opens a PR from it via Ctrl+A. Each fresh session hard-resets this branch back to `${proj.DefaultBranch}`, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
+            "Commit your work to this branch; the user opens a PR from it via Ctrl+A. Each fresh session hard-resets this branch back to `${proj.DefaultBranch}` (the latest origin tip), so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
             s"**Engineers and QAs each run in an isolated git worktree** at " +
             s"`${proj.Repo}/.gala_team/worktrees/<MemberName>` on branch `${branchPattern}`. " +
             "Their file edits live ONLY on that branch until merged — they are NOT visible from your cwd.\n\n" +
             "When inspecting a member's deliverables (e.g. after they emit `@finished`), read files from their worktree path, not your own. " +
             "If you don't see an expected file in your cwd, that does NOT mean the member failed — check the worktree at " +
-            s"`${proj.Repo}/.gala_team/worktrees/<MemberName>/` first."
+            s"`${proj.Repo}/.gala_team/worktrees/<MemberName>/` first.\n\n" +
+            "## Branches & PRs\n\n" +
+            s"`${leadBranch}` is your INTERNAL working ref. You commit there. Engineers fast-forward INTO it. **It is never the source branch of a PR on origin.**\n\n" +
+            "When you `@summary`, the orchestrator: (1) snapshots the lead tip onto a unique per-PR branch named `gala_team/" + onbGitSlug(proj.Name) + "/pr/<short-sha>`, (2) force-pushes that snapshot to origin, (3) opens a GitHub PR from it. The lead branch on origin is never touched.\n\n" +
+            "Implications you need to know:\n" +
+            "- **Multiple PRs from one workspace coexist.** Different lead tip → different short SHA → different PR branch. You can `@summary` again later to ship a follow-up; it gets its own PR.\n" +
+            "- **Re-approving the same lead state is idempotent.** Same SHA → same destination branch, force-push is a no-op, no duplicate PR is created (gh will refuse with \"already exists\").\n" +
+            "- **Don't try to merge engineer branches into lead via push to origin yourself.** Use local `git merge --ff-only <engineer-branch>` from your cwd; the orchestrator handles all origin pushes during `@summary`.\n" +
+            "- **Don't pre-push lead.** It's local-only by design. The orchestrator only ever pushes the snapshot branches.\n\n" +
+            "If a prior PR you opened is still pending review and you make follow-up changes, your next `@summary` opens a SECOND PR (with the new SHA in the branch name). Mention this in the PR body so reviewers can decide whether to land them in order or together."
     }
     val branch = "gala_team/" + onbGitSlug(proj.Name) + "/" + member.Name
     return header +

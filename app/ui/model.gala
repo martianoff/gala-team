@@ -448,6 +448,15 @@ sealed type AppMsg {
     case PreMergeHooksFailed(ErrText string)
     case PrCreated(Url string)
     case PrFailed(ErrText string)
+    // OpenBrowser is dispatched by onPrCreated to defer the
+    // side-effecting browser launch out of Update's pure
+    // computation phase. A test that constructs Update(model,
+    // PrCreated(url)) discards the returned Cmd and never sees
+    // OpenBrowser fire — so unit tests with synthetic URLs don't
+    // trigger real browser windows. Production runtime processes
+    // the Cmd, dispatches OpenBrowser, and the Update branch
+    // shells the OS launcher.
+    case OpenBrowser(Url string)
     // Merge pipeline. KeyMerge fires `gh pr merge --<rule>` against
     // LastPrUrl, then runs Policy.PostMerge hooks. Merged carries the
     // URL so the conversation log can echo a confirmation; MergeFailed

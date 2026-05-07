@@ -476,6 +476,42 @@ func TestValidatePrBody_RejectsOrchestrationPhrase(t T) T {
     return IsTrue(t, result.IsDefined())
 }
 
+// Regression for PR #333 (2026-05-07): the TL pasted "please run
+// git -C ...\.gala_team\worktrees\_lead log..." escalation prose
+// as the @summary body. Internal orchestration paths leaked into
+// GitHub. The path-leak guard catches `.gala_team`, lead worktree
+// paths, and orchestration vocabulary that means nothing to PR
+// reviewers.
+func TestValidatePrBody_RejectsGalaTeamPath(t T) T {
+    val body = "## What\nFix something\n\n## Why\nPlease run git -C C:\\Users\\maxmr\\GolandProjects\\gala_simple\\.gala_team\\worktrees\\_lead log to verify"
+    val result = validatePrBody(body, sampleTeam())
+    return IsTrue(t, result.IsDefined())
+}
+
+func TestValidatePrBody_RejectsWorktreeLeadMention(t T) T {
+    val body = "## What\nfix\n\n## Why\nThe lead worktree at worktrees/_lead has the commits"
+    val result = validatePrBody(body, sampleTeam())
+    return IsTrue(t, result.IsDefined())
+}
+
+func TestValidatePrBody_RejectsPreFlightCheckMention(t T) T {
+    val body = "## What\nblocked\n\n## Why\nThe pre-flight check disagrees with the actual lead state"
+    val result = validatePrBody(body, sampleTeam())
+    return IsTrue(t, result.IsDefined())
+}
+
+func TestValidatePrBody_RejectsOrchestratorMention(t T) T {
+    val body = "## What\nfix\n\n## Why\nThe orchestrator's bookkeeping went wrong"
+    val result = validatePrBody(body, sampleTeam())
+    return IsTrue(t, result.IsDefined())
+}
+
+func TestValidatePrBody_AcceptsCleanBody(t T) T {
+    val body = "## What\nAdd HMAC to crypto package\n\n## Why\nNeeded for JWT signing\n\n## Follow-ups\nHKDF deferred to follow-up PR"
+    val result = validatePrBody(body, sampleTeam())
+    return IsTrue(t, !result.IsDefined())
+}
+
 // Direct unit test for containsWord — substring inside identifier
 // must NOT trigger a false positive (the whole point of word-boundary
 // matching). 'felix' inside 'felix-config.yaml' is a word match (dash
@@ -604,23 +640,51 @@ func TestRecoveryModal_KeyCharDoesNotLeakToComposer(t T) T {
 }
 
 // Resume into Approval when conversation ends with lead @summary
-// AND lead branch has commits ahead of master. Fixture: branch
-// off main and commit so checkPrReady returns None.
+// AND lead branch has commits ahead of master AND the body passes
+// the PR-quality gate. Fixture: branch off main and commit so
+// checkPrReady returns None; body has the required ## What/## Why
+// sections so validatePrBody passes.
 func TestResume_RecoversApprovalWhenSummaryAndCommitsExist(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
+    val goodBody = "## What\nShip the crypto package\n\n## Why\nUser asked\n\n## Follow-ups\nnone"
     val convo = EmptyArray[session.ConversationLine]()
         .Append(session.ConversationLine(Speaker = "you", Text = "ship the crypto package"))
-        .Append(session.ConversationLine(Speaker = "Iris", Text = "@summary\ncrypto package shipped\n@end"))
+        .Append(session.ConversationLine(Speaker = "Iris", Text = "@summary\n" + goodBody + "\n@end"))
     val seed = resumedModel(proj, convo)
     val (m, _) = Update(seed, KeyRecoveryConfirm())
     return m.State match {
-        case Approval(body) => Eq(t, body, "crypto package shipped")
+        case Approval(body) => Eq(t, body, goodBody)
         case _              => IsTrue(t, false)
     }
+}
+
+// Regression for PR #333: resume must NOT enter Approval when the
+// snapshotted @summary fails the PR-quality gate. Without this guard,
+// a stale "I give up — please run git -C ...\.gala_team\..." body
+// (the kind of escalation prose that produced PR #333) would resume
+// straight into Approval and the user's next Ctrl+A would ship it
+// to GitHub. Instead, recovery spawns a TL nudge so the lead
+// rewrites @summary properly before Approval re-engages.
+func TestResume_RecoveryRejectsBadSummaryAndStaysOutOfApproval(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
+    runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "--allow-empty", "-q", "-m", "lead work"))
+    val badBody = "Blocked: pre-flight check disagrees with `git -C C:\\Users\\maxmr\\GolandProjects\\gala_simple\\.gala_team\\worktrees\\_lead log` — please verify"
+    val convo = EmptyArray[session.ConversationLine]()
+        .Append(session.ConversationLine(Speaker = "Iris", Text = "@summary\n" + badBody + "\n@end"))
+    val seed = resumedModel(proj, convo)
+    val (m, _) = Update(seed, KeyRecoveryConfirm())
+    val notApproval = m.State match {
+        case Approval(_) => IsTrue(t, false)
+        case _           => IsTrue(t, true)
+    }
+    return notApproval
 }
 
 // Resume stays Idle when lead branch is empty even if conversation
@@ -669,14 +733,16 @@ func TestResume_LatestSummaryWinsWhenMultiple(t T) T {
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
+    val olderBody = "## What\nold proposal\n\n## Why\nfirst attempt"
+    val newerBody = "## What\nnewer proposal\n\n## Why\nrevised"
     val convo = EmptyArray[session.ConversationLine]()
-        .Append(session.ConversationLine(Speaker = "Iris", Text = "@summary\nold proposal\n@end"))
+        .Append(session.ConversationLine(Speaker = "Iris", Text = "@summary\n" + olderBody + "\n@end"))
         .Append(session.ConversationLine(Speaker = "you",  Text = "/reject"))
-        .Append(session.ConversationLine(Speaker = "Iris", Text = "@summary\nnewer proposal\n@end"))
+        .Append(session.ConversationLine(Speaker = "Iris", Text = "@summary\n" + newerBody + "\n@end"))
     val seed = resumedModel(proj, convo)
     val (m, _) = Update(seed, KeyRecoveryConfirm())
     return m.State match {
-        case Approval(body) => Eq(t, body, "newer proposal")
+        case Approval(body) => Eq(t, body, newerBody)
         case _              => IsTrue(t, false)
     }
 }
@@ -693,13 +759,13 @@ func TestResume_RecoversApprovalFromRenderedSummary(t T) T {
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
-    val rendered = "Picking path C.\n  Summary:\n**Status: ready to ship**\nDetails follow."
+    val rendered = "Picking path C.\n  Summary:\n## What\nReady-to-ship change\n\n## Why\nUser asked to ship\n\n## Follow-ups\nnone"
     val convo = EmptyArray[session.ConversationLine]()
         .Append(session.ConversationLine(Speaker = "Iris", Text = rendered))
     val seed = resumedModel(proj, convo)
     val (m, _) = Update(seed, KeyRecoveryConfirm())
     return m.State match {
-        case Approval(body) => IsTrue(t, strings.Contains(body, "ready to ship"))
+        case Approval(body) => IsTrue(t, strings.Contains(body, "Ready-to-ship change"))
         case _              => IsTrue(t, false)
     }
 }

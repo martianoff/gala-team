@@ -626,11 +626,11 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             // resumes into Idle and has to re-prompt the TL to
             // re-summarize before they can ship — the 2026-05-04
             // workflow audit caught this as a real friction point.
-            val recovered = recoverApprovalIfReady(m)
+            val (recovered, recoveryCmd) = recoverApprovalIfReady(m)
             return (recovered.Copy(
                 RecoveryModalOpen = false,
                 RecoveryBannerVisible = false,
-            ), NoCmd[AppMsg]())
+            ), recoveryCmd)
         }
         case InspectFocus() => (m.Copy(
             RecoveryModalOpen = false,
@@ -2495,8 +2495,31 @@ func validatePrBody(body string, tm Team) Option[string] {
         "after three blocked",
         "after several blocked",
     )
-    return orchestrationPhrases.Find((p) => strings.Contains(lower, p)) match {
-        case Some(p) => Some(s"body contains orchestration trivia ('${p}') — PR readers don't see the chat. Describe the change, not how it got made.")
+    val orchHit = orchestrationPhrases.Find((p) => strings.Contains(lower, p))
+    if orchHit.IsDefined() {
+        val p = orchHit.GetOrElse("")
+        return Some(s"body contains orchestration trivia ('${p}') — PR readers don't see the chat. Describe the change, not how it got made.")
+    }
+    // Internal-path leaks. The orchestrator's worktree dir
+    // (.gala_team/) and the per-team branch namespace (gala_team/)
+    // mean nothing to a PR reviewer — they're orchestration
+    // bookkeeping. Mentioning them in the PR description is a tell
+    // that the TL pasted a debug log or escalation prose into
+    // @summary instead of writing a real description. PR #333 was
+    // exactly this: Iris's "I give up, please run
+    // `git -C ...\.gala_team\worktrees\_lead log...` " escalation
+    // prose became the PR body verbatim.
+    val pathLeaks = ArrayOf(
+        ".gala_team",
+        "gala_team/worktrees",
+        ".gala_team\\worktrees",
+        "worktrees/_lead",
+        "worktrees\\_lead",
+        "pre-flight check",
+        "orchestrator",
+    )
+    return pathLeaks.Find((p) => strings.Contains(lower, strings.ToLower(p))) match {
+        case Some(p) => Some(s"body contains orchestration-internal text ('${p}') — PR readers don't know about gala_team's worktrees, lead branches, or pre-flight checks. Describe what changed in the codebase, not how the orchestrator handled it.")
         case None()  => None[string]()
     }
 }
@@ -3653,17 +3676,31 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
 //      by body lines (formatDirectiveMarkers's transformation —
 //      what's actually in latest.json after a turn)
 //
-// Two guards prevent surprise re-entry into Approval:
+// Three guards prevent surprise re-entry into Approval:
 //   - Only the LATEST lead summary counts (the conversation may
 //     contain older summaries from prior turns the user already
 //     rejected — those shouldn't reactivate)
 //   - checkPrReady must succeed (lead has commits past master);
 //     otherwise resume into Approval would dead-end on the same
 //     "no commits to PR" block the workflow already covers
+//   - validatePrBody must pass against the recovered body. The
+//     same gate that catches "no sections", "mentions members",
+//     ".gala_team paths", "I-give-up prose" for fresh @summary
+//     must run on resume too. Without this, a snapshot containing
+//     a bad @summary (e.g. PR #333's escalation prose) would
+//     resume straight into Approval and the user's next Ctrl+A
+//     would ship the bad body to GitHub.
 //
-// Returns m unchanged when neither condition holds — the user lands
-// in Idle and re-prompts the TL the way they would today.
-func recoverApprovalIfReady(m AppModel) AppModel {
+// Recovery outcomes:
+//   - No summary / not PR-ready → return (m, NoCmd). User lands
+//     in Idle and re-prompts the TL.
+//   - Summary present, branch ready, body fails quality gate →
+//     return (m, nudgeCmd) where the nudge respawns the TL with
+//     the same buildBadSummaryBodyNudge prompt the live path uses.
+//     The TL fixes the body and re-emits @summary, the next gate
+//     run accepts it. Identical UX to the live-path rejection.
+//   - All three guards pass → return (m with State=Approval, NoCmd).
+func recoverApprovalIfReady(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val leadName = m.Team.Lead.Name
     val convo = m.Conversation
     var i = convo.Size() - 1
@@ -3680,10 +3717,22 @@ func recoverApprovalIfReady(m AppModel) AppModel {
         }
         i = i - 1
     }
-    if !found { return m }
+    if !found { return (m, NoCmd[AppMsg]()) }
     val readiness = checkPrReady(m.Project)
-    if readiness.IsDefined() { return m }
-    return m.Copy(State = Approval(SummaryBody = foundBody))
+    if readiness.IsDefined() { return (m, NoCmd[AppMsg]()) }
+    val bodyIssue = validatePrBody(foundBody, m.Team)
+    if bodyIssue.IsDefined() {
+        // Spawn the TL with the same bad-body nudge the live path
+        // uses, so the user sees the orchestrator actively fixing
+        // the recovered state instead of silently dropping back to
+        // Idle. The TL respawns, reads the nudge, rewrites @summary,
+        // and the next gate run accepts it.
+        val issue = bodyIssue.GetOrElse("")
+        val (m1, cmds) = spawnTLNudge(m, "recovery-bad-summary",
+            buildBadSummaryBodyNudge(issue, foundBody))
+        return (m1, batchAll(cmds))
+    }
+    return (m.Copy(State = Approval(SummaryBody = foundBody)), NoCmd[AppMsg]())
 }
 
 // extractSummaryFromText finds a summary body inside `text`,

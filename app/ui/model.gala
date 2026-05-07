@@ -247,6 +247,12 @@ struct AppModel(
     // TL relay turn (#28). Empty string if a member finished via EOF
     // without an explicit @done block.
     MemberDoneBodies HashMap[string, string],
+    // Captured @blocked reason per member from the most recent
+    // dispatched turn. Populated by onMemberBlocked, consumed by
+    // buildRelayPrompt + the proactive @blocked nudge so the TL
+    // sees the WHY when handling the failure. Cleared on the same
+    // beats as MemberDoneBodies (after relay or new user turn).
+    MemberBlockedReasons HashMap[string, string],
     // Per-member counter of visible assistant chunks rendered in the
     // CURRENT turn. Used to deduplicate the result-event echo: when
     // claude streams text chunks AND emits a final `result.result`
@@ -400,6 +406,7 @@ func InitialModelWithTeams(
     MemberJsonBuf         = EmptyHashMap[string, string](),
     MemberDirectivesFired = EmptyHashMap[string, int](),
     MemberDoneBodies      = EmptyHashMap[string, string](),
+    MemberBlockedReasons  = EmptyHashMap[string, string](),
     TurnVisibleChunks     = EmptyHashMap[string, int](),
     HelpVisible           = false,
     ProjectInfoOpen       = false,

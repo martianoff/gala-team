@@ -82,28 +82,45 @@ func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
 func spawnTLRelay(m AppModel) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val prompt = buildRelayPrompt(m, m.Team.Members)
     val (m1, cmds) = spawnTLNudge(m, "relay", prompt)
-    val m2 = m1.Copy(MemberDoneBodies = EmptyHashMap[string, string]())
+    val m2 = m1.Copy(
+        MemberDoneBodies     = EmptyHashMap[string, string](),
+        MemberBlockedReasons = EmptyHashMap[string, string](),
+    )
     return (m2, cmds)
 }
 
-// buildRelayPrompt formats the per-member deliverable list. Members
-// without an explicit @finished body (i.e. those that just hit EOF)
-// are omitted from the bullet list — TL gets clear signal about who
-// said what vs who silently exited. Falls back to a generic prompt
-// when every member returned silently.
+// buildRelayPrompt formats the per-member deliverable list AND the
+// blocked-reason list. Members without an explicit @finished body
+// (i.e. those that just hit EOF) are omitted from the done bullet
+// — TL gets clear signal about who said what. Blocked members get
+// their own section so the TL can address the failure in the same
+// turn. Falls back to a generic prompt when every member returned
+// silently AND nobody blocked.
 func buildRelayPrompt(m AppModel, members Array[Member]) string {
-    val parts = members.FoldLeft(EmptyArray[string](), (acc, mem) => {
+    val doneParts = members.FoldLeft(EmptyArray[string](), (acc, mem) => {
         val name = mem.Name
         if name == m.Team.Lead.Name { return acc }
         val body = m.MemberDoneBodies.Get(name).GetOrElse("")
         if body == "" { return acc }
         return acc.Append(s"  • ${name} said: ${body}")
     })
-    if parts.IsEmpty() {
-        return "System: dispatched members all reported back without explicit @finished bodies. Decide whether to @summary the turn for the user, or follow up with another @dispatch."
+    val blockedParts = members.FoldLeft(EmptyArray[string](), (acc, mem) => {
+        val name = mem.Name
+        if name == m.Team.Lead.Name { return acc }
+        val reason = m.MemberBlockedReasons.Get(name).GetOrElse("")
+        if reason == "" { return acc }
+        return acc.Append(s"  • ${name}: ${reason}")
+    })
+    if doneParts.IsEmpty() && blockedParts.IsEmpty() {
+        return "System: dispatched members all reported back without explicit @finished or @blocked bodies. Decide whether to @summary the turn for the user, or follow up with another @dispatch."
     }
-    val joined = parts.MkString("\n")
-    return s"System: dispatched members have reported back.\n${joined}\nDecide: send follow-up @dispatch(name) directives, request QA, or @summary the turn for the user."
+    val doneSection = if (doneParts.IsEmpty()) ""
+                      else "Members who finished:\n" + doneParts.MkString("\n") + "\n\n"
+    val blockedSection = if (blockedParts.IsEmpty()) ""
+                         else "Members who BLOCKED (subprocess killed, work incomplete):\n" + blockedParts.MkString("\n") + "\n\n"
+    return "System: dispatched members reported back.\n\n" + doneSection + blockedSection +
+        "Decide: re-dispatch blocked members with new guidance, route their work to others, request QA on what completed, " +
+        "@summary the turn for the user (especially if the blocker needs user action), or follow up with another @dispatch."
 }
 
 // eventTag projects an FSM Event to a short stable label, mirroring
@@ -580,24 +597,12 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             ReadOnlyMode = true,
         ), NoCmd[AppMsg]())
         case StartFreshFocus() => {
-            wipeMemberWorktrees(m)
-            // Wipe the debug log tree and emit a fresh session_init
-            // so the events.jsonl maps 1:1 to the live conversation
-            // — no archaeology across resets. No-op when
-            // GALA_TEAM_DEBUG is off.
-            ResetSession()
-            val empty = EmptyArray[session.ConversationLine]()
-            val cleared = m.Copy(
-                RecoveryModalOpen = false,
-                RecoveryBannerVisible = false,
-                Conversation = empty,
-                RecoveredMembers = EmptyArray[string](),
-            )
-            // Persist the cleared conversation so the next launch
-            // doesn't reload prior data via primeFromSnapshot.
-            // Without this, "Start fresh → quit → reopen" silently
-            // round-trips the old transcript back into view.
-            return (persistConversation(cleared, empty), NoCmd[AppMsg]())
+            // Recovery-modal Start fresh routes through the same
+            // freshSession helper Ctrl+N uses — single source of
+            // truth for "wipe everything". Only difference is the
+            // modal flag bookkeeping.
+            val cleared = freshSession(m).Copy(RecoveryModalOpen = false)
+            return (persistConversation(cleared, cleared.Conversation), NoCmd[AppMsg]())
         }
     }
 }
@@ -738,33 +743,38 @@ func onEraseSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if !m.EraseSessionPending {
         return (m.Copy(EraseSessionPending = true), NoCmd[AppMsg]())
     }
-    // Bump PendingClosures for every live session BEFORE we kill +
-    // clear Sessions. Killed subprocesses still emit one final
-    // ChunkArrived / SessionFailed event from their queued read
-    // pumps; without the closure counter those events sneak past
-    // and re-populate the just-cleared conversation. Same shape as
-    // closeLiveSession (used by onSubmit's respawn path).
+    val cleared = freshSession(m)
+    return (persistConversation(cleared, cleared.Conversation), NoCmd[AppMsg]())
+}
+
+// freshSession is the SHARED "wipe everything" routine. Called by
+// both Ctrl+N (onEraseSession) and the recovery modal's Start
+// fresh button so the two affordances are byte-for-byte
+// equivalent in their effects on disk + model state. Only the
+// triggering UI differs.
+//
+// What it wipes:
+//   - Live claude subprocesses (CloseAllSessions + PendingClosures
+//     bump so killed-pipe trailing chunks don't re-populate the
+//     fresh conversation).
+//   - Engineer / QA git worktrees on disk + lead branch reset to
+//     project's default branch (wipeMemberWorktrees).
+//   - .gala_team/sessions/debug/ (events.jsonl + traces/) via
+//     ResetSession — no-op when GALA_TEAM_DEBUG is off.
+//   - Every per-turn AppModel field (clearSessionState).
+//
+// Returns the cleared model. Caller persists it via
+// persistConversation. Recovery-modal callers add their own
+// modal-flag updates after via Copy.
+func freshSession(m AppModel) AppModel {
     val withPending = m.Sessions.FoldLeftKV(m.PendingClosures, (acc, name, _sess) => {
         val curr = acc.Get(name).GetOrElse(0)
         return acc.Put(name, curr + 1)
     })
     val _ = CloseAllSessions(m.Sessions)
-    // Wipe the engineer / QA worktrees on disk so the next dispatch
-    // lands in a clean checkout. Best-effort — IO errors leave the
-    // stale dirs but the data reset proceeds. Worktrees are
-    // recreated on the next `ensureSession` call (ensureWorktree
-    // detects unregistered dirs and refreshes them).
     wipeMemberWorktrees(m)
-    // Wipe the debug log tree too — Ctrl+N is a "fresh slate" hotkey
-    // and should match the recovery-modal "Start fresh" button which
-    // also wipes debug. Without this, every Ctrl+N preserved the
-    // accumulating events.jsonl + traces/ from prior sessions, which
-    // confused log audits ("why is there May 4 data when I just
-    // erased?"). No-op when GALA_TEAM_DEBUG is off.
     ResetSession()
-    val cleared = clearSessionState(m.Copy(PendingClosures = withPending))
-    val saved = persistConversation(cleared, cleared.Conversation)
-    return (saved, NoCmd[AppMsg]())
+    return clearSessionState(m.Copy(PendingClosures = withPending))
 }
 
 // conversationPageSize is the line delta applied for PgUp / PgDn /
@@ -1160,6 +1170,7 @@ func clearSessionState(m AppModel) AppModel {
         MemberBuffers         = EmptyHashMap[string, string](),
         MemberDirectivesFired = EmptyHashMap[string, int](),
         MemberDoneBodies      = EmptyHashMap[string, string](),
+        MemberBlockedReasons  = EmptyHashMap[string, string](),
         EraseSessionPending   = false,
         QuitPending           = false,
         Composer              = "",
@@ -1826,7 +1837,9 @@ func mkHelpWaitingStatus(question string) Status = StHelpWaiting(question)
 // other text), and the StFailed sidebar badge keeps the situation
 // glanceable.
 func onMemberBlocked(m AppModel, name string, reason string) Tuple[AppModel, Cmd[AppMsg]] {
+    val priorTag = stateTag(m.State)
     val nextState = transitionLogged(m.State, MemberBlocked(MemberName = name, Reason = reason), transitionContext(m))
+    val nextTag = stateTag(nextState)
     val toast = m.Toasts.PushError(s"${name} blocked", time_utils.Now(), time_utils.Seconds(int64(5)))
     val failedStatus Status = StFailed(Reason = truncateForToast(reason))
     // Kill the subprocess on @blocked — keeping it alive lets late
@@ -1835,10 +1848,42 @@ func onMemberBlocked(m AppModel, name string, reason string) Tuple[AppModel, Cmd
     // PendingClosures drops the queued reads the pump still owns.
     val closed = closeLiveSession(m, name)
     val m1 = closed.Copy(
-        State  = nextState,
-        Toasts = toast,
+        State                = nextState,
+        Toasts               = toast,
+        MemberBlockedReasons = closed.MemberBlockedReasons.Put(name, reason),
     )
-    return (setStatus(m1, name, failedStatus), NoCmd[AppMsg]())
+    val m2 = setStatus(m1, name, failedStatus)
+    // Auto-spawn a TL relay turn so the lead can attempt to fix
+    // the blocker without user intervention. Two cases:
+    //   (1) Pending set drained → state transitioned to TLReview /
+    //       QAGate. Update()'s post-dispatch auto-relay will fire
+    //       spawnTLRelay (whose buildRelayPrompt now reads
+    //       MemberBlockedReasons too). Don't double-fire here.
+    //   (2) Pending still has work → state stayed in Delegating /
+    //       QAGate. The auto-relay path won't fire. Spawn a
+    //       focused @blocked nudge so TL can act NOW (re-dispatch
+    //       with new guidance, route to another member, or
+    //       @summary to escalate to user).
+    val sameTag = priorTag == nextTag
+    if !sameTag { return (m2, NoCmd[AppMsg]()) }
+    val (m3, cmds) = spawnTLNudge(m2, "blocked-" + name, buildBlockedNudgePrompt(m2.Team, name, reason))
+    return (m3, batchAll(cmds))
+}
+
+// buildBlockedNudgePrompt formats the system message the TL gets
+// when a member blocks while OTHER members are still pending.
+// Spells out the failure + the three legitimate next moves so the
+// TL has a clear path forward without hand-holding from the user.
+func buildBlockedNudgePrompt(tm Team, name string, reason string) string {
+    val others = tm.Members.Map((mem) => mem.Name).Filter((n) => n != tm.Lead.Name && n != name)
+    val othersList = if (others.IsEmpty()) "(no other members on team)" else others.MkString(", ")
+    return "System: " + name + " blocked. Their reason:\n\n  " + reason + "\n\n" +
+        name + "'s subprocess has been killed and their status is StFailed. The rest of the team is still working.\n\n" +
+        "Decide what to do — pick ONE:\n\n" +
+        "  (A) Re-dispatch " + name + " with new guidance that addresses the blocker. Issue `@dispatch(" + name + ") <new instructions> @end`. Their worktree is preserved; they'll resume on their existing branch.\n\n" +
+        "  (B) Re-route the work to another team member. Available: " + othersList + ". Issue `@dispatch(<other>) <instructions including the file paths " + name + " was working on> @end`.\n\n" +
+        "  (C) If the blocker requires user action (missing credentials, missing tool, design call only the user can make), issue `@summary <one-paragraph explanation of what's blocking + what you need from the user> @end`. The user sees an Approval dialog and can redirect.\n\n" +
+        "Pick exactly one path and end the turn."
 }
 
 // maybeDispatchConsults inspects the latest TL chunk for newly-

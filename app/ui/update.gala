@@ -1693,6 +1693,29 @@ func extractBlockedReason(d Directive) Option[string] = d match {
 // the underlying session is the actual session-handle cleanup; this
 // just captures the deliverable text.
 func onMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppMsg]] {
+    // Commit-gate (engineers only): if the member emitted @finished
+    // but their worktree has uncommitted changes (modified tracked
+    // files OR untracked files), reject the @finished and respawn
+    // them with a system nudge demanding they commit first. The QA
+    // review pipeline runs against committed work — letting an
+    // uncommitted @finished slip through means QA either reviews
+    // nothing or has to inspect the engineer's working tree
+    // directly. The 2026-05-04 audit captured this as the dominant
+    // failure mode.
+    val mem = findMemberByName(m.Team.Members, name)
+    val isEngineer = mem match {
+        case Some(member) => SameRole(member.Role, Engineer())
+        case None()       => false
+    }
+    if isEngineer {
+        val cwd = mem match {
+            case Some(member) => onboarding.WorkspacePathFor(m.Project, member, m.Policy.WorkspaceMode)
+            case None()       => ""
+        }
+        if cwd != "" && hasUncommittedWork(cwd) {
+            return nudgeEngineerToCommit(m, name, mem.GetOrElse(m.Team.Lead))
+        }
+    }
     val toast = m.Toasts.PushSuccess(s"${name} done", time_utils.Now(), time_utils.Seconds(int64(3)))
     // Kill the member's claude subprocess once they've reported back —
     // anything they emit AFTER @finished is just trailing tool calls
@@ -1705,6 +1728,54 @@ func onMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppM
         Toasts           = toast,
     )
     return (setStatus(m1, name, StIdle()), NoCmd[AppMsg]())
+}
+
+// hasUncommittedWork returns true if `cwd` (an engineer's worktree)
+// has any modified-but-not-committed tracked files OR any untracked
+// files. Either signal indicates the engineer's @finished was
+// premature — their deliverables aren't on their branch yet, so
+// the orchestrator can't merge them and QA can't review them.
+//
+// "Clean tree with no commits past master" is allowed (the engineer
+// might have produced an analytical recommendation with no code
+// changes); we only block on the case where there's UNCOMMITTED
+// work sitting in the worktree.
+func hasUncommittedWork(cwd string) bool {
+    val modified  = gitFilesList(cwd, ArrayOf("diff", "--name-only", "HEAD"))
+    if !modified.IsEmpty() { return true }
+    val untracked = gitFilesList(cwd, ArrayOf("ls-files", "--others", "--exclude-standard"))
+    return !untracked.IsEmpty()
+}
+
+// nudgeEngineerToCommit respawns the engineer with an explicit
+// system prompt demanding they commit before re-emitting @finished.
+// We DON'T close the session and DON'T record the @finished body —
+// the engineer's "done" claim is rejected outright. Status flips
+// back to working so the sidebar shows the nudge round-trip.
+func nudgeEngineerToCommit(m AppModel, name string, mem Member) Tuple[AppModel, Cmd[AppMsg]] {
+    val cwd = onboarding.WorkspacePathFor(m.Project, mem, m.Policy.WorkspaceMode)
+    val branch = WorktreeBranchFor(m.Project, mem)
+    val files = listEngineerDeliverable(cwd, m.Project.DefaultBranch)
+    val filesPreview = if (files.IsEmpty())
+        "(unable to list)"
+    else
+        files.MkString("; ")
+    val prompt = "System: Your @finished was REJECTED — uncommitted work remains in your worktree (`" + cwd + "`).\n\n" +
+        "Files still uncommitted (M = modified, ? = untracked): " + filesPreview + "\n\n" +
+        "QA reviews COMMITTED work on `" + branch + "`. Without commits, the orchestrator has nothing to merge into the lead branch and QA has nothing to inspect.\n\n" +
+        "Run from your worktree (`cd " + cwd + "`):\n" +
+        "  git add -A\n" +
+        "  git commit -m \"<short message describing the change>\"\n\n" +
+        "Then verify with `git log --oneline " + m.Project.DefaultBranch + ".." + branch + "` — at least one commit must show. Once committed, re-emit `@finished\\n<your one-line summary>\\n@end`. Do NOT push; the orchestrator handles that."
+    val toast = m.Toasts.PushError(s"${name}: commit before @finished", time_utils.Now(), time_utils.Seconds(int64(8)))
+    val closed = closeLiveSession(m, name)
+    return ensureSession(closed.Copy(Toasts = toast), mem) match {
+        case Left(err) => (closed.Copy(LastError = Some(s"commit nudge spawn (${name}): ${err}"), Toasts = toast), NoCmd[AppMsg]())
+        case Right(m1) => {
+            val withStatus = setStatus(m1, name, StWorking())
+            return (withStatus, sendAndPumpCmd(withStatus, mem, prompt))
+        }
+    }
 }
 
 // onMemberHelp pauses the member and opens a TL clarification turn

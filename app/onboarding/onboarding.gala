@@ -230,7 +230,8 @@ func worktreeWorkspaceSection(proj Project, member Member, isTL bool, cwd string
         s"Your cwd is `${cwd}`, an isolated git worktree on branch `${branch}`. The main repo lives at `${proj.Repo}`.\n\n" +
         "Your file edits stay on your branch — nothing is auto-merged, and the TL is in a different cwd. " +
         "When you emit `@finished`, list the files you wrote (relative paths from your cwd, OR absolute paths) so the TL can find them. " +
-        "The TL won't see your files unless they read from your worktree path."
+        "The TL won't see your files unless they read from your worktree path.\n\n" +
+        "**Commit before `@finished`.** The orchestrator REJECTS any `@finished` while your worktree has uncommitted changes — QA reviews committed work and the TL merges your branch into lead, both of which need your edits to be on the branch (not just in the working tree). Run `git add -A && git commit -m \"<short message>\"` before emitting `@finished`. Verify with `git log --oneline " + proj.DefaultBranch + ".." + branch + "` — at least one commit must show. Do NOT push; the orchestrator handles that. If you have nothing to commit (e.g. you produced an analytical recommendation with no code changes), `@finished` is allowed only when `git status` is fully clean."
 }
 
 // teamRosterSection lists every other member with their role + one-

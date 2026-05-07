@@ -385,6 +385,97 @@ func resumedModel(proj Project, convo Array[session.ConversationLine]) AppModel 
         RecoveryFocus         = ResumeFocus(),
     )
 
+// ----------------------------------------------------------------------------
+// Recovery modal — input handling
+//
+// The modal is opened on app start when a previous session's snapshot
+// exists. While it's up, the dispatchMsg layer must intercept Tab
+// (cycle focus) and Enter (confirm) so they don't leak to the composer
+// or the FSM. Mouse clicks on the buttons emit KeyRecoveryClick(c)
+// which sets focus + confirms in one step.
+//
+// These tests are the regression net for the "doesn't get any input"
+// bug — they assert the message → state transitions directly, so any
+// future refactor that breaks the intercept layer surfaces here
+// instead of in a manual session.
+// ----------------------------------------------------------------------------
+
+// Tab cycles ResumeFocus → InspectFocus while the modal is open.
+// KeyToggleFocus is the Tab/Ctrl+L message; recoveryIntercept routes
+// it to onRecoveryCycle when the modal is up.
+func TestRecoveryModal_TabCyclesResumeToInspect(t T) T {
+    val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
+    val (m, _) = Update(seed, KeyToggleFocus())
+    val a = IsTrue(t, m.RecoveryModalOpen)  // modal still up
+    return m.RecoveryFocus match {
+        case InspectFocus() => IsTrue(a, true)
+        case _              => IsTrue(a, false)
+    }
+}
+
+// Tab from InspectFocus advances to StartFreshFocus.
+func TestRecoveryModal_TabCyclesInspectToStartFresh(t T) T {
+    val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
+        .Copy(RecoveryFocus = InspectFocus())
+    val (m, _) = Update(seed, KeyToggleFocus())
+    return m.RecoveryFocus match {
+        case StartFreshFocus() => IsTrue(t, true)
+        case _                 => IsTrue(t, false)
+    }
+}
+
+// Tab from StartFreshFocus wraps back to ResumeFocus.
+func TestRecoveryModal_TabWrapsStartFreshToResume(t T) T {
+    val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
+        .Copy(RecoveryFocus = StartFreshFocus())
+    val (m, _) = Update(seed, KeyToggleFocus())
+    return m.RecoveryFocus match {
+        case ResumeFocus() => IsTrue(t, true)
+        case _             => IsTrue(t, false)
+    }
+}
+
+// Enter (KeySubmit) on the open modal closes it via the focused
+// choice. ResumeFocus on an empty conversation lands in Idle (no
+// summary to recover) and the modal flag clears.
+func TestRecoveryModal_EnterConfirmsClosesModal(t T) T {
+    val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
+    val (m, _) = Update(seed, KeySubmit())
+    return IsTrue(t, !m.RecoveryModalOpen)
+}
+
+// Mouse click on the Inspect button emits KeyRecoveryClick(InspectFocus).
+// That should set focus + confirm in one step → modal closes,
+// ReadOnlyMode flips on.
+func TestRecoveryModal_ClickInspectClosesModalAndReadOnly(t T) T {
+    val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
+    val (m, _) = Update(seed, KeyRecoveryClick(Choice = InspectFocus()))
+    val a = IsTrue(t, !m.RecoveryModalOpen)
+    return IsTrue(a, m.ReadOnlyMode)
+}
+
+// Mouse click on the Start fresh button → freshSession path. Modal
+// closes, conversation is wiped.
+func TestRecoveryModal_ClickStartFreshClosesAndWipes(t T) T {
+    val convo = EmptyArray[session.ConversationLine]()
+        .Append(session.ConversationLine(Speaker = "you", Text = "old prompt"))
+    val seed = resumedModel(sampleProject(), convo)
+    val (m, _) = Update(seed, KeyRecoveryClick(Choice = StartFreshFocus()))
+    val a = IsTrue(t, !m.RecoveryModalOpen)
+    return IsTrue(a, m.Conversation.IsEmpty())
+}
+
+// Composer input must NOT leak through while the modal is up — typing
+// 'x' should be swallowed (or ignored) instead of appending to Composer.
+// The intercept currently returns None for KeyChar, which means it
+// FALLS THROUGH to onKeyChar → composer append. That's the regression:
+// any character keypress goes into the composer behind the modal.
+func TestRecoveryModal_KeyCharDoesNotLeakToComposer(t T) T {
+    val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
+    val (m, _) = Update(seed, KeyChar(C = 'x'))
+    return Eq(t, m.Composer, "")
+}
+
 // Resume into Approval when conversation ends with lead @summary
 // AND lead branch has commits ahead of master. Fixture: branch
 // off main and commit so checkPrReady returns None.

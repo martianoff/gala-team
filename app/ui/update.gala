@@ -515,15 +515,54 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     }
 }
 
-// recoveryIntercept routes Tab → KeyRecoveryCycle and Enter →
-// KeyRecoveryConfirm when the §5.6 modal is up. Returns Some when
-// the message was consumed; None lets the regular dispatch handle
-// it (so a click on the modal's button widget still fires
-// KeyRecoveryClick via the normal path).
+// recoveryIntercept routes Tab → onRecoveryCycle and Enter →
+// onRecoveryConfirm when the §5.6 modal is up. Other keyboard input
+// is SWALLOWED so it can't leak to the composer or trigger orthogonal
+// shortcuts (Ctrl+A → Approve etc.) behind the modal — the regression
+// report "doesn't get any input" was exactly this leak: typed letters
+// landed in the locked-but-still-receptive composer, making the modal
+// look dead. The pass-through whitelist (Esc / click / non-key
+// messages) keeps the modal dismissable, button-clickable, and
+// background events (Tick / late ChunkArrived from the dying prior
+// session / async loaders) flowing.
 func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg]]] = msg match {
+    // Explicit handlers — translate to the modal's own actions.
     case KeyToggleFocus() => Some(onRecoveryCycle(m))
     case KeySubmit()      => Some(onRecoveryConfirm(m))
-    case _                => None[Tuple[AppModel, Cmd[AppMsg]]]()
+    // Pass-throughs — these need the main dispatch's behavior:
+    //   HistoryDeselect: Esc closes the modal via onEscOrDeselect.
+    //   KeyRecoveryClick: button clicks set focus + confirm in one shot.
+    //   QuitMsg: Ctrl+C / Ctrl+Q must always quit, even from a modal.
+    case HistoryDeselect()   => None[Tuple[AppModel, Cmd[AppMsg]]]()
+    case KeyRecoveryClick(_) => None[Tuple[AppModel, Cmd[AppMsg]]]()
+    case QuitMsg()           => None[Tuple[AppModel, Cmd[AppMsg]]]()
+    // Swallow every other keyboard input. The modal owns the keyboard
+    // while it's up; nothing should bleed past it.
+    case KeyChar(_)               => Some((m, NoCmd[AppMsg]()))
+    case KeyBackspace()           => Some((m, NoCmd[AppMsg]()))
+    case KeyDelete()              => Some((m, NoCmd[AppMsg]()))
+    case KeyComposerLeft()        => Some((m, NoCmd[AppMsg]()))
+    case KeyComposerRight()       => Some((m, NoCmd[AppMsg]()))
+    case KeyComposerHome()        => Some((m, NoCmd[AppMsg]()))
+    case KeyComposerEnd()         => Some((m, NoCmd[AppMsg]()))
+    case KeyApprove()             => Some((m, NoCmd[AppMsg]()))
+    case KeyReject()              => Some((m, NoCmd[AppMsg]()))
+    case KeyMerge()                => Some((m, NoCmd[AppMsg]()))
+    case KeyEraseSession()         => Some((m, NoCmd[AppMsg]()))
+    case KeyToggleHistory()        => Some((m, NoCmd[AppMsg]()))
+    case KeyToggleConsultViewer()  => Some((m, NoCmd[AppMsg]()))
+    case KeyTogglePalette()        => Some((m, NoCmd[AppMsg]()))
+    case KeyToggleHelp()           => Some((m, NoCmd[AppMsg]()))
+    case KeyToggleCompactSidebar() => Some((m, NoCmd[AppMsg]()))
+    case KeyYankConversation()     => Some((m, NoCmd[AppMsg]()))
+    case KeyPasteClipboard()       => Some((m, NoCmd[AppMsg]()))
+    case KeySetViewMode(_)         => Some((m, NoCmd[AppMsg]()))
+    case HistoryCursorUp()         => Some((m, NoCmd[AppMsg]()))
+    case HistoryCursorDown()       => Some((m, NoCmd[AppMsg]()))
+    case HistorySelect()           => Some((m, NoCmd[AppMsg]()))
+    // Anything else (subprocess events, mouse outside buttons, async
+    // results, ticks) flows through unchanged.
+    case _ => None[Tuple[AppModel, Cmd[AppMsg]]]()
 }
 
 // approvalIntercept gives the user keyboard fallbacks when the

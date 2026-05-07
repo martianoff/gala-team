@@ -254,18 +254,45 @@ func currentBranch(repo string) string {
 // ensureLeadBranch.
 func ResetLeadBranch(proj Project) Try[bool] = Try[bool](() => {
     val _ = ensureLeadBranch(proj).Get()
+    // Fetch origin/<defaultBranch> first so the reset target reflects
+    // the REMOTE's current state, not the user's possibly-stale
+    // local ref. Without this, a user who never `git pull`s sees
+    // ResetLeadBranch reset lead to whatever ancient SHA their
+    // local master happens to be at — even if a prior PR has
+    // already landed upstream and advanced origin/master past it.
+    // The 2026-05-07 audit caught the worst case: lead reset to a
+    // pre-PR-327 ancestor, the next session re-created files PR
+    // 327 had already committed, and the resulting PR effectively
+    // tried to overwrite already-merged work.
+    //
+    // Fetch is best-effort. If the remote is unreachable (offline,
+    // no origin configured), fall through and reset against the
+    // local branch — better to do something than block.
+    val fetchOpts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("fetch", "--quiet", "origin", proj.DefaultBranch).ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )
+    val resetTarget = subprocess.Spawn(fetchOpts) match {
+        case Failure(_) => proj.DefaultBranch
+        case Success(p) => {
+            val code = p.Wait().Get()
+            if (code == 0) "origin/" + proj.DefaultBranch else proj.DefaultBranch
+        }
+    }
     val opts = subprocess.NewSpawnOpts(
         "git",
-        ArrayOf("reset", "--hard", proj.DefaultBranch).ToGoSlice(),
+        ArrayOf("reset", "--hard", resetTarget).ToGoSlice(),
         SliceEmpty[string](),
         proj.Repo,
     )
     val proc = subprocess.Spawn(opts) match {
         case Success(p)   => p
-        case Failure(err) => panic(s"git reset --hard ${proj.DefaultBranch}: ${err.Error()}")
+        case Failure(err) => panic(s"git reset --hard ${resetTarget}: ${err.Error()}")
     }
     val code = proc.Wait().Get()
-    if code != 0 { panic(s"git reset --hard exited with code ${code}") }
+    if code != 0 { panic(s"git reset --hard ${resetTarget} exited with code ${code}") }
     return true
 })
 

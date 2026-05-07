@@ -17,6 +17,8 @@ gala_library(
 gala_go_test(
     name = "onboarding_test",
     srcs = ["onboarding_test.gala"],
+    pkg = "onboarding",
+    lib_srcs = ["onboarding.gala"],
     deps = [
         ":onboarding",
         "//app/policy",

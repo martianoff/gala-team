@@ -1409,12 +1409,11 @@ func closeLiveSession(m AppModel, name string) AppModel {
 //   - Subsequent turns: look up the recorded id, pass it as
 //     `--resume <id>`. claude reloads the prior conversation.
 //
-// The cwd comes from EnsureWorkspace, which honours
-// Policy.WorkspaceMode — Shared puts every member in proj.Repo;
-// WorktreePerEngineer creates `.gala_team/worktrees/<name>` for
-// non-lead members on first spawn. Returns Right(updatedModel) on
-// success, Left(errorString) on spawn or workspace-creation
-// failure.
+// The cwd comes from EnsureWorkspace. The TL ALWAYS lands in
+// `.gala_team/worktrees/_lead`. Engineers/QAs land in
+// `.gala_team/worktrees/<name>` under WorktreePerEngineer, or share
+// proj.Repo under Shared. Returns Right(updatedModel) on success,
+// Left(errorString) on spawn or workspace-creation failure.
 //
 // Note: this function ALWAYS spawns. claude with `--print` exits
 // after responding, so there's never a live process to reuse —

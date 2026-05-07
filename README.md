@@ -168,11 +168,16 @@ workflow:
 # IMPORTANT: `policy:` is a top-level sibling of `workflow:` — NOT nested inside it.
 policy:
   workspace_mode: shared            # default `shared`. Possible values:
-                                    #   shared                 — every member runs in --project
-                                    #   worktree-per-engineer  — non-lead members get their own
+                                    #   shared                 — engineers/QAs run in --project
+                                    #   worktree-per-engineer  — engineers/QAs get their own
                                     #                            git worktree under
                                     #                            .gala_team/worktrees/<name>
                                     #                            on branch gala_team/<name>
+                                    # NOTE: the team lead ALWAYS runs in
+                                    # .gala_team/worktrees/_lead, regardless of mode — every
+                                    # orchestrator git op (lead-branch reset, snapshot push,
+                                    # gh pr create) targets that worktree, never the user's
+                                    # main checkout.
 
   merge_rule: squash                # default `squash`. Possible values:
                                     #   squash | rebase | merge
@@ -354,14 +359,22 @@ index.
 
 ## Workspace modes
 
-`policy.workspace_mode` decides where each member's `claude` runs:
+`policy.workspace_mode` decides where engineers and QAs run:
 
-- `shared` *(default)* — every member runs in the project repo. Simpler,
+- `shared` *(default)* — engineers/QAs run in the project repo. Simpler,
   fastest, fine for chat-based dispatch.
-- `worktree-per-engineer` — non-lead members each get a private git
+- `worktree-per-engineer` — engineers/QAs each get a private git
   worktree at `<repo>/.gala_team/worktrees/<member>` on a branch named
-  `gala_team/<member>`. Engineers can commit independently without
-  fighting over the working tree. The lead always uses the main repo.
+  `gala_team/<project>/<member>`. They can commit independently without
+  fighting over the working tree.
+
+**The team lead is special: it ALWAYS runs in
+`<repo>/.gala_team/worktrees/_lead` on branch `gala_team/<project>/lead`,
+regardless of `workspace_mode`.** Every orchestrator git op
+(lead-branch reset on Start fresh, per-PR snapshot push, `gh pr create`,
+`gh pr merge`) targets that dedicated worktree — the user's main
+checkout is never mutated by orchestrator code. `workspace_mode`
+controls only the engineer/QA isolation story, not the TL's safety.
 
 ---
 
@@ -392,9 +405,10 @@ non-fatal errors. Used internally by the `@consult` registry path.
     │   ├── latest.json                    # current session — restored on launch
     │   └── archive/
     │       └── merged-<savedAt>.json      # one per successful merge
-    └── worktrees/                         # only when workspace_mode = worktree-per-engineer
-        ├── Felix/
-        └── Theo/
+    └── worktrees/
+        ├── _lead/                          # team lead's worktree (always; per-project branch)
+        ├── Felix/                          # only when workspace_mode = worktree-per-engineer
+        └── Theo/                           # ditto
 ```
 
 ---

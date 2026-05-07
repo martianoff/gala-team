@@ -13,6 +13,8 @@ gala_library(
 gala_go_test(
     name = "team_test",
     srcs = ["team_test.gala"],
+    pkg = "team",
+    lib_srcs = ["team.gala"],
     deps = [
         ":team",
         "@gala//collection_immutable",

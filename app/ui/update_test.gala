@@ -322,6 +322,58 @@ func TestTLSummary_NudgesWhenBodyMentionsMemberName(t T) T {
     }
 }
 
+// Direct unit test for dedupTargetsByName — first occurrence wins,
+// order preserved. The 2026-05-07 audit captured Iris's claude
+// stream emitting one logical turn but two identical chunks; without
+// dedup, TurnBuffer accumulated duplicate @dispatch blocks and the
+// FoldLeft in spawnDispatchedMembers spawned each member twice.
+func TestDedupTargetsByName_DropsDuplicates(t T) T {
+    val targets = ArrayOf(
+        ("Felix", "body F"),
+        ("Mira",  "body M"),
+        ("Felix", "body F duplicate"),
+        ("Mira",  "body M duplicate"),
+    )
+    val out = dedupTargetsByName(targets)
+    val a = Eq(t, out.Size(), 2)
+    val b = Eq(a, out.Get(0).V1, "Felix")
+    val c = Eq(b, out.Get(0).V2, "body F")            // first occurrence body kept
+    val d = Eq(c, out.Get(1).V1, "Mira")
+    return Eq(d, out.Get(1).V2, "body M")
+}
+
+func TestDedupTargetsByName_PassesUniqueThrough(t T) T {
+    val targets = ArrayOf(("Felix", "F"), ("Mira", "M"), ("Theo", "T"))
+    val out = dedupTargetsByName(targets)
+    val a = Eq(t, out.Size(), 3)
+    return Eq(a, out.Get(2).V1, "Theo")
+}
+
+func TestDedupTargetsByName_EmptyInputReturnsEmpty(t T) T {
+    val out = dedupTargetsByName(EmptyArray[Tuple[string, string]]())
+    return Eq(t, out.Size(), 0)
+}
+
+// Stale-session-id detection — claude returns this when --resume
+// points at an id it doesn't recognise. Detection is case-insensitive
+// substring so wording variations across claude versions all match.
+func TestLooksLikeStaleSessionError_MatchesNoConversationFound(t T) T {
+    val err = "No conversation found with session ID: 36870845-bff8-45a6-beb8-6d93f5f6f631"
+    return IsTrue(t, looksLikeStaleSessionError(err))
+}
+
+func TestLooksLikeStaleSessionError_MatchesSessionNotFound(t T) T {
+    return IsTrue(t, looksLikeStaleSessionError("Error: session not found"))
+}
+
+func TestLooksLikeStaleSessionError_RejectsUnrelatedError(t T) T {
+    return IsTrue(t, !looksLikeStaleSessionError("rate limit exceeded"))
+}
+
+func TestLooksLikeStaleSessionError_RejectsEmpty(t T) T {
+    return IsTrue(t, !looksLikeStaleSessionError(""))
+}
+
 // Direct unit test for validatePrBody — empty body is rejected.
 func TestValidatePrBody_RejectsEmpty(t T) T {
     val result = validatePrBody("", sampleTeam())

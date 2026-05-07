@@ -1642,9 +1642,24 @@ func applyOneEnvelope(m AppModel, name string, envelope string) Tuple[AppModel, 
 func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppModel, Cmd[AppMsg]] {
     val mAccrued = accrueTokens(m, name, chunk)
     val displayText = chunk.Visible
-    val withErrSurface = if (chunk.ErrorText == "") mAccrued else {
-        val toast = mAccrued.Toasts.PushError(s"${name}: ${chunk.ErrorText}", time_utils.Now(), time_utils.Seconds(int64(8)))
-        mAccrued.Copy(Toasts = toast, LastError = Some(s"${name}: ${chunk.ErrorText}"))
+    // Stale-session-id recovery: claude returns "No conversation found
+    // with session ID …" when --resume points at an id claude doesn't
+    // know (the session was never registered, or the metadata file was
+    // wiped). Drop the bad id from SessionIds so the imminent
+    // SessionFailed → respawnMember path generates a fresh
+    // --session-id spawn instead of looping on the same broken
+    // --resume. The 2026-05-07 audit captured the exact race: Iris's
+    // chunk pump replayed an identical @dispatch envelope, the
+    // duplicate FoldLeft iteration spawned Mira a second time with
+    // --resume against an id the first spawn hadn't yet established
+    // with claude, and Mira blocked indefinitely on this error.
+    val mRecovered = if (looksLikeStaleSessionError(chunk.ErrorText))
+        mAccrued.Copy(SessionIds = mAccrued.SessionIds.Remove(name))
+    else
+        mAccrued
+    val withErrSurface = if (chunk.ErrorText == "") mRecovered else {
+        val toast = mRecovered.Toasts.PushError(s"${name}: ${chunk.ErrorText}", time_utils.Now(), time_utils.Seconds(int64(8)))
+        mRecovered.Copy(Toasts = toast, LastError = Some(s"${name}: ${chunk.ErrorText}"))
     }
     if displayText == "" {
         return (withErrSurface, NoCmd[AppMsg]())
@@ -2262,9 +2277,22 @@ func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
 // rather than aborting the whole fanout so a typo'd member name
 // doesn't strand the rest of the dispatch.
 func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, Cmd[AppMsg]] {
-    val targets = dirs.Collect({
+    val rawTargets = dirs.Collect({
         case Dispatch(name, body) => (name, body)
     })
+    // Dedupe by member name — keep the first body, drop subsequent
+    // duplicates. Iris's claude stream can occasionally emit the same
+    // chunk twice (claude buffer flush, --resume mid-envelope, pump
+    // retry); without dedup, TurnBuffer accumulates duplicate
+    // @dispatch blocks and the FoldLeft below spawns each target
+    // twice. The second spawn uses --resume against a session id the
+    // first spawn hasn't yet registered with claude, racing into a
+    // "No conversation found with session ID …" error.
+    //
+    // The 2026-05-07 audit captured this: Iris emitted one logical
+    // turn but two identical chunks; Mira ended up dispatched twice
+    // and her second --resume crashed with the lookup error.
+    val targets = dedupTargetsByName(rawTargets)
     // Drop @dispatch() targets that point at a QA member when the
     // workflow auto-spawns QA. Without this, Iris including a QA
     // member in her first @dispatch list would fan out QA in parallel
@@ -2333,6 +2361,39 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
 // partitionQaTargets splits dispatch targets into (allowed, droppedQaNames)
 // — entries pointing at a QA team member end up in droppedQaNames; the
 // rest pass through unchanged. Used by spawnDispatchedMembers when the
+// looksLikeStaleSessionError returns true if claude's error text
+// indicates the --resume id we passed isn't recognised. Two surface
+// shapes claude has been observed to use: "No conversation found
+// with session ID …" (typical) and "session not found" (older
+// builds). Case-insensitive substring check — the message wording
+// varies across claude versions and we want every variant to trigger
+// the recovery.
+func looksLikeStaleSessionError(err string) bool {
+    if err == "" { return false }
+    val lower = strings.ToLower(err)
+    return strings.Contains(lower, "no conversation found") ||
+           strings.Contains(lower, "session not found") ||
+           strings.Contains(lower, "session id not found")
+}
+
+// dedupTargetsByName collapses duplicate (name, body) tuples down to
+// the first occurrence per name. Order is preserved (FoldLeft over the
+// input array). Used by spawnDispatchedMembers to defend against
+// claude streams that repeat the same chunk and inflate the parsed
+// directive list — the orchestrator should treat a logical "dispatch
+// Felix" intent as one spawn, not N spawns where N is the number of
+// times claude redundantly flushed the same line.
+func dedupTargetsByName(targets Array[Tuple[string, string]]) Array[Tuple[string, string]] {
+    val seed = (EmptyArray[Tuple[string, string]](), EmptyHashMap[string, bool]())
+    val (out, _) = targets.FoldLeft(seed, (acc, t) => {
+        val (kept, seen) = acc
+        val (name, _) = t
+        if seen.Get(name).IsDefined() { return (kept, seen) }
+        return (kept.Append(t), seen.Put(name, true))
+    })
+    return out
+}
+
 // workflow auto-spawns QA so we don't double-dispatch.
 func partitionQaTargets(targets Array[Tuple[string, string]], tm Team) Tuple[Array[Tuple[string, string]], Array[string]] {
     val seed = (EmptyArray[Tuple[string, string]](), EmptyArray[string]())

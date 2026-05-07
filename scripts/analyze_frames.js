@@ -2,7 +2,7 @@
 // Reads /tmp/ui_audit.*.jsonl and produces a bug survey.
 const fs = require("fs");
 const path = require("path");
-const dir = process.env.TEMP || "C:/Users/maxmr/AppData/Local/Temp";
+const dir = process.env.TEMP || require("os").tmpdir();
 const files = fs.readdirSync(dir).filter(f => f.startsWith("ui_audit.") && f.endsWith(".jsonl")).sort();
 
 const findings = [];

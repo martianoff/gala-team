@@ -134,8 +134,8 @@ func LoadOrError(repoDir string) Either[string, Snapshot] {
 // The hand-rolled walkers (encodeSnapshot, decodeSnapshot,
 // decodeConversation, decodeLine, decodeStringArray) lived here
 // pre-0.41.0 because Codec[T] couldn't decode `Conversation
-// Array[ConversationLine]`. PR #314 closed that gap, so we no longer
-// need them.
+// Array[ConversationLine]`. A later gala release closed that gap,
+// so we no longer need them.
 
 // EnsureGitignore appends `.gala_team/` to the project's .gitignore
 // if (a) the file doesn't already mention it, and (b) the project is

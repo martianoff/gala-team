@@ -359,10 +359,10 @@ func main() {
 
 // scanStaleWorktrees lists `<repo>/.gala_team/worktrees/` and emits
 // a kind=stale_worktree debug event for any subdir whose name isn't
-// in the current team's member list. The TL otherwise can — and did,
-// see the ghost-Mira incident from the 2026-05-03 audit log — read
-// the on-disk worktree state and treat it as authoritative team
-// membership, leading to reasoning about phantom engineers.
+// in the current team's member list. The TL otherwise can read the
+// on-disk worktree state and treat it as authoritative team
+// membership, leading to reasoning about phantom engineers — past
+// audits captured this as the "ghost member" incident.
 //
 // Best-effort: if the worktrees dir doesn't exist yet (first run),
 // or the read fails, we silently skip. The events are diagnostic-

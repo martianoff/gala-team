@@ -2,7 +2,7 @@
 // Asserts on the validation output and prints findings.
 const fs = require("fs");
 const dir = "/tmp/galateam_validate_out";
-const tempDir = process.env.TEMP || "C:/Users/maxmr/AppData/Local/Temp";
+const tempDir = process.env.TEMP || require("os").tmpdir();
 const realDir = fs.existsSync(dir) ? dir : tempDir + "/galateam_validate_out";
 
 function readFrames(path) {

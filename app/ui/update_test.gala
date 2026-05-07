@@ -279,12 +279,12 @@ func TestTLSummary_EntersApprovalWhenLeadBranchHasCommits(t T) T {
     }
 }
 
-// Regression for the 2026-05-07 "TL says orchestrator won't let me
-// PR" bug. The lead branch has commits past master, but the user's
-// HEAD (the cwd of `proj.Repo`) is on master with no work. Old
+// Regression for the "TL says orchestrator won't let me PR" bug.
+// The lead branch has commits past master, but the user's HEAD
+// (the cwd of `proj.Repo`) is on master with no work. The earlier
 // checkPrReady probed `master..HEAD` from proj.Repo, saw 0 commits,
-// and rejected the @summary. Now it probes the explicit lead ref so
-// HEAD location is irrelevant — the same lead state is visible
+// and rejected the @summary. Now it probes the explicit lead ref
+// so HEAD location is irrelevant — the same lead state is visible
 // regardless of which worktree the user has checked out.
 func TestTLSummary_LeadHasCommitsButHeadOnMasterStillEntersApproval(t T) T {
     val proj = emptyLeadBranchProject()
@@ -354,13 +354,14 @@ func TestTLSummary_NudgesWhenBodyMentionsMemberName(t T) T {
     }
 }
 
-// Regression for the 2026-05-07 "Theo abandoned 59ms after dispatch"
+// Regression for the "QA abandoned milliseconds after dispatch"
 // bug. setStatus(idle→working) must reset LastChunkAt to NowAt so
 // the heartbeat FSM doesn't immediately escalate to StFailed because
-// of a stale prior-turn timestamp. Theo had LastChunkAt from his
-// first QA review (06:31:31), got re-dispatched 7 minutes later
-// (06:38:56), and was abandoned by the next tick because elapsed
-// (445s) > AbandonAfterSeconds (300s).
+// of a stale prior-turn timestamp. The pattern: a QA member's
+// LastChunkAt from a prior review is many minutes stale by the
+// time they're re-dispatched, and elapsed > AbandonAfterSeconds
+// triggers MemberAbandoned on the next tick before the new claude
+// can produce any output.
 func TestSetStatus_ResetsLastChunkAtOnIdleToWorking(t T) T {
     val seed = sampleModel()
     val staleTime = time_utils.FromUnixSeconds(int64(1000))
@@ -398,10 +399,10 @@ func TestSetStatus_KeepsLastChunkAtOnWorkingToWorking(t T) T {
 }
 
 // Direct unit test for dedupTargetsByName — first occurrence wins,
-// order preserved. The 2026-05-07 audit captured Iris's claude
-// stream emitting one logical turn but two identical chunks; without
-// dedup, TurnBuffer accumulated duplicate @dispatch blocks and the
-// FoldLeft in spawnDispatchedMembers spawned each member twice.
+// order preserved. Defends against a TL claude stream emitting one
+// logical turn as two identical chunks: without dedup, TurnBuffer
+// would accumulate duplicate @dispatch blocks and the FoldLeft in
+// spawnDispatchedMembers would spawn each member twice.
 func TestDedupTargetsByName_DropsDuplicates(t T) T {
     val targets = ArrayOf(
         ("Felix", "body F"),
@@ -476,14 +477,14 @@ func TestValidatePrBody_RejectsOrchestrationPhrase(t T) T {
     return IsTrue(t, result.IsDefined())
 }
 
-// Regression for PR #333 (2026-05-07): the TL pasted "please run
-// git -C ...\.gala_team\worktrees\_lead log..." escalation prose
-// as the @summary body. Internal orchestration paths leaked into
-// GitHub. The path-leak guard catches `.gala_team`, lead worktree
-// paths, and orchestration vocabulary that means nothing to PR
-// reviewers.
+// Regression: a TL once pasted "please run git -C
+// ...\.gala_team\worktrees\_lead log..." escalation prose as the
+// @summary body. Internal orchestration paths would leak into the
+// public PR description. The path-leak guard catches `.gala_team`,
+// lead worktree paths, and orchestration vocabulary that means
+// nothing to PR reviewers.
 func TestValidatePrBody_RejectsGalaTeamPath(t T) T {
-    val body = "## What\nFix something\n\n## Why\nPlease run git -C C:\\Users\\maxmr\\GolandProjects\\gala_simple\\.gala_team\\worktrees\\_lead log to verify"
+    val body = "## What\nFix something\n\n## Why\nPlease run git -C /workdir/.gala_team/worktrees/_lead log to verify"
     val result = validatePrBody(body, sampleTeam())
     return IsTrue(t, result.IsDefined())
 }
@@ -662,20 +663,20 @@ func TestResume_RecoversApprovalWhenSummaryAndCommitsExist(t T) T {
     }
 }
 
-// Regression for PR #333: resume must NOT enter Approval when the
-// snapshotted @summary fails the PR-quality gate. Without this guard,
-// a stale "I give up — please run git -C ...\.gala_team\..." body
-// (the kind of escalation prose that produced PR #333) would resume
-// straight into Approval and the user's next Ctrl+A would ship it
-// to GitHub. Instead, recovery spawns a TL nudge so the lead
-// rewrites @summary properly before Approval re-engages.
+// Regression: resume must NOT enter Approval when the snapshotted
+// @summary fails the PR-quality gate. Without this guard, a stale
+// "I give up — please run git -C ...\.gala_team\..." escalation
+// body would resume straight into Approval and the user's next
+// Ctrl+A would ship it to GitHub. Instead, recovery spawns a TL
+// nudge so the lead rewrites @summary properly before Approval
+// re-engages.
 func TestResume_RecoveryRejectsBadSummaryAndStaysOutOfApproval(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
-    val badBody = "Blocked: pre-flight check disagrees with `git -C C:\\Users\\maxmr\\GolandProjects\\gala_simple\\.gala_team\\worktrees\\_lead log` — please verify"
+    val badBody = "Blocked: pre-flight check disagrees with `git -C /workdir/.gala_team/worktrees/_lead log` — please verify"
     val convo = EmptyArray[session.ConversationLine]()
         .Append(session.ConversationLine(Speaker = "Iris", Text = "@summary\n" + badBody + "\n@end"))
     val seed = resumedModel(proj, convo)
@@ -751,8 +752,7 @@ func TestResume_LatestSummaryWinsWhenMultiple(t T) T {
 // summary ("Summary:\n<body>") not the raw directive — formatDirective-
 // Markers strips the @summary/@end markers before we save. Recovery
 // must recognize this rendered form too, otherwise resume after a
-// real session never recovers Approval. The 2026-05-04 audit caught
-// this exact case.
+// real session never recovers Approval.
 func TestResume_RecoversApprovalFromRenderedSummary(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
@@ -1926,7 +1926,7 @@ func TestKeyToggleHelp_F6_FlipsHelpVisible(t T) T {
 
 func TestRealClaude_SystemInit_IsDropped(t T) T {
     val seed = sampleModel()
-    val line = "{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"C:\\\\Users\\\\maxmr\",\"session_id\":\"abc\",\"tools\":[\"Task\",\"Bash\",\"Read\"],\"model\":\"claude-opus-4-7\"}"
+    val line = "{\"type\":\"system\",\"subtype\":\"init\",\"cwd\":\"/workdir\",\"session_id\":\"abc\",\"tools\":[\"Task\",\"Bash\",\"Read\"],\"model\":\"claude-opus-4-7\"}"
     val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
     return Eq(t, m.Conversation.Filter((cl) => cl.Speaker == "Iris").Size(), 0)
 }

@@ -18,7 +18,7 @@ import (
 // When on, every event lands in <repo>/.gala_team/sessions/debug/
 // events.jsonl as one JSON object per line:
 //
-//     {"ts":"2026-05-03T14:23:45.123Z","kind":"user_input",
+//     {"ts":"2026-01-15T14:23:45.123Z","kind":"user_input",
 //      "member":"Iris","payload":{"text_len":42}}
 //
 // The companion per-member chunk traces (raw Claude stream-json) go
@@ -142,7 +142,7 @@ func ResetSession() {
     if !DebugEnabled() { return }
     // Order matters on Windows: close cached trace file handles
     // BEFORE os.RemoveAll(debug/) — Windows refuses to delete a
-    // file that any process has open. Pre-2026-05-07 this ran
+    // file that any process has open. An earlier version ran
     // RemoveAll first, which silently left every per-member
     // traces/<member>/*.jsonl on disk because the chunk pump's
     // long-lived handles kept the files locked.

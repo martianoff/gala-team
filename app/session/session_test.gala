@@ -129,12 +129,12 @@ func TestSaveThenLoad_TextWithDoubleQuotes(t T) T {
 func TestSaveThenLoad_TextWithBackslashes(t T) T {
     val dir = mkTempDir("backslash")
     val convo = ArrayOf(
-        ConversationLine(Speaker = "you", Text = "C:\\Users\\maxmr\\file.txt"),
+        ConversationLine(Speaker = "you", Text = "C:\\workdir\\file.txt"),
     )
     val saved = Save(dir, "demo", convo, EmptyArray[string]())
     val t1 = IsSuccess(t, saved)
     return Load(dir) match {
-        case Some(snap) => Eq(t1, snap.Conversation.Get(0).Text, "C:\\Users\\maxmr\\file.txt")
+        case Some(snap) => Eq(t1, snap.Conversation.Get(0).Text, "C:\\workdir\\file.txt")
         case None()     => IsTrue(t1, false)
     }
 }

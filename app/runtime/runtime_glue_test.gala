@@ -210,8 +210,8 @@ func runGitInDir(dir string, args Array[string]) {
 
 // Markdown bold wrap (`**foo**`) must be stripped from the title.
 // GitHub renders titles as plain text, so leaving the asterisks
-// produces "**Crypto MVP — hash...**" verbatim. PR #327 was the
-// regression that triggered this fix.
+// produces "**Crypto MVP — hash...**" verbatim. A past regression
+// that triggered this fix.
 func TestGhTitle_StripsBoldWrap(t T) T {
     return Eq(t, GhTitle("**Crypto MVP shipped**"), "Crypto MVP shipped")
 }
@@ -237,8 +237,9 @@ func TestGhTitle_PreservesInnerMarkdown(t T) T {
     return Eq(t, GhTitle("Shipped **crypto** package"), "Shipped **crypto** package")
 }
 
-// Long titles must cap at a word boundary, NOT mid-word. PR #327
-// truncated to "...Lead is now 3 commits ahead of ..." which is
+// Long titles must cap at a word boundary, NOT mid-word. The
+// earlier code truncated to "...Lead is now 3 commits ahead of ..."
+// which is
 // readable but the original cut at exactly 67 chars sometimes
 // landed mid-word.
 func TestGhTitle_CapsAtWordBoundary(t T) T {
@@ -273,10 +274,10 @@ func TestGhTitle_EmptyBodyFallsBackToUntitled(t T) T {
     return Eq(t1, GhTitle("\n  \n  \n"), "Untitled")
 }
 
-// Regression test for the exact PR #327 body that produced the
-// "**Crypto MVP — hash functions only. Lead is now 3 commits
+// Regression test for a real-world body that previously produced
+// the "**Crypto MVP — hash functions only. Lead is now 3 commits
 // ahead of ..." title. After fix: stripped + word-boundary cap.
-func TestGhTitle_PR327Regression(t T) T {
+func TestGhTitle_BoldWrapAndLongTitleRegression(t T) T {
     val body = "**Crypto MVP — hash functions only. Lead is now 3 commits ahead of master.**\n```\n99a2ad1 feat..."
     val title = GhTitle(body)
     val t1 = IsTrue(t, !strings.Contains(title, "**"))

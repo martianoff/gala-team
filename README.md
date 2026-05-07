@@ -439,5 +439,3 @@ Run the test suite:
 ```bash
 bazel test //app/...
 ```
-
-Internal design notes live under `docs/private/`.

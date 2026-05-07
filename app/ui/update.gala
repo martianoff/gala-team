@@ -248,8 +248,8 @@ func updateLivenessStatuses(
         // by the heartbeat-stuck/abandon machinery. A long TLReview
         // pause (waiting on the user) would otherwise flip the lead
         // to Stuck/Failed and emit a spurious MemberStuck/Abandoned
-        // FSM event — see the 2026-05-03 log audit where Iris hit
-        // MemberAbandoned at TLReview→TLReview.
+        // FSM event — past audits caught the lead hitting
+        // MemberAbandoned during a long TLReview→TLReview pause.
         if name == leadName { return (curM, curCmds, curStuck) }
         val current = curM.Statuses.Get(name).GetOrElse(StIdle())
         val derived = livenessStatus(curM, name, current, now)
@@ -624,8 +624,8 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             // unconfirmed @summary on the lead's pen and the lead
             // branch is still PR-ready. Without this, the user
             // resumes into Idle and has to re-prompt the TL to
-            // re-summarize before they can ship — the 2026-05-04
-            // workflow audit caught this as a real friction point.
+            // re-summarize before they can ship — a real friction
+            // point past workflow audits caught.
             val (recovered, recoveryCmd) = recoverApprovalIfReady(m)
             return (recovered.Copy(
                 RecoveryModalOpen = false,
@@ -1556,8 +1556,8 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     // NUL bytes pass the "no JSON shapes" test trivially (`\x00`
     // doesn't contain `{`, `"`, or `\`), so a chunk of pure NUL
     // bytes was being fast-pathed as prose and appended to the
-    // conversation. The 2026-05-04 audit log captured a 2162-byte
-    // NUL run rendering as Felix output. Real assistant prose never
+    // conversation. A past audit captured a multi-kilobyte NUL run
+    // rendering as engineer output. Real assistant prose never
     // contains NUL — reject the whole chunk if any NUL byte is
     // present.
     val hasControlBytes = strings.Contains(line, "\x00")
@@ -1648,11 +1648,11 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     // wiped). Drop the bad id from SessionIds so the imminent
     // SessionFailed → respawnMember path generates a fresh
     // --session-id spawn instead of looping on the same broken
-    // --resume. The 2026-05-07 audit captured the exact race: Iris's
-    // chunk pump replayed an identical @dispatch envelope, the
-    // duplicate FoldLeft iteration spawned Mira a second time with
-    // --resume against an id the first spawn hadn't yet established
-    // with claude, and Mira blocked indefinitely on this error.
+    // --resume. The exact race observed: a TL chunk pump replayed
+    // an identical @dispatch envelope, the duplicate FoldLeft
+    // iteration spawned a member a second time with --resume against
+    // an id the first spawn hadn't yet established with claude, and
+    // the member blocked indefinitely on this error.
     val mRecovered = if (looksLikeStaleSessionError(chunk.ErrorText))
         mAccrued.Copy(SessionIds = mAccrued.SessionIds.Remove(name))
     else
@@ -1779,8 +1779,8 @@ func onMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppM
     // review pipeline runs against committed work — letting an
     // uncommitted @finished slip through means QA either reviews
     // nothing or has to inspect the engineer's working tree
-    // directly. The 2026-05-04 audit captured this as the dominant
-    // failure mode.
+    // directly. Past audits captured this as a dominant failure
+    // mode.
     val mem = findMemberByName(m.Team.Members, name)
     val isEngineer = mem match {
         case Some(member) => SameRole(member.Role, Engineer())
@@ -2289,9 +2289,10 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
     // first spawn hasn't yet registered with claude, racing into a
     // "No conversation found with session ID …" error.
     //
-    // The 2026-05-07 audit captured this: Iris emitted one logical
-    // turn but two identical chunks; Mira ended up dispatched twice
-    // and her second --resume crashed with the lookup error.
+    // Observed in past sessions: a TL emitted one logical turn but
+    // claude streamed two identical chunks; an engineer ended up
+    // dispatched twice and the second --resume crashed with the
+    // session-id lookup error.
     val targets = dedupTargetsByName(rawTargets)
     // Drop @dispatch() targets that point at a QA member when the
     // workflow auto-spawns QA. Without this, Iris including a QA
@@ -2505,10 +2506,10 @@ func validatePrBody(body string, tm Team) Option[string] {
     // mean nothing to a PR reviewer — they're orchestration
     // bookkeeping. Mentioning them in the PR description is a tell
     // that the TL pasted a debug log or escalation prose into
-    // @summary instead of writing a real description. PR #333 was
-    // exactly this: Iris's "I give up, please run
-    // `git -C ...\.gala_team\worktrees\_lead log...` " escalation
-    // prose became the PR body verbatim.
+    // @summary instead of writing a real description (e.g. an
+    // "I give up, please run `git -C ...\.gala_team\worktrees\_lead
+    // log...`" escalation that would otherwise become the PR body
+    // verbatim).
     val pathLeaks = ArrayOf(
         ".gala_team",
         "gala_team/worktrees",
@@ -2760,7 +2761,7 @@ func buildDeliverableManifest(m AppModel, engineers Array[Member]) string {
 // and (c) untracked new files in `cwd`, each tagged with a single-
 // char status prefix (C / M / ?) so QA can tell at a glance whether
 // the file is on the engineer's branch or only in their working
-// tree. The 2026-05-04 audit caught QA blocking every turn because
+// tree. Past audits caught QA blocking every turn because
 // listChangedFiles only returned (a); engineers routinely emit
 // @finished with uncommitted work, the manifest then claimed
 // "(none)", and QA had nothing to review.
@@ -3548,10 +3549,10 @@ func onApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // FSM clock starts fresh per turn. Without this, a member who sat
 // idle for >AbandonAfterSeconds (default 300s) between turns gets
 // abandoned by the next heartbeat tick BEFORE their newly-spawned
-// claude has a chance to emit anything — the 2026-05-07 audit
-// captured this as Theo (QA) being abandoned 59ms after dispatch
-// because his prior LastChunkAt was 7 minutes stale. Working→working
-// keeps LastChunkAt untouched; non-working transitions don't read it.
+// claude has a chance to emit anything — observed as a QA member
+// being abandoned milliseconds after re-dispatch because their
+// prior LastChunkAt was many minutes stale. Working→working keeps
+// LastChunkAt untouched; non-working transitions don't read it.
 func setStatus(m AppModel, name string, st Status) AppModel {
     val prior = m.Statuses.Get(name).GetOrElse(StIdle())
     val wasWorking = isWorkingStatus(prior)
@@ -3625,8 +3626,8 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
     // left wondering why the PR didn't open.
     //
     // CRITICAL: when the check fails we MUST dismiss the modal too.
-    // The 2026-05-04 audit caught a session where the user was stuck
-    // on Approval for 30 minutes — Ctrl+A reached onApprove, the
+    // A past audit caught a session where the user was stuck on
+    // Approval for 30 minutes — Ctrl+A reached onApprove, the
     // check failed (lead branch had 0 commits ahead of master), and
     // the original code returned without changing State. Modal
     // stayed up, conversation log update was hidden behind it, the
@@ -3687,7 +3688,7 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
 //     same gate that catches "no sections", "mentions members",
 //     ".gala_team paths", "I-give-up prose" for fresh @summary
 //     must run on resume too. Without this, a snapshot containing
-//     a bad @summary (e.g. PR #333's escalation prose) would
+//     a bad @summary (escalation prose pasted as the body) would
 //     resume straight into Approval and the user's next Ctrl+A
 //     would ship the bad body to GitHub.
 //
@@ -3803,13 +3804,13 @@ func parseRenderedSummary(text string) string {
 // an opaque message):
 //   - lead has zero commits ahead of defaultBranch
 //
-// Bug history: 2026-05-07 audit captured `master..HEAD` querying the
-// user's main repo (where HEAD == master and no work lives — the
-// orchestrator now operates exclusively in `_lead/`). The lead
-// branch had 4 commits past master via the worktree, but checkPrReady
-// reported "nothing to PR" and the @summary gate kept rejecting the
-// TL's verdict. Five reformulated @summary attempts later the TL
-// gave up and asked the user to ship manually.
+// Bug history: an earlier version of this check ran `master..HEAD`
+// against the user's main repo (where HEAD is whatever branch the
+// user happens to have checked out — typically master, with no
+// orchestrator work since the orchestrator operates exclusively in
+// `_lead/`). The lead branch could be many commits ahead via the
+// worktree, but checkPrReady would report "nothing to PR" and the
+// @summary gate kept rejecting the TL's verdict turn after turn.
 //
 // We deliberately do NOT call out to the network (`gh repo view`,
 // `git fetch`) — the check should be quick and offline-safe so the
@@ -3964,8 +3965,8 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // the OS default browser — Cmd, not direct call, so unit tests
 // (which call Update directly with synthetic PR URLs like
 // `https://x/y/pull/7`) discard the Cmd and don't actually spawn
-// a browser process. The 2026-05-07 audit caught this: every test
-// run was launching real browser windows for the fake URLs.
+// a browser process. Without this, every test run was launching
+// real browser windows for the fake URLs.
 //
 // Production runtime executes the Cmd, which calls OpenInBrowser
 // (per-OS launcher, async, silent on failure — headless / CI /

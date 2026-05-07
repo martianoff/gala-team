@@ -297,10 +297,10 @@ func ResetLeadBranch(proj Project) Try[bool] = Try(() => {
     // ResetLeadBranch reset lead to whatever ancient SHA their
     // local master happens to be at — even if a prior PR has
     // already landed upstream and advanced origin/master past it.
-    // The 2026-05-07 audit caught the worst case: lead reset to a
-    // pre-PR-327 ancestor, the next session re-created files PR
-    // 327 had already committed, and the resulting PR effectively
-    // tried to overwrite already-merged work.
+    // The worst case: lead resets to a pre-PR ancestor, the next
+    // session re-creates files a prior PR had already committed,
+    // and the resulting PR effectively tries to overwrite
+    // already-merged work.
     //
     // Fetch is best-effort. If the remote is unreachable (offline,
     // no origin configured), fall through and reset against the
@@ -686,11 +686,10 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
     return concurrent.FutureApply[Msg](() => {
         // Snapshot the lead branch's current tip onto a UNIQUE
         // per-PR branch so multiple PRs from this team can coexist
-        // without colliding. The 2026-05-07 audit captured the bug
-        // this prevents: every PR shipped from
-        // `gala_team/<project>/lead`, so the second time the user
-        // hit Approve in the same workspace, `gh pr create` failed
-        // with "a pull request for branch ... already exists".
+        // without colliding. Without this, every PR would ship from
+        // `gala_team/<project>/lead`, and the second time the user
+        // hit Approve in the same workspace, `gh pr create` would
+        // fail with "a pull request for branch ... already exists".
         //
         // Naming: `gala_team/<project>/pr/<short-sha>` — short SHA
         // is stable and deterministic per content (same lead state

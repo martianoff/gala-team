@@ -15,7 +15,7 @@ OUT="/tmp/galateam_live_out_$$"
 mkdir -p "$OUT"
 
 # Real-shaped claude stream-json envelopes (escapes pre-baked).
-INIT_CHUNK='{"type":"system","subtype":"init","cwd":"C:\\\\Users\\\\maxmr\\\\GolandProjects\\\\gala_team","session_id":"550e8400-e29b-41d4-a716-446655440000","tools":["Read","Write","Bash"],"model":"claude-opus-4-7"}'
+INIT_CHUNK='{"type":"system","subtype":"init","cwd":"/workdir/gala_team","session_id":"550e8400-e29b-41d4-a716-446655440000","tools":["Read","Write","Bash"],"model":"claude-opus-4-7"}'
 ASSISTANT_TEXT='{"type":"assistant","message":{"id":"msg_01","role":"assistant","content":[{"type":"text","text":"Hello! I am Lead. How can I help?"}]}}'
 ASSISTANT_DISPATCH='{"type":"assistant","message":{"id":"msg_02","role":"assistant","content":[{"type":"text","text":"I will fan this out.\n@dispatch(Eng) please find and fix bugs\n@end"}]}}'
 ASSISTANT_TOOL_USE='{"type":"assistant","message":{"id":"msg_03","content":[{"type":"text","text":"Let me check the file."},{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file":"main.go"}}]}}'

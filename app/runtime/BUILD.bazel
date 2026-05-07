@@ -9,6 +9,7 @@ gala_library(
         "trace.gala",
     ],
     go_srcs = [
+        "browser.go",
         "debuglog.go",
         "trace.go",
     ],

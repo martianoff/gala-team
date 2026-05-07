@@ -540,16 +540,17 @@ func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
 // allowed (rejection routes through the chat composer for the
 // next prompt).
 func approvalIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg]]] = msg match {
-    // Enter only approves when the composer is EMPTY. If the user
-    // typed something, they obviously meant to submit that text —
-    // silently approving would discard their typed redirect. With
-    // text in the composer, fall through so onSubmit handles it
-    // (the prompt becomes the next user turn, implicitly rejecting
-    // the approval).
-    case KeySubmit() if m.Composer == ""    => Some(onApprove(m))
-    case KeyChar(c) if c == 'y' || c == 'Y' => Some(onApprove(m))
-    case KeyChar(c) if c == 'n' || c == 'N' => Some(onReject(m))
-    case _                                  => None[Tuple[AppModel, Cmd[AppMsg]]]()
+    // Enter approves when the composer is whitespace-only. TrimSpace
+    // (not raw `== ""`) so a stray space or tab the user didn't
+    // notice doesn't sink the keyboard fallback — the original
+    // strict check left users staring at "why doesn't Enter work?"
+    // when their composer had a leading space. If the user typed
+    // real text, fall through so onSubmit submits it (an implicit
+    // redirect — they clearly didn't mean to approve blindly).
+    case KeySubmit() if strings.TrimSpace(m.Composer) == "" => Some(onApprove(m))
+    case KeyChar(c) if c == 'y' || c == 'Y'                 => Some(onApprove(m))
+    case KeyChar(c) if c == 'n' || c == 'N'                 => Some(onReject(m))
+    case _                                                  => None[Tuple[AppModel, Cmd[AppMsg]]]()
 }
 
 // onRecoveryCycle advances the focus across the recovery modal's
@@ -3607,12 +3608,15 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (withState, NoCmd[AppMsg]())
 }
 
-// onPrCreated records the URL in LastPrUrl + the conversation log so
-// the user has a copy-paste-friendly link AND a hint for Ctrl+M to
-// trigger the merge step. We don't auto-open the browser (no browser
-// in headless / CI contexts) and don't auto-merge (the user always
-// gets a confirmation step).
+// onPrCreated records the URL in LastPrUrl + the conversation log
+// so the user has a copy-paste-friendly link AND a hint for Ctrl+M
+// to trigger the merge step. Best-effort opens the URL in the OS
+// default browser via OpenInBrowser — failures are silent (headless
+// / CI contexts have no browser; we don't want to surface that as
+// an error). The user can always click the OSC 8 hyperlink in the
+// conversation log if the auto-open didn't fire.
 func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
+    val _ = OpenInBrowser(url)
     // Wrap the URL in OSC 8 so terminals that support it (Windows
     // Terminal / iTerm2 / kitty / modern xterm) render it as a real
     // clickable hyperlink. Terminals that don't recognise the escape

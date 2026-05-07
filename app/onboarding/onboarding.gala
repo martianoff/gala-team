@@ -296,9 +296,26 @@ func protocolSection(isTL bool, hasQa bool) string {
             "## Example — closing out the turn\n\n" +
             "```\n" +
             "@summary\n" +
-            "Both engineers reported back. PR is ready for review at <url>.\n" +
+            "Add SHA-256 / SHA-512 hashing to the standard library.\n" +
+            "\n" +
+            "## What\n" +
+            "- New `crypto` package: `Hash(algo, bytes) -> Digest`, streaming `Hasher`, hex/base64 encoding.\n" +
+            "- Stdlib registration so `import crypto` works in user code.\n" +
+            "- 14 unit tests including NIST FIPS 180-4 known-answer vectors.\n" +
+            "\n" +
+            "## Why\n" +
+            "Hashing is a baseline primitive for content addressing, ETags, and HMAC chains. Several user-facing libraries (caches, signed tokens) blocked on it.\n" +
+            "\n" +
+            "## Follow-ups\n" +
+            "- HMAC + AEAD encryption — separate PR.\n" +
+            "- MD5 deliberately omitted (not safe for collision-resistant use).\n" +
+            "- Pattern-matching extractor on `Digest` not requested; deferred.\n" +
             "@end\n" +
             "```\n\n" +
+            "## @summary body — write a PR description, not a chat recap\n\n" +
+            "The `@summary` body becomes the PR description verbatim. The user (and reviewers) read it cold without your transcript context. Two firm rules:\n\n" +
+            "- **Sections.** Use `## What`, `## Why`, `## Follow-ups` (and `## Gaps` if relevant). Reviewers scan headings.\n" +
+            "- **No names, no internal nuance.** Don't write \"Felix did X then Mira fixed Y after three blocked attempts.\" The reader doesn't know who Felix is and doesn't care. Write the PR as if a single author wrote it: \"Added X. Fixed Y.\" Skip orchestration trivia (\"I dispatched...\", \"after retries\", \"the merger turn\"). Skip the apology-and-postmortem voice.\n\n" +
             "## Rules\n\n" +
             "- Each directive opens with the tag on its own line and closes with `@end` on its own line.\n" +
             "- Plain prose between directives is rendered as your message to the user.\n" +

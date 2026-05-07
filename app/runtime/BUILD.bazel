@@ -37,5 +37,7 @@ gala_go_test(
         "//app/project",
         "//app/team",
         "@gala//collection_immutable",
+        "@gala//go_interop",
+        "@gala//subprocess",
     ],
 )

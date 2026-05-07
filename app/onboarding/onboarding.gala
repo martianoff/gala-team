@@ -133,15 +133,22 @@ func roleSection(proj Project, team Team, member Member, mode WorkspaceMode) str
 // for prompt assembly. Keep these two in sync if the worktree layout
 // changes.
 //
-// Shared mode → everyone is in proj.Repo.
-// WorktreePerEngineer → TL stays in proj.Repo, but engineers / QAs
-// each get `<proj.Repo>/.gala_team/worktrees/<member-name>` on
-// branch `gala_team/<member-name>`.
-func WorkspacePathFor(proj Project, m Member, mode WorkspaceMode) string = mode match {
-    case Shared() => proj.Repo
-    case WorktreePerEngineer() => m.Role match {
-        case TeamLead() => proj.Repo
-        case _          => filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
+// The TL ALWAYS gets `<proj.Repo>/.gala_team/worktrees/_lead`,
+// regardless of mode — orchestrator git ops (lead-branch reset,
+// snapshot push, gh pr create) target the TL's cwd, and routing them
+// through the user's main checkout is what causes "we keep breaking
+// master" incidents.
+//
+// Shared mode → engineers / QAs share `proj.Repo`, TL still in `_lead`.
+// WorktreePerEngineer → engineers / QAs each get
+// `<proj.Repo>/.gala_team/worktrees/<member-name>` on branch
+// `gala_team/<member-name>`; TL still in `_lead`.
+func WorkspacePathFor(proj Project, m Member, mode WorkspaceMode) string {
+    val isLead = SameRole(m.Role, TeamLead())
+    if isLead { return filepath.Join(proj.Repo, ".gala_team", "worktrees", "_lead") }
+    return mode match {
+        case Shared()              => proj.Repo
+        case WorktreePerEngineer() => filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
     }
 }
 
@@ -200,9 +207,9 @@ func sharedWorkspaceSection(proj Project, isTL bool, cwd string) string {
     if isTL {
         val leadBranch = leadBranchOf(proj)
         return header +
-            s"Your cwd is the project root at `${cwd}`. **You are checked out on branch `${leadBranch}`** — your own dedicated branch forked from `${proj.DefaultBranch}`. " +
-            "Commit your work to this branch; the user opens a PR from it via Ctrl+A. Each fresh session hard-resets this branch back to `${proj.DefaultBranch}`, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
-            "All members share the project root cwd in shared mode. Concurrent file edits can collide; coordinate via @dispatch bodies to keep work non-overlapping. When a member emits `@finished`, their files are already on disk in this same cwd — read them directly to verify."
+            s"Your cwd is your dedicated lead worktree at `${cwd}`. **You are checked out on branch `${leadBranch}`** — forked from `${proj.DefaultBranch}` (latest origin tip). " +
+            s"Commit your work here; the user opens a PR from it via Ctrl+A. Each fresh session hard-resets this branch back to `${proj.DefaultBranch}`, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
+            s"**Engineers and QAs run in the project root at `${proj.Repo}`** (shared mode). When inspecting their deliverables, read files from `${proj.Repo}`, not your own cwd."
     }
     return header +
         s"Your cwd is `${cwd}`, shared with the rest of the team. " +
@@ -216,9 +223,9 @@ func worktreeWorkspaceSection(proj Project, member Member, isTL bool, cwd string
     if isTL {
         val leadBranch = leadBranchOf(proj)
         return header +
-            s"Your cwd is the project root at `${proj.Repo}`. **You are checked out on branch `${leadBranch}`** — your own dedicated branch forked from `${proj.DefaultBranch}`. " +
-            "Commit your work to this branch; the user opens a PR from it via Ctrl+A. Each fresh session hard-resets this branch back to `${proj.DefaultBranch}` (the latest origin tip), so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
-            s"**Engineers and QAs each run in an isolated git worktree** at " +
+            s"Your cwd is your dedicated lead worktree at `${cwd}`. **You are checked out on branch `${leadBranch}`** — forked from `${proj.DefaultBranch}` (latest origin tip). The user's main repo lives at `${proj.Repo}` and is OFF LIMITS — never `cd` there, never `git checkout` / `git reset` / `git push` from there. Every git op you run stays inside your worktree.\n\n" +
+            s"Commit your work to this branch; the user opens a PR from it via Ctrl+A. Each fresh session removes this worktree, then re-creates it forked off `${proj.DefaultBranch}` again, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
+            s"**Engineers and QAs each run in their own isolated git worktree** at " +
             s"`${proj.Repo}/.gala_team/worktrees/<MemberName>` on branch `${branchPattern}`. " +
             "Their file edits live ONLY on that branch until merged — they are NOT visible from your cwd.\n\n" +
             "When inspecting a member's deliverables (e.g. after they emit `@finished`), read files from their worktree path, not your own. " +

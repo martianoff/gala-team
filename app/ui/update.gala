@@ -1095,41 +1095,47 @@ func onYankConversation(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
 }
 
-// wipeMemberWorktrees removes every member's git worktree AND hard-
-// resets the lead's branch so a fresh session starts on a clean
-// filesystem AND a clean main-tracked HEAD. Two halves:
+// wipeMemberWorktrees removes every member's git worktree (lead + any
+// per-engineer ones) so a fresh session starts from a clean filesystem.
+// Three halves:
 //
-//   1. Lead-branch reset (always runs, regardless of workspace mode):
-//      hard-reset `gala_team/<proj>/lead` back to the project's
-//      default branch. Without this, leftover commits from prior
-//      Lead turns confuse the next session — the lead inspects the
-//      file tree, sees its OWN previous edits, and re-plans against
-//      that stale starting point.
+//   1. Lead worktree wipe (always runs, regardless of workspace mode):
+//      `git worktree remove --force <_lead>`. The lead always has its
+//      own worktree now. Wiping + re-creating on the next session is
+//      cleaner than reset-in-place because it also drops untracked
+//      files that `git reset` would leave behind.
 //
 //   2. Engineer/QA worktree wipe (worktree-per-engineer only):
 //      `git worktree remove --force` per member. Without this,
 //      `?? crypto/` and other untracked files from the prior
 //      engineer leak into the new engineer's view.
 //
+//   3. `git worktree prune` to drop git's internal metadata for any
+//      out-of-band-removed entries.
+//
 // Best-effort — IO failures are silently ignored. The user opted into
 // "Start fresh = blank slate"; we don't want a partial cleanup to
 // abort the wipe because of one stale lockfile.
 func wipeMemberWorktrees(m AppModel) {
-    // (1) Lead-branch reset. Always runs.
+    // (1) Lead worktree wipe + re-fork. RemoveLeadWorktree drops the
+    // dir + git's metadata; ResetLeadBranch then re-creates the
+    // worktree (via EnsureLeadWorktree) AND hard-resets the branch
+    // tip to origin/<default> so the next session starts from the
+    // remote's current state, not the user's possibly-stale local
+    // ref. Without this fetch+reset step, an old lead branch SHA
+    // could anchor the next session pre-merged work.
+    val _ = RemoveLeadWorktree(m.Project)
     val _ = ResetLeadBranch(m.Project)
     // (2) Engineer/QA worktree wipe. Worktree mode only.
     val name = policy.WorkspaceModeName(m.Policy.WorkspaceMode)
-    if name != "worktree-per-engineer" { return }
-    m.Team.Members.ForEach((mem) => {
-        val isLead = SameRole(mem.Role, TeamLead())
-        if isLead { return }
-        val _ = RemoveWorktree(m.Project, mem)
-    })
-    // (3) Prune git's internal worktree metadata. RemoveWorktree
-    // short-circuits when the directory is already gone, so any prior
-    // out-of-band wipe leaves orphan `.git/worktrees/<name>/` entries
-    // that subsequent `git worktree add` calls choke on. `git worktree
-    // prune` cleans those up unconditionally.
+    if name == "worktree-per-engineer" {
+        m.Team.Members.ForEach((mem) => {
+            val isLead = SameRole(mem.Role, TeamLead())
+            if isLead { return }
+            val _ = RemoveWorktree(m.Project, mem)
+        })
+    }
+    // (3) Prune git's internal worktree metadata.
     val _ = PruneWorktrees(m.Project)
 }
 

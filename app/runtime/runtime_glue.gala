@@ -60,8 +60,10 @@ struct MemberSession(
 // ----------------------------------------------------------------------------
 
 // SpawnSession launches a `claude` CLI process for `m` with cwd
-// `workspace`. The team lead always uses `proj.Repo`; engineers /
-// QAs may run in their own git worktree (see `EnsureWorkspace`).
+// `workspace`. Every member — including the team lead — runs in
+// their own git worktree under `<proj.Repo>/.gala_team/worktrees/`
+// (see `EnsureWorkspace`); the user's main checkout is never used
+// as a session cwd by the orchestrator.
 //
 // Flags:
 //   - m.Model pins the model when set (--model <name>).
@@ -104,32 +106,38 @@ func SpawnSession(
 
 // EnsureWorkspace returns the cwd to spawn `m` in, given the team's
 // workspace policy. For Shared mode, every member gets `proj.Repo`.
-// For WorktreePerEngineer, the team lead still gets `proj.Repo` but
-// engineers / QAs get a per-member git worktree at
-// `<proj.Repo>/.gala_team/worktrees/<m.Name>` with a branch named
-// `gala_team/<proj.Name>/<m.Name>`. The project-scoped branch keeps
-// runs against different projects (same team yaml, different `--project`
-// dirs) from clobbering each other's branches if the same repo is
-// reused. The worktree is created on first call; subsequent calls
-// for the same member just return the existing path.
+// For WorktreePerEngineer, EVERY member — including the team lead —
+// gets a dedicated git worktree under `<proj.Repo>/.gala_team/worktrees/`.
+// Engineers / QAs land in `<m.Name>/` on `gala_team/<proj.Name>/<m.Name>`;
+// the lead lands in `_lead/` on `gala_team/<proj.Name>/lead`. The
+// project-scoped branch keeps runs against different projects (same
+// team yaml, different `--project` dirs) from clobbering each other's
+// branches if the same repo is reused.
+//
+// Why the TL also gets a worktree (was: TL ran in `proj.Repo`):
+// orchestrator git ops — Start fresh hard-reset, lead-branch checkout,
+// snapshot push, `gh pr create` — all mutated the user's main checkout
+// directly. A bad TL turn left the user on a stale branch with stray
+// commits or a wrong-base reset. Routing the TL through its own
+// worktree means the user's main repo is never touched by orchestrator
+// code, full stop.
+//
+// The worktree is created on first call; subsequent calls for the same
+// member just return the existing path.
+//
+// The TL gets a worktree REGARDLESS of `mode` — even in `Shared()`,
+// where engineers/QAs share `proj.Repo`. The TL alone has its own
+// `_lead/` worktree because every orchestrator git op (ResetLeadBranch,
+// pushSnapshotBranch, gh pr create) targets the TL's cwd; if that cwd
+// were `proj.Repo`, the user's main checkout would be mutated by every
+// turn. Shared mode keeps its meaning for engineers (no per-engineer
+// isolation) but the TL's safety story is non-negotiable.
 func EnsureWorkspace(proj Project, m Member, mode WorkspaceMode) Try[string] {
     val isLead = SameRole(m.Role, TeamLead())
-    if isLead {
-        // Lead always runs on its own branch forked from the project's
-        // default. Without this, the lead inspects whatever branch the
-        // user happens to be on and gets confused by leftover state
-        // from the previous session. ensureLeadBranch creates / checks
-        // out `gala_team/<proj>/lead` so each session starts clean
-        // (Start fresh / Ctrl+N hard-reset that branch back to the
-        // default — see `ResetLeadBranch`).
-        val _ = ensureLeadBranch(proj)
-    }
+    if isLead { return EnsureLeadWorktree(proj) }
     return mode match {
         case Shared()              => Success[string](proj.Repo)
-        case WorktreePerEngineer() => m.Role match {
-            case TeamLead() => Success[string](proj.Repo)
-            case _          => ensureWorktree(proj, m)
-        }
+        case WorktreePerEngineer() => ensureWorktree(proj, m)
     }
 }
 
@@ -176,84 +184,116 @@ func gitSlug(s string) string {
     return joined
 }
 
-// ensureLeadBranch creates the lead's branch (if missing) and checks
-// it out. Idempotent: if the user is already on the lead branch, no
-// IO happens. If the branch doesn't exist, fork it from the project's
-// default branch. Best-effort — IO failures don't sink the orchestration
-// (the lead just stays on whatever branch they happen to be on).
-func ensureLeadBranch(proj Project) Try[bool] = Try[bool](() => {
+// LeadWorktreePath returns the on-disk location of the team lead's
+// dedicated worktree. Mirrors the per-engineer path convention so
+// downstream code (logs, view surfaces, sweepers) can locate it
+// without re-implementing the formula. Underscore prefix keeps it
+// distinct from any member named "lead" and sorts at the top of
+// directory listings.
+func LeadWorktreePath(proj Project) string =
+    filepath.Join(proj.Repo, ".gala_team", "worktrees", "_lead")
+
+// isGitRepoDir returns true iff `dir` contains a `.git` entry (file
+// or directory — `.git` is a file inside worktree checkouts, a dir
+// in the main checkout). Cheap stat; no subprocess. Used to gate
+// worktree creation so non-git fixtures degrade cleanly instead of
+// failing every git op the orchestrator tries to run.
+func isGitRepoDir(dir string) bool {
+    val info, err = os.Stat(filepath.Join(dir, ".git"))
+    if err != nil { return false }
+    val _ = info
+    return true
+}
+
+// EnsureLeadWorktree creates the team lead's worktree at
+// `<proj.Repo>/.gala_team/worktrees/_lead` checked out on the
+// `gala_team/<proj.Name>/lead` branch. Idempotent: subsequent calls
+// just return the path. Subsumes the older `ensureLeadBranch` —
+// the worktree is on the right branch by construction.
+//
+// Critically, this is what keeps orchestrator git ops off the user's
+// main checkout. ResetLeadBranch, pushSnapshotBranch, and gh pr create
+// all run with cwd set to this path; the user's `proj.Repo` is never
+// `git checkout`ed or `git reset`ed by the orchestrator.
+func EnsureLeadWorktree(proj Project) Try[string] = Try[string](() => {
+    // Graceful degradation: if proj.Repo isn't even a git repo (test
+    // fixtures with bare temp dirs, headless setups pointed at a
+    // non-VCS workspace), the worktree machinery has nothing to bite
+    // on. Fall back to proj.Repo so callers still get a usable cwd.
+    // Production always satisfies the git-repo precondition; this
+    // branch only fires in degenerate environments.
+    if !isGitRepoDir(proj.Repo) {
+        return proj.Repo
+    }
+    val wtPath = LeadWorktreePath(proj)
     val branch = LeadBranchFor(proj)
-    val current = currentBranch(proj.Repo)
-    if current == branch { return true }
-    // Branch exists locally? Just check it out.
-    val refOpts = subprocess.NewSpawnOpts(
-        "git",
-        ArrayOf("rev-parse", "--verify", "--quiet", "refs/heads/" + branch).ToGoSlice(),
-        SliceEmpty[string](),
-        proj.Repo,
-    )
-    val refProc = subprocess.Spawn(refOpts).Get()
-    val refCode = refProc.Wait().Get()
-    val branchExists = refCode == 0
-    val args = if (branchExists)
-        ArrayOf("checkout", branch)
-    else
-        ArrayOf("checkout", "-b", branch, proj.DefaultBranch)
+    if isRegisteredWorktree(proj, wtPath) {
+        return wtPath
+    }
+    val parent = filepath.Dir(wtPath)
+    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
+    if mkErr != nil { panic(s"lead worktree mkdir ${parent}: ${mkErr.Error()}") }
+    val info, statErr = os.Stat(wtPath)
+    if statErr == nil && info.IsDir() {
+        // Same defensive cleanup as ensureWorktree: a leftover dir
+        // from a prior interrupted run will block `git worktree add`.
+        // Try git's own remove first, then fall back to os.RemoveAll.
+        val gitRm = subprocess.NewSpawnOpts(
+            "git",
+            ArrayOf("worktree", "remove", "--force", wtPath).ToGoSlice(),
+            SliceEmpty[string](),
+            proj.Repo,
+        )
+        subprocess.Spawn(gitRm) match {
+            case Success(p) => { val _ = p.Wait() }
+            case Failure(_) => {}
+        }
+        val info2, statErr2 = os.Stat(wtPath)
+        if statErr2 == nil && info2.IsDir() {
+            val rmErr = os.RemoveAll(wtPath)
+            val _ = rmErr
+        }
+    }
+    // Fork the lead worktree from the project's DEFAULT BRANCH so a
+    // brand-new lead session starts at the same baseline the user has
+    // on main. `-B` re-creates the branch if it already exists locally
+    // (left over from a prior session); the worktree adopts whatever
+    // tip lead currently points at if it does, otherwise it's freshly
+    // forked. Either way, ResetLeadBranch's hard-reset on Start fresh
+    // cleans the slate per session.
     val opts = subprocess.NewSpawnOpts(
         "git",
-        args.ToGoSlice(),
+        ArrayOf("worktree", "add", "-B", branch, wtPath, proj.DefaultBranch).ToGoSlice(),
         SliceEmpty[string](),
         proj.Repo,
     )
     val proc = subprocess.Spawn(opts) match {
         case Success(p)   => p
-        case Failure(err) => panic(s"git checkout ${branch}: ${err.Error()}")
+        case Failure(err) => panic(s"git worktree add ${wtPath}: ${err.Error()}")
     }
     val code = proc.Wait().Get()
-    if code != 0 { panic(s"git checkout ${branch} exited with code ${code}") }
-    return true
-})
-
-// currentBranch reads `git rev-parse --abbrev-ref HEAD`. Returns "" on
-// any failure (detached HEAD, not a git repo, etc.) so callers can
-// treat absence as "different branch — needs checkout".
-func currentBranch(repo string) string {
-    val opts = subprocess.NewSpawnOpts(
-        "git",
-        ArrayOf("rev-parse", "--abbrev-ref", "HEAD").ToGoSlice(),
-        SliceEmpty[string](),
-        repo,
-    )
-    val procTry = subprocess.Spawn(opts)
-    if procTry.IsFailure() { return "" }
-    val proc = procTry.Get()
-    var line = ""
-    var stopped = false
-    for !stopped {
-        val ln = proc.ReadLine()
-        if ln.IsFailure() {
-            stopped = true
-        } else {
-            val t = strings.TrimSpace(ln.Get())
-            if t != "" { line = t }
+    if code != 0 {
+        if isRegisteredWorktree(proj, wtPath) {
+            LogWorktreeCreate("_lead", wtPath, branch)
+            return wtPath
         }
+        panic(s"git worktree add ${wtPath} exited with code ${code}")
     }
-    val code = proc.Wait()
-    if code.IsFailure() { return "" }
-    if code.Get() != 0 { return "" }
-    return line
-}
+    LogWorktreeCreate("_lead", wtPath, branch)
+    return wtPath
+})
 
 // ResetLeadBranch hard-resets the lead's branch back to the project's
 // default branch. Called by the Start fresh / Ctrl+N paths so the new
 // session doesn't inherit committed leftover work from the prior
 // session. Best-effort — IO failures don't block the data-side reset.
 //
-// Two-step: (1) checkout the lead branch (creating it if missing);
-// (2) `git reset --hard <default>`. Step 1 is idempotent via
-// ensureLeadBranch.
+// Operates on the lead WORKTREE (not the user's main checkout). The
+// worktree is created on demand if missing; the reset target is
+// origin/<defaultBranch> so a stale local default doesn't anchor lead
+// to a pre-merged ancestor.
 func ResetLeadBranch(proj Project) Try[bool] = Try[bool](() => {
-    val _ = ensureLeadBranch(proj).Get()
+    val wtPath = EnsureLeadWorktree(proj).Get()
     // Fetch origin/<defaultBranch> first so the reset target reflects
     // the REMOTE's current state, not the user's possibly-stale
     // local ref. Without this, a user who never `git pull`s sees
@@ -272,7 +312,7 @@ func ResetLeadBranch(proj Project) Try[bool] = Try[bool](() => {
         "git",
         ArrayOf("fetch", "--quiet", "origin", proj.DefaultBranch).ToGoSlice(),
         SliceEmpty[string](),
-        proj.Repo,
+        wtPath,
     )
     val resetTarget = subprocess.Spawn(fetchOpts) match {
         case Failure(_) => proj.DefaultBranch
@@ -285,7 +325,7 @@ func ResetLeadBranch(proj Project) Try[bool] = Try[bool](() => {
         "git",
         ArrayOf("reset", "--hard", resetTarget).ToGoSlice(),
         SliceEmpty[string](),
-        proj.Repo,
+        wtPath,
     )
     val proc = subprocess.Spawn(opts) match {
         case Success(p)   => p
@@ -442,6 +482,18 @@ func isRegisteredWorktree(proj Project, wtPath string) bool {
 // prune` manually.
 func RemoveWorktree(proj Project, m Member) Try[bool] = Try[bool](() => {
     val wtPath = filepath.Join(proj.Repo, ".gala_team", "worktrees", m.Name)
+    return removeWorktreeAt(proj, wtPath)
+})
+
+// RemoveLeadWorktree drops the lead's `_lead/` worktree on Start
+// fresh / Ctrl+N so the next session starts from a freshly-created
+// worktree forked off origin/<defaultBranch>. Best-effort, same
+// shape as RemoveWorktree.
+func RemoveLeadWorktree(proj Project) Try[bool] = Try[bool](() => {
+    return removeWorktreeAt(proj, LeadWorktreePath(proj))
+})
+
+func removeWorktreeAt(proj Project, wtPath string) bool {
     val info, statErr = os.Stat(wtPath)
     if statErr != nil || !info.IsDir() { return true }  // already gone
     val opts = subprocess.NewSpawnOpts(
@@ -457,7 +509,7 @@ func RemoveWorktree(proj Project, m Member) Try[bool] = Try[bool](() => {
     val code = proc.Wait().Get()
     if code != 0 { panic(s"git worktree remove ${wtPath} exited with code ${code}") }
     return true
-})
+}
 
 // PruneWorktrees runs `git worktree prune` to drop git's internal
 // metadata for worktrees whose directories were removed out-of-band
@@ -617,8 +669,8 @@ func MsgMember(msg Msg) string = msg match {
 // Approval / PR creation
 // ----------------------------------------------------------------------------
 
-// GhPrCreateFuture spawns `gh pr create` against `proj.Repo` with the
-// summary text as the PR body. The first line of `body` becomes the
+// GhPrCreateFuture spawns `gh pr create` from the lead worktree with
+// the summary text as the PR body. The first line of `body` becomes the
 // title (capped at 70 chars per gala-style rule), the rest goes into
 // the body via the `--body` flag.
 //
@@ -633,6 +685,7 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
     val title = GhTitle(body)
     val bodyWithFooter = body + "\n\n---\n🍎 orchestrated by [Gala Team](https://github.com/martianoff/gala-team)"
     val leadBranch = LeadBranchFor(proj)
+    val leadWtPath = LeadWorktreePath(proj)
     return concurrent.FutureApply[Msg](() => {
         // Snapshot the lead branch's current tip onto a UNIQUE
         // per-PR branch so multiple PRs from this team can coexist
@@ -649,7 +702,7 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
         // itself stays put as the orchestrator's working ref;
         // engineers / future turns continue to fast-forward INTO
         // lead, and each PR snapshots out from there.
-        val sha = readShortSha(proj.Repo, leadBranch)
+        val sha = readShortSha(leadWtPath, leadBranch)
         if sha == "" {
             return RtPrFailed(Err = errors.New("could not resolve lead branch tip — is the branch present?"))
         }
@@ -663,7 +716,7 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
             "gh",
             args.ToGoSlice(),
             SliceEmpty[string](),
-            proj.Repo,
+            leadWtPath,
         )
         return subprocess.Spawn(opts) match {
             case Failure(err) => RtPrFailed(Err = err)
@@ -714,7 +767,7 @@ func pushSnapshotBranch(proj Project, srcBranch string, dstBranch string) string
         "git",
         ArrayOf("push", "--force", "origin", refspec).ToGoSlice(),
         SliceEmpty[string](),
-        proj.Repo,
+        LeadWorktreePath(proj),
     )
     return subprocess.Spawn(opts) match {
         case Failure(err) => err.Error()
@@ -800,8 +853,8 @@ func readGhPrUrl(p subprocess.Process) Msg {
     }
 }
 
-// GhPrMergeFuture spawns `gh pr merge <url> --<rule>` against
-// `proj.Repo`. The `rule` argument decides which merge strategy flag is
+// GhPrMergeFuture spawns `gh pr merge <url> --<rule>` from the lead
+// worktree. The `rule` argument decides which merge strategy flag is
 // passed: SquashMerge → --squash, RebaseMerge → --rebase, PlainMerge →
 // --merge. We pass `--delete-branch` so the engineer worktrees stay
 // clean after a successful merge.
@@ -811,12 +864,13 @@ func readGhPrUrl(p subprocess.Process) Msg {
 // progress and we just need the exit code.
 func GhPrMergeFuture(proj Project, url string, rule MergeRule) concurrent.Future[Msg] {
     val args = ArrayOf("pr", "merge", url, mergeFlag(rule), "--delete-branch")
+    val leadWtPath = LeadWorktreePath(proj)
     return concurrent.FutureApply[Msg](() => {
         val opts = subprocess.NewSpawnOpts(
             "gh",
             args.ToGoSlice(),
             SliceEmpty[string](),
-            proj.Repo,
+            leadWtPath,
         )
         return subprocess.Spawn(opts) match {
             case Failure(err) => RtMergeFailed(Err = err)

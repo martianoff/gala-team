@@ -2,10 +2,13 @@ package main
 
 import (
     "errors"
+    "os"
     "strings"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    "martianoff/gala/subprocess"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
@@ -115,6 +118,90 @@ func TestLeadBranchFor_AlphaNumPassthrough(t T) T {
         Github = None[string](), DefaultBranch = "main",
     )
     return Eq(t, LeadBranchFor(proj), "gala_team/skunkworks/lead")
+}
+
+// Lead worktree path matches the per-engineer convention with the
+// `_lead` reserved name. Underscore prefix keeps it distinct from
+// any team member named "lead" and sorts at the top of directory
+// listings.
+func TestLeadWorktreePath_PerProjectConvention(t T) T {
+    val proj = Project(
+        Name = "Default Project",
+        Repo = "/repo",
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+    val path = LeadWorktreePath(proj)
+    return IsTrue(t, strings.HasSuffix(path, ".gala_team/worktrees/_lead") ||
+                     strings.HasSuffix(path, ".gala_team\\worktrees\\_lead"))
+}
+
+// Fallback contract: when proj.Repo isn't a git repo, EnsureLeadWorktree
+// returns the bare repo path instead of failing. Production always
+// passes a real git repo; this fallback keeps test fixtures (and any
+// degenerate non-VCS workspace) working without a panic. Without it,
+// any test that exercised the TL spawn path against a temp-dir project
+// would fail at git worktree add.
+func TestEnsureLeadWorktree_FallsBackForNonGitDir(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_lead_wt_fallback_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    val proj = Project(
+        Name = "demo", Repo = dir,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+    val result = EnsureLeadWorktree(proj)
+    return result match {
+        case Success(path) => Eq(t, path, dir)  // fell back to proj.Repo
+        case Failure(_)    => IsTrue(t, false)
+    }
+}
+
+// Real git repo: EnsureLeadWorktree creates the worktree on first
+// call, returns the same path on subsequent calls (idempotent), and
+// the returned path is a registered git worktree.
+func TestEnsureLeadWorktree_CreatesAndIsIdempotent(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_lead_wt_create_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "init"))
+    val proj = Project(
+        Name = "demo", Repo = dir,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+    val firstPath = EnsureLeadWorktree(proj) match {
+        case Success(p) => p
+        case Failure(_) => ""
+    }
+    if firstPath == "" { return IsTrue(t, false) }
+    val secondPath = EnsureLeadWorktree(proj) match {
+        case Success(p) => p
+        case Failure(_) => ""
+    }
+    if secondPath == "" { return IsTrue(t, false) }
+    val a = Eq(t, firstPath, secondPath)
+    return IsTrue(a, strings.HasSuffix(firstPath, "_lead"))
+}
+
+// Helper: runs a git command in `dir`. Used by lead-worktree tests to
+// stand up a real git fixture without dragging in the git-fixture
+// helpers that only live in the ui package.
+func runGitInDir(dir string, args Array[string]) {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        args.ToGoSlice(),
+        SliceEmpty[string](),
+        dir,
+    )
+    val proc = subprocess.Spawn(opts)
+    proc match {
+        case Success(p) => { val _ = p.Wait() }
+        case Failure(_) => {}
+    }
 }
 
 // ----------------------------------------------------------------------------

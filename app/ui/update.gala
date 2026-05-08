@@ -2098,7 +2098,15 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                     return (m1, batchAll(nudgeCmds))
                 }
                 // Plain chat — return to Idle, no orchestration.
-                return (setStatus(cleaned.Copy(State = Idle()), name, StIdle()), NoCmd[AppMsg]())
+                // Route through transitionLogged so the TLThinking→Idle
+                // hop lands in events.jsonl as a fsm_transition event.
+                // Without this, audits saw a fresh UserPrompted event
+                // pop from "nowhere" because the prior turn's Idle
+                // arrival was invisible. afterTLDone(empty) → Idle()
+                // by construction, so the FSM agrees with the direct
+                // assignment that lived here before.
+                val nextState = transitionLogged(cleaned.State, TLDone(Directives = EmptyArray[Directive]()), transitionContext(cleaned))
+                return (setStatus(cleaned.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
             }
             // Empty-after-QA-filter guard. If every dispatch target
             // resolved to a QA member (and qa_required is on), the

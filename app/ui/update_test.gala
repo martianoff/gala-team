@@ -91,6 +91,25 @@ func TestKeySubmit_Empty_NoOp(t T) T {
     }
 }
 
+// Plain-chat TL response (no @dispatch / @summary directives) must
+// still transition the FSM to Idle. Without this, an audit reading
+// events.jsonl saw a fresh UserPrompted event pop from "nowhere"
+// because the prior turn's TLThinking→Idle hop was assigned
+// directly to State, bypassing transitionLogged. Now the empty-
+// dispatch path routes through transitionLogged so the audit log
+// is complete.
+func TestSessionFailed_PlainChatTLResponse_LandsBackInIdle(t T) T {
+    val seed = sampleModel().Copy(
+        State      = TLThinking(),
+        TurnBuffer = "I'll wait for your direction before dispatching.",
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
 func TestTickMsg_BumpsCounter(t T) T {
     val (m1, _) = Update(sampleModel(), TickMsg())
     val (m2, _) = Update(m1, TickMsg())

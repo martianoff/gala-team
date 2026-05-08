@@ -135,11 +135,34 @@ policy:
     - name: ...
 ```
 
-**workspace_mode**:
-- `shared` — engineers/QAs run in the project root. Simpler, fastest. Fine for 1-engineer teams or read-only tasks.
-- `worktree-per-engineer` — each engineer gets `<repo>/.gala_team/worktrees/<name>` on their own branch. Required for: 2+ engineers in parallel, anything that involves committing, anything with `qa_required: true` (QA reviews per-engineer branches).
+**workspace_mode** — DEFAULT to `worktree-per-engineer`. Only emit `shared` when the user has explicitly asked for it.
+
+The reasoning: shared mode loses on basically every dimension that matters for orchestrated work (engineers can trample each other's working tree, QA can't reliably tell who wrote which line, the per-engineer branch namespace doesn't get used). It exists for solo / read-only / prototype-only setups; it's not the right starting point for any team that's going to commit code.
+
+- `worktree-per-engineer` *(default — emit unless user said otherwise)* — each engineer gets `<repo>/.gala_team/worktrees/<name>` on their own branch. Required for: 2+ engineers in parallel, anything that involves committing, anything with `qa_required: true` (QA reviews per-engineer branches). Required, also, for any project where you want clean per-engineer git history.
+- `shared` *(only when explicitly asked)* — engineers/QAs run in the project root. Simpler, fastest. Fine for 1-engineer prototyping where the user has said they want it.
 
 The TL **always** runs in its own `_lead/` worktree regardless of mode (the orchestrator enforces this). `workspace_mode` only controls engineer/QA isolation.
+
+**dangerously_skip_permissions** — DEFAULT to `true`. Only emit `false` when the user has explicitly asked for it.
+
+```yaml
+teams:
+  - key: main
+    name: ...
+    dangerously_skip_permissions: true  # default unless user asks for false
+    ...
+```
+
+The reasoning: gala_team is an orchestrator the user has already opted into. Engineers running with `--dangerously-skip-permissions` skip claude's per-tool approval prompts that would otherwise pause the orchestration on every Edit / Write / Bash. Without it, a 4-member team can produce dozens of approval prompts per turn — the user spends more time clicking "Allow" than reading deliverables, and the orchestrator's parallel fanout serializes against the user's wrist. The user has approved the orchestrator's existence; they don't need to re-approve every file write inside it.
+
+The flag is per-team (cross-team consults must opt in separately), so this isn't a blanket "trust everything" — it's "trust this team's claude session to do the file edits its dispatch body asked it to do".
+
+**Only emit `dangerously_skip_permissions: false`** when:
+- The user explicitly asked for `false` / for permission prompts.
+- The team is operating on a sensitive repo where every edit warrants a human-in-the-loop check (the user will say so).
+
+Don't emit `false` because of generic "safety" instincts. The whole point of gala_team is that the orchestrator + the lead's review + QA + the user's Approval modal are the safety layers; per-tool prompts on top of all that just slow the system down.
 
 **merge_rule**:
 - `squash` — default for most projects. One PR = one commit on the target branch.
@@ -196,7 +219,8 @@ When the input is an existing `team.yaml`, do step 1 (survey project) then a SEC
 - **Vague personalities** — "smart engineer" / "10 years experience". Rewrite as voice + decision style.
 - **Identical personalities** across engineers. Differentiate or drop one.
 - **QA enabled but no QA member** (or vice versa) — yaml validates but FSM stalls on QAGate forever.
-- **`workspace_mode: shared` with 2+ engineers** — likely a bug; they'll trample each other's working tree. Switch to `worktree-per-engineer`.
+- **`workspace_mode: shared` without a stated reason** — `worktree-per-engineer` is the default. Shared mode with 2+ engineers is almost always a bug (they trample each other); shared mode with 1 engineer is fine if the user picked it deliberately, but if there's no comment / extra_instructions explaining why, propose flipping to worktree.
+- **`dangerously_skip_permissions: false` (or absent) without a stated reason** — `true` is the default. Without it, every Edit / Write / Bash from any member opens an approval prompt; the orchestrator's parallel fanout serializes against the user's wrist. Propose flipping to true unless the team's notes say "permission prompts are required because <reason>".
 - **`pre_merge` hooks that don't match CI** — engineer ships work that passes locally but CI rejects. Sync them.
 - **No team-wide onboarding when CLAUDE.md exists** — the project's own conventions are invisible to the team.
 - **5+ members** — usually means the lead can't write distinct briefs. Suggest consolidating or splitting into multi-team.
@@ -215,6 +239,7 @@ teams:
   - key: main
     name: "Authy"
     description: "Auth-service maintainers"
+    dangerously_skip_permissions: true
     onboarding:
       - CLAUDE.md
       - docs/ARCHITECTURE.md
@@ -283,7 +308,8 @@ The rationale that should accompany it:
 
 - 2 engineers because Authy's typical features (e.g. "add OAuth provider X") split into auth-flow + storage. 1 would queue them serially; 3 would force the lead to invent fake decomposition.
 - QA included because production auth code; River's verdict format mirrors the orchestrator's QA-prompt expectations (cite refs, open with recommendation).
-- `worktree-per-engineer` — required by 2 engineers + QA reviewing committed work.
+- `dangerously_skip_permissions: true` — the default. The orchestrator + lead review + QA + the Approval modal are the safety layers; per-tool prompts on top of those would just stall every dispatch on the user's wrist.
+- `worktree-per-engineer` — the default, required anyway by 2 engineers + QA reviewing committed work.
 - Hooks pulled from CI — the actual `bazel test //...` command, not a stubbed `go test`.
 - Onboarding includes CLAUDE.md so the team's CLAUDE-style rules (functional, no `any`) flow into every member.
 - Lin's `extra_instructions` repeats the @summary rules because past sessions have shown TLs slipping into chat-recap PRs without it.

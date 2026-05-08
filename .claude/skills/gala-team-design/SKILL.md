@@ -28,7 +28,7 @@ Plus a brief rationale (~5-8 bullets) explaining the key choices: roster size, w
 When given a project path:
 
 1. Read `README.md` (or equivalent) for project purpose + commands. Skim, don't summarize back.
-2. Read `CLAUDE.md` if present — it's the highest-signal source on conventions, gotchas, and forbidden patterns. Anything in CLAUDE.md MUST flow through into the team's `extra_instructions` or per-role onboarding.
+2. Read `CLAUDE.md` if present — it's the highest-signal source on conventions, gotchas, and forbidden patterns. CLAUDE.md belongs in **team-wide `onboarding:`** (so every member reads it on first prompt). Do NOT also restate its rules in `extra_instructions` — that's duplication; the model already has the file in context.
 3. Detect the language(s) and build system:
    - Look for `go.mod`, `Cargo.toml`, `package.json`, `pyproject.toml`, `pom.xml`, `BUILD.bazel`, `Makefile`, etc.
    - Run the file lookup with Glob — don't guess.
@@ -90,20 +90,55 @@ Examples that DON'T work (too vague / too vibes-y / too prescriptive):
 ```yaml
 personality: "Senior engineer with 10 years of experience"   # no behavioral signal
 personality: "Smart and helpful"                              # vacuous
-personality: "Always uses the strategy pattern"               # belongs in extra_instructions
+personality: "Always uses the strategy pattern"               # coding convention — belongs in CLAUDE.md / onboarding, not personality
 ```
 
-`extra_instructions` carries project-specific rules the personality doesn't capture:
-- Coding conventions ("default to pattern matching over if-else")
-- Forbidden patterns ("never use `any`/`interface{}` — fail with an error if type can't be inferred")
-- Required practices ("write the test before the implementation")
-- Project-specific tools ("use `bazel test //crypto:crypto_test` not `go test`")
-- Anything from the project's CLAUDE.md that applies to the member's role
+### What the orchestrator already injects — DO NOT restate in `extra_instructions`
 
-Lead's extra_instructions specifically should cover:
-- When to dispatch in parallel vs sequence
-- When to @consult a sibling team (only if multi-team)
-- @summary discipline ("PR description, not chat recap; ## What / ## Why / ## Follow-ups")
+The orchestrator builds every member's first prompt by stitching together (1) the role section it generates internally, (2) the team-wide and per-member `onboarding:` files, and (3) the user's task. Anything inside (1) or (2) is already in the model's context — restating it in `extra_instructions` is pure duplication. It bloats the prompt, fights the source of truth in `app/onboarding/onboarding.gala` + `app/ui/update.gala::buildQAReviewPrompt`, and changes nothing in behavior.
+
+What the **TL prompt** already injects (`onboarding.gala::protocolSection`, isTL branch):
+- Directive vocabulary (`@dispatch`, `@consult`, `@summary`, `@end`) with a worked two-engineers-in-parallel example.
+- The full `@summary` PR-shape rules: `## What` / `## Why` / `## Follow-ups`, "no member names / no orchestration internals", "if you can't ship, don't `@summary`".
+- A worked `@summary` example body.
+- Cross-team consult etiquette (when the first prompt this turn arrived via `@consult`).
+- "Don't fabricate names — only dispatch to members listed in `# Your team`".
+- "What does NOT dispatch" (decorative arrows, multi-target syntax, markdown headings).
+- TL workspace layout: lead branch, `_lead/` worktree, "main repo OFF LIMITS", PR snapshot mechanics, "multiple PRs from one workspace coexist".
+
+What the **engineer / QA prompt** already injects (`onboarding.gala::protocolSection`, !isTL branch):
+- `@finished` / `@help` / `@blocked` vocabulary, "exactly one terminal directive per turn".
+- Member workspace layout: own cwd, own branch, "list files you wrote in `@finished`".
+- The "commit before `@finished`" requirement and the exact `git add -A && git commit` recipe.
+
+What the **QA review prompt** already injects (`update.gala::buildQAReviewPrompt`, sent at every QA turn):
+- A pre-aggregated **deliverable manifest**: each engineer's cwd + branch + changed files (with `C` / `M` / `?` prefixes).
+- Verdict format: open with `Recommendation: re-dispatch <Member>` / `Recommendation: TL acts directly` / `Recommendation: escalate to user`.
+- "Cite EXACT branch refs from the manifest above" (with the `gala_team/<proj>/<member>` pattern).
+- "Cite absolute file paths" (the worktree paths from the manifest).
+- The required `Files reviewed: ...` closing line.
+- The full `@finished` / `@blocked` sign-off protocol.
+
+What the **onboarding files** already inject (whatever you list under `onboarding:`):
+- Full text of `CLAUDE.md`, `GALA_BEST_PRACTICES.md`, `ARCHITECTURE.md`, etc.
+- Coding conventions, forbidden patterns, required practices, project-specific tooling, hard rules — **all of these belong in onboarding files**, not pasted into `extra_instructions`. If a rule isn't already documented in the project, add it to `CLAUDE.md` or a new doc and onboard on it; don't paper over the gap by inlining it on the team config.
+
+### What `extra_instructions` IS for
+
+Use it only for things the orchestrator's built-ins and onboarding can't supply:
+
+- **TL: zone-of-focus routing.** The TL's roster section lists members + first-line personalities, but it doesn't tell the TL where each engineer DEFAULTS. A 2+ engineer team benefits from "Felix → frontend, Mira → API" routing the TL otherwise has to re-derive every turn.
+- **TL: multi-team scope.** In a multi-team setup, what THIS team owns vs siblings (e.g. "this team handles `auth/`, sibling `data` team handles `ingest/`"). The cross-team consult etiquette is built-in; the team-vs-team scope boundary is config knowledge.
+- **Engineer: zone echo.** A one-line reminder of the engineer's own default focus, so they don't drift cross-cutting on every brief.
+- **QA: usually empty.** Onboarding + the QA review prompt already cover the role almost completely. Leave it blank unless there's a verdict-shaping concern that isn't already in CLAUDE.md and isn't already in the built-in QA prompt.
+
+Two quick smell tests for any line you're tempted to add:
+- Is this line specific to *this team's roster / decomposition*? If yes, keep it. If it would apply equally to any team running the same project, it belongs in `CLAUDE.md` / onboarding.
+- Could this line be invalidated by a future change to `app/onboarding/onboarding.gala` or `app/ui/update.gala`? If yes, it's restating a built-in — drop it.
+
+If you find yourself writing "must use functional patterns", "always cite branch refs", "open with Recommendation:", or "@summary must be PR-shaped" — stop. The first belongs in the project's `CLAUDE.md`; the rest are already injected by the orchestrator.
+
+### Personalities — keep distinct
 
 Make personalities **distinct across members**. Two engineers with the same voice produce indistinguishable transcripts and waste a slot.
 
@@ -206,6 +241,7 @@ Before emitting the final yaml, sanity-check:
 - [ ] No tab characters anywhere in the yaml (gala's decoder is strict).
 - [ ] `workspace_mode` matches the team size (multi-engineer → `worktree-per-engineer`).
 - [ ] No personal usernames, absolute home paths, or other private artifacts in any string field.
+- [ ] **No `extra_instructions` line duplicates the orchestrator's built-in injections.** Re-read every `extra_instructions` block and ask: "is this already in the TL prompt / engineer prompt / QA review prompt / onboarding files?" If yes, strip it. The remaining content should be zone-of-focus routing (lead) + own-zone echo (engineers) + usually-empty (QA).
 
 If any check fails, fix before emitting.
 
@@ -224,7 +260,14 @@ When the input is an existing `team.yaml`, do step 1 (survey project) then a SEC
 - **`pre_merge` hooks that don't match CI** — engineer ships work that passes locally but CI rejects. Sync them.
 - **No team-wide onboarding when CLAUDE.md exists** — the project's own conventions are invisible to the team.
 - **5+ members** — usually means the lead can't write distinct briefs. Suggest consolidating or splitting into multi-team.
-- **Missing `extra_instructions` on the lead** — leads default to generic "decompose and dispatch" without project-specific guidance, producing low-quality @dispatch bodies.
+- **`extra_instructions` duplicates orchestrator built-ins.** The most common smell. Look for:
+  - Lead `extra_instructions` restating `@summary` PR-shape rules (`## What` / `## Why` / `## Follow-ups`, "no internal nuance", "no orchestration internals") or the parallel-dispatch example — all already in `app/onboarding/onboarding.gala::protocolSection`.
+  - QA `extra_instructions` restating "open with `Recommendation:`", "cite branch refs", "cite absolute file paths" — all already in `app/ui/update.gala::buildQAReviewPrompt`.
+  - Engineer `extra_instructions` restating coding conventions / forbidden patterns / hard rules from the project's `CLAUDE.md` — those are already loaded once via team-wide `onboarding:`.
+
+  Strip these. What's left should be zone-of-focus routing on the lead, an own-zone echo on each engineer, and (almost always) empty for QA.
+
+- **Missing zone-of-focus routing on a 2+ engineer team's lead** — the TL's roster section lists members but doesn't say where each defaults. Without routing, the lead has to invent decomposition every turn. Add a short "Felix → X, Mira → Y" block to the lead's `extra_instructions` (and a one-line echo on each engineer).
 
 Produce a focused diff: list each change with its rationale. Don't rewrite the whole file when 3 fields need changes.
 
@@ -251,33 +294,29 @@ teams:
           Always closes a turn with @summary or returns to the user with a
           specific next step — never trails off.
         extra_instructions: |
-          Prefer one engineer for single-file changes; two for orthogonal
-          tasks (auth flow vs storage layer).
-          @summary body must be PR-shaped: ## What / ## Why / ## Follow-ups.
-          Never paste internal paths or bookkeeping into @summary.
+          Zone-of-focus when picking who to dispatch:
+            Quinn → auth flow (handlers, middleware, OAuth provider glue)
+            Sage  → storage (DB schema, queries, migrations)
+          Cross-over allowed when the work demands it; bias to defaults
+          when both engineers fit equally.
       - role: engineer
         name: "Quinn"
         personality: |
           Functional-leaning, terse. States invariants before code.
         extra_instructions: |
-          Default to pattern matching and small pure functions per the
-          repo's CLAUDE.md; avoid mutable state outside func bodies.
+          Default focus: auth flow — handlers, middleware, OAuth glue.
+          Cross over to storage only when the work demands it.
       - role: engineer
         name: "Sage"
         personality: |
           Pragmatic. Reaches for the boring solution. Writes tests first.
         extra_instructions: |
-          Cover happy path + 1-2 edge cases per change. Never ship without
-          a passing test for the new behavior.
+          Default focus: storage — DB schema, queries, migrations.
+          Cross over to handlers only when the work demands it.
       - role: qa
         name: "River"
         personality: |
           Evidence-driven. Reproduces bugs in a test before opining.
-        extra_instructions: |
-          Verdicts cite EXACT branch refs (gala_team/<proj>/<member>) and
-          ABSOLUTE file paths from the manifest, not member names alone.
-          Open with: Recommendation: re-dispatch / TL acts directly /
-          escalate to user.
 
 workflow:
   qa_required: true
@@ -307,12 +346,13 @@ policy:
 The rationale that should accompany it:
 
 - 2 engineers because Authy's typical features (e.g. "add OAuth provider X") split into auth-flow + storage. 1 would queue them serially; 3 would force the lead to invent fake decomposition.
-- QA included because production auth code; River's verdict format mirrors the orchestrator's QA-prompt expectations (cite refs, open with recommendation).
+- QA included because production auth code. River's `extra_instructions` is empty: the built-in QA review prompt already injects the verdict format (Recommendation type, branch refs from the manifest, absolute file paths, `Files reviewed:` line), and onboarding carries the project rules — there's nothing config-specific to add.
 - `dangerously_skip_permissions: true` — the default. The orchestrator + lead review + QA + the Approval modal are the safety layers; per-tool prompts on top of those would just stall every dispatch on the user's wrist.
 - `worktree-per-engineer` — the default, required anyway by 2 engineers + QA reviewing committed work.
 - Hooks pulled from CI — the actual `bazel test //...` command, not a stubbed `go test`.
-- Onboarding includes CLAUDE.md so the team's CLAUDE-style rules (functional, no `any`) flow into every member.
-- Lin's `extra_instructions` repeats the @summary rules because past sessions have shown TLs slipping into chat-recap PRs without it.
+- Onboarding includes CLAUDE.md so the team's CLAUDE-style rules (functional, no `any`) reach every member without being restated per-role.
+- Lin's `extra_instructions` is just zone-of-focus routing. The `@summary` PR-shape rules and the parallel-dispatch example are already injected by the orchestrator's built-in TL prompt; restating them would only duplicate what the model sees on first prompt.
+- Quinn's and Sage's `extra_instructions` echo their default zone in one line each — the TL has the routing, the engineers have the matching default. Coding conventions (pattern matching, immutability, test-first) are NOT restated here; CLAUDE.md in onboarding covers them.
 
 ---
 

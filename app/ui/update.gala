@@ -3649,7 +3649,13 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
             session.ConversationLine(Speaker = "policy", Text = s"running ${m.Policy.PreMerge.Size()} pre-merge hook(s)…"),
         ),
     )
-    return (noted, hooksFutureCmd(m.Project, m.Policy.PreMerge, body))
+    // Pre-merge hooks validate the work that's about to ship — that
+    // lives on the lead branch in the lead's worktree, NOT in the
+    // user's main checkout. Running from proj.Repo would test a stale
+    // tree and (with bazel) walk into .gala_team/worktrees/_lead/'s
+    // own bazel-* output symlinks from the outer workspace.
+    val leadCwd = onboarding.WorkspacePathFor(m.Project, m.Team.Lead, m.Policy.WorkspaceMode)
+    return (noted, hooksFutureCmd(leadCwd, m.Policy.PreMerge, body))
 }
 
 // recoverApprovalIfReady scans `m.Conversation` in reverse for the
@@ -3886,8 +3892,8 @@ func refMissing(repo string, ref string) bool {
 // future resolves to Try[bool]; we map Success(_) to
 // PreMergeHooksPassed(body) (carrying the summary so the PR-create
 // step has it) and Failure(err) to PreMergeHooksFailed(err.Error()).
-func hooksFutureCmd(proj Project, hooks Array[policy.Hook], body string) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = policy.RunHooksFuture(proj, hooks).Map((res Try[bool]) => res match {
+func hooksFutureCmd(cwd string, hooks Array[policy.Hook], body string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = policy.RunHooksFuture(cwd, hooks).Map((res Try[bool]) => res match {
         case Success(_)   => PreMergeHooksPassed(SummaryBody = body)
         case Failure(err) => PreMergeHooksFailed(ErrText = err.Error())
     }))
@@ -4044,11 +4050,17 @@ func onMerged(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
             session.ConversationLine(Speaker = "policy", Text = s"running ${m.Policy.PostMerge.Size()} post-merge hook(s)…"),
         ),
     )
-    return (noted, postMergeHooksFutureCmd(m.Project, m.Policy.PostMerge, url))
+    // Post-merge hooks run AFTER `gh pr merge` has landed the change
+    // on origin/<defaultBranch>. The user's main checkout is the
+    // natural cwd here — these hooks are typically notify / deploy
+    // scripts that operate against the project repo, not the lead
+    // worktree (which by this point has been (or is about to be)
+    // wiped by the start-fresh path).
+    return (noted, postMergeHooksFutureCmd(m.Project.Repo, m.Policy.PostMerge, url))
 }
 
-func postMergeHooksFutureCmd(proj Project, hooks Array[policy.Hook], url string) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = policy.RunHooksFuture(proj, hooks).Map((res Try[bool]) => res match {
+func postMergeHooksFutureCmd(cwd string, hooks Array[policy.Hook], url string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = policy.RunHooksFuture(cwd, hooks).Map((res Try[bool]) => res match {
         case Success(_)   => PostMergeHooksPassed(Url = url)
         case Failure(err) => PostMergeHooksFailed(ErrText = err.Error())
     }))

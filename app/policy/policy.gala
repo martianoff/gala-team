@@ -47,8 +47,10 @@ sealed type MergeRule {
 
 // Hook is a single shell command run at a lifecycle point. Name is
 // surfaced in the conversation log when the hook fires; Cmd is the
-// program; Args is its argv tail. Cwd defaults to the project repo
-// (Phase 1; future versions may add per-engineer worktree cwds).
+// program; Args is its argv tail. Cwd is supplied by the caller of
+// RunHooks — pre-merge runs from the lead's worktree (so the hooks
+// validate the work that's about to ship); post-merge runs from
+// the project repo (the merged state).
 struct Hook(
     Name string,
     Cmd  string,

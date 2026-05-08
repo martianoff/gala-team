@@ -8,7 +8,6 @@ gala_library(
     ],
     importpath = "github.com/martianoff/gala_team/app/policy",
     deps = [
-        "//app/project",
         "@gala//collection_immutable",
         "@gala//concurrent",
         "@gala//go_interop",
@@ -20,9 +19,16 @@ gala_library(
 gala_go_test(
     name = "policy_test",
     srcs = ["policy_test.gala"],
+    pkg = "policy",
+    lib_srcs = [
+        "policy.gala",
+        "runner.gala",
+    ],
     deps = [
         ":policy",
-        "//app/project",
         "@gala//collection_immutable",
+        "@gala//concurrent",
+        "@gala//go_interop",
+        "@gala//subprocess",
     ],
 )

@@ -6,19 +6,25 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
-    . "github.com/martianoff/gala_team/app/project"
 )
 
 // ============================================================================
-// runner — sequential hook execution against a project.
+// runner — sequential hook execution against a caller-chosen cwd.
 //
 // The Phase 1 contract is intentionally narrow: feed in an array of
-// Hooks plus a Project, get back Try[bool] that's Success(true) iff
-// every hook exited 0. The first non-zero exit (or spawn failure)
-// short-circuits and surfaces with a "<hook name>: <error>" message.
+// Hooks plus a working directory, get back Try[bool] that's
+// Success(true) iff every hook exited 0. The first non-zero exit (or
+// spawn failure) short-circuits and surfaces with a "<hook name>:
+// <error>" message.
 //
-// Hooks run in the project repo (`proj.Repo`). Per-engineer worktree
-// cwds will land in a follow-up once WorktreePerEngineer is wired up.
+// The runner is cwd-agnostic by design: the caller picks the right dir
+// for each policy phase (pre-merge runs from the lead's worktree so it
+// validates the work that's about to ship; post-merge runs from
+// proj.Repo). Past audits caught a regression where this code spawned
+// hooks in the user's main checkout, which (a) tested a stale tree
+// without the lead's commits and (b) made bazel walk into
+// `.gala_team/worktrees/_lead/bazel-_lead/...` from the outer
+// workspace and explode on external test fixtures.
 //
 // We expose two flavors:
 //   - RunHooks: blocking, returns a Try. Useful for unit tests.
@@ -36,18 +42,19 @@ struct HookResult(
     Stderr   string,
 )
 
-// RunHooks runs every hook in `hooks` sequentially against `proj.Repo`.
-// Returns Success(true) iff every hook exited 0; otherwise Failure
-// with a wrapped error tagged with the failing hook's name.
+// RunHooks runs every hook in `hooks` sequentially with `cwd` as the
+// working directory of each spawned subprocess. Returns Success(true)
+// iff every hook exited 0; otherwise Failure with a wrapped error
+// tagged with the failing hook's name.
 //
 // This is the synchronous, in-process flavor. The Future variant below
 // wraps this same call site for the UI layer.
-func RunHooks(proj Project, hooks Array[Hook]) Try[bool] = Try(() => {
+func RunHooks(cwd string, hooks Array[Hook]) Try[bool] = Try(() => {
     var i = 0
     val n = hooks.Size()
     for i < n {
         val hook = hooks.Get(i)
-        runOne(proj, hook) match {
+        runOne(cwd, hook) match {
             case Failure(err) => panic(s"${hook.Name}: ${err.Error()}")
             case Success(r)   => {
                 if r.ExitCode != 0 {
@@ -61,19 +68,19 @@ func RunHooks(proj Project, hooks Array[Hook]) Try[bool] = Try(() => {
 })
 
 // RunHooksFuture wraps RunHooks for the UI dispatch loop.
-func RunHooksFuture(proj Project, hooks Array[Hook]) concurrent.Future[Try[bool]] =
-    concurrent.FutureApply[Try[bool]](() => RunHooks(proj, hooks))
+func RunHooksFuture(cwd string, hooks Array[Hook]) concurrent.Future[Try[bool]] =
+    concurrent.FutureApply[Try[bool]](() => RunHooks(cwd, hooks))
 
-// runOne spawns a single hook and drains its stdout / stderr. Returns
-// HookResult on success (the spawn ran to completion; the exit code
-// might still be non-zero), Failure if the spawn itself failed
+// runOne spawns a single hook in `cwd` and drains its stdout / stderr.
+// Returns HookResult on success (the spawn ran to completion; the exit
+// code might still be non-zero), Failure if the spawn itself failed
 // (executable not found, etc.).
-func runOne(proj Project, hook Hook) Try[HookResult] = Try(() => {
+func runOne(cwd string, hook Hook) Try[HookResult] = Try(() => {
     val opts = subprocess.NewSpawnOpts(
         hook.Cmd,
         hook.Args.ToGoSlice(),
         SliceEmpty[string](),
-        proj.Repo,
+        cwd,
     )
     val proc = subprocess.Spawn(opts) match {
         case Success(p)   => p

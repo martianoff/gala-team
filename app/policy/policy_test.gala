@@ -4,7 +4,6 @@ import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "github.com/martianoff/gala_team/app/project"
 )
 
 // ----- Pure schema tests -----------------------------------------------------
@@ -42,14 +41,8 @@ func TestWorkspaceModeName_BothVariants(t T) T {
 // know is on PATH, and send it `version` (always exits 0) or a bogus
 // flag (always exits non-zero).
 
-func sampleProject() Project = Project(
-    Name = "demo", Repo = ".",
-    Github = None[string](),
-    DefaultBranch = "main",
-)
-
 func TestRunHooks_EmptyHooksReturnsSuccess(t T) T {
-    val res = RunHooks(sampleProject(), EmptyArray[Hook]())
+    val res = RunHooks(".",EmptyArray[Hook]())
     return IsSuccess(t, res)
 }
 
@@ -60,7 +53,7 @@ func TestRunHooks_SingleSuccessfulHook(t T) T {
     val hooks = ArrayOf(
         Hook(Name = "git-version", Cmd = "git", Args = ArrayOf("--version")),
     )
-    val res = RunHooks(sampleProject(), hooks)
+    val res = RunHooks(".",hooks)
     return IsSuccess(t, res)
 }
 
@@ -69,7 +62,7 @@ func TestRunHooks_FirstFailureShortCircuits(t T) T {
         Hook(Name = "doomed",  Cmd = "git", Args = ArrayOf("--definitely-not-a-flag")),
         Hook(Name = "skipped", Cmd = "git", Args = ArrayOf("--version")),
     )
-    val res = RunHooks(sampleProject(), hooks)
+    val res = RunHooks(".",hooks)
     return IsFailure(t, res)
 }
 
@@ -82,7 +75,7 @@ func TestRunHooks_SpawnFailure_SurfacesAsFailure(t T) T {
     val hooks = ArrayOf(
         Hook(Name = "missing", Cmd = "this-binary-definitely-does-not-exist-12345", Args = EmptyArray[string]()),
     )
-    val res = RunHooks(sampleProject(), hooks)
+    val res = RunHooks(".",hooks)
     return IsFailure(t, res)
 }
 
@@ -94,7 +87,7 @@ func TestRunHooks_MultiArg_AllArgsPassed(t T) T {
     val hooks = ArrayOf(
         Hook(Name = "git-status", Cmd = "git", Args = ArrayOf("--no-pager", "--version")),
     )
-    val res = RunHooks(sampleProject(), hooks)
+    val res = RunHooks(".",hooks)
     return IsSuccess(t, res)
 }
 
@@ -105,7 +98,7 @@ func TestRunHooks_TwoSuccessfulHooks_BothRun(t T) T {
         Hook(Name = "first",  Cmd = "git", Args = ArrayOf("--version")),
         Hook(Name = "second", Cmd = "git", Args = ArrayOf("--version")),
     )
-    val res = RunHooks(sampleProject(), hooks)
+    val res = RunHooks(".",hooks)
     return IsSuccess(t, res)
 }
 
@@ -115,7 +108,7 @@ func TestRunHooks_NonZeroExit_IsFailure(t T) T {
     val hooks = ArrayOf(
         Hook(Name = "bad-flag", Cmd = "git", Args = ArrayOf("--bad-flag-that-does-not-exist")),
     )
-    val res = RunHooks(sampleProject(), hooks)
+    val res = RunHooks(".",hooks)
     return IsFailure(t, res)
 }
 

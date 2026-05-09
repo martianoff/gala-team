@@ -486,6 +486,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case FocusSidebarClicked()       => (m.Copy(Focus = FocusSidebar()), NoCmd[AppMsg]())
     case FocusComposerClicked()      => (m.Copy(Focus = FocusComposer()), NoCmd[AppMsg]())
     case SidebarRowClicked(idx)      => onSidebarRowClicked(m, idx)
+    case ClickConversationEntry(idx) => onClickConversationEntry(m, idx)
     case KeyEraseSession()           => onEraseSession(m)
     case KeyYankConversation()       => onYankConversation(m)
     case KeyPasteClipboard()         => onPasteClipboard(m)
@@ -732,6 +733,35 @@ func onSidebarRowClicked(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
         case Some(_) => onSidebarToggleGroup(mFocused)
         case None()  => (mFocused, NoCmd[AppMsg]())
     }
+}
+
+// onClickConversationEntry records a left-click on a rendered
+// ConversationLog entry. The user can then Ctrl+Y to copy just that
+// entry, or Esc to clear the selection. Clicking again on a
+// different entry simply moves the selection.
+//
+// idx is in the same coordinate space as cvBuildLayout's entry
+// indices (oldest-first into the ConversationLog). We clamp to the
+// conversation size so a stale click during a fast append (entry
+// index recorded a frame before the conversation grew) doesn't land
+// out of bounds.
+//
+// Clicking on the already-selected entry toggles selection off — a
+// natural deselect gesture without forcing the user to hunt for Esc.
+func onClickConversationEntry(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
+    val total = m.Conversation.Size()
+    if total == 0 { return (m, NoCmd[AppMsg]()) }
+    val clamped = if (idx < 0) 0
+                  else if (idx >= total) total - 1
+                  else idx
+    val isToggleOff = m.SelectedEntry match {
+        case Some(prev) => prev == clamped
+        case None()     => false
+    }
+    if isToggleOff {
+        return (m.Copy(SelectedEntry = None[int]()), NoCmd[AppMsg]())
+    }
+    return (m.Copy(SelectedEntry = Some(clamped)), NoCmd[AppMsg]())
 }
 
 // onSidebarToggleGroup folds or unfolds the role group at
@@ -1158,11 +1188,15 @@ func clipboardReadCmd() Tuple[string, Array[string]] {
     return ("xclip", ArrayOf("-selection", "clipboard", "-o"))
 }
 
-// onYankConversation copies the entire conversation transcript to the
-// system clipboard via the terminal's OSC 52 escape sequence. The
-// terminal — not gala_team — receives the escape and talks to the OS
-// clipboard, so it works over SSH and across multiplexers like tmux
-// (provided they pass OSC 52 through, which most do).
+// onYankConversation copies conversation text to the system clipboard
+// via the terminal's OSC 52 escape sequence. The terminal — not
+// gala_team — receives the escape and talks to the OS clipboard, so
+// it works over SSH and across multiplexers like tmux (provided
+// they pass OSC 52 through, which most do).
+//
+// Selection-aware: if `m.SelectedEntry` is set (the user clicked a
+// conversation entry), copy just that one entry's `Speaker: Text`.
+// Otherwise copy the whole transcript (the long-standing behavior).
 //
 // Synchronous one-shot write: OSC 52 is a tiny out-of-band escape
 // that doesn't interfere with the cell grid the renderer just drew,
@@ -1176,6 +1210,29 @@ func onYankConversation(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         val toast = m.Toasts.PushInfo("nothing to copy — conversation is empty", time_utils.Now(), time_utils.Seconds(int64(3)))
         return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
     }
+    return m.SelectedEntry match {
+        case Some(idx) => yankSingleEntry(m, idx)
+        case None()    => yankFullTranscript(m)
+    }
+}
+
+func yankSingleEntry(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
+    if idx < 0 || idx >= m.Conversation.Size() {
+        // Out-of-range selection (shouldn't happen — clicks clamp,
+        // KeySubmit drops the selection — but be defensive).
+        return yankFullTranscript(m)
+    }
+    val cl = m.Conversation.Get(idx)
+    val rendered = s"${cl.Speaker}: ${cl.Text}"
+    val (_, err) = CopyToClipboard(rendered)
+    if err != nil {
+        return (m.Copy(LastError = Some(s"clipboard copy failed: ${err.Error()}")), NoCmd[AppMsg]())
+    }
+    val toast = m.Toasts.PushInfo(s"copied ${cl.Speaker}'s entry to clipboard", time_utils.Now(), time_utils.Seconds(int64(3)))
+    return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
+}
+
+func yankFullTranscript(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val rendered = m.Conversation.Map((cl session.ConversationLine) =>
         s"${cl.Speaker}: ${cl.Text}"
     ).MkString("\n")
@@ -1239,6 +1296,7 @@ func clearSessionState(m AppModel) AppModel {
         Composer              = "",
         ComposerCursor        = 0,
         LastError             = None[string](),
+        SelectedEntry         = None[int](),
     )
 }
 
@@ -1299,6 +1357,11 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // in this turn if a multi-PR split is wanted again.
         Plan          = EmptyArray[string](),
         PlanShipped   = 0,
+        // Drop a stale conversation-entry selection — the entry index
+        // a click recorded earlier may shift as we append the new
+        // user line + member responses, and a highlight on the wrong
+        // row would read as a ghost.
+        SelectedEntry = None[int](),
         // First user prompt after a recovery dismisses the banner
         // automatically — the user has signaled they want to
         // continue, so the "type to resume · Esc to discard" hint
@@ -4647,6 +4710,9 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     }
     if m.MemberDetailOpen.IsDefined() {
         return (m.Copy(MemberDetailOpen = None[string]()), NoCmd[AppMsg]())
+    }
+    if m.SelectedEntry.IsDefined() {
+        return (m.Copy(SelectedEntry = None[int]()), NoCmd[AppMsg]())
     }
     if m.RecoveryBannerVisible {
         return (m.Copy(

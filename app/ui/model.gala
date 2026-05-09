@@ -157,6 +157,15 @@ struct AppModel(
     // fresh prompt overrides any pending plan.
     Plan         Array[string],
     PlanShipped  int,
+    // Index of the currently-selected ConversationLog entry — what a
+    // mouse click on the conversation pane records, what Ctrl+Y
+    // copies when set (just that entry, not the whole transcript),
+    // and what the rendered conversation pane highlights with a
+    // reverse-video pass. None = no selection (Ctrl+Y falls back to
+    // the full-transcript copy). Cleared by Esc, by KeyEraseSession,
+    // and on every successful KeySubmit (a new turn invalidates the
+    // selection because the conversation grew underneath it).
+    SelectedEntry Option[int],
     // Per-turn TL output accumulator. Reset on every KeySubmit. Used by
     // the chunk pump to detect newly-completed @consult blocks without
     // re-scanning the entire conversation log.
@@ -430,6 +439,7 @@ func InitialModelWithTeams(
     ActiveBase   = None[string](),
     Plan         = EmptyArray[string](),
     PlanShipped  = 0,
+    SelectedEntry = None[int](),
     TurnBuffer    = "",
     ConsultsFired = 0,
     ActiveConsults = EmptyHashMap[string, ConsultSession](),
@@ -572,6 +582,13 @@ sealed type AppMsg {
     // the clicked row; group-header rows additionally toggle
     // fold/unfold (matches the keyboard Space binding).
     case SidebarRowClicked(VisibleIdx int)
+    // Dispatched by gala-tui's per-entry OnClick wrapper inside the
+    // ConversationLogViewClick widget when the user left-clicks on a
+    // rendered conversation entry. Idx is the entry's 0-based index
+    // in the rendered ConversationLog (oldest-first); the handler
+    // sets m.SelectedEntry so subsequent Ctrl+Y copies just that
+    // entry's text rather than the whole transcript. Esc clears.
+    case ClickConversationEntry(Idx int)
     // Dispatched by gala-tui on a click in the composer's
     // bordered band — switches Focus back to FocusComposer.
     case FocusComposerClicked

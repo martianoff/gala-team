@@ -996,6 +996,102 @@ func TestPostMergeHooksFailed_SetsLastError(t T) T {
 }
 
 // ---------------------------------------------------------------------------
+// Conversation-entry selection (click → SelectedEntry → Ctrl+Y copies
+// just that entry; Esc clears).
+// ---------------------------------------------------------------------------
+
+// Helper: a tiny sample conversation for the selection tests.
+func sampleConversation() Array[session.ConversationLine] = ArrayOf(
+    session.ConversationLine(Speaker = "you",  Text = "ship the metrics endpoint"),
+    session.ConversationLine(Speaker = "Iris", Text = "on it — dispatching Felix."),
+    session.ConversationLine(Speaker = "Felix", Text = "done. Histogram + counter, lints clean."),
+)
+
+func TestClickEntry_SetsSelectedEntry(t T) T {
+    val seed = sampleModel().Copy(Conversation = sampleConversation())
+    val (m, _) = Update(seed, ClickConversationEntry(Idx = 1))
+    return m.SelectedEntry match {
+        case Some(idx) => Eq(t, idx, 1)
+        case None()    => IsTrue(t, false)
+    }
+}
+
+// Click outside the conversation range is dropped — no selection.
+func TestClickEntry_OutOfRange_DroppedSilently(t T) T {
+    val seed = sampleModel().Copy(Conversation = sampleConversation())
+    val (m1, _) = Update(seed, ClickConversationEntry(Idx = 99))
+    val t1 = Eq(t, m1.Conversation.Size(), seed.Conversation.Size())
+    return m1.SelectedEntry match {
+        case Some(idx) => Eq(t1, idx, 2)  // clamped to last entry
+        case None()    => IsTrue(t1, false)
+    }
+}
+
+// Clicking on the same entry that's already selected toggles selection
+// off — natural "deselect" gesture without forcing the user to Esc.
+func TestClickEntry_ClickSameAgain_DeselectsByToggle(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation  = sampleConversation(),
+        SelectedEntry = Some(1),
+    )
+    val (m, _) = Update(seed, ClickConversationEntry(Idx = 1))
+    return IsFalse(t, m.SelectedEntry.IsDefined())
+}
+
+// Clicking an empty conversation is a no-op.
+func TestClickEntry_EmptyConversation_NoOp(t T) T {
+    val (m, _) = Update(sampleModel(), ClickConversationEntry(Idx = 0))
+    return IsFalse(t, m.SelectedEntry.IsDefined())
+}
+
+// Esc clears a live selection (precedence: after MemberDetailOpen,
+// before RecoveryBannerVisible).
+func TestEsc_ClearsSelectedEntry(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation  = sampleConversation(),
+        SelectedEntry = Some(0),
+    )
+    val (m, _) = Update(seed, HistoryDeselect())
+    return IsFalse(t, m.SelectedEntry.IsDefined())
+}
+
+// Ctrl+Y with a selection copies JUST that entry's "Speaker: Text"
+// rather than the full transcript. Toast text reflects the entry
+// path so the user knows which copy fired.
+func TestCtrlY_WithSelection_CopiesSingleEntry(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation  = sampleConversation(),
+        SelectedEntry = Some(2),  // Felix's done line
+    )
+    val (m, _) = Update(seed, KeyYankConversation())
+    val toasts = m.Toasts
+    val t1 = IsTrue(t, toasts.Length() > 0)
+    val msg = toasts.Items.Get(0).Message
+    return IsTrue(t1, strings.Contains(msg, "Felix"))
+}
+
+// Ctrl+Y without a selection still yanks the full transcript (V1
+// behavior preserved).
+func TestCtrlY_NoSelection_StillYanksFullTranscript(t T) T {
+    val seed = sampleModel().Copy(Conversation = sampleConversation())
+    val (m, _) = Update(seed, KeyYankConversation())
+    val msg = m.Toasts.Items.Get(0).Message
+    return IsTrue(t, strings.Contains(msg, "3 lines"))
+}
+
+// New user prompt drops a stale selection — the conversation grows
+// underneath it and the recorded index would point at the wrong row.
+func TestKeySubmit_ClearsSelectedEntry(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation  = sampleConversation(),
+        SelectedEntry = Some(1),
+        Composer      = "next prompt",
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    return IsFalse(t, m.SelectedEntry.IsDefined())
+}
+
+// ---------------------------------------------------------------------------
 // Status state machine — Statuses HashMap reflects who's currently
 // doing what. Sidebar widget reads these.
 // ---------------------------------------------------------------------------

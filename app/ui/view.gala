@@ -1196,18 +1196,47 @@ func conversationPanel(m AppModel) Widget {
         ))
     }
     val width = conversationPaneWidth(m)
-    val entries = m.Conversation.FoldLeft(EmptyArray[ConversationEntry](), (acc, cl session.ConversationLine) => {
-        return acc.AppendAll(renderConversationLine(m, cl, width))
-    })
+    // Walk the conversation lines explicitly so we can build a
+    // parallel "log-entry index → conversation-line index" map
+    // alongside the flattened entry list. renderConversationLine
+    // splits a single conversation line into multiple log entries
+    // (prose / code / fence bars), so a click on any entry needs
+    // to resolve back to the underlying line for selection.
+    var entries = EmptyArray[ConversationEntry]()
+    var lineIdxByEntry = EmptyArray[int]()
+    var lineIdx = 0
+    val totalLines = m.Conversation.Size()
+    val selectedLine = m.SelectedEntry.GetOrElse(-1)
+    for lineIdx < totalLines {
+        val cl = m.Conversation.Get(lineIdx)
+        val isSelected = lineIdx == selectedLine
+        val newEntries = renderConversationLine(m, cl, width, isSelected)
+        var k = 0
+        val nNew = newEntries.Size()
+        for k < nNew {
+            entries = entries.Append(newEntries.Get(k))
+            lineIdxByEntry = lineIdxByEntry.Append(lineIdx)
+            k = k + 1
+        }
+        lineIdx = lineIdx + 1
+    }
     val log = ConversationLog(
         Entries       = entries,
         Offset        = m.ConversationOffset,
         StickToBottom = m.ConversationSticky,
     )
     val viewportH = conversationViewportHeight(m)
+    val mapSize = lineIdxByEntry.Size()
     return Column(ArrayOf[LayoutChild](
         Fixed(1, header),
-        Flex(1, ConversationLogView(log, viewportH)),
+        Flex(1, ConversationLogViewClick[AppMsg](log, viewportH, (logIdx) => {
+            // Defensive clamp — gala-tui should never dispatch an
+            // out-of-range idx for a non-empty log, but a stray click
+            // mid-redraw is safer to ignore than to crash.
+            val safe = if (logIdx < 0 || logIdx >= mapSize) -1
+                       else lineIdxByEntry.Get(logIdx)
+            return ClickConversationEntry(Idx = safe)
+        })),
     ))
 }
 
@@ -1237,10 +1266,16 @@ func conversationViewportHeight(m AppModel) int {
 // widget because ConversationLog needs an explicit Height per entry
 // for sticky-bottom math; a Column widget hides those heights and
 // breaks scrollback.
-func renderConversationLine(m AppModel, cl session.ConversationLine, width int) Array[ConversationEntry] {
-    val proseStyle = speakerStyle(m.Team, cl.Speaker)
-    val codeStyle = DefaultStyle().WithFg(BrightCyan())
-    val codeBarStyle = DefaultStyle().WithFg(BrightCyan()).WithDim()
+func renderConversationLine(m AppModel, cl session.ConversationLine, width int, isSelected bool) Array[ConversationEntry] {
+    val baseProseStyle = speakerStyle(m.Team, cl.Speaker)
+    val baseCodeStyle = DefaultStyle().WithFg(BrightCyan())
+    val baseCodeBarStyle = DefaultStyle().WithFg(BrightCyan()).WithDim()
+    // Selection highlight: every entry under the selected line gets
+    // reverse-video so the whole rendered message reads as one
+    // unambiguous unit, even when it spans prose + code + fence bars.
+    val proseStyle    = if (isSelected) baseProseStyle.WithReverse()    else baseProseStyle
+    val codeStyle     = if (isSelected) baseCodeStyle.WithReverse()     else baseCodeStyle
+    val codeBarStyle  = if (isSelected) baseCodeBarStyle.WithReverse()  else baseCodeBarStyle
     val prefix = s"  ${cl.Speaker}: "
     // Render directive markers at display time — the conversation
     // log stores raw `@summary` / `@end` / `@dispatch` directives

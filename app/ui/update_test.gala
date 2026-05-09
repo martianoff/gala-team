@@ -2211,6 +2211,85 @@ func TestComposerBackspace_RemovesBeforeCursor(t T) T {
 }
 
 // ---------------------------------------------------------------------------
+// Composer Up/Down vertical navigation. Hard \n-separated lines only —
+// soft-wrapped rows aren't navigated row-by-row. A single-line composer
+// jumps to start/end on Up/Down (closest sensible destination).
+// ---------------------------------------------------------------------------
+
+// "abcd\nefgh", cursor at index 2 (between 'b' and 'c'), Down moves to
+// the same column (2) on line 2 — between 'f' and 'g'. Column preserved.
+func TestComposerVerticalMove_Down_PreservesColumn(t T) T {
+    val next = composerVerticalMove("abcd\nefgh", 2, 1)
+    return Eq(t, next, 7)  // 'a','b','c','d','\n','e','f' — index 7 is between f and g
+}
+
+// Mirror of the above: from line 2 col 2, Up goes to line 1 col 2.
+func TestComposerVerticalMove_Up_PreservesColumn(t T) T {
+    val next = composerVerticalMove("abcd\nefgh", 7, -1)
+    return Eq(t, next, 2)
+}
+
+// Target line shorter than the source column → cursor lands at the
+// end of the target line (clamped column).
+func TestComposerVerticalMove_Down_ClampsToShorterLine(t T) T {
+    val next = composerVerticalMove("abcdef\nxy", 5, 1)  // col 5 on line 1
+    return Eq(t, next, 9)  // line 2 only has 2 chars, end of "xy"
+}
+
+// Single-line composer: Up jumps to start.
+func TestComposerVerticalMove_Up_SingleLine_JumpsToStart(t T) T {
+    val next = composerVerticalMove("hello", 5, -1)
+    return Eq(t, next, 0)
+}
+
+// Single-line composer: Down jumps to end.
+func TestComposerVerticalMove_Down_SingleLine_JumpsToEnd(t T) T {
+    val next = composerVerticalMove("hello", 0, 1)
+    return Eq(t, next, 5)
+}
+
+// Already at the first line, Up clamps to 0 (stay at top).
+func TestComposerVerticalMove_Up_FromFirstLine_ClampsToZero(t T) T {
+    val next = composerVerticalMove("abc\ndef\nghi", 1, -1)
+    return Eq(t, next, 0)
+}
+
+// Already at the last line, Down clamps to end (stay at bottom).
+func TestComposerVerticalMove_Down_FromLastLine_ClampsToEnd(t T) T {
+    val next = composerVerticalMove("abc\ndef\nghi", 9, 1)  // 'g','h' col 1 on last line
+    return Eq(t, next, 11)  // total length
+}
+
+// Empty composer: any vertical move is a no-op (cursor stays at 0).
+func TestComposerVerticalMove_Empty_NoOp(t T) T {
+    val up = composerVerticalMove("", 0, -1)
+    val down = composerVerticalMove("", 0, 1)
+    val t1 = Eq(t, up, 0)
+    return Eq(t1, down, 0)
+}
+
+// Up arrow when composer has focus and history modal is closed:
+// cursor moves between hard lines instead of being routed to the
+// no-op history navigation.
+func TestUpArrow_ComposerFocus_MovesCursorBetweenHardLines(t T) T {
+    val m0 = sampleModel().Copy(Composer = "hello\nworld", ComposerCursor = 8)  // col 2 on line 2
+    val (m1, _) = Update(m0, HistoryCursorUp())
+    return Eq(t, m1.ComposerCursor, 2)
+}
+
+// History modal open: Up arrow still drives the modal cursor, not
+// the composer text cursor — the modal owns the keyboard.
+func TestUpArrow_HistoryMode_DoesNotMoveComposerCursor(t T) T {
+    val m0 = sampleModel().Copy(
+        Composer = "hello\nworld",
+        ComposerCursor = 8,
+        HistoryMode = true,
+    )
+    val (m1, _) = Update(m0, HistoryCursorUp())
+    return Eq(t, m1.ComposerCursor, 8)  // unchanged
+}
+
+// ---------------------------------------------------------------------------
 // QA auto-spawn guard: if the lead @dispatches a QA member directly
 // when qa_required is true, spawnDispatchedMembers drops it. Engineers
 // in the same fan-out still go through.

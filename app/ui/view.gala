@@ -91,7 +91,7 @@ func View(m AppModel) Widget {
     val base = Column(ArrayOf[LayoutChild](
         Fixed(4, header),
         Flex(1, body),
-        Fixed(3, composerPanel),
+        Fixed(composerOuterHeight(m), composerPanel),
         Fixed(1, footer),
         // Error banner sits at the very bottom — visible without
         // shadowing the keybind row, off the chat-input area, easy
@@ -1483,31 +1483,125 @@ func consultEntryRows(m AppModel, name string, sess ConsultSession) Array[Layout
 }
 
 func composerWidget(m AppModel) Widget {
-    val style = if (m.Composer == "")
-                    DefaultStyle().WithDim()
-                else
-                    DefaultStyle().WithFg(BrightWhite())
-    val rendered = if (m.Composer == "") {
-        s"  Type to ${m.Team.Lead.Name}…▌"
-    } else {
-        // Render the cursor INSIDE the text, not always at end.
-        // Without this, every keystroke looks identical regardless
-        // of where the user pointed Left/Right/Home — the user has
-        // no visual feedback for the cursor position.
-        val rs = ToRunes(m.Composer)
-        val n = len(rs)
-        val cur = clampCursor(m.ComposerCursor, n)
-        val left = string(SliceTo(rs, cur))
-        val right = string(SliceFrom(rs, cur))
-        s"  ${left}▌${right}"
+    val style = composerStyle(m)
+    val rendered = composerRendered(m)
+    val (cols, rows) = TermSize()
+    val innerW = composerInnerWidth(cols)
+    val wrapped = WrapParagraph(rendered, innerW)
+    val rawTotal = wrapped.Size()
+    val totalRows = if (rawTotal < 1) 1 else rawTotal
+    val visibleRows = composerVisibleRows(totalRows, rows)
+    if totalRows <= visibleRows {
+        return ParagraphStyled(rendered, style)
     }
-    // Long prompts wrap inside the composer panel via Paragraph
-    // instead of clipping at the right edge. The composer panel
-    // itself is Fixed(3, ...) — three rows = ~2 wrapped lines plus
-    // the cursor row. After-paste of a multi-line block, the user
-    // can scroll the input by deleting characters; further scroll-
-    // ability is the textarea-rewrite follow-up (#12 in the queue).
-    return ParagraphStyled(rendered, style)
+    // Wrapped content exceeds the panel — slide a viewport over the
+    // full paragraph so the row holding the cursor glyph stays in
+    // view. ScrollableViewport renders the paragraph into a hidden
+    // buffer of `totalRows` rows and copies the visible slice.
+    val cursorRow = composerCursorRow(wrapped, totalRows)
+    val offset = composerScrollOffset(cursorRow, visibleRows, totalRows)
+    return ScrollableViewport(ParagraphStyled(rendered, style), offset, totalRows)
+}
+
+// composerStyle picks dim grey for the placeholder, bright white once
+// the user has started typing. Split out so composerWidget and the
+// future inline-rename / mode-indicator overlays stay in sync.
+func composerStyle(m AppModel) Style =
+    if (m.Composer == "") DefaultStyle().WithDim()
+    else                  DefaultStyle().WithFg(BrightWhite())
+
+// composerRendered builds the displayable string with the cursor
+// glyph (▌) inserted at the user's cursor offset. Extracted from
+// composerWidget so the height computation in composerOuterHeight
+// wraps the exact same string the renderer will, keeping the panel
+// height in sync with the visible row count.
+//
+// Rendering the cursor INSIDE the text (rather than always at the
+// end) is what gives the user visual feedback for Left / Right /
+// Home / End; without it, every keystroke looks identical regardless
+// of where the cursor actually is.
+func composerRendered(m AppModel) string {
+    if m.Composer == "" {
+        return s"  Type to ${m.Team.Lead.Name}…▌"
+    }
+    val rs = ToRunes(m.Composer)
+    val n = len(rs)
+    val cur = clampCursor(m.ComposerCursor, n)
+    val left = string(SliceTo(rs, cur))
+    val right = string(SliceFrom(rs, cur))
+    return s"  ${left}▌${right}"
+}
+
+// composerInnerWidth returns the cells available for composer content
+// at the given terminal width — total cols minus the 2 cells of side
+// border. Floored at 8 so wrap math stays sane on absurdly narrow
+// terminals (the rendered string would still clip but won't divide-
+// by-zero or loop forever).
+func composerInnerWidth(cols int) int {
+    val w = cols - 2
+    if w < 8 { return 8 }
+    return w
+}
+
+// composerCap returns the maximum inner content rows the composer
+// panel will grow to: never more than half the terminal height and
+// never more than 12 rows. Floors at 1 so the placeholder always
+// renders even on a minuscule terminal.
+func composerCap(rows int) int {
+    val byHalf = rows / 2
+    val capped = if (byHalf < 12) byHalf else 12
+    if capped < 1 { return 1 }
+    return capped
+}
+
+// composerVisibleRows returns the inner content rows the panel will
+// reserve: min(needed, cap). Pulled out so composerWidget and
+// composerOuterHeight can't drift.
+func composerVisibleRows(totalRows int, termRows int) int {
+    val cap = composerCap(termRows)
+    if totalRows < cap { return totalRows }
+    return cap
+}
+
+// composerCursorRow finds the wrapped-line index that contains the
+// cursor glyph "▌". Used to compute the scroll offset that keeps the
+// cursor on screen. If the glyph isn't found (composerRendered always
+// inserts one, but be defensive), pin to the last row so end-of-text
+// stays visible.
+func composerCursorRow(wrapped Array[string], totalRows int) int {
+    var i = 0
+    for i < totalRows {
+        if strings.Contains(wrapped.Get(i), "▌") {
+            return i
+        }
+        i = i + 1
+    }
+    return totalRows - 1
+}
+
+// composerScrollOffset picks the viewport offset that keeps the
+// cursor row visible. Cursor in the first `visibleRows` lines stays
+// pinned to the top of the panel; below that, the viewport slides
+// down so the cursor sits on the last visible row.
+func composerScrollOffset(cursorRow int, visibleRows int, totalRows int) int {
+    if cursorRow < visibleRows { return 0 }
+    val want = cursorRow - visibleRows + 1
+    val maxOffset = totalRows - visibleRows
+    if want > maxOffset { return maxOffset }
+    return want
+}
+
+// composerOuterHeight returns the panel's outer height — visible
+// content rows plus 2 for the top/bottom border. Mirrors
+// composerWidget's wrap so the layout slot exactly fits the rendered
+// content (no blank rows below the text, no clipped cursor row).
+func composerOuterHeight(m AppModel) int {
+    val (cols, rows) = TermSize()
+    val innerW = composerInnerWidth(cols)
+    val wrapped = WrapParagraph(composerRendered(m), innerW)
+    val rawTotal = wrapped.Size()
+    val totalRows = if (rawTotal < 1) 1 else rawTotal
+    return composerVisibleRows(totalRows, rows) + 2
 }
 
 // footerWidget chooses what one-line legend to render at the

@@ -205,6 +205,38 @@ func TestView_Composer_ShowsTypedText(t T) T {
     return IsFalse(t1, strings.Contains(out, "Type to Iris"))
 }
 
+// A composer string that wraps to several rows now grows the panel
+// instead of clipping to a single visible line. We assert that the
+// long substring shows up on more than one rendered terminal row —
+// the prior `Fixed(3, ...)` panel could only fit one.
+func TestView_Composer_LongText_ExpandsPanel(t T) T {
+    val long = strings.Repeat("ship the metrics endpoint ", 20)  // ~520 chars
+    val m = mkModel(mkTeam("X", "")).Copy(Composer = long)
+    val out = render(m)
+    val rows = strings.Split(out, "\n")
+    var i = 0
+    var hits = 0
+    val n = len(rows)
+    for i < n {
+        if strings.Contains(rows[i], "ship the metrics endpoint") {
+            hits = hits + 1
+        }
+        i = i + 1
+    }
+    return IsTrue(t, hits >= 2)
+}
+
+// When the wrapped text exceeds the panel's row cap, the viewport
+// scrolls so the cursor row stays in view. Place the cursor at end
+// of a long string and assert the cursor glyph "▌" still renders.
+func TestView_Composer_LongText_AutoScrollsToCursor(t T) T {
+    val long = strings.Repeat("ship the metrics endpoint ", 50)  // ~1300 chars, > cap rows wrapped
+    // Pure ASCII — byte len == rune count, no need to dot-import go_interop.ToRunes.
+    val m = mkModel(mkTeam("X", "")).Copy(Composer = long, ComposerCursor = len(long))
+    val out = render(m)
+    return IsTrue(t, strings.Contains(out, "▌"))
+}
+
 // ---------------------------------------------------------------------------
 // Footer
 // ---------------------------------------------------------------------------

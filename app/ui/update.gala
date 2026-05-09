@@ -672,7 +672,22 @@ func onKeyChar(m AppModel, c rune) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match 
 // pair of arrow-key bindings doing the right thing in both modes.
 func onCursorMove(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
     case FocusSidebar()  => onSidebarCursorMove(m, delta)
-    case FocusComposer() => onHistoryCursorMove(m, delta)
+    case FocusComposer() => onComposerVerticalOrHistory(m, delta)
+}
+
+// onComposerVerticalOrHistory routes Up/Down when the composer has
+// focus. With the history browser open, arrows navigate the saved-
+// archives modal cursor — the modal owns those keys while it's up.
+// Otherwise they move the composer's text cursor between hard \n-
+// separated lines, preserving column. Single-line composers fall
+// back to "jump to start" (Up) / "jump to end" (Down) since there's
+// no other line to land on.
+func onComposerVerticalOrHistory(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] {
+    if m.HistoryMode {
+        return onHistoryCursorMove(m, delta)
+    }
+    val next = composerVerticalMove(m.Composer, m.ComposerCursor, delta)
+    return (m.Copy(ComposerCursor = next), NoCmd[AppMsg]())
 }
 
 // onToggleFocus cycles between the composer and the sidebar.
@@ -4268,6 +4283,65 @@ func composerDeleteAt(text string, cursor int) Tuple[string, int] {
     val left = string(SliceTo(rs, cur))
     val right = string(SliceFrom(rs, cur + 1))
     return (left + right, cur)
+}
+
+// composerVerticalMove returns the rune offset reached by moving the
+// composer cursor `delta` hard lines up (-1) or down (+1) from
+// `cursor`, preserving the column. Hard line = \n-separated; soft-
+// wrapped rows aren't navigated row-by-row (Up/Down on a single-line
+// composer therefore behaves like Home / End — the cursor jumps to
+// the start or end of the only line, which is the closest sensible
+// destination).
+//
+// Used by onComposerVerticalOrHistory to make Up/Down work as
+// in-text navigation now that the composer panel can grow to
+// multiple rows.
+func composerVerticalMove(text string, cursor int, delta int) int {
+    val rs = ToRunes(text)
+    val n = len(rs)
+    val cur = clampCursor(cursor, n)
+    // Walk to current line index + column.
+    var lineIdx = 0
+    var lineStart = 0
+    var i = 0
+    for i < cur {
+        if rs[i] == '\n' {
+            lineIdx = lineIdx + 1
+            lineStart = i + 1
+        }
+        i = i + 1
+    }
+    val col = cur - lineStart
+    // Count remaining \n's so we know the total line count.
+    var totalLines = lineIdx + 1
+    var j = cur
+    for j < n {
+        if rs[j] == '\n' { totalLines = totalLines + 1 }
+        j = j + 1
+    }
+    val target = lineIdx + delta
+    if target < 0  { return 0 }
+    if target >= totalLines { return n }
+    // Walk forward to the start of the target line.
+    var li = 0
+    var ls = 0
+    var k = 0
+    for li < target {
+        if rs[k] == '\n' {
+            li = li + 1
+            ls = k + 1
+        }
+        k = k + 1
+    }
+    // Find the end of the target line (next \n or n).
+    var le = ls
+    for le < n {
+        if rs[le] == '\n' { break }
+        le = le + 1
+    }
+    val lineLen = le - ls
+    val newCol = if (col < lineLen) col else lineLen
+    return ls + newCol
 }
 
 // clampCursor folds cursor into [0, n] so callers don't have to check

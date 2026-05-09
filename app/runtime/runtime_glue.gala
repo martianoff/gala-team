@@ -1059,6 +1059,12 @@ func stripWrap(s string, n int) string {
 // predictable: PR title byte budgets matter (some hosts impose
 // 256-byte limits) and "…" is 3 bytes in UTF-8, which would push
 // the total over the cap if we naïvely subtracted 1.
+//
+// Loop bound is `i >= rollbackFloor` (inclusive). The earlier
+// strict-greater form missed the floor position itself — a real
+// PR (#336) lost its "in `subprocess`" boundary because the space
+// happened to sit exactly at `hardLimit - 10` and was never
+// checked, falling through to a mid-word cut inside backticks.
 func capTitleAtWordBoundary(s string, cap int) string {
     val rs = ToRunes(s)
     if len(rs) <= cap { return s }
@@ -1068,7 +1074,7 @@ func capTitleAtWordBoundary(s string, cap int) string {
     var i = hardLimit
     val rollbackFloor = if (hardLimit > 10) hardLimit - 10 else 0
     var foundSpace = false
-    for i > rollbackFloor && !foundSpace {
+    for i >= rollbackFloor && !foundSpace {
         val c = rs[i]
         if c == ' ' || c == '\t' {
             cutAt = i

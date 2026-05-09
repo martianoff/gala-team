@@ -263,6 +263,28 @@ func TestGhTitle_ShortTitlePassthrough(t T) T {
     return Eq(t, title, "fix(crypto): handle empty Bytes input")
 }
 
+// Regression for PR #336: the rollback-floor was checked with
+// strict-greater, missing the floor position itself. A space that
+// happened to sit at exactly hardLimit - 10 was never seen, and
+// the algorithm fell through to a mid-word cut. The exact input
+// below produced the title
+// `Replace panic-driven failure with explicit Try returns in `subproce...`
+// — mid-word inside an unclosed backtick. Inclusive bound (i >=
+// rollbackFloor) catches the boundary space and cuts cleanly at
+// "in...".
+func TestGhTitle_RollbackFloorIsInclusive(t T) T {
+    val body = "Replace panic-driven failure with explicit Try returns in `subprocess` and `crypto.RandomBytes`."
+    val title = GhTitle(body)
+    val t1 = IsTrue(t, len(title) <= 70)
+    // Must NOT cut mid-word inside the backticks — the regression
+    // shape is `subproce` (and similar truncated tokens).
+    val t2 = IsFalse(t1, strings.Contains(title, "subproce..."))
+    val t3 = IsFalse(t2, strings.Contains(title, "subproc..."))
+    // Should end at a real word boundary. "in..." is the natural
+    // stop for the inclusive-floor algorithm on this input.
+    return IsTrue(t3, strings.HasSuffix(title, "in..."))
+}
+
 // First-line extraction skips leading blank lines (TL summaries
 // occasionally start with whitespace before the headline).
 func TestGhTitle_SkipsLeadingBlankLines(t T) T {

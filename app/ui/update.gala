@@ -1294,6 +1294,11 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // The TL re-emits @base early in this turn if stacking is
         // wanted; otherwise the PR opens against the project default.
         ActiveBase    = None[string](),
+        // Reset @plan — a fresh user prompt overrides any pending
+        // multi-PR plan from a prior turn. The TL re-emits @plan
+        // in this turn if a multi-PR split is wanted again.
+        Plan          = EmptyArray[string](),
+        PlanShipped   = 0,
         // First user prompt after a recovery dismisses the banner
         // automatically — the user has signaled they want to
         // continue, so the "type to resume · Esc to discard" hint
@@ -1800,10 +1805,11 @@ func applyBaseDirective(m AppModel, dirs Array[Directive]) Tuple[AppModel, Array
         case Base(_) => false
         case _       => true
     })
-    return baseRef match {
-        case None()      => (m, nonBase)
-        case Some(ref)   => (m.Copy(ActiveBase = resolveBaseRef(m, ref)), nonBase)
+    val withBase = baseRef match {
+        case None()    => m
+        case Some(ref) => m.Copy(ActiveBase = resolveBaseRef(m, ref))
     }
+    return applyPlanDirective(withBase, nonBase)
 }
 
 func resolveBaseRef(m AppModel, ref string) Option[string] {
@@ -1814,6 +1820,26 @@ func resolveBaseRef(m AppModel, ref string) Option[string] {
         return Some(m.OpenPrs.Last().Branch)
     }
     return Some(trimmed)
+}
+
+// applyPlanDirective stashes the first @plan's items into m.Plan,
+// resets PlanShipped to 0, and strips the directive from the dirs
+// list. Plan stores the FULL ordered list (not just the queue) so
+// the plan banner can render shipped / in-progress / queued state
+// per step. Multiple @plan directives in one turn — only the first
+// counts; later ones are dropped silently. The Plan directive
+// isn't FSM-visible (same pattern as @base): it's a side-channel
+// for the PR pipeline.
+func applyPlanDirective(m AppModel, dirs Array[Directive]) Tuple[AppModel, Array[Directive]] {
+    val firstPlan = dirs.Collect({ case Plan(items) => items }).HeadOption()
+    val nonPlan = dirs.Filter((d) => d match {
+        case Plan(_) => false
+        case _       => true
+    })
+    return firstPlan match {
+        case None()      => (m, nonPlan)
+        case Some(items) => (m.Copy(Plan = items, PlanShipped = 0), nonPlan)
+    }
 }
 
 func extractHelpQuestion(d Directive) Option[string] = d match {
@@ -4054,15 +4080,54 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
         Title    = pendingPrTitle(m),
         OpenedAt = time_utils.Now(),
     )
-    val convo = m.Conversation
+    // Plan auto-continuation. Account this PR as one shipped step
+    // (regardless of whether a plan is active — `nextShipped` is a
+    // no-op for a non-plan PR because Plan is empty). If a plan is
+    // active and there's a next step queued AND the user isn't
+    // drafting a fresh prompt, pop the next item, stage it in
+    // Composer, and synthesize KeySubmit so the standard onSubmit
+    // path runs the next step. Composer non-empty means the user
+    // is mid-typing an interjection — don't overwrite their text;
+    // the plan stalls until they send their prompt (which also
+    // clears Plan).
+    val nextShipped = m.PlanShipped + 1
+    val planActive  = !m.Plan.IsEmpty()
+    val canContinue = m.AutoApprove && planActive && nextShipped < m.Plan.Size() && m.Composer == ""
+    val convoBase = m.Conversation
         .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${linkified}"))
-    val convoWithHint = if (m.AutoApprove) {
-        convo.Append(session.ConversationLine(
+    if canContinue {
+        val nextStep = m.Plan.Get(nextShipped)
+        val total    = m.Plan.Size()
+        val convoWithPlan = convoBase
+            .Append(session.ConversationLine(
+                Speaker = "system",
+                Text    = s"plan: continuing ${nextShipped + 1}/${total} → ${nextStep}",
+            ))
+        return (m.Copy(
+            OpenPrs      = m.OpenPrs.Append(entry),
+            ActiveBase   = None[string](),
+            PlanShipped  = nextShipped,
+            Composer     = nextStep,
+            Toasts       = toast,
+            Conversation = convoWithPlan,
+        ), MsgCmd[AppMsg](Msg = KeySubmit()))
+    }
+    // Plan exhausted (this PR was the last step) — surface a
+    // completion line so the user can see the chain finished.
+    val planJustCompleted = planActive && nextShipped >= m.Plan.Size() && m.Composer == ""
+    val convoWithHint = if (planJustCompleted) {
+        val total = m.Plan.Size()
+        convoBase.Append(session.ConversationLine(
+            Speaker = "system",
+            Text    = s"plan: complete (${total}/${total} PRs shipped) — review in GitHub when ready",
+        ))
+    } else if (m.AutoApprove) {
+        convoBase.Append(session.ConversationLine(
             Speaker = "gh",
             Text    = s"queued in batch (${m.OpenPrs.Size() + 1} open) — review in GitHub when ready",
         ))
     } else {
-        convo.Append(session.ConversationLine(
+        convoBase.Append(session.ConversationLine(
             Speaker = "gh",
             Text    = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.",
         ))
@@ -4070,9 +4135,11 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
     // Clear ActiveBase now that the PR has been opened — the next
     // turn starts with a fresh base decision (defaulting back to the
     // project's default branch unless the TL emits another @base).
+    val finalShipped = if (planActive) nextShipped else m.PlanShipped
     return (m.Copy(
         OpenPrs      = m.OpenPrs.Append(entry),
         ActiveBase   = None[string](),
+        PlanShipped  = finalShipped,
         Toasts       = toast,
         Conversation = convoWithHint,
     ), MsgCmd[AppMsg](Msg = OpenBrowser(Url = url)))

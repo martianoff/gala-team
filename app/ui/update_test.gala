@@ -2453,6 +2453,119 @@ func TestKeySubmit_ClearsActiveBase(t T) T {
     return IsFalse(t, m.ActiveBase.IsDefined())
 }
 
+// ---------------------------------------------------------------------------
+// @plan directive (V3 multi-PR auto-continuation)
+// ---------------------------------------------------------------------------
+
+// Ingest stores the FULL items list on m.Plan and resets
+// PlanShipped. The current turn ships the first item; subsequent
+// PrCreated events advance PlanShipped and auto-fire the next.
+func TestApplyPlan_StoresFullListAndResetsShipped(t T) T {
+    val seed = sampleModel().Copy(PlanShipped = 99)  // stale value
+    val dirs = ArrayOf[Directive](Plan(Items = ArrayOf("step1", "step2", "step3")))
+    val (next, rest) = applyBaseDirective(seed, dirs)
+    val t1 = Eq(t, next.Plan.Size(), 3)
+    val t2 = Eq(t1, next.Plan.Get(0), "step1")
+    val t3 = Eq(t2, next.PlanShipped, 0)
+    return Eq(t3, rest.Size(), 0)  // Plan directive stripped from FSM-visible dirs
+}
+
+// First @plan wins when a TL emits multiple. Onboarding says "emit
+// once at the top of the turn"; this guards against confused chains.
+func TestApplyPlan_FirstWins(t T) T {
+    val dirs = ArrayOf[Directive](
+        Plan(Items = ArrayOf("a", "b")),
+        Plan(Items = ArrayOf("c", "d", "e")),
+    )
+    val (next, _) = applyBaseDirective(sampleModel(), dirs)
+    val t1 = Eq(t, next.Plan.Size(), 2)
+    return Eq(t1, next.Plan.Get(0), "a")
+}
+
+// PrCreated with an active plan + AutoApprove + idle composer:
+// advances PlanShipped and stages the next step in Composer. The
+// synthetic KeySubmit Cmd is dropped by the unit-test harness; we
+// just assert the model changes.
+func TestPrCreated_WithPlan_AutoContinues(t T) T {
+    val seed = sampleModel().Copy(
+        AutoApprove = true,
+        Plan        = ArrayOf("webhook handler", "refund flow"),
+    )
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
+    val t1 = Eq(t, m.PlanShipped, 1)
+    return Eq(t1, m.Composer, "refund flow")
+}
+
+// Plan reaches its end after the last step's PR. PlanShipped
+// equals Plan.Size(); no auto-continue; Composer untouched.
+func TestPrCreated_PlanLastStep_CompletesQuietly(t T) T {
+    val seed = sampleModel().Copy(
+        AutoApprove = true,
+        Plan        = ArrayOf("only step"),
+    )
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
+    val t1 = Eq(t, m.PlanShipped, 1)
+    val t2 = Eq(t1, m.Composer, "")
+    // Last conversation line is the "plan: complete" notice.
+    val lastLine = m.Conversation.Get(m.Conversation.Size() - 1).Text
+    return IsTrue(t2, strings.Contains(lastLine, "plan: complete"))
+}
+
+// PrCreated with empty Plan does NOT touch Composer. Auto-approve
+// drops back to the existing batch-queued behavior (V1 shape).
+func TestPrCreated_NoPlan_LeavesComposerUntouched(t T) T {
+    val seed = sampleModel().Copy(AutoApprove = true, Composer = "user typed this")
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
+    return Eq(t, m.Composer, "user typed this")
+}
+
+// PrCreated with Plan but Composer non-empty (user mid-typing) does
+// NOT auto-continue — we never overwrite user text. PlanShipped
+// still advances so the visualization reflects the PR that just
+// landed; the next user submit clears the plan.
+func TestPrCreated_PlanButComposerInUse_StallsPlan(t T) T {
+    val seed = sampleModel().Copy(
+        AutoApprove = true,
+        Plan        = ArrayOf("step1", "step2"),
+        Composer    = "wait — different ask",
+    )
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
+    val t1 = Eq(t, m.Composer, "wait — different ask")
+    return Eq(t1, m.PlanShipped, 1)
+}
+
+// PrCreated with a plan but AutoApprove off does NOT auto-continue —
+// manual mode would dead-end on the Ctrl+M / Ctrl+A wait anyway.
+func TestPrCreated_PlanWithoutAutoApprove_DoesNotContinue(t T) T {
+    val seed = sampleModel().Copy(
+        AutoApprove = false,
+        Plan        = ArrayOf("step1", "step2"),
+    )
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
+    return Eq(t, m.Composer, "")
+}
+
+// User-issued KeySubmit clears any pending Plan + PlanShipped —
+// typing a fresh prompt overrides the queued multi-PR sequence.
+func TestKeySubmit_ClearsPlanAndShipped(t T) T {
+    val seed = sampleModel().Copy(
+        Composer    = "redirect",
+        Plan        = ArrayOf("a", "b", "c"),
+        PlanShipped = 1,
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    val t1 = IsTrue(t, m.Plan.IsEmpty())
+    return Eq(t1, m.PlanShipped, 0)
+}
+
+// planProgressGlyphs renders ✓/▶/☐ per step.
+func TestPlanProgressGlyphs(t T) T {
+    val t1 = Eq(t,  planProgressGlyphs(0, 3), "▶ ☐ ☐")
+    val t2 = Eq(t1, planProgressGlyphs(1, 3), "✓ ▶ ☐")
+    val t3 = Eq(t2, planProgressGlyphs(2, 3), "✓ ✓ ▶")
+    return Eq(t3, planProgressGlyphs(3, 3), "✓ ✓ ✓")
+}
+
 // pendingPrTitle pulls the most recent user prompt out of the
 // conversation log so each batch entry has a human-readable handle.
 // Falls back to the lead branch when no user line exists.

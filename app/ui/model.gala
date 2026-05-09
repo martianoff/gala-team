@@ -140,6 +140,23 @@ struct AppModel(
     // name. Cleared on every new user prompt, every Approval acceptance
     // (PR has been opened), and every Approval rejection.
     ActiveBase   Option[string],
+    // Multi-PR plan queued by the TL via `@plan`. Plan is the full
+    // ordered list of step prompts; PlanShipped counts how many of
+    // them have already produced a PR. The step currently in
+    // progress is `Plan.Get(PlanShipped)` (when PlanShipped <
+    // Plan.Size()). Plan is "complete" when PlanShipped equals
+    // Plan.Size().
+    //
+    // Auto-continuation fires on every PrCreated while AutoApprove
+    // is on and PlanShipped is still less than Plan.Size() — the
+    // next step is staged in Composer and a synthetic KeySubmit
+    // re-enters onSubmit. The plan banner above the composer renders
+    // the per-step status (✓ shipped / ▶ in progress / ☐ queued).
+    //
+    // Both fields are cleared on every user-issued KeySubmit so a
+    // fresh prompt overrides any pending plan.
+    Plan         Array[string],
+    PlanShipped  int,
     // Per-turn TL output accumulator. Reset on every KeySubmit. Used by
     // the chunk pump to detect newly-completed @consult blocks without
     // re-scanning the entire conversation log.
@@ -411,6 +428,8 @@ func InitialModelWithTeams(
     OpenPrs      = EmptyArray[BatchPr](),
     AutoApprove  = policy.AutoApprove,
     ActiveBase   = None[string](),
+    Plan         = EmptyArray[string](),
+    PlanShipped  = 0,
     TurnBuffer    = "",
     ConsultsFired = 0,
     ActiveConsults = EmptyHashMap[string, ConsultSession](),

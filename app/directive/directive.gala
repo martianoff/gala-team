@@ -2,6 +2,7 @@ package directive
 
 import (
     . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
 )
 
 // ============================================================================
@@ -69,4 +70,13 @@ sealed type Directive {
     // and propagated to `gh pr create --base` when the @summary lands.
     // (TL → orchestrator)
     case Base(Ref string)
+    // Plan a multi-PR sequence. TL emits this once at the top of its
+    // first turn when the user asked for a multi-PR split; each Item
+    // becomes the next user-prompt-equivalent the orchestrator fires
+    // after a PR lands. The current turn ships the FIRST item; the
+    // rest are queued in AppModel.Plan and auto-spawned via KeySubmit
+    // as PR after PR completes (only meaningful while AutoApprove is
+    // on — manual-approve mode would block on Ctrl+A anyway). Empty
+    // bodies are dropped by the parser. (TL → orchestrator)
+    case Plan(Items Array[string])
 }

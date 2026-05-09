@@ -4,6 +4,7 @@ import (
     "strings"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
 )
 
 // ============================================================================
@@ -112,6 +113,9 @@ func parseOpeningTag(line string) Option[openingTag] {
     }
     if strings.HasPrefix(trimmed, "@base") {
         return parseBodyOnlyTag("base", strings.TrimPrefix(trimmed, "@base"))
+    }
+    if strings.HasPrefix(trimmed, "@plan") {
+        return parseBodyOnlyTag("plan", strings.TrimPrefix(trimmed, "@plan"))
     }
     return None[openingTag]()
 }
@@ -245,5 +249,48 @@ func buildDirective(
         val firstTok = strings.SplitN(ref, "\n", 2)[0]
         return Some[Directive](Base(Ref = strings.TrimSpace(firstTok)))
     }
+    if kind == "plan" {
+        // Each non-empty body line becomes one Item. Lenient about
+        // bullet style — strip leading "- ", "* ", "• ", "N.", "N)"
+        // so the TL can write the plan as a markdown list without
+        // worrying about the exact form. Empty plan body drops the
+        // directive (no silent zero-step plan).
+        val items = parsePlanItems(body)
+        if items.IsEmpty() { return None[Directive]() }
+        return Some[Directive](Plan(Items = items))
+    }
     return None[Directive]()
+}
+
+func parsePlanItems(body string) Array[string] {
+    val lines = strings.Split(body, "\n")
+    var out = EmptyArray[string]()
+    var i = 0
+    val n = len(lines)
+    for i < n {
+        val cleaned = stripPlanBullet(strings.TrimSpace(lines[i]))
+        if cleaned != "" {
+            out = out.Append(cleaned)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// stripPlanBullet removes a leading list marker so the item body
+// matches the user-facing prompt the TL meant to send. Recognised:
+// "- ", "* ", "• ", "N.", "N)" (one or more digits). Anything else
+// passes through verbatim.
+func stripPlanBullet(s string) string {
+    if strings.HasPrefix(s, "- ")  { return strings.TrimSpace(strings.TrimPrefix(s, "- "))  }
+    if strings.HasPrefix(s, "* ")  { return strings.TrimSpace(strings.TrimPrefix(s, "* "))  }
+    if strings.HasPrefix(s, "• ")  { return strings.TrimSpace(strings.TrimPrefix(s, "• "))  }
+    val rs = ToRunes(s)
+    val n = len(rs)
+    var i = 0
+    for i < n && rs[i] >= '0' && rs[i] <= '9' { i = i + 1 }
+    if i > 0 && i < n && (rs[i] == '.' || rs[i] == ')') {
+        return strings.TrimSpace(string(SliceFrom(rs, i + 1)))
+    }
+    return s
 }

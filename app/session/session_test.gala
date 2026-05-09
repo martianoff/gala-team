@@ -192,8 +192,9 @@ func TestSaveThenLoad_SpeakerWithUnicode(t T) T {
     }
 }
 
-// Many-line conversations exercise per-element comma handling in the
-// JSON codec. 50 lines is overkill but fast enough.
+// Many-line conversations exercise the per-element comma handling that
+// FIX-001 (json codec nested array) addressed. 50 lines is overkill
+// for a regression but fast enough.
 func TestSaveThenLoad_FiftyLineConversation(t T) T {
     val dir = mkTempDir("many_lines")
     var convo = EmptyArray[ConversationLine]()

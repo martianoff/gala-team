@@ -64,7 +64,14 @@ func mkProj() Project = Project(
 
 func mkModel(team Team) AppModel = InitialModel(mkProj(), team, DefaultWorkflow(), DefaultPolicy())
 
-func render(m AppModel) string = gala_tui.Snapshot(View(m), viewportW, viewportH)
+// Function-valued val to bypass a transpiler quirk: when `session`
+// is qualified-imported and exports a `Snapshot` struct, plain or
+// qualified `Snapshot(...)` calls get resolved to the struct
+// constructor instead of gala_tui's Snapshot function. Routing
+// through `takeSnap` keeps the call site free of the offending name.
+val takeSnap = gala_tui.Snapshot
+
+func render(m AppModel) string = takeSnap(View(m), viewportW, viewportH)
 
 // ---------------------------------------------------------------------------
 // Header

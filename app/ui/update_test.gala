@@ -594,8 +594,9 @@ func TestContainsWord_RespectsWordBoundaries(t T) T {
 func resumedModel(proj Project, convo Array[session.ConversationLine]) AppModel =
     InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
         Conversation          = convo,
+        RecoveryModalOpen     = true,
         RecoveryBannerVisible = true,
-        Recovery              = Some(ResumeFocus()),
+        RecoveryFocus         = ResumeFocus(),
     )
 
 // ----------------------------------------------------------------------------
@@ -619,32 +620,32 @@ func resumedModel(proj Project, convo Array[session.ConversationLine]) AppModel 
 func TestRecoveryModal_TabCyclesResumeToInspect(t T) T {
     val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
     val (m, _) = Update(seed, KeyToggleFocus())
-    val a = IsTrue(t, m.Recovery.IsDefined())  // modal still up
-    return m.Recovery match {
-        case Some(InspectFocus()) => IsTrue(a, true)
-        case _                    => IsTrue(a, false)
+    val a = IsTrue(t, m.RecoveryModalOpen)  // modal still up
+    return m.RecoveryFocus match {
+        case InspectFocus() => IsTrue(a, true)
+        case _              => IsTrue(a, false)
     }
 }
 
 // Tab from InspectFocus advances to StartFreshFocus.
 func TestRecoveryModal_TabCyclesInspectToStartFresh(t T) T {
     val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
-        .Copy(Recovery = Some(InspectFocus()))
+        .Copy(RecoveryFocus = InspectFocus())
     val (m, _) = Update(seed, KeyToggleFocus())
-    return m.Recovery match {
-        case Some(StartFreshFocus()) => IsTrue(t, true)
-        case _                       => IsTrue(t, false)
+    return m.RecoveryFocus match {
+        case StartFreshFocus() => IsTrue(t, true)
+        case _                 => IsTrue(t, false)
     }
 }
 
 // Tab from StartFreshFocus wraps back to ResumeFocus.
 func TestRecoveryModal_TabWrapsStartFreshToResume(t T) T {
     val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
-        .Copy(Recovery = Some(StartFreshFocus()))
+        .Copy(RecoveryFocus = StartFreshFocus())
     val (m, _) = Update(seed, KeyToggleFocus())
-    return m.Recovery match {
-        case Some(ResumeFocus()) => IsTrue(t, true)
-        case _                   => IsTrue(t, false)
+    return m.RecoveryFocus match {
+        case ResumeFocus() => IsTrue(t, true)
+        case _             => IsTrue(t, false)
     }
 }
 
@@ -654,7 +655,7 @@ func TestRecoveryModal_TabWrapsStartFreshToResume(t T) T {
 func TestRecoveryModal_EnterConfirmsClosesModal(t T) T {
     val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
     val (m, _) = Update(seed, KeySubmit())
-    return IsFalse(t, m.Recovery.IsDefined())
+    return IsTrue(t, !m.RecoveryModalOpen)
 }
 
 // Mouse click on the Inspect button emits KeyRecoveryClick(InspectFocus).
@@ -663,7 +664,7 @@ func TestRecoveryModal_EnterConfirmsClosesModal(t T) T {
 func TestRecoveryModal_ClickInspectClosesModalAndReadOnly(t T) T {
     val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
     val (m, _) = Update(seed, KeyRecoveryClick(Choice = InspectFocus()))
-    val a = IsFalse(t, m.Recovery.IsDefined())
+    val a = IsTrue(t, !m.RecoveryModalOpen)
     return IsTrue(a, m.ReadOnlyMode)
 }
 
@@ -674,7 +675,7 @@ func TestRecoveryModal_ClickStartFreshClosesAndWipes(t T) T {
         .Append(session.ConversationLine(Speaker = "you", Text = "old prompt"))
     val seed = resumedModel(sampleProject(), convo)
     val (m, _) = Update(seed, KeyRecoveryClick(Choice = StartFreshFocus()))
-    val a = IsFalse(t, m.Recovery.IsDefined())
+    val a = IsTrue(t, !m.RecoveryModalOpen)
     return IsTrue(a, m.Conversation.IsEmpty())
 }
 
@@ -1906,15 +1907,14 @@ func sampleArchive(savedAt int64, label string) session.SnapshotMeta = session.S
     LineCount   = 0,
 )
 
-// makeSnap builds a Snapshot for tests.
+// makeSnap builds a Snapshot for tests. Positional args because the
+// transpiler doesn't yet support named-arg construction on qualified
+// cross-package struct types (gala_tui ALSO exports a `Snapshot`
+// helper, so we can't safely dot-import session in the test
+// binary).
 func makeSnap() session.Snapshot {
     val convo = EmptyArray[session.ConversationLine]()
-    return session.Snapshot(
-        ProjectName   = "demo",
-        SavedAt       = int64(12345),
-        Conversation  = convo,
-        ActiveMembers = EmptyArray[string](),
-    )
+    return session.Snapshot("demo", int64(12345), convo)
 }
 
 // ---------------------------------------------------------------------------

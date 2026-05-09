@@ -114,16 +114,16 @@ func View(m AppModel) Widget {
     }
     val withProjectInfo = if (m.ProjectInfoOpen) projectInfoOverlay(m, withMemberOverlay) else withMemberOverlay
     val withGuidance    = if (m.GuidanceOpen)    guidanceOverlay(m, withProjectInfo)     else withProjectInfo
-    val withRecovery    = if (m.Recovery.IsDefined()) recoveryModalOverlay(m, withGuidance) else withGuidance
+    val withRecovery    = if (m.RecoveryModalOpen) recoveryModalOverlay(m, withGuidance) else withGuidance
     val withApproval    = m.State match {
         case Approval(body) => approvalModalOverlay(m, body, withRecovery)
         case _              => withRecovery
     }
     val withHelp        = if (m.HelpVisible) helpOverlay(m, withApproval) else withApproval
-    return m.Palette match {
-        case Some(pal) => paletteOverlay(pal, withHelp)
-        case None()    => withHelp
+    if m.PaletteVisible {
+        return paletteOverlay(m.Palette, withHelp)
     }
+    return withHelp
 }
 
 // helpOverlay paints the auto-generated help modal — every key
@@ -273,20 +273,19 @@ func recoveryModalOverlay(m AppModel, base Widget) Widget {
 // button dispatches a one-shot "set focus + confirm" message —
 // SelectAndConfirm — that the update layer handles atomically.
 func recoveryButtonRow(m AppModel) Widget {
-    val focus = m.Recovery.GetOrElse(ResumeFocus())
     val resumeBtn = ButtonClick[AppMsg](
         "Resume",
-        isResumeFocus(focus),
+        isResumeFocus(m.RecoveryFocus),
         KeyRecoveryClick(Choice = ResumeFocus()),
     )
     val inspectBtn = ButtonClick[AppMsg](
         "Inspect",
-        isInspectFocus(focus),
+        isInspectFocus(m.RecoveryFocus),
         KeyRecoveryClick(Choice = InspectFocus()),
     )
     val freshBtn = ButtonClick[AppMsg](
         "Start fresh",
-        isStartFreshFocus(focus),
+        isStartFreshFocus(m.RecoveryFocus),
         KeyRecoveryClick(Choice = StartFreshFocus()),
     )
     return Row(ArrayOf[LayoutChild](
@@ -698,7 +697,7 @@ func statusTagFor(s Status) string = s match {
     case StWorking()      => "working"
     case StSlow()         => "slow"
     case StStuck()        => "stuck"
-    case StRecovering(att, max)  => s"recovering ${att}/${max}"
+    case StRecovering(n)  => s"recovering ${n}"
     case StHelpWaiting(_) => "needs help"
     case StDone()         => "done"
     case StFailed(r)      => s"failed: ${r}"
@@ -975,6 +974,12 @@ func sidebarWidget(m AppModel) Widget {
 // active members, "recov n/m" for recovering, "✗ failed" for failed,
 // etc. Members with no notable status (StIdle / StQueued / StDone)
 // get no entry, so the sidebar stays clean during quiescence.
+//
+// Takes `members` as a typed parameter so the auto-unwrap from
+// `Immutable[Array[Member]]` to `Array[Member]` happens at the call
+// boundary — sidesteps the chained-accessor / method-on-Immutable
+// regressions documented in `GALA_TEAM_0_39_2_REGRESSIONS.md` (FIX-010
+// / 011 / 012). Same pattern used elsewhere in the file.
 func buildSidebarRightFields(m AppModel, members Array[Member]) HashMap[string, string] {
     return members.FoldLeft(EmptyHashMap[string, string](), (acc, mem) => {
         val txt = sidebarRightField(m, mem.Name)
@@ -1000,7 +1005,7 @@ func sidebarRightField(m AppModel, name string) string {
         case StQueued()         => ""
         case StDone()           => totalWorkFor(m, name, false)
         case StFailed(_)        => "✗ failed"
-        case StRecovering(att, max) => s"${totalWorkFor(m, name, true)} (recov ${att}/${max})"
+        case StRecovering(note) => s"${totalWorkFor(m, name, true)} (recov ${note})"
         case StHelpWaiting(_)   => "help"
         case StWorking()        => totalWorkFor(m, name, true)
         case StSlow()           => s"${totalWorkFor(m, name, true)} slow"
@@ -1111,7 +1116,7 @@ func tallyOne(c LivenessCounts, s Status) LivenessCounts = s match {
     case StWorking()        => c.Copy(Working    = c.Working    + 1)
     case StSlow()           => c.Copy(Slow       = c.Slow       + 1)
     case StStuck()          => c.Copy(Stuck      = c.Stuck      + 1)
-    case StRecovering(_, _) => c.Copy(Recovering = c.Recovering + 1)
+    case StRecovering(_) => c.Copy(Recovering = c.Recovering + 1)
     case StFailed(_)        => c.Copy(Failed     = c.Failed     + 1)
     case _                  => c
 }

@@ -229,10 +229,10 @@ func loadRegistry(proj Project) consult.Registry {
 // ----- demo fallback (only used when --team is omitted) ---------------------
 
 // sampleTeamConfig wraps sampleTeam() into a TeamConfig with default
-// workflow/policy and a one-entry Teams list, used as the unreachable
-// branch of the team-loading if-as-expression in main() when the user
-// omits --team. die() above terminates the process before the value
-// is ever observed.
+// workflow/policy and a one-entry Teams list, so the if-as-expression
+// in main() doesn't need an explicit `return` (which currently
+// triggers a transpiler bug — gala issue #289 — emitting a dead
+// `return nil` that fails Go compile).
 func sampleTeamConfig() TeamConfig {
     val tm = sampleTeam()
     return TeamConfig(
@@ -432,7 +432,8 @@ func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match
             Conversation          = snap.Conversation,
             RecoveredMembers      = snap.ActiveMembers,
             RecoveryBannerVisible = true,
-            Recovery              = Some(ResumeFocus()),
+            RecoveryModalOpen     = true,
+            RecoveryFocus         = ResumeFocus(),
         )
     }
 }

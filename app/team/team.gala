@@ -130,6 +130,10 @@ func MembersOf(t Team, r Role) Array[Member] =
 func MemberByName(t Team, name string) Option[Member] = t.Members.Find((m) => m.Name == name)
 
 // FindTeamByKey scans `teams` for the entry whose Key equals `key`.
+// Lives in the team package so the lambda body can do
+// `tm.Key == key` cleanly — the transpiler doesn't auto-unwrap the
+// std.Immutable[string] wrapper on cross-package field access in
+// equality comparisons.
 func FindTeamByKey(teams Array[Team], key string) Option[Team] =
     teams.Find((tm) => tm.Key == key)
 
@@ -160,9 +164,11 @@ sealed type Status {
     // "nudge in 0:NN" countdown via NudgeAt.
     case StStuck
     // StRecovering: a non-EOF crash was observed and the
-    // orchestrator is auto-respawning the member. Attempt / Max are
-    // the retry counter the sidebar formats as "1/2".
-    case StRecovering(Attempt int, Max int)
+    // orchestrator is auto-respawning the member. Note carries the
+    // human-readable retry counter (e.g. "1/2") for the sidebar.
+    // Single-arg shape to dodge FIX-013 (multi-arg named-args
+    // sealed-case widening regression) while it's still open.
+    case StRecovering(Note string)
     // StHelpWaiting: member emitted `@help(...)` and is paused
     // awaiting a TL clarification turn.
     case StHelpWaiting(Question string)
@@ -176,7 +182,7 @@ func StatusName(s Status) string = s match {
     case StDone()           => "done"
     case StSlow()           => "slow"
     case StStuck()          => "stuck"
-    case StRecovering(_, _) => "recovering"
+    case StRecovering(_) => "recovering"
     case StHelpWaiting(_)   => "help-waiting"
     case StFailed(_)        => "failed"
 }

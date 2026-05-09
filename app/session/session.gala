@@ -29,6 +29,12 @@ import (
 // ConversationLine lives here rather than in app/ui so app/ui can depend
 // on session (and not the other way around) — saves the type from being
 // duplicated and keeps app/session self-contained for the cmd-side load.
+//
+// Implementation note: drives json.JsonEncoderImpl / JsonDecoderImpl
+// directly rather than `Codec[Snapshot]` because the typed codegen still
+// emits `WriteNull` for non-primitive array elements (the
+// "primitives only" gate in genCollectionWrite). The decoder side
+// supports nested arrays-of-structs since gala 0.39 (FIX-001).
 // ============================================================================
 
 // ConversationLine is a single rendered turn in the Team-Lead conversation

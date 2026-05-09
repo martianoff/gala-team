@@ -5,6 +5,7 @@ import (
     "strings"
     "martianoff/gala/subprocess"
     "github.com/martianoff/gala_team/app/session"
+    "martianoff/gala/time_utils"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -13,6 +14,16 @@ import (
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
+)
+
+// sampleBatchPr builds a stub BatchPr for the merge / batch-list
+// tests. Stable shape (canned title, Unix-epoch timestamp) so
+// snapshot-style assertions stay deterministic across runs.
+func sampleBatchPr(url string) BatchPr = BatchPr(
+    Url      = url,
+    Branch   = "feat/x",
+    Title    = "ship the metrics endpoint",
+    OpenedAt = time_utils.UnixEpoch(),
 )
 
 // sampleProject points Repo at a fresh temp dir so onChunk's auto-save
@@ -904,12 +915,10 @@ func TestPreMergeHooksFailed_StopsPipelineWithError(t T) T {
 // Merge flow — Ctrl+M after PrCreated
 // ---------------------------------------------------------------------------
 
-func TestPrCreated_StoresUrlInLastPrUrl(t T) T {
+func TestPrCreated_AppendsToOpenPrs(t T) T {
     val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7"))
-    return m.LastPrUrl match {
-        case Some(url) => Eq(t, url, "https://x/y/pull/7")
-        case None()    => IsTrue(t, false)
-    }
+    val t1 = Eq(t, m.OpenPrs.Size(), 1)
+    return Eq(t1, m.OpenPrs.Get(0).Url, "https://x/y/pull/7")
 }
 
 func TestPrCreated_AppendsBothLogLines(t T) T {
@@ -920,31 +929,35 @@ func TestPrCreated_AppendsBothLogLines(t T) T {
 }
 
 func TestKeyMerge_WithoutPriorPr_NoOp(t T) T {
-    val seed = sampleModel()  // LastPrUrl is None
+    val seed = sampleModel()  // OpenPrs is empty
     val (m, _) = Update(seed, KeyMerge())
     val t1 = Eq(t, m.Conversation.Size(), 0)
-    return m.LastPrUrl match {
-        case None()  => IsTrue(t1, true)
-        case Some(_) => IsTrue(t1, false)
-    }
+    return IsTrue(t1, m.OpenPrs.IsEmpty())
 }
 
-func TestKeyMerge_WithLastPrUrl_LogsMergeIntent(t T) T {
-    val seed = sampleModel().Copy(LastPrUrl = Some("https://x/y/pull/7"))
+func TestKeyMerge_WithOpenPr_LogsMergeIntent(t T) T {
+    val seed = sampleModel().Copy(OpenPrs = ArrayOf(sampleBatchPr("https://x/y/pull/7")))
     val (m, _) = Update(seed, KeyMerge())
     val t1 = Eq(t, m.Conversation.Size(), 1)
     return Eq(t1, m.Conversation.Get(0).Text, "/merge")
 }
 
-func TestMerged_ClearsLastPrUrlAndLogs(t T) T {
-    val seed = sampleModel().Copy(LastPrUrl = Some("https://x/y/pull/7"))
+func TestMerged_DropsMatchingPrAndLogs(t T) T {
+    val seed = sampleModel().Copy(OpenPrs = ArrayOf(sampleBatchPr("https://x/y/pull/7")))
     val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/7"))
-    val t1 = m.LastPrUrl match {
-        case None()  => IsTrue(t, true)
-        case Some(_) => IsTrue(t, false)
-    }
+    val t1 = IsTrue(t, m.OpenPrs.IsEmpty())
     val t2 = Eq(t1, m.Conversation.Size(), 1)
     return Eq(t2, m.Conversation.Get(0).Text, "merged: https://x/y/pull/7")
+}
+
+func TestMerged_BatchMode_OnlyDropsMatchingEntry(t T) T {
+    val seed = sampleModel().Copy(OpenPrs = ArrayOf(
+        sampleBatchPr("https://x/y/pull/7"),
+        sampleBatchPr("https://x/y/pull/8"),
+    ))
+    val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/8"))
+    val t1 = Eq(t, m.OpenPrs.Size(), 1)
+    return Eq(t1, m.OpenPrs.Get(0).Url, "https://x/y/pull/7")
 }
 
 func TestMerged_WithPostMergeHooks_LogsBanner(t T) T {
@@ -952,7 +965,7 @@ func TestMerged_WithPostMergeHooks_LogsBanner(t T) T {
         Hook(Name = "notify", Cmd = "echo", Args = ArrayOf("done")),
     ))
     val seed = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow(), pol)
-        .Copy(LastPrUrl = Some("https://x/y/pull/7"))
+        .Copy(OpenPrs = ArrayOf(sampleBatchPr("https://x/y/pull/7")))
     val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/7"))
     val t1 = Eq(t, m.Conversation.Size(), 2)
     val t2 = Eq(t1, m.Conversation.Get(0).Speaker, "gh")
@@ -1024,8 +1037,8 @@ func TestMerged_ResetsAllMembersToIdle(t T) T {
         .Put("Iris",  StWorking())
         .Put("Felix", StFailed(Reason = "boom"))
     val seed = sampleModel().Copy(
-        LastPrUrl = Some("https://x/y/pull/9"),
-        Statuses  = seedStatuses,
+        OpenPrs  = ArrayOf(sampleBatchPr("https://x/y/pull/9")),
+        Statuses = seedStatuses,
     )
     val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/9"))
     val t1 = m.Statuses.Get("Iris") match {
@@ -1601,17 +1614,14 @@ func TestKeySubmit_InTLThinking_StaysInTLThinking(t T) T {
     }
 }
 
-// KeyMerge with no LastPrUrl is a strict no-op even if PrFailed has
+// KeyMerge with no open PR is a strict no-op even if PrFailed has
 // already populated LastError — we never let Ctrl+M re-fire after a
 // failed PR-create attempt.
 func TestKeyMerge_AfterPrFailed_NoOp(t T) T {
     val seed = sampleModel().Copy(LastError = Some("gh pr create: auth required"))
     val (m, _) = Update(seed, KeyMerge())
     val t1 = Eq(t, m.Conversation.Size(), 0)
-    return m.LastPrUrl match {
-        case None()  => IsTrue(t1, true)
-        case Some(_) => IsTrue(t1, false)
-    }
+    return IsTrue(t1, m.OpenPrs.IsEmpty())
 }
 
 // KeyApprove from each non-Approval state must stay in that state and
@@ -2287,6 +2297,87 @@ func TestUpArrow_HistoryMode_DoesNotMoveComposerCursor(t T) T {
     )
     val (m1, _) = Update(m0, HistoryCursorUp())
     return Eq(t, m1.ComposerCursor, 8)  // unchanged
+}
+
+// ---------------------------------------------------------------------------
+// AutoApprove (batch-PR mode) — F7 toggle + PrCreated wiring
+// ---------------------------------------------------------------------------
+
+// F7 flips AutoApprove from its initial value (false, per DefaultPolicy)
+// and pushes a confirmation toast so the mode change is visible.
+func TestKeyToggleAutoApprove_FlipsAndToasts(t T) T {
+    val seed = sampleModel()
+    val t0 = IsFalse(t, seed.AutoApprove)
+    val (m1, _) = Update(seed, KeyToggleAutoApprove())
+    val t1 = IsTrue(t0, m1.AutoApprove)
+    val t2 = IsTrue(t1, m1.Toasts.Length() > 0)
+    val (m2, _) = Update(m1, KeyToggleAutoApprove())
+    return IsFalse(t2, m2.AutoApprove)
+}
+
+// AutoApprove seeds from policy.auto_approve at startup so a team.yaml
+// declaring `auto_approve: true` boots the model already in batch
+// mode. The F7 toggle still flips it from there.
+func TestInitialModel_SeedsAutoApproveFromPolicy(t T) T {
+    val pol = DefaultPolicy().Copy(AutoApprove = true)
+    val m = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow(), pol)
+    return IsTrue(t, m.AutoApprove)
+}
+
+// In auto-approve mode the second log line invites batch-review in
+// GitHub instead of suggesting Ctrl+M, so the user knows the next
+// prompt won't block on a manual merge.
+func TestPrCreated_AutoApprove_SkipsCtrlMHint(t T) T {
+    val seed = sampleModel().Copy(AutoApprove = true)
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/7"))
+    val t1 = Eq(t, m.Conversation.Size(), 2)
+    val first = m.Conversation.Get(0).Text
+    val second = m.Conversation.Get(1).Text
+    val t2 = IsTrue(t1, strings.Contains(first, "https://x/y/pull/7"))
+    val t3 = IsTrue(t2, strings.Contains(second, "queued in batch"))
+    return IsFalse(t3, strings.Contains(second, "Ctrl+M"))
+}
+
+// Manual-approve mode (default) still surfaces the Ctrl+M hint — this
+// guards against the AutoApprove branch accidentally swallowing the
+// non-auto path.
+func TestPrCreated_ManualApprove_KeepsCtrlMHint(t T) T {
+    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7"))
+    val second = m.Conversation.Get(1).Text
+    return IsTrue(t, strings.Contains(second, "Ctrl+M"))
+}
+
+// AutoApprove accumulates: each PrCreated grows OpenPrs without
+// resetting prior entries. Mirrors the user-visible "(N open)" badge.
+func TestPrCreated_AutoApprove_AccumulatesOpenPrs(t T) T {
+    val seed = sampleModel().Copy(AutoApprove = true)
+    val (m1, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1"))
+    val (m2, _) = Update(m1,   PrCreated(Url = "https://x/y/pull/2"))
+    val (m3, _) = Update(m2,   PrCreated(Url = "https://x/y/pull/3"))
+    val t1 = Eq(t, m3.OpenPrs.Size(), 3)
+    val t2 = Eq(t1, m3.OpenPrs.Get(0).Url, "https://x/y/pull/1")
+    return Eq(t2, m3.OpenPrs.Get(2).Url, "https://x/y/pull/3")
+}
+
+// pendingPrTitle pulls the most recent user prompt out of the
+// conversation log so each batch entry has a human-readable handle.
+// Falls back to the lead branch when no user line exists.
+func TestPendingPrTitle_PicksLatestUserPrompt(t T) T {
+    val seed = sampleModel().Copy(Conversation = ArrayOf(
+        session.ConversationLine(Speaker = "you",  Text = "ship the metrics endpoint"),
+        session.ConversationLine(Speaker = "Iris", Text = "on it"),
+        session.ConversationLine(Speaker = "you",  Text = "add a histogram too"),
+    ))
+    return Eq(t, pendingPrTitle(seed), "add a histogram too")
+}
+
+func TestPendingPrTitle_SkipsSlashCommands(t T) T {
+    val seed = sampleModel().Copy(Conversation = ArrayOf(
+        session.ConversationLine(Speaker = "you", Text = "ship the metrics endpoint"),
+        session.ConversationLine(Speaker = "you", Text = "/approve"),
+        session.ConversationLine(Speaker = "you", Text = "/merge"),
+    ))
+    return Eq(t, pendingPrTitle(seed), "ship the metrics endpoint")
 }
 
 // ---------------------------------------------------------------------------

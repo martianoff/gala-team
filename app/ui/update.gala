@@ -504,6 +504,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case KeyPaletteRowClick(idx)     => onPaletteRowClick(m, idx)
     case KeySetViewMode(mode)        => onSetViewMode(m, mode)
     case KeyToggleHelp()             => (m.Copy(HelpVisible = !m.HelpVisible), NoCmd[AppMsg]())
+    case KeyToggleAutoApprove()      => onToggleAutoApprove(m)
     case KeyToggleProjectInfo()      => (m.Copy(ProjectInfoOpen = !m.ProjectInfoOpen), NoCmd[AppMsg]())
     case KeyToggleGuidance()         => (m.Copy(GuidanceOpen = !m.GuidanceOpen), NoCmd[AppMsg]())
     case KeyToggleCompactSidebar()   => (m.Copy(CompactSidebar = !m.CompactSidebar), NoCmd[AppMsg]())
@@ -921,6 +922,21 @@ func viewModeTag(v ViewMode) string = v match {
     case ViewActivity() => "activity"
 }
 
+// onToggleAutoApprove flips m.AutoApprove and pushes a toast so the
+// user always sees the new mode in their peripheral vision. Bound to
+// F7 + a palette entry. Doesn't immediately fire approveAndKickHooks
+// even if Approval(_) is the current state — the user has to send
+// the next prompt for the auto-fire path to engage.
+func onToggleAutoApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val flipped = !m.AutoApprove
+    val msg = if (flipped)
+        "auto-approve ON · @summary will auto-create PRs without Ctrl+A"
+    else
+        "auto-approve OFF · Ctrl+A required for each PR"
+    val toast = m.Toasts.PushInfo(msg, time_utils.Now(), time_utils.Seconds(int64(4)))
+    return (m.Copy(AutoApprove = flipped, Toasts = toast), NoCmd[AppMsg]())
+}
+
 // onTogglePalette opens the palette with the freshly-built action
 // list when closed, closes it when already open. Building actions
 // each open keeps them in sync with the current model (member roster,
@@ -1024,6 +1040,11 @@ func paletteActions(m AppModel) Array[PaletteAction[AppMsg]] {
         PaletteAction[AppMsg](Label = "Approve summary (Ctrl+A)", Category = "Approval", Msg = KeyApprove()),
         PaletteAction[AppMsg](Label = "Reject summary (Ctrl+R)", Category = "Approval", Msg = KeyReject()),
         PaletteAction[AppMsg](Label = "Merge open PR (Ctrl+M)", Category = "Approval", Msg = KeyMerge()),
+        PaletteAction[AppMsg](
+            Label = if (m.AutoApprove) "Auto-approve: turn OFF (F7)" else "Auto-approve: turn ON (F7) · batch PRs without Ctrl+A",
+            Category = "Approval",
+            Msg = KeyToggleAutoApprove(),
+        ),
         PaletteAction[AppMsg](Label = "Toggle composer / sidebar focus (Tab)", Category = "Navigate", Msg = KeyToggleFocus()),
         PaletteAction[AppMsg](Label = "Toggle consult viewer (Ctrl+T)", Category = "Navigate", Msg = KeyToggleConsultViewer()),
         PaletteAction[AppMsg](Label = "History browser (Ctrl+H)", Category = "View", Msg = KeyToggleHistory()),
@@ -2201,6 +2222,25 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             // sidebar agents never flip from idle.
             if (stateTag(nextState) == "Delegating") {
                 return spawnDispatchedMembers(withState, dirs)
+            }
+            // AutoApprove: when the TL's @summary lands cleanly (the
+            // PR-readiness + body-quality gates above passed) and the
+            // batch toggle is on, run the same approveAndKickHooks
+            // pipeline Ctrl+A would have triggered. Lands the FSM back
+            // in Idle ready for the next user prompt; the new PR
+            // shows up in OpenPrs once gh pr create resolves. We
+            // dispatch via the KeyApprove AppMsg rather than calling
+            // approveAndKickHooks directly so the activity log
+            // captures a synthetic approve event — matches how a
+            // human Ctrl+A is recorded.
+            if withState.AutoApprove {
+                val nextIsApproval = nextState match {
+                    case Approval(_) => true
+                    case _           => false
+                }
+                if nextIsApproval {
+                    return (withState, MsgCmd[AppMsg](Msg = KeyApprove()))
+                }
             }
             return (withState, NoCmd[AppMsg]())
         }
@@ -3967,29 +4007,73 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (withState, NoCmd[AppMsg]())
 }
 
-// onPrCreated records the URL in LastPrUrl + the conversation log
-// so the user has a copy-paste-friendly link AND a hint for Ctrl+M
-// to trigger the merge step. Returns a Cmd that opens the URL in
-// the OS default browser — Cmd, not direct call, so unit tests
-// (which call Update directly with synthetic PR URLs like
-// `https://x/y/pull/7`) discard the Cmd and don't actually spawn
-// a browser process. Without this, every test run was launching
-// real browser windows for the fake URLs.
+// onPrCreated appends the new PR to OpenPrs + the conversation log so
+// the user has a copy-paste-friendly link. In manual-approve mode
+// (the default) the model holds at most one entry, so the existing
+// "Press Ctrl+M to merge" hint stays accurate. In AutoApprove mode
+// the list grows across prompts; the merge hint is replaced with a
+// "queued in batch" line and the user reviews the batch in GitHub
+// when they're done.
 //
-// Production runtime executes the Cmd, which calls OpenInBrowser
-// (per-OS launcher, async, silent on failure — headless / CI /
-// sandboxed envs have no browser). The OSC 8 hyperlink in the
-// conversation log is the fallback if the launcher misfires.
+// Returns a Cmd that opens the URL in the OS default browser — Cmd,
+// not direct call, so unit tests (which call Update directly with
+// synthetic PR URLs like `https://x/y/pull/7`) discard the Cmd and
+// never trigger real browser windows. Production runtime processes
+// the Cmd, dispatches OpenBrowser, and the Update branch shells the
+// OS launcher.
 func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
     val linkified = prOscOpen(url) + url + prOscClose()
     val toast = m.Toasts.PushInfo(s"PR ready · ${url}", time_utils.Now(), time_utils.Seconds(int64(8)))
+    val entry = BatchPr(
+        Url      = url,
+        Branch   = LeadBranchFor(m.Project),
+        Title    = pendingPrTitle(m),
+        OpenedAt = time_utils.Now(),
+    )
+    val convo = m.Conversation
+        .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${linkified}"))
+    val convoWithHint = if (m.AutoApprove) {
+        convo.Append(session.ConversationLine(
+            Speaker = "gh",
+            Text    = s"queued in batch (${m.OpenPrs.Size() + 1} open) — review in GitHub when ready",
+        ))
+    } else {
+        convo.Append(session.ConversationLine(
+            Speaker = "gh",
+            Text    = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.",
+        ))
+    }
     return (m.Copy(
-        LastPrUrl    = Some(url),
+        OpenPrs      = m.OpenPrs.Append(entry),
         Toasts       = toast,
-        Conversation = m.Conversation
-            .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${linkified}"))
-            .Append(session.ConversationLine(Speaker = "gh", Text = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.")),
+        Conversation = convoWithHint,
     ), MsgCmd[AppMsg](Msg = OpenBrowser(Url = url)))
+}
+
+// pendingPrTitle picks a short label for the freshly-opened PR. The
+// most recent "you" line in the conversation (skipping slash-prefixed
+// orchestration markers like /approve and /merge) is the user prompt
+// that kicked off this turn — a clean handle for the batch list.
+// Falls back to the project's branch name when no user line is
+// available (resume-on-Approval and similar edge cases).
+func pendingPrTitle(m AppModel) string {
+    var i = m.Conversation.Size() - 1
+    for i >= 0 {
+        val line = m.Conversation.Get(i)
+        if line.Speaker == "you" && !strings.HasPrefix(line.Text, "/") {
+            val trimmed = strings.TrimSpace(line.Text)
+            val first = strings.SplitN(trimmed, "\n", 2)[0]
+            return truncateTitle(first, 80)
+        }
+        i = i - 1
+    }
+    return LeadBranchFor(m.Project)
+}
+
+func truncateTitle(s string, maxLen int) string {
+    val rs = ToRunes(s)
+    if len(rs) <= maxLen { return s }
+    return string(SliceTo(rs, maxLen - 1)) + "…"
 }
 
 // onOpenBrowser fires the OS browser-launcher for `url`. Reached
@@ -4026,11 +4110,14 @@ func prOscClose() string {
 }
 
 // onMerge fires when the user presses Ctrl+M after a PrCreated. Only
-// acts when LastPrUrl is set; outside that, the key is a no-op (the
-// user can't merge what hasn't been opened).
-func onMerge(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.LastPrUrl match {
-    case None()    => (m, NoCmd[AppMsg]())
-    case Some(url) => mergeAndKickPostMerge(m, url)
+// acts when OpenPrs has at least one entry; outside that, the key is
+// a no-op (the user can't merge what hasn't been opened). Merges the
+// most-recently-opened PR — in AutoApprove mode the rest of the batch
+// stays in OpenPrs for the user to handle in GitHub.
+func onMerge(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if m.OpenPrs.IsEmpty() { return (m, NoCmd[AppMsg]()) }
+    val url = m.OpenPrs.Last().Url
+    return mergeAndKickPostMerge(m, url)
 }
 
 func mergeAndKickPostMerge(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
@@ -4042,17 +4129,17 @@ func mergeAndKickPostMerge(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] 
     return (withLog, runtimeFutureToCmd(GhPrMergeFuture(m.Project, url, m.Policy.MergeRule)))
 }
 
-// onMerged echoes the URL into the conversation, clears LastPrUrl
-// (the same PR can't be merged twice), resets every member's status
-// to Idle (the pipeline is done — next prompt starts fresh), kicks
-// any PostMerge hooks, and snapshots the now-immutable conversation
-// log into .gala_team/sessions/archive/ so future `Ctrl+H` runs can
-// pull it back up. On a clean hook run, PostMergeHooksPassed
-// appends the final "✓ all green" line.
+// onMerged echoes the URL into the conversation, drops the matching
+// entry from OpenPrs (the same PR can't be merged twice), resets every
+// member's status to Idle (the pipeline is done — next prompt starts
+// fresh), kicks any PostMerge hooks, and snapshots the now-immutable
+// conversation log into .gala_team/sessions/archive/ so future
+// `Ctrl+H` runs can pull it back up. On a clean hook run,
+// PostMergeHooksPassed appends the final "✓ all green" line.
 func onMerged(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
     val _ = session.ArchiveLatest(m.Project.Repo, "merged")  // best-effort; failure is silent
     val withMerge = resetAllStatuses(m.Copy(
-        LastPrUrl    = None[string](),
+        OpenPrs      = m.OpenPrs.Filter((p) => p.Url != url),
         Conversation = m.Conversation.Append(
             session.ConversationLine(Speaker = "gh", Text = s"merged: ${url}"),
         ),

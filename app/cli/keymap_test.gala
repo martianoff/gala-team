@@ -117,8 +117,8 @@ func TestKeyToAppMsg_F5_Activity(t T) T =
 func TestKeyToAppMsg_F6_Help(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 6))), "KeyToggleHelp")
 
-func TestKeyToAppMsg_F7_NoOp(t T) T =
-    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 7))), "NoOp")
+func TestKeyToAppMsg_F7_AutoApprove(t T) T =
+    expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 7))), "KeyToggleAutoApprove")
 
 func TestKeyToAppMsg_F8_NoOp(t T) T =
     expectMsg(t, KeyToAppMsg(PlainKey(FKey(N = 8))), "NoOp")
@@ -215,6 +215,8 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case PreMergeHooksFailed(_)      => "PreMergeHooksFailed"
     case PrCreated(_)                => "PrCreated"
     case PrFailed(_)                 => "PrFailed"
+    case OpenBrowser(_)              => "OpenBrowser"
+    case WorktreesWiped()            => "WorktreesWiped"
     case Merged(_)                   => "Merged"
     case MergeFailed(_)              => "MergeFailed"
     case PostMergeHooksPassed(_)     => "PostMergeHooksPassed"
@@ -244,6 +246,7 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case KeySetViewMode(_)           => "KeySetViewMode"
     case KeyPaletteRowClick(_)       => "KeyPaletteRowClick"
     case KeyToggleHelp()             => "KeyToggleHelp"
+    case KeyToggleAutoApprove()      => "KeyToggleAutoApprove"
     case KeyToggleProjectInfo()      => "KeyToggleProjectInfo"
     case KeyToggleGuidance()         => "KeyToggleGuidance"
     case KeyToggleCompactSidebar()   => "KeyToggleCompactSidebar"

@@ -229,6 +229,7 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case FocusSidebarClicked()       => "FocusSidebarClicked"
     case FocusComposerClicked()      => "FocusComposerClicked"
     case SidebarRowClicked(_)        => "SidebarRowClicked"
+    case ClickConversationEntry(_)   => "ClickConversationEntry"
     case KeyToggleFocus()            => "KeyToggleFocus"
     case KeySidebarToggleGroup()     => "KeySidebarToggleGroup"
     case KeyEraseSession()           => "KeyEraseSession"

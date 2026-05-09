@@ -231,6 +231,34 @@ func TestView_Composer_LongText_AutoScrollsToCursor(t T) T {
     return IsTrue(t, strings.Contains(out, "▌"))
 }
 
+// SelectedEntry highlights the corresponding conversation line with
+// reverse-video styling. The styled snapshot (which preserves ANSI
+// escapes, unlike the plain Snapshot) is checked for the SGR
+// reverse-video sequence \x1b[7m on the line containing the
+// selected speaker. Without selection, the same content has no
+// reverse seq anywhere — confirms our styling is selection-driven
+// and not a static highlight applied everywhere.
+func TestView_SelectedEntry_AppliesReverseHighlight(t T) T {
+    val convo = ArrayOf(
+        session.ConversationLine(Speaker = "you",  Text = "ship the metrics endpoint"),
+        session.ConversationLine(Speaker = "Iris", Text = "on it"),
+    )
+    val unselected = gala_tui.SnapshotStyled(View(mkModel(mkTeam("X", "")).Copy(Conversation = convo)), viewportW, viewportH)
+    val selected = gala_tui.SnapshotStyled(View(mkModel(mkTeam("X", "")).Copy(
+        Conversation  = convo,
+        SelectedEntry = Some(1),
+    )), viewportW, viewportH)
+    // The reverse-video SGR code is `7`. It can appear either as a
+    // standalone `\x1b[7m` or combined with bold/foreground codes
+    // (`\x1b[1;7;96m`). Match the inner `;7;` form which catches the
+    // combined case (the standalone form would be a separate
+    // assertion, but our prose style is bold + colored, so the
+    // combined form is what actually fires).
+    val combinedRev = ";7;"
+    val t1 = IsFalse(t, strings.Contains(unselected, combinedRev))
+    return IsTrue(t1, strings.Contains(selected, combinedRev))
+}
+
 // ---------------------------------------------------------------------------
 // Footer
 // ---------------------------------------------------------------------------

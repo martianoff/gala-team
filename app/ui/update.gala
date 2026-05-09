@@ -400,7 +400,7 @@ func statusTag(s Status) string = s match {
     case StWorking()        => "working"
     case StSlow()           => "slow"
     case StStuck()          => "stuck"
-    case StRecovering(_) => "recovering"
+    case StRecovering(_, _) => "recovering"
     case StHelpWaiting(_)   => "help-waiting"
     case StDone()           => "done"
     case StFailed(_)        => "failed"
@@ -409,11 +409,8 @@ func statusTag(s Status) string = s match {
 func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     // Palette interception: when the command palette is open, route
     // typing/navigation keys through the palette state machine instead
-    // of the composer. Other messages fall through. Plain bool flag
-    // rather than Option[Tuple[...]] because gala 0.41.0 lowers
-    // Option-of-generic-struct to a non-None default, which would
-    // make the intercept fire even when the palette is closed.
-    if m.PaletteVisible {
+    // of the composer. Other messages fall through.
+    if m.Palette.IsDefined() {
         val (handled, m1, cmd1) = interceptPaletteMsg(m, msg)
         if handled { return (m1, cmd1) }
     }
@@ -422,7 +419,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     // the focused choice, Esc cancels (handled below in HistoryDeselect).
     // Without this, the user lands on the modal and can neither dismiss
     // it nor pick a button — keys flow to the composer instead.
-    if m.RecoveryModalOpen {
+    if m.Recovery.IsDefined() {
         val intercepted = recoveryIntercept(m, msg)
         if intercepted.IsDefined() {
             return intercepted.GetOrElse((m, NoCmd[AppMsg]()))
@@ -510,7 +507,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case KeyToggleCompactSidebar()   => (m.Copy(CompactSidebar = !m.CompactSidebar), NoCmd[AppMsg]())
     case KeyRecoveryCycle()          => onRecoveryCycle(m)
     case KeyRecoveryConfirm()        => onRecoveryConfirm(m)
-    case KeyRecoveryClick(c)         => onRecoveryConfirm(m.Copy(RecoveryFocus = c))
+    case KeyRecoveryClick(c)         => onRecoveryConfirm(m.Copy(Recovery = Some(c)))
     case TickMsg()                   => onTick(m)
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
@@ -598,14 +595,16 @@ func approvalIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
 // onRecoveryCycle advances the focus across the recovery modal's
 // three buttons (Resume → Inspect → StartFresh → Resume). No-op when
 // the modal isn't visible.
-func onRecoveryCycle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
-    if !m.RecoveryModalOpen { return (m, NoCmd[AppMsg]()) }
-    val next = m.RecoveryFocus match {
-        case ResumeFocus()     => InspectFocus()
-        case InspectFocus()    => StartFreshFocus()
-        case StartFreshFocus() => ResumeFocus()
+func onRecoveryCycle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Recovery match {
+    case None()      => (m, NoCmd[AppMsg]())
+    case Some(focus) => {
+        val next = focus match {
+            case ResumeFocus()     => InspectFocus()
+            case InspectFocus()    => StartFreshFocus()
+            case StartFreshFocus() => ResumeFocus()
+        }
+        return (m.Copy(Recovery = Some(next)), NoCmd[AppMsg]())
     }
-    return (m.Copy(RecoveryFocus = next), NoCmd[AppMsg]())
 }
 
 // onRecoveryConfirm dispatches the focused button's action.
@@ -618,26 +617,25 @@ func onRecoveryCycle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 //                shipping that as a separate flag was less ergonomic
 //                than just deleting on Start fresh, since the user
 //                already opted into starting over.
-func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
-    if !m.RecoveryModalOpen { return (m, NoCmd[AppMsg]()) }
-    return m.RecoveryFocus match {
+func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Recovery match {
+    case None()      => (m, NoCmd[AppMsg]())
+    case Some(focus) => focus match {
         case ResumeFocus() => {
             // Recover Approval state if the prior session left an
             // unconfirmed @summary on the lead's pen and the lead
             // branch is still PR-ready. Without this, the user
             // resumes into Idle and has to re-prompt the TL to
-            // re-summarize before they can ship — a real friction
-            // point past workflow audits caught.
+            // re-summarize before they can ship.
             val (recovered, recoveryCmd) = recoverApprovalIfReady(m)
             return (recovered.Copy(
-                RecoveryModalOpen = false,
+                Recovery              = None[RecoveryChoice](),
                 RecoveryBannerVisible = false,
             ), recoveryCmd)
         }
         case InspectFocus() => (m.Copy(
-            RecoveryModalOpen = false,
+            Recovery              = None[RecoveryChoice](),
             RecoveryBannerVisible = false,
-            ReadOnlyMode = true,
+            ReadOnlyMode          = true,
         ), NoCmd[AppMsg]())
         case StartFreshFocus() => {
             // Recovery-modal Start fresh routes through the same
@@ -645,7 +643,7 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             // truth for "wipe everything". Only difference is the
             // modal flag bookkeeping.
             val (clearedRaw, wipeCmd) = freshSession(m)
-            val cleared = clearedRaw.Copy(RecoveryModalOpen = false)
+            val cleared = clearedRaw.Copy(Recovery = None[RecoveryChoice]())
             return (persistConversation(cleared, cleared.Conversation), wipeCmd)
         }
     }
@@ -942,37 +940,39 @@ func onToggleAutoApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // each open keeps them in sync with the current model (member roster,
 // archive list, etc.).
 func onTogglePalette(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
-    if m.PaletteVisible {
+    if m.Palette.IsDefined() {
         return (closePalette(m), NoCmd[AppMsg]())
     }
     val actions = paletteActions(m)
-    return (m.Copy(PaletteVisible = true, Palette = NewPalette[AppMsg](actions)), NoCmd[AppMsg]())
+    return (m.Copy(Palette = Some(NewPalette[AppMsg](actions))), NoCmd[AppMsg]())
 }
 
 // closePalette hides the palette overlay so the main UI regains focus.
-func closePalette(m AppModel) AppModel = m.Copy(PaletteVisible = false)
+func closePalette(m AppModel) AppModel = m.Copy(Palette = None[Palette[AppMsg]]())
 
 // onPaletteEvent runs PaletteUpdate against the current palette and
 // stitches the new state back into the model. On PalConfirm, the
 // selected PaletteAction's Msg is dispatched as a regular AppMsg
 // (closing the palette first) so the action runs through the normal
 // pipeline — including its own Cmd return.
-func onPaletteEvent(m AppModel, ev PaletteEvent) Tuple[AppModel, Cmd[AppMsg]] {
-    if !m.PaletteVisible { return (m, NoCmd[AppMsg]()) }
-    val isConfirm = ev match {
-        case PalConfirm() => true
-        case _            => false
-    }
-    if isConfirm {
-        val pickedMsg = paletteSelectedMsg(m.Palette)
-        val mClosed = closePalette(m)
-        return pickedMsg match {
-            case None()      => (mClosed, NoCmd[AppMsg]())
-            case Some(amsg)  => Update(mClosed, amsg)
+func onPaletteEvent(m AppModel, ev PaletteEvent) Tuple[AppModel, Cmd[AppMsg]] = m.Palette match {
+    case None()    => (m, NoCmd[AppMsg]())
+    case Some(pal) => {
+        val isConfirm = ev match {
+            case PalConfirm() => true
+            case _            => false
         }
+        if isConfirm {
+            val pickedMsg = paletteSelectedMsg(pal)
+            val mClosed = closePalette(m)
+            return pickedMsg match {
+                case None()      => (mClosed, NoCmd[AppMsg]())
+                case Some(amsg)  => Update(mClosed, amsg)
+            }
+        }
+        val updated = PaletteUpdate[AppMsg](pal, ev)
+        return (m.Copy(Palette = Some(updated)), NoCmd[AppMsg]())
     }
-    val updated = PaletteUpdate[AppMsg](m.Palette, ev)
-    return (m.Copy(Palette = updated), NoCmd[AppMsg]())
 }
 
 // onPaletteRowClick handles a mouse click on the palette's idx-th
@@ -983,20 +983,21 @@ func onPaletteEvent(m AppModel, ev PaletteEvent) Tuple[AppModel, Cmd[AppMsg]] {
 //
 // Nudging is O(N) on the visible row count, but the palette caps at
 // ~8 rows so this is a couple of iterations at worst.
-func onPaletteRowClick(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
-    if !m.PaletteVisible { return (m, NoCmd[AppMsg]()) }
-    val pal = m.Palette
-    val n = pal.FilteredIdx.Length()
-    if n == 0 { return (m, NoCmd[AppMsg]()) }
-    val target = if (idx < 0) 0 else if (idx >= n) n - 1 else idx
-    var aligned = pal
-    var safety = 0
-    for aligned.Selected != target && safety < 64 {
-        val ev = if (aligned.Selected < target) PalNext() else PalPrev()
-        aligned = PaletteUpdate[AppMsg](aligned, ev)
-        safety = safety + 1
+func onPaletteRowClick(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] = m.Palette match {
+    case None()    => (m, NoCmd[AppMsg]())
+    case Some(pal) => {
+        val n = pal.FilteredIdx.Length()
+        if n == 0 { return (m, NoCmd[AppMsg]()) }
+        val target = if (idx < 0) 0 else if (idx >= n) n - 1 else idx
+        var aligned = pal
+        var safety = 0
+        for aligned.Selected != target && safety < 64 {
+            val ev = if (aligned.Selected < target) PalNext() else PalPrev()
+            aligned = PaletteUpdate[AppMsg](aligned, ev)
+            safety = safety + 1
+        }
+        return onPaletteEvent(m.Copy(Palette = Some(aligned)), PalConfirm())
     }
-    return onPaletteEvent(m.Copy(Palette = aligned), PalConfirm())
 }
 
 // paletteSelectedMsg returns the AppMsg attached to the currently-
@@ -1698,7 +1699,7 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     }
     val withLastSeen = withErrSurface.Copy(RetryCount = withErrSurface.RetryCount.Remove(name))
     val current = withLastSeen.Statuses.Get(name).GetOrElse(StIdle())
-    val nextStatus = if (isStickyStatus(current)) current else mkWorkingStatus()
+    val nextStatus = if (isStickyStatus(current)) current else StWorking()
     val withLine = setStatus(persistConversation(withLastSeen, nextConvo), name, nextStatus)
     val (m1, consultCmds) = maybeDispatchConsults(withLine, name, displayText)
     val (m2, memberCmds)  = maybeHandleMemberDirectives(m1, name, displayText)
@@ -1884,7 +1885,7 @@ func onMemberHelp(m AppModel, name string, question string) Tuple[AppModel, Cmd[
     // The TL's nudge turn brings them back via a fresh dispatch.
     val closed = closeLiveSession(m, name)
     val m1 = closed.Copy(State = nextState, Toasts = toast)
-    val m2 = setStatus(m1, name, mkHelpWaitingStatus(question))
+    val m2 = setStatus(m1, name, StHelpWaiting(question))
     val (m3, cmds) = spawnTLNudge(m2, s"help-${name}", buildHelpNudgePrompt(name, question))
     return (m3, batchAll(cmds))
 }
@@ -1895,10 +1896,6 @@ func onMemberHelp(m AppModel, name string, question string) Tuple[AppModel, Cmd[
 // member clarification.
 func buildHelpNudgePrompt(name string, question string) string =
     s"System: ${name} requested clarification — they asked: \"${question}\". Reply with a follow-up @dispatch(${name}) directive containing the guidance, or @summary if the team should abandon the task."
-
-// mkHelpWaitingStatus widens StHelpWaiting to Status (FIX-013
-// workaround — multi-arg sealed cases need a typed helper).
-func mkHelpWaitingStatus(question string) Status = StHelpWaiting(question)
 
 // onMemberBlocked surfaces the external-environment failure as a
 // chat entry the user can scroll, plus a short toast for transient
@@ -2284,7 +2281,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         RetryCount = cleaned.RetryCount.Put(name, attempt),
         LastError  = Some(s"${name}: ${err} — retry ${attempt}/${maxRetries}"),
     )
-    val withStatus = setStatus(recovering, name, mkRecoveringStatus(attempt, maxRetries))
+    val withStatus = setStatus(recovering, name, StRecovering(attempt, maxRetries))
     return respawnMember(withStatus, name)
 }
 
@@ -2721,7 +2718,7 @@ func isCurrentlyDispatched(m AppModel, name string) bool =
         case StWorking()      => true
         case StSlow()         => true
         case StStuck()        => true
-        case StRecovering(_)  => true
+        case StRecovering(_, _)  => true
         case StHelpWaiting(_) => true
         case _                => false
     }
@@ -2885,11 +2882,6 @@ func isStickyStatus(s Status) bool = s match {
     case _                => false
 }
 
-// mkWorkingStatus is a typed shim — wrapping case construction in a
-// return-typed helper sidesteps the FIX-013 widening regression for
-// any future cases that need it.
-func mkWorkingStatus() Status = StWorking()
-
 // isDuplicateOfLastConvoLine returns true when `text` (from `speaker`)
 // matches the most recent conversation line by the same speaker. claude
 // emits both a streamed intermediate assistant chunk AND a final
@@ -3047,34 +3039,23 @@ func buildMemberNudgePrompt(reason string, mem Member) string {
 
 // ----------------------------------------------------------------------------
 // Claude stream-json filtering — typed Codec[T] decode.
-// gala 0.41.0+'s Codec[T] supports Array[Struct] field decode and
-// silently drops unknown JSON fields, so we model the only shapes we
-// care about (assistant message text, result error) and let the
-// codec do the heavy lifting. Decode failures land as Try.Failure
-// which we trap into emptyChunk() — no raw-JSON leaks ever.
 //
-// What we explicitly do NOT do anymore:
-//   - sanitise the extracted assistant text. The prior heuristic
-//     scanned for envelope markers ("\"stop_reason\":", "\"usage\":",
-//     etc.) and truncated everything after the first match. That
-//     silently dropped legitimate response text whenever claude was
-//     asked to explain its own stream-json format (the response would
-//     literally contain those substrings). User: "we shouldn't truncate
-//     any text, we should extract text carefully" — so we trust whatever
-//     the codec returned and render it verbatim. If the codec ever
-//     over-runs on a long string literal again, the fix is in gala's
-//     JSON decoder, not a downstream truncator.
-//   - drop pre-fragment lines based on JSON-token heuristics. The
-//     original looksLikeJsonFragment() was a workaround for gala
-//     0.41.0's bufio.Scanner buffer being too small (64KB default,
-//     long thinking parts split across reads). gala_simple's
-//     subprocess now sizes the buffer to 4 MiB (maxLineBytes in
-//     subprocess.go) so that fragmentation cause is gone. We keep
-//     only the cleanest tail patterns — a line that is JUST `}` or
-//     `]}` (after trim) — as a tiny defence against the very rare
-//     malformed line. Anything else, even if it looks JSON-shaped, is
-//     rendered verbatim. Better to occasionally show an ugly token
-//     than silently drop a multi-paragraph response.
+// We model only the shapes we care about (assistant message text,
+// result error) and let the JSON codec do the heavy lifting. Decode
+// failures land as Try.Failure which we trap into emptyChunk() — no
+// raw-JSON leaks ever.
+//
+// We do NOT sanitise the extracted assistant text. A prior heuristic
+// scanned for envelope markers ("\"stop_reason\":", "\"usage\":",
+// etc.) and truncated everything after the first match — that
+// silently dropped legitimate response text whenever claude was asked
+// to explain its own stream-json format. We trust whatever the codec
+// returned and render it verbatim.
+//
+// We also do NOT drop pre-fragment lines based on JSON-token
+// heuristics. The only post-decode defence is a tiny tail filter for
+// lines that are just `}` or `]}` (after trim), guarding against the
+// very rare malformed line.
 //
 // Optional diagnostic: setting GALA_TEAM_TRACE_DIR=<dir> tees every
 // (raw line, parsed result) pair into per-member JSONL files. See
@@ -3543,17 +3524,6 @@ func isCleanCloseError(err string) bool {
     return false
 }
 
-// mkRecoveringStatus constructs a StRecovering case and returns it
-// typed as the parent Status. Sealed-case widening fires on `return`
-// statements (FIX-007) but not on function-call argument sites for
-// multi-arg cases — wrapping the construction in a return-typed
-// helper sidesteps that. Same workaround for any other multi-arg
-// sealed-case argument site.
-// FIX-013 workaround: positional construction widens to parent type
-// where named (`StRecovering(Attempt = a, Max = m)`) does not.
-// Pre-formatting the note string to "N/M" sidesteps multi-arg cases.
-func mkRecoveringStatus(attempt int, max int) Status = StRecovering(s"${attempt}/${max}")
-
 // onApprove is the Phase-1 approval flow: when the FSM is in Approval,
 // the user pressed Ctrl+A. We transition the FSM via ApprovalAccepted,
 // log "/approve", and gate the PR-create on the team's pre-merge hooks
@@ -3640,7 +3610,7 @@ func isWorkingStatus(s Status) bool = s match {
     case StWorking()      => true
     case StSlow()          => true
     case StStuck()         => true
-    case StRecovering(_)   => true
+    case StRecovering(_, _)   => true
     case _                 => false
 }
 
@@ -4321,12 +4291,8 @@ func transitionContext(m AppModel) TransitionContext = TransitionContext(
 )
 
 // trimLastRune removes the final rune from `s`. Returns "" if `s` is
-// already empty.  Goes via []rune so we trim grapheme-cleanly instead
+// already empty. Goes via []rune so we trim grapheme-cleanly instead
 // of byte-fiddling at the UTF-8 level.
-//
-// SliceTo (from go_interop) gives us the rune slice; string(...) is
-// Go's native []rune → string conversion (the inverse direction
-// without a helper is not supported by GALA's parser).
 func trimLastRune(s string) string {
     val rs = ToRunes(s)
     val n = len(rs)
@@ -4524,7 +4490,7 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if m.HelpVisible {
         return (m.Copy(HelpVisible = false), NoCmd[AppMsg]())
     }
-    if m.RecoveryModalOpen {
+    if m.Recovery.IsDefined() {
         // Esc on the recovery modal = "discard prior session" — same
         // semantics as the Start fresh button, so wipe worktrees too
         // for consistency. Without this, Esc would silently leave
@@ -4534,7 +4500,7 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         val wipeCmd = runtimeFutureToCmd(WipeWorktreesFuture(m.Project, m.Team.Members, m.Policy.WorkspaceMode))
         val empty = EmptyArray[session.ConversationLine]()
         val cleared = m.Copy(
-            RecoveryModalOpen     = false,
+            Recovery              = None[RecoveryChoice](),
             RecoveryBannerVisible = false,
             RecoveredMembers      = EmptyArray[string](),
             Conversation          = empty,

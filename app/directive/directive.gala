@@ -47,10 +47,6 @@ sealed type Directive {
     // routes it into the next TL relay turn so the lead can decide
     // follow-up. EOF still works as an implicit completion signal —
     // @done is for explicit deliverable summaries. (Member → orchestrator)
-    //
-    // Named `Finished` rather than `Done` because the bare-`Done` case
-    // name collides with a transpiler-internal `state.Done` resolver
-    // entry in gala 0.39.x — see FIX-014 in the regression doc.
     case Finished(Body string)
     // Member needs clarification from the TL before continuing. The
     // orchestrator pauses the member (StHelpWaiting) and opens a TL

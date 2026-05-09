@@ -16,9 +16,12 @@ gala_library(
 gala_go_test(
     name = "team_config_test",
     srcs = ["team_config_test.gala"],
+    pkg = "config",
+    lib_srcs = ["team_config.gala"],
     deps = [
-        ":config",
         "//app/policy",
         "//app/team",
+        "@gala//collection_immutable",
+        "@gala//yaml",
     ],
 )

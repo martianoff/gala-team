@@ -10,6 +10,7 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/directive"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
@@ -847,7 +848,7 @@ func TestResume_IgnoresSummaryFromNonLead(t T) T {
 // the URL substring rather than equality so the escape wrapping
 // doesn't make the assertion brittle.
 func TestPrCreated_AppendsUrlToConversationLog(t T) T {
-    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://github.com/x/y/pull/1"))
+    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://github.com/x/y/pull/1", Branch = "gala_team/x/pr/abc"))
     val first = m.Conversation.Get(0)
     val t1 = Eq(t, first.Speaker, "gh")
     val t2 = IsTrue(t1, strings.HasPrefix(first.Text, "PR created: "))
@@ -915,13 +916,13 @@ func TestPreMergeHooksFailed_StopsPipelineWithError(t T) T {
 // ---------------------------------------------------------------------------
 
 func TestPrCreated_AppendsToOpenPrs(t T) T {
-    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7"))
+    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7", Branch = "gala_team/x/pr/def7"))
     val t1 = Eq(t, m.OpenPrs.Size(), 1)
     return Eq(t1, m.OpenPrs.Get(0).Url, "https://x/y/pull/7")
 }
 
 func TestPrCreated_AppendsBothLogLines(t T) T {
-    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7"))
+    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7", Branch = "gala_team/x/pr/def7"))
     val t1 = Eq(t, m.Conversation.Size(), 2)
     val t2 = IsTrue(t1, strings.Contains(m.Conversation.Get(0).Text, "https://x/y/pull/7"))
     return IsTrue(t2, m.Conversation.Get(1).Text == "Press Ctrl+M to merge with --squash.")
@@ -1160,7 +1161,7 @@ func TestChunkArrived_DifferentSpeakersInterleave(t T) T {
 // success.
 func TestPrCreated_DoesNotClearPriorLastError(t T) T {
     val seed = sampleModel().Copy(LastError = Some("session save: disk full"))
-    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1"))
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
     return m.LastError match {
         case Some(s) => Eq(t, s, "session save: disk full")
         case None()  => IsTrue(t, false)
@@ -2329,7 +2330,7 @@ func TestInitialModel_SeedsAutoApproveFromPolicy(t T) T {
 // prompt won't block on a manual merge.
 func TestPrCreated_AutoApprove_SkipsCtrlMHint(t T) T {
     val seed = sampleModel().Copy(AutoApprove = true)
-    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/7"))
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/7", Branch = "gala_team/x/pr/def7"))
     val t1 = Eq(t, m.Conversation.Size(), 2)
     val first = m.Conversation.Get(0).Text
     val second = m.Conversation.Get(1).Text
@@ -2342,7 +2343,7 @@ func TestPrCreated_AutoApprove_SkipsCtrlMHint(t T) T {
 // guards against the AutoApprove branch accidentally swallowing the
 // non-auto path.
 func TestPrCreated_ManualApprove_KeepsCtrlMHint(t T) T {
-    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7"))
+    val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7", Branch = "gala_team/x/pr/def7"))
     val second = m.Conversation.Get(1).Text
     return IsTrue(t, strings.Contains(second, "Ctrl+M"))
 }
@@ -2351,12 +2352,105 @@ func TestPrCreated_ManualApprove_KeepsCtrlMHint(t T) T {
 // resetting prior entries. Mirrors the user-visible "(N open)" badge.
 func TestPrCreated_AutoApprove_AccumulatesOpenPrs(t T) T {
     val seed = sampleModel().Copy(AutoApprove = true)
-    val (m1, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1"))
-    val (m2, _) = Update(m1,   PrCreated(Url = "https://x/y/pull/2"))
-    val (m3, _) = Update(m2,   PrCreated(Url = "https://x/y/pull/3"))
+    val (m1, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
+    val (m2, _) = Update(m1,   PrCreated(Url = "https://x/y/pull/2", Branch = "gala_team/x/pr/bbb2"))
+    val (m3, _) = Update(m2,   PrCreated(Url = "https://x/y/pull/3", Branch = "gala_team/x/pr/ccc3"))
     val t1 = Eq(t, m3.OpenPrs.Size(), 3)
     val t2 = Eq(t1, m3.OpenPrs.Get(0).Url, "https://x/y/pull/1")
     return Eq(t2, m3.OpenPrs.Get(2).Url, "https://x/y/pull/3")
+}
+
+// ---------------------------------------------------------------------------
+// @base directive (V2 stacking)
+// ---------------------------------------------------------------------------
+
+// @base previous resolves to the most recent open PR's branch. With
+// at least one OpenPrs entry, the resolver returns Some(branch) and
+// applyBaseDirective stores that on the model. The Base directive is
+// stripped from the returned dirs so the FSM routing layer doesn't
+// see it.
+func TestApplyBase_Previous_ResolvesToLastOpenBranch(t T) T {
+    val seed = sampleModel().Copy(OpenPrs = ArrayOf(
+        sampleBatchPr("https://x/y/pull/7").Copy(Branch = "gala_team/x/pr/abc7"),
+        sampleBatchPr("https://x/y/pull/8").Copy(Branch = "gala_team/x/pr/def8"),
+    ))
+    val dirs = ArrayOf[Directive](Base(Ref = "previous"), Dispatch(Target = "Felix", Body = "go"))
+    val (next, rest) = applyBaseDirective(seed, dirs)
+    val t1 = next.ActiveBase match {
+        case Some(b) => Eq(t, b, "gala_team/x/pr/def8")
+        case None()  => IsTrue(t, false)
+    }
+    return Eq(t1, rest.Size(), 1)  // Base stripped, Dispatch survives
+}
+
+// @base main is treated as "no override" so ActiveBase stays None and
+// gh pr create falls back to the project's default branch.
+func TestApplyBase_Main_LeavesActiveBaseNone(t T) T {
+    val dirs = ArrayOf[Directive](Base(Ref = "main"))
+    val (next, _) = applyBaseDirective(sampleModel(), dirs)
+    return IsFalse(t, next.ActiveBase.IsDefined())
+}
+
+// @base previous on the very first prompt — OpenPrs is empty — falls
+// back to None instead of dead-ending. The PR opens against the
+// default branch as if @base had been omitted.
+func TestApplyBase_PreviousWithEmptyOpenPrs_FallsBackToNone(t T) T {
+    val dirs = ArrayOf[Directive](Base(Ref = "previous"))
+    val (next, _) = applyBaseDirective(sampleModel(), dirs)
+    return IsFalse(t, next.ActiveBase.IsDefined())
+}
+
+// A literal ref is passed through verbatim so TLs can pin a base
+// branch outside the main / previous shorthands.
+func TestApplyBase_LiteralRef_Passes(t T) T {
+    val dirs = ArrayOf[Directive](Base(Ref = "release/2026-q1"))
+    val (next, _) = applyBaseDirective(sampleModel(), dirs)
+    return next.ActiveBase match {
+        case Some(b) => Eq(t, b, "release/2026-q1")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// First Base wins when a TL emits multiple. (Should be rare; the
+// onboarding doc says "emit once at the top of the turn".)
+func TestApplyBase_FirstWins(t T) T {
+    val dirs = ArrayOf[Directive](
+        Base(Ref = "feat/a"),
+        Base(Ref = "feat/b"),
+    )
+    val (next, _) = applyBaseDirective(sampleModel(), dirs)
+    return next.ActiveBase match {
+        case Some(b) => Eq(t, b, "feat/a")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// PrCreated records the snapshot branch on the BatchPr entry, so a
+// later @base previous resolves to the right ref instead of the
+// generic lead-branch placeholder.
+func TestPrCreated_RecordsSnapshotBranch(t T) T {
+    val seed = sampleModel()
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/9", Branch = "gala_team/x/pr/snap9"))
+    return Eq(t, m.OpenPrs.Get(0).Branch, "gala_team/x/pr/snap9")
+}
+
+// PrCreated clears ActiveBase. The next user prompt starts fresh —
+// the TL must re-emit @base if stacking is wanted again.
+func TestPrCreated_ClearsActiveBase(t T) T {
+    val seed = sampleModel().Copy(ActiveBase = Some("gala_team/x/pr/abc"))
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/9", Branch = "gala_team/x/pr/snap9"))
+    return IsFalse(t, m.ActiveBase.IsDefined())
+}
+
+// New user prompt resets ActiveBase. Without this, a stale base from
+// a prior turn would silently apply to the next, unrelated PR.
+func TestKeySubmit_ClearsActiveBase(t T) T {
+    val seed = sampleModel().Copy(
+        Composer = "next task",
+        ActiveBase = Some("gala_team/x/pr/abc"),
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    return IsFalse(t, m.ActiveBase.IsDefined())
 }
 
 // pendingPrTitle pulls the most recent user prompt out of the

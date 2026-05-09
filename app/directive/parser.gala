@@ -110,6 +110,9 @@ func parseOpeningTag(line string) Option[openingTag] {
     if strings.HasPrefix(trimmed, "@blocked") {
         return parseBodyOnlyTag("blocked", strings.TrimPrefix(trimmed, "@blocked"))
     }
+    if strings.HasPrefix(trimmed, "@base") {
+        return parseBodyOnlyTag("base", strings.TrimPrefix(trimmed, "@base"))
+    }
     return None[openingTag]()
 }
 
@@ -230,6 +233,17 @@ func buildDirective(
     }
     if kind == "blocked" {
         return Some[Directive](Blocked(Reason = body))
+    }
+    if kind == "base" {
+        // Strip whitespace/newlines from the ref token. TLs sometimes
+        // wrap the ref onto its own line; we tolerate that and use the
+        // first non-empty token. Empty ref is a parse failure (drop the
+        // directive) so a stray "@base ... @end" doesn't silently lock
+        // the team into a weird base.
+        val ref = strings.TrimSpace(body)
+        if ref == "" { return None[Directive]() }
+        val firstTok = strings.SplitN(ref, "\n", 2)[0]
+        return Some[Directive](Base(Ref = strings.TrimSpace(firstTok)))
     }
     return None[Directive]()
 }

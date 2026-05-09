@@ -132,6 +132,14 @@ struct AppModel(
     // startup, toggled mid-session via F7. Stored on the model so the
     // F7 toggle can flip it without rewriting team.yaml.
     AutoApprove  bool,
+    // Resolved base ref for the PR this turn will eventually open.
+    // None = the project's default branch (the gh pr create default).
+    // Some(ref) is set when the TL emits an `@base <ref>` directive.
+    // `previous` is resolved to the most recent OpenPrs entry's branch
+    // at directive time, so this field always carries a literal branch
+    // name. Cleared on every new user prompt, every Approval acceptance
+    // (PR has been opened), and every Approval rejection.
+    ActiveBase   Option[string],
     // Per-turn TL output accumulator. Reset on every KeySubmit. Used by
     // the chunk pump to detect newly-completed @consult blocks without
     // re-scanning the entire conversation log.
@@ -402,6 +410,7 @@ func InitialModelWithTeams(
     LastError    = None[string](),
     OpenPrs      = EmptyArray[BatchPr](),
     AutoApprove  = policy.AutoApprove,
+    ActiveBase   = None[string](),
     TurnBuffer    = "",
     ConsultsFired = 0,
     ActiveConsults = EmptyHashMap[string, ConsultSession](),
@@ -469,7 +478,7 @@ sealed type AppMsg {
     // the failure in LastError and leaves the PR uncut.
     case PreMergeHooksPassed(SummaryBody string)
     case PreMergeHooksFailed(ErrText string)
-    case PrCreated(Url string)
+    case PrCreated(Url string, Branch string)
     case PrFailed(ErrText string)
     // OpenBrowser is dispatched by onPrCreated to defer the
     // side-effecting browser launch out of Update's pure

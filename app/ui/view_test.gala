@@ -967,7 +967,7 @@ func TestFlow_ChunkArrived_RendersInConversation(t T) T {
 // PrCreated swaps the footer hint to mention Ctrl+M.
 func TestFlow_PrCreated_FooterShowsMergeHint(t T) T {
     val seed = mkModel(mkTeam("X", ""))
-    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1"))
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
     return IsTrue(t, strings.Contains(render(m), "Ctrl+M merge"))
 }
 

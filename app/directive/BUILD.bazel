@@ -16,8 +16,12 @@ gala_library(
 gala_go_test(
     name = "parser_test",
     srcs = ["parser_test.gala"],
+    pkg = "directive",
+    lib_srcs = [
+        "directive.gala",
+        "parser.gala",
+    ],
     deps = [
-        ":directive",
         "@gala//collection_immutable",
     ],
 )

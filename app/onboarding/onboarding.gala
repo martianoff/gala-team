@@ -295,10 +295,11 @@ func protocolSection(isTL bool, hasQa bool) string {
         else
             ""
         return "# How to delegate (orchestration protocol)\n\n" +
-            "Three directives drive the orchestrator. Use them to coordinate the team:\n\n" +
+            "Four directives drive the orchestrator. Use them to coordinate the team:\n\n" +
             "- `@dispatch(<MemberName>) ... @end` — assign the body text to that member as their next task. Multiple back-to-back `@dispatch` blocks fan out in parallel.\n" +
             "- `@consult(<TeamKey>) ... @end` — ask another team for input. Cross-team. Less common.\n" +
-            "- `@summary ... @end` — finalize the turn for the user. The user is then asked to approve and the turn ends.\n\n" +
+            "- `@summary ... @end` — finalize the turn for the user. The user is then asked to approve and the turn ends.\n" +
+            "- `@base <ref> @end` — pick the base branch for the PR this turn will eventually open. See \"## Stacking PRs\" below.\n\n" +
             "## Example — two engineers in parallel\n\n" +
             "```\n" +
             "I'll split this two ways.\n\n" +
@@ -334,6 +335,21 @@ func protocolSection(isTL bool, hasQa bool) string {
             "- **No names, no internal nuance.** Don't write \"Felix did X then Mira fixed Y after three blocked attempts.\" The reader doesn't know who Felix is and doesn't care. Write the PR as if a single author wrote it: \"Added X. Fixed Y.\" Skip orchestration trivia (\"I dispatched...\", \"after retries\", \"the merger turn\"). Skip the apology-and-postmortem voice.\n" +
             "- **No orchestration internals.** The reviewer doesn't know about `.gala_team/`, `worktrees/_lead`, `gala_team/<proj>/lead`, pre-flight checks, or any of the orchestrator's bookkeeping. Never paste those paths or terms into the body. The canonical bad shape: a TL pasting `Please run git -C ...\\.gala_team\\worktrees\\_lead log...` as the @summary body, which then ships verbatim as the public PR description — incomprehensible to anyone outside this orchestrator.\n" +
             "- **If you can't ship, don't @summary.** When something is genuinely broken (orchestrator state inconsistent, branch state weird, gh credentials missing), do NOT emit @summary with a \"please fix manually\" prose body — that goes straight to GitHub. Instead, emit prose-only output (no directive) explaining what's wrong; the user reads it in the TUI, not on GitHub. Reserve @summary for the case where the work is genuinely PR-ready.\n\n" +
+            "## Stacking PRs (the @base directive)\n\n" +
+            "By default every PR you open is based on the project's default branch. If the next task you're about to do depends on changes from a PR you opened earlier in this session that has NOT been merged yet, emit `@base previous` as the FIRST directive of your turn — before any `@dispatch`. The orchestrator will pass `--base <previous-pr-branch>` to `gh pr create` so reviewers see only this turn's diff (instead of the prior PR's commits leaking in).\n\n" +
+            "```\n" +
+            "@base previous\n" +
+            "@end\n\n" +
+            "@dispatch(Felix)\n" +
+            "...\n" +
+            "@end\n" +
+            "```\n\n" +
+            "Rules of thumb:\n\n" +
+            "- **Independent task** (no relation to the prior PR): omit `@base`. PR opens against the default branch — the normal case.\n" +
+            "- **Dependent task** (this turn's work needs commits that only exist on a still-open prior PR): emit `@base previous`.\n" +
+            "- **Specific branch**: `@base <branch-name>` if you need a base that isn't the default branch and isn't the most recent open PR (rare).\n" +
+            "- Emit `@base` once, at the top of the turn. Multiple `@base` directives in one turn — only the first counts.\n" +
+            "- Don't emit `@base` at all if the previous PR is already merged; the default branch already contains its commits, so a fresh PR off main will diff cleanly.\n\n" +
             "## Rules\n\n" +
             "- Each directive opens with the tag on its own line and closes with `@end` on its own line.\n" +
             "- Plain prose between directives is rendered as your message to the user.\n" +

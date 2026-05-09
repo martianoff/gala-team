@@ -43,7 +43,7 @@ sealed type Msg {
     case RtWriteSent(Member string)
     case RtStderrArrived(Member string, Line string)
     case RtStderrEnded(Member string)
-    case RtPrCreated(Url string)
+    case RtPrCreated(Url string, Branch string)
     case RtPrFailed(Err error)
     case RtMerged(Url string)
     case RtMergeFailed(Err error)
@@ -712,7 +712,7 @@ func MsgMember(msg Msg) string = msg match {
     case RtWriteSent(name)          => name
     case RtStderrArrived(name, _)   => name
     case RtStderrEnded(name)        => name
-    case RtPrCreated(_)             => ""
+    case RtPrCreated(_, _)          => ""
     case RtPrFailed(_)              => ""
     case RtMerged(_)                => ""
     case RtMergeFailed(_)           => ""
@@ -726,16 +726,22 @@ func MsgMember(msg Msg) string = msg match {
 // GhPrCreateFuture spawns `gh pr create` from the lead worktree with
 // the summary text as the PR body. The first line of `body` becomes the
 // title (capped at 70 chars per gala-style rule), the rest goes into
-// the body via the `--body` flag.
+// the body via the `--body` flag. `baseRef` is the branch the PR
+// targets — None lets gh pick the project's default branch (the usual
+// case); Some(ref) is set when the TL emitted an `@base <ref>`
+// directive earlier in the turn (V2 stacking).
 //
-// Returns RtPrCreated(url) on success — `gh` prints the PR URL on its
-// last stdout line, so we read until the stream closes and take the
-// last non-empty line. Returns RtPrFailed(err) on any spawn or non-zero
-// exit. The user typically reads the URL from the conversation log
-// then opens it in their browser; alternative would be to launch the
-// browser directly via `gh pr view --web` but that bypasses the audit
-// trail of "what summary did the team agree to".
-func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
+// Returns RtPrCreated(url, branch) on success — `gh` prints the PR
+// URL on its last stdout line, so we read until the stream closes and
+// take the last non-empty line. The snapshot branch is also surfaced
+// so the model can record it on the BatchPr entry; that's what later
+// `@base previous` directives resolve against.
+//
+// Returns RtPrFailed(err) on any spawn or non-zero exit. The user
+// typically reads the URL from the conversation log then opens it in
+// their browser; the alternative `gh pr view --web` would bypass the
+// audit trail of "what summary did the team agree to".
+func GhPrCreateFuture(proj Project, body string, baseRef Option[string]) concurrent.Future[Msg] {
     val title = GhTitle(body)
     val bodyWithFooter = body + "\n\n---\n🍎 orchestrated by [Gala Team](https://github.com/martianoff/gala-team)"
     val leadBranch = LeadBranchFor(proj)
@@ -764,7 +770,11 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
         if pushResult != "" {
             return RtPrFailed(Err = errors.New(s"git push pr branch failed: ${pushResult}"))
         }
-        val args = ArrayOf("pr", "create", "--head", prBranch, "--title", title, "--body", bodyWithFooter)
+        val baseArgs = baseRef match {
+            case None()    => EmptyArray[string]()
+            case Some(ref) => ArrayOf("--base", ref)
+        }
+        val args = ArrayOf("pr", "create", "--head", prBranch, "--title", title, "--body", bodyWithFooter).AppendAll(baseArgs)
         val opts = subprocess.NewSpawnOpts(
             "gh",
             args.ToGoSlice(),
@@ -773,7 +783,7 @@ func GhPrCreateFuture(proj Project, body string) concurrent.Future[Msg] {
         )
         return subprocess.Spawn(opts) match {
             case Failure(err) => RtPrFailed(Err = err)
-            case Success(p)   => readGhPrUrl(p)
+            case Success(p)   => readGhPrUrl(p, prBranch)
         }
     })
 }
@@ -871,7 +881,7 @@ func drainGitPushResult(p subprocess.Process) string {
 // stderr after stdout is drained keeps the code linear without
 // risking deadlock for the size of output gh pr create produces
 // (stderr is typically a few short lines).
-func readGhPrUrl(p subprocess.Process) Msg {
+func readGhPrUrl(p subprocess.Process, prBranch string) Msg {
     var lastLine = ""
     for {
         val line = p.ReadLine()
@@ -902,7 +912,7 @@ func readGhPrUrl(p subprocess.Process) Msg {
                 val detail = if (stderrJoined != "") s": ${stderrJoined}" else ""
                 RtPrFailed(Err = errors.New(s"gh pr create produced no output${detail}"))
             }
-            else                     RtPrCreated(Url = lastLine)
+            else                     RtPrCreated(Url = lastLine, Branch = prBranch)
     }
 }
 

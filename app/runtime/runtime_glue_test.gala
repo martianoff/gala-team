@@ -60,15 +60,18 @@ func TestMsgMember_AcrossAllVariants(t T) T {
 // so callers can pattern-match on emptiness or pivot to RtPrCreated /
 // RtPrFailed directly.
 func TestMsgMember_PrVariantsHaveNoMember(t T) T {
-    val t1 = Eq(t,  MsgMember(RtPrCreated(Url = "https://x/y/pull/1")),       "")
+    val t1 = Eq(t,  MsgMember(RtPrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1")), "")
     return       Eq(t1, MsgMember(RtPrFailed(Err = errors.New("auth"))), "")
 }
 
 func TestMsg_RtPrCreated_Construction(t T) T {
-    val msg = RtPrCreated(Url = "https://github.com/x/y/pull/42")
+    val msg = RtPrCreated(Url = "https://github.com/x/y/pull/42", Branch = "gala_team/x/pr/snap42")
     return msg match {
-        case RtPrCreated(url) => Eq(t, url, "https://github.com/x/y/pull/42")
-        case _                => IsTrue(t, false)
+        case RtPrCreated(url, branch) => {
+            val a = Eq(t, url, "https://github.com/x/y/pull/42")
+            return Eq(a, branch, "gala_team/x/pr/snap42")
+        }
+        case _ => IsTrue(t, false)
     }
 }
 

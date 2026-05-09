@@ -459,7 +459,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case StderrEnded(_)              => (m, NoCmd[AppMsg]())
     case PreMergeHooksPassed(body)   => onPreMergeHooksPassed(m, body)
     case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
-    case PrCreated(url)              => onPrCreated(m, url)
+    case PrCreated(url, branch)      => onPrCreated(m, url, branch)
     case WorktreesWiped()            => onWorktreesWiped(m)
     case PrFailed(err)               => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
     case OpenBrowser(url)            => onOpenBrowser(m, url)
@@ -1290,6 +1290,10 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         ConversationSticky = true,
         TurnBuffer    = "",
         ConsultsFired = 0,
+        // Reset @base — a new prompt starts a fresh PR-base decision.
+        // The TL re-emits @base early in this turn if stacking is
+        // wanted; otherwise the PR opens against the project default.
+        ActiveBase    = None[string](),
         // First user prompt after a recovery dismisses the banner
         // automatically — the user has signaled they want to
         // continue, so the "type to resume · Esc to discard" hint
@@ -1773,6 +1777,45 @@ func extractDoneBody(d Directive) Option[string] = d match {
     case _              => None[string]()
 }
 
+// applyBaseDirective scrapes the first @base directive out of `dirs`,
+// resolves the ref against the current open-PR list, and returns
+//   (model with ActiveBase set if a Base was found, dirs minus the
+//   Base directive)
+// The Base directive is stripped from the returned dirs so the FSM
+// routing layer (afterTLDone, directiveTargets, firstSummary) sees
+// the same shape it always has — Base is a side-channel that the PR
+// pipeline reads, not an FSM-visible event.
+//
+// Resolution rules:
+//   - "main" / empty / unrecognised → model unchanged (default base
+//     used by gh pr create), Base directive still stripped.
+//   - "previous" → most recent OpenPrs entry's branch. If OpenPrs is
+//     empty, falls back to None (gh's default = project's default
+//     branch) so a TL that emits @base previous on the very first
+//     prompt doesn't dead-end.
+//   - any other value → treated as a literal branch name.
+func applyBaseDirective(m AppModel, dirs Array[Directive]) Tuple[AppModel, Array[Directive]] {
+    val baseRef = dirs.Collect({ case Base(ref) => ref }).HeadOption()
+    val nonBase = dirs.Filter((d) => d match {
+        case Base(_) => false
+        case _       => true
+    })
+    return baseRef match {
+        case None()      => (m, nonBase)
+        case Some(ref)   => (m.Copy(ActiveBase = resolveBaseRef(m, ref)), nonBase)
+    }
+}
+
+func resolveBaseRef(m AppModel, ref string) Option[string] {
+    val trimmed = strings.TrimSpace(ref)
+    if trimmed == "" || trimmed == "main" { return None[string]() }
+    if trimmed == "previous" {
+        if m.OpenPrs.IsEmpty() { return None[string]() }
+        return Some(m.OpenPrs.Last().Branch)
+    }
+    return Some(trimmed)
+}
+
 func extractHelpQuestion(d Directive) Option[string] = d match {
     case Help(q) => Some(q)
     case _       => None[string]()
@@ -2106,7 +2149,17 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         //   - Other member → MemberDone(name, body). FSM drains the
         //     pending set and advances to QAGate / TLReview / relay.
         if name == cleaned.Team.Lead.Name {
-            val dirs = Parse(cleaned.TurnBuffer)
+            val rawDirs = Parse(cleaned.TurnBuffer)
+            // Capture @base from the lead's turn so the eventual
+            // gh pr create can pass --base. First Base directive wins:
+            // the TL is expected to declare the base ref ONCE near the
+            // top of its turn before any @dispatch / @summary. Resolve
+            // the alias `previous` against the current OpenPrs list so
+            // the model field always carries a literal branch name.
+            // applyBaseDirective also drops the Base directive from the
+            // returned dirs list so the FSM routing below sees the same
+            // shape it always has.
+            val (cleanedB, dirs) = applyBaseDirective(cleaned, rawDirs)
             // Empty-dispatch guard. If the lead's turn parsed zero
             // directives at all (no @dispatch, no @summary, nothing),
             // the FSM must NOT transition to Delegating — that would
@@ -2121,12 +2174,12 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             //      Iris's reply and decides what to do next.
             // Either way, no Delegating, no auto-QA.
             if dirs.IsEmpty() {
-                val malformedReason = detectMalformedDispatch(cleaned.TurnBuffer, cleaned.Team)
+                val malformedReason = detectMalformedDispatch(cleanedB.TurnBuffer, cleanedB.Team)
                 if malformedReason != "" {
                     val (m1, nudgeCmds) = spawnTLNudge(
-                        setStatus(cleaned, name, StIdle()),
+                        setStatus(cleanedB, name, StIdle()),
                         "malformed-dispatch",
-                        buildMalformedDispatchPrompt(malformedReason, cleaned.Team),
+                        buildMalformedDispatchPrompt(malformedReason, cleanedB.Team),
                     )
                     return (m1, batchAll(nudgeCmds))
                 }
@@ -2138,8 +2191,8 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 // arrival was invisible. afterTLDone(empty) → Idle()
                 // by construction, so the FSM agrees with the direct
                 // assignment that lived here before.
-                val nextState = transitionLogged(cleaned.State, TLDone(Directives = EmptyArray[Directive]()), transitionContext(cleaned))
-                return (setStatus(cleaned.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
+                val nextState = transitionLogged(cleanedB.State, TLDone(Directives = EmptyArray[Directive]()), transitionContext(cleanedB))
+                return (setStatus(cleanedB.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
             }
             // Empty-after-QA-filter guard. If every dispatch target
             // resolved to a QA member (and qa_required is on), the
@@ -2147,8 +2200,8 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             // engineer dispatches. Same anti-cascade: nudge the lead
             // and stay out of Delegating.
             val dispatchTargets = dirs.Collect({ case Dispatch(n, b) => (n, b) })
-            val nonQa = if (cleaned.Workflow.QARequired) {
-                val (allowed, _) = partitionQaTargets(dispatchTargets, cleaned.Team)
+            val nonQa = if (cleanedB.Workflow.QARequired) {
+                val (allowed, _) = partitionQaTargets(dispatchTargets, cleanedB.Team)
                 allowed
             } else {
                 dispatchTargets
@@ -2159,7 +2212,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                     case _      => ""
                 })
                 val (m1, nudgeCmds) = spawnTLNudge(
-                    setStatus(cleaned, name, StIdle()),
+                    setStatus(cleanedB, name, StIdle()),
                     "qa-only-dispatch",
                     buildQaAutoSpawnNudge(droppedNames),
                 )
@@ -2176,19 +2229,19 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             // (b) merge engineer branches into lead via a designated
             // step, or (c) revise the @summary if there's genuinely
             // nothing to ship.
-            val provisionalState = Transition(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
+            val provisionalState = Transition(cleanedB.State, TLDone(Directives = dirs), transitionContext(cleanedB))
             val provisionalIsApproval = provisionalState match {
                 case Approval(_) => true
                 case _           => false
             }
             if provisionalIsApproval {
-                val readiness = checkPrReady(cleaned.Project)
+                val readiness = checkPrReady(cleanedB.Project)
                 if readiness.IsDefined() {
                     val reason = readiness.GetOrElse("")
                     val (m1, nudgeCmds) = spawnTLNudge(
-                        setStatus(cleaned, name, StIdle()),
+                        setStatus(cleanedB, name, StIdle()),
                         "summary-without-pr-ready",
-                        buildSummaryNotPrReadyNudge(reason, cleaned.Team, cleaned.Project),
+                        buildSummaryNotPrReadyNudge(reason, cleanedB.Team, cleanedB.Project),
                     )
                     return (m1, batchAll(nudgeCmds))
                 }
@@ -2199,19 +2252,19 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 // TL to rewrite if the body lacks structure or
                 // mentions internal orchestration nuance.
                 val summaryBody = firstSummaryBody(dirs)
-                val bodyIssue = validatePrBody(summaryBody, cleaned.Team)
+                val bodyIssue = validatePrBody(summaryBody, cleanedB.Team)
                 if bodyIssue.IsDefined() {
                     val issueText = bodyIssue.GetOrElse("")
                     val (m1, nudgeCmds) = spawnTLNudge(
-                        setStatus(cleaned, name, StIdle()),
+                        setStatus(cleanedB, name, StIdle()),
                         "summary-bad-body",
                         buildBadSummaryBodyNudge(issueText, summaryBody),
                     )
                     return (m1, batchAll(nudgeCmds))
                 }
             }
-            val nextState = transitionLogged(cleaned.State, TLDone(Directives = dirs), transitionContext(cleaned))
-            val withState = setStatus(cleaned.Copy(State = nextState), name, StIdle())
+            val nextState = transitionLogged(cleanedB.State, TLDone(Directives = dirs), transitionContext(cleanedB))
+            val withState = setStatus(cleanedB.Copy(State = nextState), name, StIdle())
             // If the new state is Delegating, fan out: spawn each
             // dispatched member's session with their per-target body
             // as the prompt. Without this, members stay StIdle forever
@@ -3667,7 +3720,7 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = "/approve")),
     )
     if m.Policy.PreMerge.IsEmpty() {
-        return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body)))
+        return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body, m.ActiveBase)))
     }
     val noted = withState.Copy(
         Conversation = withState.Conversation.Append(
@@ -3931,7 +3984,7 @@ func onPreMergeHooksPassed(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]]
             session.ConversationLine(Speaker = "policy", Text = "pre-merge hooks: ✓ all green, opening PR"),
         ),
     )
-    return (withLog, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body)))
+    return (withLog, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body, m.ActiveBase)))
 }
 
 // onPreMergeHooksFailed records the first failing hook's error and
@@ -3991,12 +4044,13 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // never trigger real browser windows. Production runtime processes
 // the Cmd, dispatches OpenBrowser, and the Update branch shells the
 // OS launcher.
-func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
+func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppMsg]] {
     val linkified = prOscOpen(url) + url + prOscClose()
     val toast = m.Toasts.PushInfo(s"PR ready · ${url}", time_utils.Now(), time_utils.Seconds(int64(8)))
+    val effectiveBranch = if (branch == "") LeadBranchFor(m.Project) else branch
     val entry = BatchPr(
         Url      = url,
-        Branch   = LeadBranchFor(m.Project),
+        Branch   = effectiveBranch,
         Title    = pendingPrTitle(m),
         OpenedAt = time_utils.Now(),
     )
@@ -4013,8 +4067,12 @@ func onPrCreated(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
             Text    = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.",
         ))
     }
+    // Clear ActiveBase now that the PR has been opened — the next
+    // turn starts with a fresh base decision (defaulting back to the
+    // project's default branch unless the TL emits another @base).
     return (m.Copy(
         OpenPrs      = m.OpenPrs.Append(entry),
+        ActiveBase   = None[string](),
         Toasts       = toast,
         Conversation = convoWithHint,
     ), MsgCmd[AppMsg](Msg = OpenBrowser(Url = url)))
@@ -4276,7 +4334,7 @@ func runtimeToAppMsg(rm Msg) AppMsg = rm match {
     case RtWriteSent(name)          => WriteSent(Member = name)
     case RtStderrArrived(name, line) => StderrArrived(Member = name, Line = line)
     case RtStderrEnded(name)        => StderrEnded(Member = name)
-    case RtPrCreated(url)           => PrCreated(Url = url)
+    case RtPrCreated(url, branch)   => PrCreated(Url = url, Branch = branch)
     case RtPrFailed(err)            => PrFailed(ErrText = err.Error())
     case RtMerged(url)              => Merged(Url = url)
     case RtMergeFailed(err)         => MergeFailed(ErrText = err.Error())

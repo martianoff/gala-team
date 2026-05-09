@@ -57,4 +57,16 @@ sealed type Directive {
     // down). User-visible failure — the TL can't unblock it.
     // (Member → orchestrator)
     case Blocked(Reason string)
+    // Pick the base branch for the PR this turn will eventually open.
+    // Ref values:
+    //   - "main"     → branch off the project's default branch (the
+    //                  default — unstacked, independent PR).
+    //   - "previous" → branch off the most recent open BatchPr's
+    //                  branch (a stacked PR).
+    //   - any other  → a literal branch name.
+    // TL emits this as the FIRST directive of its turn when it wants
+    // to deviate from the default. Captured into AppModel.ActiveBase
+    // and propagated to `gh pr create --base` when the @summary lands.
+    // (TL → orchestrator)
+    case Base(Ref string)
 }

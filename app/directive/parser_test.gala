@@ -356,3 +356,71 @@ func TestParse_BaseThenDispatch_PreservesOrder(t T) T {
         case _              => IsTrue(t2, false)
     }
 }
+
+// ----- @plan ---------------------------------------------------------------
+
+// @plan accepts a numbered list. Leading "N." is stripped from each
+// item so the queued prompt matches the user-facing text.
+func TestPlan_NumberedList(t T) T {
+    val msg = "@plan\n1. Stripe SDK\n2. Webhook handler\n3. Refund flow\n@end"
+    return first(t, msg) match {
+        case Plan(items) => {
+            val t1 = Eq(t, items.Length(), 3)
+            val t2 = Eq(t1, items.Get(0), "Stripe SDK")
+            val t3 = Eq(t2, items.Get(1), "Webhook handler")
+            return Eq(t3, items.Get(2), "Refund flow")
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+// @plan accepts dash bullets too. Same item shape after the bullet
+// is stripped.
+func TestPlan_DashBullets(t T) T {
+    val msg = "@plan\n- One\n- Two\n- Three\n@end"
+    return first(t, msg) match {
+        case Plan(items) => {
+            val t1 = Eq(t, items.Length(), 3)
+            val t2 = Eq(t1, items.Get(0), "One")
+            val t3 = Eq(t2, items.Get(1), "Two")
+            return Eq(t3, items.Get(2), "Three")
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+// Plain lines without bullets are taken as-is. Empty lines between
+// items are skipped.
+func TestPlan_PlainLinesWithBlankSeparators(t T) T {
+    val msg = "@plan\nFirst PR\n\nSecond PR\n\nThird PR\n@end"
+    return first(t, msg) match {
+        case Plan(items) => {
+            val t1 = Eq(t, items.Length(), 3)
+            return Eq(t1, items.Get(0), "First PR")
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+// Empty plan body drops the directive (no zero-step plan).
+func TestPlan_EmptyBody_DropsDirective(t T) T {
+    val msg = "@plan\n@end"
+    val dirs = Parse(msg)
+    return IsTrue(t, dirs.IsEmpty())
+}
+
+// @plan + @dispatch in the same turn surface in source order so the
+// orchestrator can stash the plan and still spawn the first dispatch.
+func TestParse_PlanThenDispatch_PreservesOrder(t T) T {
+    val msg = "@plan\nA\nB\n@end\n\n@dispatch(Felix)\nImplement A.\n@end"
+    val dirs = Parse(msg)
+    val t1 = Eq(t, dirs.Length(), 2)
+    val t2 = dirs.Get(0) match {
+        case Plan(_) => IsTrue(t1, true)
+        case _       => IsTrue(t1, false)
+    }
+    return dirs.Get(1) match {
+        case Dispatch(_, _) => IsTrue(t2, true)
+        case _              => IsTrue(t2, false)
+    }
+}

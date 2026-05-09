@@ -313,6 +313,56 @@ func TestView_Footer_AutoApprove_NoApproveHints(t T) T {
     return IsTrue(t2, strings.Contains(out, "F7 auto:on"))
 }
 
+// Active plan renders a banner above the composer with progress
+// glyphs and the in-progress step body. The rendered glyphs are
+// checked individually (✓ for shipped, ▶ for in-progress, ☐ for
+// queued) rather than as a fixed-spacing sequence — terminal cell-
+// width handling pads emoji-adjacent characters in ways that
+// depend on the font's reported east-asian-width.
+func TestView_PlanBanner_ShowsProgressAndCurrentStep(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        AutoApprove = true,
+        Plan        = ArrayOf("Stripe SDK", "Webhook handler", "Refund flow"),
+        PlanShipped = 1,
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "Plan 2/3"))
+    val t2 = IsTrue(t1, strings.Contains(out, "Webhook handler"))
+    val t3 = IsTrue(t2, strings.Contains(out, "✓"))
+    val t4 = IsTrue(t3, strings.Contains(out, "▶"))
+    return IsTrue(t4, strings.Contains(out, "☐"))
+}
+
+// Empty Plan → no banner (zero-row spacer).
+func TestView_PlanBanner_HiddenWhenNoPlan(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    return IsFalse(t, strings.Contains(out, "📋 Plan"))
+}
+
+// Plan exhausted (PlanShipped == Plan.Size()) → banner hides; the
+// completion message is in the conversation log instead.
+func TestView_PlanBanner_HiddenWhenComplete(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        AutoApprove = true,
+        Plan        = ArrayOf("a", "b"),
+        PlanShipped = 2,
+    )
+    val out = render(m)
+    return IsFalse(t, strings.Contains(out, "📋 Plan"))
+}
+
+// Header AUTO badge surfaces the plan progress so a user looking at
+// the top of the screen knows the chain is mid-flight.
+func TestView_Header_AutoBadge_IncludesPlanProgress(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        AutoApprove = true,
+        Plan        = ArrayOf("a", "b", "c"),
+        PlanShipped = 1,
+    )
+    val out = render(m)
+    return IsTrue(t, strings.Contains(out, "plan 2/3"))
+}
+
 // QuitPending replaces the regular footer with a confirmation
 // prompt. It even wins over LastError so the user is never confused
 // about what their next keypress will do.

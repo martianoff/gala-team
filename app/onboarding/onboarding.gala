@@ -295,11 +295,12 @@ func protocolSection(isTL bool, hasQa bool) string {
         else
             ""
         return "# How to delegate (orchestration protocol)\n\n" +
-            "Four directives drive the orchestrator. Use them to coordinate the team:\n\n" +
+            "Five directives drive the orchestrator. Use them to coordinate the team:\n\n" +
             "- `@dispatch(<MemberName>) ... @end` — assign the body text to that member as their next task. Multiple back-to-back `@dispatch` blocks fan out in parallel.\n" +
             "- `@consult(<TeamKey>) ... @end` — ask another team for input. Cross-team. Less common.\n" +
             "- `@summary ... @end` — finalize the turn for the user. The user is then asked to approve and the turn ends.\n" +
-            "- `@base <ref> @end` — pick the base branch for the PR this turn will eventually open. See \"## Stacking PRs\" below.\n\n" +
+            "- `@base <ref> @end` — pick the base branch for the PR this turn will eventually open. See \"## Stacking PRs\" below.\n" +
+            "- `@plan ... @end` — queue a multi-PR sequence. See \"## Multi-PR plans\" below.\n\n" +
             "## Example — two engineers in parallel\n\n" +
             "```\n" +
             "I'll split this two ways.\n\n" +
@@ -350,6 +351,28 @@ func protocolSection(isTL bool, hasQa bool) string {
             "- **Specific branch**: `@base <branch-name>` if you need a base that isn't the default branch and isn't the most recent open PR (rare).\n" +
             "- Emit `@base` once, at the top of the turn. Multiple `@base` directives in one turn — only the first counts.\n" +
             "- Don't emit `@base` at all if the previous PR is already merged; the default branch already contains its commits, so a fresh PR off main will diff cleanly.\n\n" +
+            "## Multi-PR plans (the @plan directive)\n\n" +
+            "When the user asks you to ship work as **multiple PRs in one go** (\"split into 3 PRs\", \"do this in stages\", etc.), emit a `@plan` block as your VERY FIRST directive listing each PR. The orchestrator queues every item except the first; this turn ships PR 1 normally. After PR 1 lands, the orchestrator auto-spawns you with the SECOND item as the prompt — you handle it like any user prompt, ship PR 2, the orchestrator advances to item 3, and so on until the plan drains.\n\n" +
+            "```\n" +
+            "@plan\n" +
+            "Stripe SDK + config\n" +
+            "Webhook handler that uses the SDK\n" +
+            "Refund flow built on the webhook handler\n" +
+            "@end\n\n" +
+            "@dispatch(Felix)\n" +
+            "Implement Stripe SDK + config: ...\n" +
+            "@end\n" +
+            "```\n\n" +
+            "Items can use any list style — `- bullets`, `1. numbers`, `* asterisks`, or plain lines. Leading bullets are stripped.\n\n" +
+            "Combining with `@base`:\n\n" +
+            "- The first PR usually doesn't need `@base` (it's the foundation, branches off main).\n" +
+            "- The auto-prompted follow-ups typically DO need `@base previous` because each step builds on the prior PR. Emit `@base previous` early in those continuation turns just like a manual stacked PR.\n\n" +
+            "Rules of thumb:\n\n" +
+            "- **Only emit `@plan` on the FIRST turn of a multi-PR ask.** Subsequent auto-prompted turns should NOT include `@plan` — that would queue another nested plan and confuse the chain.\n" +
+            "- **Emit `@plan` once per turn.** If you emit it twice, only the first counts.\n" +
+            "- **Empty plan body drops the directive.** A `@plan` with no items is meaningless and ignored.\n" +
+            "- **Single-item plans are valid** but degenerate — the queue stays empty, the auto-continuation never fires. Don't bother for a single PR; just `@dispatch` and `@summary` like normal.\n" +
+            "- **The user can always interject.** Anything they type in the composer cancels the plan on the next user submit. If you see a prompt that doesn't match the next plan step, treat it as a user override and abandon the plan.\n\n" +
             "## Rules\n\n" +
             "- Each directive opens with the tag on its own line and closes with `@end` on its own line.\n" +
             "- Plain prose between directives is rendered as your message to the user.\n" +

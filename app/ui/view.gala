@@ -91,6 +91,11 @@ func View(m AppModel) Widget {
     val base = Column(ArrayOf[LayoutChild](
         Fixed(4, header),
         Flex(1, body),
+        // Plan banner sits directly above the composer when a multi-
+        // PR plan is active, so the user can see "shipped → in
+        // progress → queued" status without scrolling the
+        // conversation log. Renders 0 rows when no plan is active.
+        planBanner(m),
         Fixed(composerOuterHeight(m), composerPanel),
         Fixed(1, footer),
         // Error banner sits at the very bottom — visible without
@@ -831,7 +836,14 @@ func headerWidget(m AppModel) Widget {
     val (cols, _) = TermSize()
     val brand = buildBrandLine(m, cols)
     val brandLine = TextStyled(brand, DefaultStyle().WithBold().WithFg(BrightCyan()))
-    val autoBadge = if (m.AutoApprove) s"  ·  AUTO (${m.OpenPrs.Size()} open)" else ""
+    val autoBadge = if (m.AutoApprove) {
+        val total = m.Plan.Size()
+        val shipped = m.PlanShipped
+        val planSuffix = if (total == 0) ""
+                         else if (shipped >= total) s" · plan ${total}/${total}"
+                         else                       s" · plan ${shipped + 1}/${total}"
+        s"  ·  AUTO (${m.OpenPrs.Size()} open${planSuffix})"
+    } else ""
     val sub = TextStyled(s"      ${stateLabel(m.State)}${autoBadge}${tokenSuffix(m)}", DefaultStyle().WithDim())
     return Column(ArrayOf[LayoutChild](
         Fixed(1, Empty()),         // spacer row 0 — sacrificial in PowerShell
@@ -1633,6 +1645,51 @@ func footerWidget(m AppModel) Widget {
 func errorBanner(m AppModel) LayoutChild = m.LastError match {
     case None()    => Fixed(0, Empty())
     case Some(err) => Fixed(1, TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed())))
+}
+
+// planBanner renders the active multi-PR plan as a single status
+// line directly above the composer. Hidden (0 rows) when no plan is
+// active or the plan has fully drained. Format:
+//
+//   📋 Plan 2/3:  ✓ ▶ ☐  — Webhook handler that uses the SDK
+//
+// Glyphs: ✓ shipped (PlanShipped count), ▶ the step currently in
+// progress (at index PlanShipped), ☐ queued steps after.
+//
+// The right side prints the in-progress step's body so the user has
+// a one-glance reminder of what's running. The numeric counter
+// "(N/M)" is "shipped+1 / total" — i.e. the 1-indexed position of
+// the in-progress step.
+func planBanner(m AppModel) LayoutChild {
+    if m.Plan.IsEmpty() { return Fixed(0, Empty()) }
+    val total = m.Plan.Size()
+    val shipped = m.PlanShipped
+    if shipped >= total { return Fixed(0, Empty()) }
+    val (cols, _) = TermSize()
+    val glyphs = planProgressGlyphs(shipped, total)
+    val current = m.Plan.Get(shipped)
+    val maxBodyCols = cols - 30
+    val bodyMax = if (maxBodyCols < 12) 12 else maxBodyCols
+    val body = truncateTitle(current, bodyMax)
+    val text = s"  📋 Plan ${shipped + 1}/${total}:  ${glyphs}  — ${body}"
+    return Fixed(1, TextStyled(text, DefaultStyle().WithFg(BrightCyan())))
+}
+
+// planProgressGlyphs builds the per-step status string. Done steps
+// get ✓, the in-progress step gets ▶, queued steps get ☐. Spaces
+// between glyphs keep the line readable on dense terminals.
+func planProgressGlyphs(shipped int, total int) string {
+    var out = ""
+    var i = 0
+    for i < total {
+        val glyph = if (i < shipped) "✓"
+                    else if (i == shipped) "▶"
+                    else                     "☐"
+        if i > 0 { out = out + " " }
+        out = out + glyph
+        i = i + 1
+    }
+    return out
 }
 
 // footerHints picks a context-appropriate key legend. After

@@ -9,6 +9,7 @@ gala_library(
     importpath = "github.com/martianoff/gala_team/app/directive",
     deps = [
         "@gala//collection_immutable",
+        "@gala//go_interop",
     ],
     visibility = ["//visibility:public"],
 )
@@ -23,5 +24,6 @@ gala_go_test(
     ],
     deps = [
         "@gala//collection_immutable",
+        "@gala//go_interop",
     ],
 )

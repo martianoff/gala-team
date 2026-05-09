@@ -482,7 +482,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case HistoryDeselect()           => onEscOrDeselect(m)
     case HistoryArchiveLoaded(snap)  => (m.Copy(ViewingArchive = Some(snap)), NoCmd[AppMsg]())
     case HistoryArchiveFailed(err)   => (m.Copy(LastError = Some(s"history: ${err}")), NoCmd[AppMsg]())
-    case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
+    case MouseAt(x, y, pressed, motion) => onMouseAt(m, x, y, pressed, motion)
     case FocusSidebarClicked()       => (m.Copy(Focus = FocusSidebar()), NoCmd[AppMsg]())
     case FocusComposerClicked()      => (m.Copy(Focus = FocusComposer()), NoCmd[AppMsg]())
     case SidebarRowClicked(idx)      => onSidebarRowClicked(m, idx)
@@ -754,14 +754,86 @@ func onClickConversationEntry(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] 
     val clamped = if (idx < 0) 0
                   else if (idx >= total) total - 1
                   else idx
+    // Toggle-off only fires for a bare single-line click on the
+    // already-selected entry — preserves V1 ergonomics. If we're in
+    // the middle of (or just finished) a drag, the same lineIdx is
+    // valid and shouldn't deselect.
     val isToggleOff = m.SelectedEntry match {
-        case Some(prev) => prev == clamped
+        case Some(prev) => prev == clamped && !rangeIsExtended(m)
         case None()     => false
     }
     if isToggleOff {
-        return (m.Copy(SelectedEntry = None[int]()), NoCmd[AppMsg]())
+        return (m.Copy(
+            SelectedEntry  = None[int](),
+            SelectionFocus = None[int](),
+            Dragging       = false,
+        ), NoCmd[AppMsg]())
     }
-    return (m.Copy(SelectedEntry = Some(clamped)), NoCmd[AppMsg]())
+    // Fresh click: anchor + focus both at this line, button assumed
+    // held (a drag may follow); a release without intervening motion
+    // simply ends the drag with anchor==focus, indistinguishable
+    // from V1 single-click.
+    return (m.Copy(
+        SelectedEntry  = Some(clamped),
+        SelectionFocus = Some(clamped),
+        Dragging       = true,
+    ), NoCmd[AppMsg]())
+}
+
+// rangeIsExtended returns true when the current selection covers
+// more than one line (anchor != focus). Used to decide whether a
+// repeat click on the anchor should toggle off (only makes sense
+// when the click is at the anchor of a single-line selection).
+func rangeIsExtended(m AppModel) bool = m.SelectedEntry match {
+    case None()       => false
+    case Some(anchor) => m.SelectionFocus match {
+        case None()       => false
+        case Some(focus)  => anchor != focus
+    }
+}
+
+// onMouseAt is the fallback handler for mouse events that don't hit
+// a registered click target. We use it for two things:
+//   1. Drag-motion frames (Pressed=true, Motion=true under ?1002):
+//      while m.Dragging, map (X, Y) to a conversation line and slide
+//      SelectionFocus to it. The anchor stays put. Only updates
+//      the model when the line changes (avoids redraws on every
+//      cell-of-motion event).
+//   2. Release frames (Pressed=false): clear m.Dragging while
+//      preserving the range so Ctrl+Y can copy it. If the user
+//      released before any motion fired, anchor==focus and the
+//      result is V1-identical.
+//
+// Press events on areas with no .OnClick handler also flow here;
+// today we treat them as no-ops because the only meaningful press
+// target inside this app is the conversation pane (which has its
+// own ClickConversationEntry handler) — out-of-pane presses don't
+// start a selection.
+func onMouseAt(m AppModel, x int, y int, pressed bool, motion bool) Tuple[AppModel, Cmd[AppMsg]] {
+    if !pressed {
+        // Release ends any active drag. Selection state stays so
+        // Ctrl+Y can read it.
+        if !m.Dragging { return (m, NoCmd[AppMsg]()) }
+        return (m.Copy(Dragging = false), NoCmd[AppMsg]())
+    }
+    if !motion { return (m, NoCmd[AppMsg]()) }
+    // Drag motion: only act while a conversation-pane drag is in
+    // progress. Otherwise the user is dragging on the sidebar / a
+    // modal / outside any selectable region — leave the selection
+    // alone.
+    if !m.Dragging { return (m, NoCmd[AppMsg]()) }
+    val lineOpt = convoLineAtMouseY(m, y)
+    return lineOpt match {
+        case None()     => (m, NoCmd[AppMsg]())
+        case Some(line) => {
+            // Only emit a Copy when the focus actually moves —
+            // motion events fire per cell and most don't cross a
+            // line boundary.
+            val current = m.SelectionFocus.GetOrElse(-1)
+            if line == current { return (m, NoCmd[AppMsg]()) }
+            return (m.Copy(SelectionFocus = Some(line)), NoCmd[AppMsg]())
+        }
+    }
 }
 
 // onSidebarToggleGroup folds or unfolds the role group at
@@ -1211,8 +1283,14 @@ func onYankConversation(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
     }
     return m.SelectedEntry match {
-        case Some(idx) => yankSingleEntry(m, idx)
-        case None()    => yankFullTranscript(m)
+        case None()       => yankFullTranscript(m)
+        case Some(anchor) => {
+            val focus = m.SelectionFocus.GetOrElse(anchor)
+            val lo = if (anchor < focus) anchor else focus
+            val hi = if (anchor < focus) focus else anchor
+            if lo == hi { return yankSingleEntry(m, lo) }
+            return yankRange(m, lo, hi)
+        }
     }
 }
 
@@ -1229,6 +1307,32 @@ func yankSingleEntry(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
         return (m.Copy(LastError = Some(s"clipboard copy failed: ${err.Error()}")), NoCmd[AppMsg]())
     }
     val toast = m.Toasts.PushInfo(s"copied ${cl.Speaker}'s entry to clipboard", time_utils.Now(), time_utils.Seconds(int64(3)))
+    return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
+}
+
+// yankRange copies the inclusive [lo, hi] slice of m.Conversation
+// joined by newlines (each line as "Speaker: Text"). Out-of-range
+// indices clamp to the valid window so a stale drag focus from a
+// fast append still produces a reasonable copy.
+func yankRange(m AppModel, lo int, hi int) Tuple[AppModel, Cmd[AppMsg]] {
+    val total = m.Conversation.Size()
+    val safeLo = if (lo < 0) 0 else lo
+    val safeHi = if (hi >= total) total - 1 else hi
+    if safeLo > safeHi { return yankFullTranscript(m) }
+    var parts = EmptyArray[string]()
+    var i = safeLo
+    for i <= safeHi {
+        val cl = m.Conversation.Get(i)
+        parts = parts.Append(s"${cl.Speaker}: ${cl.Text}")
+        i = i + 1
+    }
+    val rendered = parts.MkString("\n")
+    val (_, err) = CopyToClipboard(rendered)
+    if err != nil {
+        return (m.Copy(LastError = Some(s"clipboard copy failed: ${err.Error()}")), NoCmd[AppMsg]())
+    }
+    val n = safeHi - safeLo + 1
+    val toast = m.Toasts.PushInfo(s"copied ${n} lines to clipboard", time_utils.Now(), time_utils.Seconds(int64(3)))
     return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
 }
 
@@ -1297,6 +1401,8 @@ func clearSessionState(m AppModel) AppModel {
         ComposerCursor        = 0,
         LastError             = None[string](),
         SelectedEntry         = None[int](),
+        SelectionFocus        = None[int](),
+        Dragging              = false,
     )
 }
 
@@ -1361,7 +1467,9 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // a click recorded earlier may shift as we append the new
         // user line + member responses, and a highlight on the wrong
         // row would read as a ghost.
-        SelectedEntry = None[int](),
+        SelectedEntry  = None[int](),
+        SelectionFocus = None[int](),
+        Dragging       = false,
         // First user prompt after a recovery dismisses the banner
         // automatically — the user has signaled they want to
         // continue, so the "type to resume · Esc to discard" hint
@@ -4712,7 +4820,11 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return (m.Copy(MemberDetailOpen = None[string]()), NoCmd[AppMsg]())
     }
     if m.SelectedEntry.IsDefined() {
-        return (m.Copy(SelectedEntry = None[int]()), NoCmd[AppMsg]())
+        return (m.Copy(
+            SelectedEntry  = None[int](),
+            SelectionFocus = None[int](),
+            Dragging       = false,
+        ), NoCmd[AppMsg]())
     }
     if m.RecoveryBannerVisible {
         return (m.Copy(

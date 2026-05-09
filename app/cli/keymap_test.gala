@@ -148,12 +148,13 @@ func TestKeyToAppMsg_Unknown_NoOp(t T) T = expectMsg(t, KeyToAppMsg(PlainKey(Unk
 func TestInputToAppMsg_KeyInput_DelegatesToKeyToAppMsg(t T) T =
     expectMsg(t, InputToAppMsg(KeyInput(Ev = Ctrl(Char('q')))), "QuitMsg")
 
-// MouseInput lifts to MouseAt with X/Y/Pressed forwarded verbatim.
+// MouseInput lifts to MouseAt with X/Y/Pressed/Motion forwarded
+// verbatim.
 func TestInputToAppMsg_MouseInput_LiftsToMouseAt(t T) T {
-    val ev = MouseEvent(Btn = MouseLeft(), X = 7, Y = 13, Pressed = true)
+    val ev = MouseEvent(Btn = MouseLeft(), X = 7, Y = 13, Pressed = true, Motion = false)
     val m = InputToAppMsg(MouseInput(Ev = ev))
     return m match {
-        case MouseAt(x, y, p) => {
+        case MouseAt(x, y, p, _) => {
             val t1 = Eq(t, x, 7)
             val t2 = Eq(t1, y, 13)
             return IsTrue(t2, p)
@@ -164,11 +165,22 @@ func TestInputToAppMsg_MouseInput_LiftsToMouseAt(t T) T {
 
 // MouseInput release forwards Pressed=false.
 func TestInputToAppMsg_MouseInput_PreservesReleasePressed(t T) T {
-    val ev = MouseEvent(Btn = MouseLeft(), X = 0, Y = 0, Pressed = false)
+    val ev = MouseEvent(Btn = MouseLeft(), X = 0, Y = 0, Pressed = false, Motion = false)
     val m = InputToAppMsg(MouseInput(Ev = ev))
     return m match {
-        case MouseAt(_, _, p) => IsFalse(t, p)
-        case _                => IsTrue(t, false)
+        case MouseAt(_, _, p, _) => IsFalse(t, p)
+        case _                   => IsTrue(t, false)
+    }
+}
+
+// MouseInput drag motion forwards Motion=true alongside Pressed=true.
+// Consumers use this to distinguish a fresh click from drag tracking.
+func TestInputToAppMsg_MouseInput_PreservesDragMotion(t T) T {
+    val ev = MouseEvent(Btn = MouseLeft(), X = 4, Y = 5, Pressed = true, Motion = true)
+    val m = InputToAppMsg(MouseInput(Ev = ev))
+    return m match {
+        case MouseAt(_, _, _, motion) => IsTrue(t, motion)
+        case _                        => IsTrue(t, false)
     }
 }
 
@@ -225,7 +237,7 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case ConsultFailed(_, _)         => "ConsultFailed"
     case ConsultChunkArrived(_, _)   => "ConsultChunkArrived"
     case ConsultEnded(_, _)          => "ConsultEnded"
-    case MouseAt(_, _, _)            => "MouseAt"
+    case MouseAt(_, _, _, _)         => "MouseAt"
     case FocusSidebarClicked()       => "FocusSidebarClicked"
     case FocusComposerClicked()      => "FocusComposerClicked"
     case SidebarRowClicked(_)        => "SidebarRowClicked"

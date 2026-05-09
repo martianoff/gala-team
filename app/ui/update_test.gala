@@ -1088,7 +1088,98 @@ func TestKeySubmit_ClearsSelectedEntry(t T) T {
         Composer      = "next prompt",
     )
     val (m, _) = Update(seed, KeySubmit())
-    return IsFalse(t, m.SelectedEntry.IsDefined())
+    val t1 = IsFalse(t, m.SelectedEntry.IsDefined())
+    val t2 = IsFalse(t1, m.SelectionFocus.IsDefined())
+    return IsFalse(t2, m.Dragging)
+}
+
+// ---------------------------------------------------------------------------
+// V2 drag selection — click sets anchor + focus + Dragging; motion
+// while-held updates focus; release clears Dragging while preserving
+// the range so Ctrl+Y can copy it.
+// ---------------------------------------------------------------------------
+
+// Click sets anchor=focus=idx and engages Dragging so subsequent
+// motion events extend the range.
+func TestClickEntry_EngagesDragging(t T) T {
+    val seed = sampleModel().Copy(Conversation = sampleConversation())
+    val (m, _) = Update(seed, ClickConversationEntry(Idx = 1))
+    val anchor = m.SelectedEntry.GetOrElse(-1)
+    val focus  = m.SelectionFocus.GetOrElse(-1)
+    val t1 = Eq(t,  anchor, 1)
+    val t2 = Eq(t1, focus,  1)
+    return IsTrue(t2, m.Dragging)
+}
+
+// Mouse release clears Dragging without touching anchor / focus —
+// the user has finished the drag but the range stays selected so
+// Ctrl+Y can still copy it.
+func TestMouseRelease_ClearsDraggingPreservesRange(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(2),
+        Dragging       = true,
+    )
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 12, Pressed = false, Motion = false))
+    val t1 = IsFalse(t, m.Dragging)
+    val t2 = Eq(t1, m.SelectedEntry.GetOrElse(-1),  0)
+    return Eq(t2, m.SelectionFocus.GetOrElse(-1), 2)
+}
+
+// Motion event while NOT dragging is a strict no-op (the user is
+// just hovering after a release; we shouldn't extend a stale range).
+func TestMouseMotion_WithoutDragging_NoOp(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(0),
+        Dragging       = false,
+    )
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 15, Pressed = true, Motion = true))
+    return Eq(t, m.SelectionFocus.GetOrElse(-1), 0)
+}
+
+// Ctrl+Y on a multi-line range copies the joined "Speaker: Text"
+// of the inclusive range. Toast text reflects the line count.
+func TestCtrlY_WithRange_CopiesJoinedRange(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(2),
+    )
+    val (m, _) = Update(seed, KeyYankConversation())
+    val msg = m.Toasts.Items.Get(0).Message
+    return IsTrue(t, strings.Contains(msg, "3 lines"))
+}
+
+// Ctrl+Y with anchor==focus still goes through the single-entry
+// path, not the range path (toast says "X's entry", not "N lines").
+func TestCtrlY_AnchorEqualsFocus_TreatsAsSingleEntry(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(2),
+        SelectionFocus = Some(2),
+    )
+    val (m, _) = Update(seed, KeyYankConversation())
+    val msg = m.Toasts.Items.Get(0).Message
+    return IsTrue(t, strings.Contains(msg, "Felix"))
+}
+
+// Esc clears all three selection fields together — anchor + focus +
+// Dragging. Required so Ctrl+Y after Esc falls back to full
+// transcript.
+func TestEsc_ClearsAllSelectionFields(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(2),
+        Dragging       = true,
+    )
+    val (m, _) = Update(seed, HistoryDeselect())
+    val t1 = IsFalse(t,  m.SelectedEntry.IsDefined())
+    val t2 = IsFalse(t1, m.SelectionFocus.IsDefined())
+    return IsFalse(t2, m.Dragging)
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,14 +1365,14 @@ func TestPrCreated_DoesNotClearPriorLastError(t T) T {
 // without ambiguity.
 func TestMouseAt_IsNoopOnModel(t T) T {
     val seed = sampleModel().Copy(Composer = "keep me", Tick = 4)
-    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true, Motion = false))
     val t1 = Eq(t, m.Composer, "keep me")
     val t2 = Eq(t1, m.Tick, 4)
     return Eq(t2, m.Conversation.Size(), 0)
 }
 
 func TestMouseAt_ReleaseAlsoNoop(t T) T {
-    val (m, _) = Update(sampleModel(), MouseAt(X = 0, Y = 0, Pressed = false))
+    val (m, _) = Update(sampleModel(), MouseAt(X = 0, Y = 0, Pressed = false, Motion = false))
     return Eq(t, m.Composer, "")
 }
 
@@ -1666,7 +1757,7 @@ func TestFocusSidebarClicked_FocusesWithoutCursorChange(t T) T {
 // registered HitRegistry entry. Render shouldn't change.
 func TestMouseAt_FallthroughIsNoOp(t T) T {
     val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 3)
-    val (m, _) = Update(seed, MouseAt(X = 50, Y = 8, Pressed = true))
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 8, Pressed = true, Motion = false))
     val t1 = m.Focus match {
         case FocusSidebar()  => IsTrue(t, true)
         case FocusComposer() => IsTrue(t, false)

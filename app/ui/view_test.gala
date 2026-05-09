@@ -1077,14 +1077,14 @@ func TestFlow_SessionFailed_FooterWarns(t T) T {
 func TestFlow_MousePressOutsideSidebar_LeavesRenderUnchanged(t T) T {
     val seed = mkModel(mkTeam("X", ""))
     val before = render(seed)
-    val (m, _) = Update(seed, MouseAt(X = 50, Y = 10, Pressed = true))
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 10, Pressed = true, Motion = false))
     return Eq(t, render(m), before)
 }
 
 func TestFlow_MouseRelease_LeavesRenderUnchanged(t T) T {
     val seed = mkModel(mkTeam("X", ""))
     val before = render(seed)
-    val (m, _) = Update(seed, MouseAt(X = 0, Y = 0, Pressed = false))
+    val (m, _) = Update(seed, MouseAt(X = 0, Y = 0, Pressed = false, Motion = false))
     return Eq(t, render(m), before)
 }
 
@@ -1095,9 +1095,9 @@ func TestFlow_MouseRelease_LeavesRenderUnchanged(t T) T {
 func TestFlow_MouseOutOfBounds_NoChange(t T) T {
     val seed = mkModel(mkTeam("X", ""))
     val before = render(seed)
-    val (m1, _) = Update(seed, MouseAt(X = -5, Y = -3, Pressed = true))
+    val (m1, _) = Update(seed, MouseAt(X = -5, Y = -3, Pressed = true, Motion = false))
     val t1 = Eq(t, render(m1), before)
-    val (m2, _) = Update(seed, MouseAt(X = 9999, Y = 9999, Pressed = true))
+    val (m2, _) = Update(seed, MouseAt(X = 9999, Y = 9999, Pressed = true, Motion = false))
     return Eq(t1, render(m2), before)
 }
 
@@ -1123,13 +1123,13 @@ func TestFlow_MousePressInSidebar_FocusesSidebar(t T) T {
 // shouldn't close the panel.
 func TestFlow_MouseInHistoryMode_DoesNotClosePanel(t T) T {
     val seed = mkModel(mkTeam("X", "")).Copy(HistoryMode = true)
-    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true, Motion = false))
     return IsTrue(t, strings.Contains(render(m), "History  ·"))
 }
 
 // Mouse press in consult viewer mode doesn't close the modal.
 func TestFlow_MouseInConsultViewer_DoesNotClose(t T) T {
     val seed = mkModel(mkTeam("X", "")).Copy(ConsultViewerOpen = true)
-    val (m, _) = Update(seed, MouseAt(X = 50, Y = 10, Pressed = true))
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 10, Pressed = true, Motion = false))
     return IsTrue(t, strings.Contains(render(m), "Consult viewer"))
 }

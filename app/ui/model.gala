@@ -157,15 +157,23 @@ struct AppModel(
     // fresh prompt overrides any pending plan.
     Plan         Array[string],
     PlanShipped  int,
-    // Index of the currently-selected ConversationLog entry — what a
-    // mouse click on the conversation pane records, what Ctrl+Y
-    // copies when set (just that entry, not the whole transcript),
-    // and what the rendered conversation pane highlights with a
-    // reverse-video pass. None = no selection (Ctrl+Y falls back to
-    // the full-transcript copy). Cleared by Esc, by KeyEraseSession,
-    // and on every successful KeySubmit (a new turn invalidates the
-    // selection because the conversation grew underneath it).
+    // Anchor of a conversation-pane selection. Set on a mouse press
+    // inside the pane; preserved across a drag. None = no selection.
     SelectedEntry Option[int],
+    // Focus of the selection — the current end of the range while a
+    // drag is in progress, or the same value as SelectedEntry for a
+    // bare click. The visible range is min(anchor, focus) ..
+    // max(anchor, focus). When SelectedEntry is None this is None
+    // too (the two fields move together). Updated continuously by
+    // motion-while-held events during a drag.
+    SelectionFocus Option[int],
+    // True while the mouse button is held after a press inside the
+    // conversation pane. Drives "should we keep updating
+    // SelectionFocus on each motion event?" — once the user
+    // releases, motion events outside the conversation pane stop
+    // dragging the focus. Reset on release, on Esc, on
+    // KeyEraseSession, and on every successful KeySubmit.
+    Dragging bool,
     // Per-turn TL output accumulator. Reset on every KeySubmit. Used by
     // the chunk pump to detect newly-completed @consult blocks without
     // re-scanning the entire conversation log.
@@ -439,7 +447,9 @@ func InitialModelWithTeams(
     ActiveBase   = None[string](),
     Plan         = EmptyArray[string](),
     PlanShipped  = 0,
-    SelectedEntry = None[int](),
+    SelectedEntry  = None[int](),
+    SelectionFocus = None[int](),
+    Dragging       = false,
     TurnBuffer    = "",
     ConsultsFired = 0,
     ActiveConsults = EmptyHashMap[string, ConsultSession](),
@@ -572,7 +582,15 @@ sealed type AppMsg {
     // / SidebarRowClicked through the framework's auto-routing,
     // so MouseAt only fires for clicks on the conversation pane
     // and other unwrapped regions. Currently a no-op there.
-    case MouseAt(X int, Y int, Pressed bool)
+    // Mouse fallback. The runtime dispatches MouseAt for events that
+    // don't hit a registered click target — releases (Pressed=false),
+    // motion-while-held (Motion=true under ?1002 button-event tracking),
+    // and presses on areas with no .OnClick handler. Drag-selection
+    // in the conversation pane reads Motion to update its range
+    // focus during a drag; click-on-entry continues to flow through
+    // the dedicated ClickConversationEntry path (registered hit) so
+    // single-click semantics aren't disturbed.
+    case MouseAt(X int, Y int, Pressed bool, Motion bool)
     // Dispatched by gala-tui when the user clicks on the bordered
     // sidebar panel (anywhere — header, body, or border). Switches
     // Focus to FocusSidebar without disturbing the cursor.

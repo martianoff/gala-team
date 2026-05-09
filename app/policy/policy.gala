@@ -131,6 +131,15 @@ struct Policy(
     MergeRule     MergeRule,
     Heartbeat     Heartbeat,
     Guardrails    Guardrails,
+    // AutoApprove turns the per-PR approval gate off: when an @summary
+    // resolves cleanly (PR-ready + valid body), the orchestrator runs
+    // the same approveAndKickHooks pipeline it would have run on
+    // Ctrl+A — pre-merge hooks then `gh pr create` — and lands the FSM
+    // back in Idle ready for the next user prompt. Each PR accumulates
+    // in AppModel.OpenPrs; merge stays manual so the user reviews the
+    // batch in GitHub. F7 toggles the same flag mid-session for the
+    // running model.
+    AutoApprove   bool,
 )
 
 // DefaultPolicy returns the most permissive shape — shared workspace,
@@ -145,6 +154,7 @@ func DefaultPolicy() Policy = Policy(
     MergeRule     = SquashMerge(),
     Heartbeat     = DefaultHeartbeat(),
     Guardrails    = DefaultGuardrails(),
+    AutoApprove   = false,
 )
 
 // PolicyViolation is the union of every reason the orchestrator can

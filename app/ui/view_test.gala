@@ -7,6 +7,7 @@ import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/time_utils"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
@@ -264,7 +265,7 @@ func TestView_Footer_DefaultLegend(t T) T {
 // (Ctrl+M merge / Ctrl+A re-approve). Tab/consults hints were
 // removed when palette/paste/view-mode hints were added.
 func TestView_Footer_PostPrCreated_ShowsMergeHint(t T) T {
-    val m = mkModel(mkTeam("X", "")).Copy(LastPrUrl = Some("https://github.com/x/y/pull/1"))
+    val m = mkModel(mkTeam("X", "")).Copy(OpenPrs = ArrayOf(samplePr("https://github.com/x/y/pull/1")))
     val out = render(m)
     val t1 = IsTrue(t,  strings.Contains(out, "Ctrl+M merge"))
     return IsTrue(t1, strings.Contains(out, "Ctrl+A re-approve"))
@@ -275,11 +276,48 @@ func TestView_Footer_PostPrCreated_ShowsMergeHint(t T) T {
 func TestView_Footer_LastErrorBeatsLegend(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(
         LastError = Some("gh pr merge: auth required"),
-        LastPrUrl = Some("https://x/y/pull/1"),
+        OpenPrs   = ArrayOf(samplePr("https://x/y/pull/1")),
     )
     val out = render(m)
     val t1 = IsTrue(t,  strings.Contains(out, "auth required"))
     return IsTrue(t1, strings.Contains(out, "Ctrl+M merge"))
+}
+
+// samplePr builds a stub BatchPr for footer / banner / list-render
+// tests. A canned title and the Unix-epoch timestamp keep snapshot
+// matchers stable across runs.
+func samplePr(url string) BatchPr = BatchPr(
+    Url      = url,
+    Branch   = "feat/x",
+    Title    = "ship the metrics endpoint",
+    OpenedAt = UnixEpoch(),
+)
+
+// AutoApprove on shows an "AUTO (N open)" badge in the header sub-row
+// so the user can see the mode + batch size at a glance.
+func TestView_Header_AutoApproveBadge(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        AutoApprove = true,
+        OpenPrs     = ArrayOf(samplePr("https://x/y/pull/1"), samplePr("https://x/y/pull/2")),
+    )
+    val out = render(m)
+    return IsTrue(t, strings.Contains(out, "AUTO (2 open)"))
+}
+
+// AutoApprove off — no AUTO badge in the header.
+func TestView_Header_NoBadgeWhenManual(t T) T {
+    val out = render(mkModel(mkTeam("X", "")))
+    return IsFalse(t, strings.Contains(out, "AUTO ("))
+}
+
+// AutoApprove suppresses Ctrl+A / Ctrl+R hints in the composer footer
+// — the gate is off, so those keys aren't load-bearing anymore.
+func TestView_Footer_AutoApprove_NoApproveHints(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(AutoApprove = true)
+    val out = render(m)
+    val t1 = IsFalse(t,  strings.Contains(out, "Ctrl+A approve"))
+    val t2 = IsFalse(t1, strings.Contains(out, "Ctrl+R reject"))
+    return IsTrue(t2, strings.Contains(out, "F7 auto:on"))
 }
 
 // QuitPending replaces the regular footer with a confirmation

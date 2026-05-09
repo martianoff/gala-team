@@ -133,6 +133,7 @@ struct WirePolicy(
     PreQA         Array[WireHook],
     Heartbeat     WireHeartbeat,
     Guardrails    WireGuardrails,
+    AutoApprove   bool,
 )
 
 struct WireGuidance(
@@ -262,6 +263,7 @@ func convertPolicy(wp WirePolicy, blockPresent bool) Policy {
         PreQA         = preQA,
         Heartbeat     = hb,
         Guardrails    = guardrails,
+        AutoApprove   = wp.AutoApprove,
     )
 }
 

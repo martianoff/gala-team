@@ -166,6 +166,7 @@ func helpRows() Array[string] = ArrayOf(
     "  Ctrl+, / Ctrl+.   compact-left toggle (team panel)",
     "  F1 / F2 / F3      Default split / Focus / Grid",
     "  F4 / F5 / F6      Pipeline / Activity / Help",
+    "  F7                toggle auto-approve (batch PRs)",
     "  Ctrl+Q / Ctrl+C   quit (twice to confirm)",
     "  Esc               close any open modal / drop focus",
 )
@@ -829,7 +830,8 @@ func headerWidget(m AppModel) Widget {
     val (cols, _) = TermSize()
     val brand = buildBrandLine(m, cols)
     val brandLine = TextStyled(brand, DefaultStyle().WithBold().WithFg(BrightCyan()))
-    val sub = TextStyled(s"      ${stateLabel(m.State)}${tokenSuffix(m)}", DefaultStyle().WithDim())
+    val autoBadge = if (m.AutoApprove) s"  ·  AUTO (${m.OpenPrs.Size()} open)" else ""
+    val sub = TextStyled(s"      ${stateLabel(m.State)}${autoBadge}${tokenSuffix(m)}", DefaultStyle().WithDim())
     return Column(ArrayOf[LayoutChild](
         Fixed(1, Empty()),         // spacer row 0 — sacrificial in PowerShell
         Fixed(1, brandLine),       // row 1 — first row that always survives
@@ -1648,9 +1650,18 @@ func errorBanner(m AppModel) LayoutChild = m.LastError match {
 // Ctrl+H opens the saved-archive browser.
 func footerHints(m AppModel) string = m.Focus match {
     case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc composer · F2/F3/F4/F5 views · F6 help · Ctrl+Q quit"
-    case FocusComposer() => m.LastPrUrl match {
-        case Some(_) => "  Ctrl+M merge · Ctrl+A re-approve · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
-        case None()  => "  Enter send · Ctrl+A approve · Ctrl+R reject · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+    case FocusComposer() => {
+        if (m.AutoApprove) {
+            // AutoApprove suppresses Ctrl+A / Ctrl+R hints — the gate is
+            // off. Merge stays manual so Ctrl+M shows whenever any PR
+            // is open in the batch.
+            val mergeHint = if (m.OpenPrs.IsEmpty()) "" else " · Ctrl+M merge"
+            return s"  Enter send${mergeHint} · F7 auto:on · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+        }
+        if (!m.OpenPrs.IsEmpty()) {
+            return "  Ctrl+M merge · Ctrl+A re-approve · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+        }
+        return "  Enter send · Ctrl+A approve · Ctrl+R reject · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
     }
 }
 

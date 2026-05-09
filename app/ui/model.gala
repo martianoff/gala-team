@@ -123,7 +123,19 @@ struct AppModel(
     ComposerCursor int,
     Tick         int,                              // monotonic tick counter (drives spinners)
     LastError    Option[string],                   // most recent runtime error, footer
-    LastPrUrl    Option[string],                   // PR awaiting `gh pr merge` after PrCreated
+    // Open PRs accumulated this session (oldest first). Each successful
+    // gh pr create appends a BatchPr; manual Ctrl+M consumes the most
+    // recent entry. With AutoApprove on, the list grows across multiple
+    // user prompts so the user can review the batch in GitHub when
+    // ready. With AutoApprove off (default), the list will hold at
+    // most one entry between Ctrl+A and Ctrl+M — same shape as the
+    // previous LastPrUrl Option[string] it replaces.
+    OpenPrs      Array[BatchPr],
+    // AutoApprove turns the per-PR approval gate off — see the policy
+    // doc on Policy.AutoApprove. Seeded from policy.auto_approve at
+    // startup, toggled mid-session via F7. Stored on the model so the
+    // F7 toggle can flip it without rewriting team.yaml.
+    AutoApprove  bool,
     // Per-turn TL output accumulator. Reset on every KeySubmit. Used by
     // the chunk pump to detect newly-completed @consult blocks without
     // re-scanning the entire conversation log.
@@ -301,6 +313,18 @@ struct AppModel(
     CompactSidebar bool,
 )
 
+// BatchPr is one PR opened during this session. Stored in
+// AppModel.OpenPrs as the auto-approve / batch flow accumulates them.
+// OpenedAt drives the "PR ready 2m ago" relative-time display in the
+// open-PR list; Title is the first line of the @summary body so the
+// user can identify each entry without clicking through.
+struct BatchPr(
+    Url      string,
+    Branch   string,
+    Title    string,
+    OpenedAt Instant,
+)
+
 // RecoveryChoice tracks which option of the §5.6 recovery modal is
 // currently focused. The buttons are clickable; Tab cycles; Enter
 // fires the focused choice.
@@ -384,7 +408,8 @@ func InitialModelWithTeams(
     ComposerCursor = 0,
     Tick         = 0,
     LastError    = None[string](),
-    LastPrUrl    = None[string](),
+    OpenPrs      = EmptyArray[BatchPr](),
+    AutoApprove  = policy.AutoApprove,
     TurnBuffer    = "",
     ConsultsFired = 0,
     ActiveConsults = EmptyHashMap[string, ConsultSession](),
@@ -465,9 +490,9 @@ sealed type AppMsg {
     // shells the OS launcher.
     case OpenBrowser(Url string)
     // Merge pipeline. KeyMerge fires `gh pr merge --<rule>` against
-    // LastPrUrl, then runs Policy.PostMerge hooks. Merged carries the
-    // URL so the conversation log can echo a confirmation; MergeFailed
-    // surfaces the gh exit error.
+    // the most-recent OpenPrs entry, then runs Policy.PostMerge hooks.
+    // Merged carries the URL so the conversation log can echo a
+    // confirmation; MergeFailed surfaces the gh exit error.
     case KeyMerge
     case Merged(Url string)
     case MergeFailed(ErrText string)
@@ -587,6 +612,12 @@ sealed type AppMsg {
     case KeySetViewMode(Mode ViewMode)
     // Help overlay (`?` key, header `?` button). Toggles HelpVisible.
     case KeyToggleHelp
+    // Toggles AutoApprove (the batch-PR mode). Bound to F7 + a palette
+    // entry. When on, an @summary that passes the readiness + body
+    // gates skips the Ctrl+A wait and runs approveAndKickHooks
+    // directly; each PR accumulates in OpenPrs. See Policy.AutoApprove
+    // for the full semantics.
+    case KeyToggleAutoApprove
     // Project-info modal (Frame S). Toggled by clicking project name
     // in the header or palette → "Project info".
     case KeyToggleProjectInfo

@@ -100,14 +100,10 @@ struct AppModel(
     // computes it server-side); good enough for "did this turn
     // cost a quarter or a hundred dollars" awareness.
     TotalCostUsd float64,
-    // Command-palette state. PaletteVisible toggles the overlay;
-    // Palette holds the live picker. We use a flag rather than
-    // Option[Palette[AppMsg]] because the gala 0.41.0 transpiler
-    // initializes Option of a generic struct as a non-None default
-    // (the inner Some looks like a zero Palette), which would render
-    // an empty palette on launch.
-    PaletteVisible bool,
-    Palette        Palette[AppMsg],
+    // Command-palette state. None when the overlay is closed; Some
+    // when it's open with a live picker. Toggled by Ctrl+P (see
+    // KeyTogglePalette) and PaletteEvent dispatches.
+    Palette Option[Palette[AppMsg]],
     // ViewMode picks the top-level layout: the default split, a
     // fullscreen pipeline org chart (F4), a member-card grid (F3),
     // or focus mode that hides the sidebar (F2). Plain sealed type
@@ -293,15 +289,12 @@ struct AppModel(
     // open this; lists every loaded guidance doc with sha + path +
     // loaded-at. Loaded data lives in m.Guidance.
     GuidanceOpen bool,
-    // RecoveryModalOpen + RecoveryFocus drive the §5.6 modal. We use
-    // a bool + plain sealed type rather than Option[RecoveryChoice]
-    // because gala 0.41+'s transpiler initialises Option-of-sealed-
-    // type as a non-None default (the inner sealed case looks like a
-    // zero-valued struct), which would render the recovery modal on
-    // every fresh launch instead of only when a prior session
-    // actually exists.
-    RecoveryModalOpen bool,
-    RecoveryFocus     RecoveryChoice,
+    // Recovery drives the §5.6 modal. None when the modal is closed;
+    // Some(choice) when it's open with `choice` as the focused
+    // button (Resume / Inspect / Start fresh). The recovery flow
+    // sets this from primeFromSnapshot when a prior session is
+    // detected.
+    Recovery Option[RecoveryChoice],
     // ReadOnlyMode = true when the user picked "Inspect" on the
     // recovery modal — sessions don't spawn, the composer is locked,
     // PR-related shortcuts are no-ops. Used purely for read-only
@@ -401,8 +394,7 @@ func InitialModelWithTeams(
     TokenUsage = EmptyHashMap[string, ClaudeUsage](),
     CurrentTurnUsage = EmptyHashMap[string, ClaudeUsage](),
     TotalCostUsd = 0.0,
-    PaletteVisible = false,
-    Palette = NewPalette[AppMsg](EmptyArray[PaletteAction[AppMsg]]()),
+    Palette = None[Palette[AppMsg]](),
     ViewMode = ViewDefault(),
     Composer     = "",
     ComposerCursor = 0,
@@ -443,8 +435,7 @@ func InitialModelWithTeams(
     HelpVisible           = false,
     ProjectInfoOpen       = false,
     GuidanceOpen          = false,
-    RecoveryModalOpen     = false,
-    RecoveryFocus         = ResumeFocus(),
+    Recovery              = None[RecoveryChoice](),
     ReadOnlyMode          = false,
     CompactSidebar        = false,
 )

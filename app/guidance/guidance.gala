@@ -78,11 +78,7 @@ func LoadDoc(repoDir string, slot string, rawPath string) Try[GuidanceDoc] = Try
     return GuidanceDoc(Slot = slot, Path = rawPath, Body = text, Sha256 = digest)
 })
 
-// sha256Hex returns the hex-encoded sha256 of `b`. Lifted into its own
-// function because gala's transpiler doesn't accept the Go expression
-// `sha256.Sum256(b)[:]` (array-to-slice via [:] inside an expression
-// position trips a SyntaxError). The Go-side body uses the standard
-// stdlib path; gala just wraps it.
+// sha256Hex returns the hex-encoded sha256 of `b`.
 func sha256Hex(b []byte) string {
     val h = sha256.New()
     val _, _ = h.Write(b)

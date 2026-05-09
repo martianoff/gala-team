@@ -12,13 +12,11 @@ import (
 // ============================================================================
 // app/config — loads a team.yaml file into a validated Team + Workflow.
 //
-// gala 0.41.0's `yaml.Codec[T]` handles `Array[Struct]` so the
-// hand-rolled pull-decoder this file used to host has been replaced with
-// a wire-format struct + a single `Codec[WireConfig]` decode + a
-// post-decode conversion to the public `Team` / `Member` / `Policy` /
-// `Workflow` shapes (the public types carry sealed `Role` /
-// `WorkspaceMode` / `MergeRule` values that the codec doesn't touch
-// natively, and a computed `Lead` field that has no YAML key).
+// A single `Codec[WireConfig]` decode + a post-decode conversion produces
+// the public `Team` / `Member` / `Policy` / `Workflow` shapes. The public
+// types carry sealed `Role` / `WorkspaceMode` / `MergeRule` values that
+// the codec doesn't touch natively, plus a computed `Lead` field that has
+// no YAML key, so the wire / public split stays.
 // ============================================================================
 
 // LoadFromString parses a YAML document into TeamConfig (Team + Workflow),

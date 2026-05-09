@@ -10,6 +10,7 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/directive"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
@@ -1007,40 +1008,29 @@ func sampleConversation() Array[session.ConversationLine] = ArrayOf(
     session.ConversationLine(Speaker = "Felix", Text = "done. Histogram + counter, lints clean."),
 )
 
-func TestClickEntry_SetsSelectedEntry(t T) T {
+func TestDragPress_SetsSelectedEntry(t T) T {
     val seed = sampleModel().Copy(Conversation = sampleConversation())
-    val (m, _) = Update(seed, ClickConversationEntry(Idx = 1))
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 1, Phase = DragPress()))
     return m.SelectedEntry match {
         case Some(idx) => Eq(t, idx, 1)
         case None()    => IsTrue(t, false)
     }
 }
 
-// Click outside the conversation range is dropped — no selection.
-func TestClickEntry_OutOfRange_DroppedSilently(t T) T {
+// Press out of range clamps to the last entry — guards against a
+// stale event during a fast append.
+func TestDragPress_OutOfRange_Clamped(t T) T {
     val seed = sampleModel().Copy(Conversation = sampleConversation())
-    val (m1, _) = Update(seed, ClickConversationEntry(Idx = 99))
-    val t1 = Eq(t, m1.Conversation.Size(), seed.Conversation.Size())
-    return m1.SelectedEntry match {
-        case Some(idx) => Eq(t1, idx, 2)  // clamped to last entry
-        case None()    => IsTrue(t1, false)
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 99, Phase = DragPress()))
+    return m.SelectedEntry match {
+        case Some(idx) => Eq(t, idx, 2)  // clamped to last entry
+        case None()    => IsTrue(t, false)
     }
 }
 
-// Clicking on the same entry that's already selected toggles selection
-// off — natural "deselect" gesture without forcing the user to Esc.
-func TestClickEntry_ClickSameAgain_DeselectsByToggle(t T) T {
-    val seed = sampleModel().Copy(
-        Conversation  = sampleConversation(),
-        SelectedEntry = Some(1),
-    )
-    val (m, _) = Update(seed, ClickConversationEntry(Idx = 1))
-    return IsFalse(t, m.SelectedEntry.IsDefined())
-}
-
-// Clicking an empty conversation is a no-op.
-func TestClickEntry_EmptyConversation_NoOp(t T) T {
-    val (m, _) = Update(sampleModel(), ClickConversationEntry(Idx = 0))
+// DragPress on an empty conversation is a no-op.
+func TestDragPress_EmptyConversation_NoOp(t T) T {
+    val (m, _) = Update(sampleModel(), ConversationDragMsg(Idx = 0, Phase = DragPress()))
     return IsFalse(t, m.SelectedEntry.IsDefined())
 }
 
@@ -1099,11 +1089,11 @@ func TestKeySubmit_ClearsSelectedEntry(t T) T {
 // the range so Ctrl+Y can copy it.
 // ---------------------------------------------------------------------------
 
-// Click sets anchor=focus=idx and engages Dragging so subsequent
-// motion events extend the range.
-func TestClickEntry_EngagesDragging(t T) T {
+// DragPress sets anchor=focus=idx and engages Dragging so subsequent
+// DragOver events extend the range.
+func TestDragPress_EngagesDragging(t T) T {
     val seed = sampleModel().Copy(Conversation = sampleConversation())
-    val (m, _) = Update(seed, ClickConversationEntry(Idx = 1))
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 1, Phase = DragPress()))
     val anchor = m.SelectedEntry.GetOrElse(-1)
     val focus  = m.SelectionFocus.GetOrElse(-1)
     val t1 = Eq(t,  anchor, 1)
@@ -1111,33 +1101,47 @@ func TestClickEntry_EngagesDragging(t T) T {
     return IsTrue(t2, m.Dragging)
 }
 
-// Mouse release clears Dragging without touching anchor / focus —
+// DragOver moves SelectionFocus to the new entry while leaving
+// SelectedEntry (the anchor) put.
+func TestDragOver_UpdatesFocusKeepsAnchor(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(0),
+        Dragging       = true,
+    )
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 2, Phase = DragOver()))
+    val t1 = Eq(t, m.SelectedEntry.GetOrElse(-1), 0)
+    return Eq(t1, m.SelectionFocus.GetOrElse(-1), 2)
+}
+
+// DragOver on the same line as the current focus is a no-op (avoids
+// model copies on horizontal mouse wiggles inside one row).
+func TestDragOver_SameLine_NoOp(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(1),
+        SelectionFocus = Some(1),
+        Dragging       = true,
+    )
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 1, Phase = DragOver()))
+    return Eq(t, m.SelectionFocus.GetOrElse(-1), 1)
+}
+
+// DragRelease clears Dragging without touching anchor / focus —
 // the user has finished the drag but the range stays selected so
 // Ctrl+Y can still copy it.
-func TestMouseRelease_ClearsDraggingPreservesRange(t T) T {
+func TestDragRelease_ClearsDraggingPreservesRange(t T) T {
     val seed = sampleModel().Copy(
         Conversation   = sampleConversation(),
         SelectedEntry  = Some(0),
         SelectionFocus = Some(2),
         Dragging       = true,
     )
-    val (m, _) = Update(seed, MouseAt(X = 50, Y = 12, Pressed = false, Motion = false))
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 2, Phase = DragRelease()))
     val t1 = IsFalse(t, m.Dragging)
     val t2 = Eq(t1, m.SelectedEntry.GetOrElse(-1),  0)
     return Eq(t2, m.SelectionFocus.GetOrElse(-1), 2)
-}
-
-// Motion event while NOT dragging is a strict no-op (the user is
-// just hovering after a release; we shouldn't extend a stale range).
-func TestMouseMotion_WithoutDragging_NoOp(t T) T {
-    val seed = sampleModel().Copy(
-        Conversation   = sampleConversation(),
-        SelectedEntry  = Some(0),
-        SelectionFocus = Some(0),
-        Dragging       = false,
-    )
-    val (m, _) = Update(seed, MouseAt(X = 50, Y = 15, Pressed = true, Motion = true))
-    return Eq(t, m.SelectionFocus.GetOrElse(-1), 0)
 }
 
 // Ctrl+Y on a multi-line range copies the joined "Speaker: Text"

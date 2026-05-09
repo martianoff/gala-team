@@ -1237,13 +1237,15 @@ func conversationPanel(m AppModel) Widget {
     val mapSize = lineIdxByEntry.Size()
     return Column(ArrayOf[LayoutChild](
         Fixed(1, header),
-        Flex(1, ConversationLogViewClick[AppMsg](log, viewportH, (logIdx) => {
-            // Defensive clamp — gala-tui should never dispatch an
-            // out-of-range idx for a non-empty log, but a stray click
-            // mid-redraw is safer to ignore than to crash.
+        Flex(1, ConversationLogViewDrag[AppMsg](log, viewportH, (logIdx, phase) => {
+            // Defensive clamp — gala-tui shouldn't dispatch an out-of-
+            // range idx for a non-empty log, but a stale frame is
+            // safer to ignore than to crash. Resolves the log-entry
+            // idx to a conversation-line idx through the parallel
+            // map built above.
             val safe = if (logIdx < 0 || logIdx >= mapSize) -1
                        else lineIdxByEntry.Get(logIdx)
-            return ClickConversationEntry(Idx = safe)
+            return ConversationDragMsg(Idx = safe, Phase = phase)
         })),
     ))
 }
@@ -1261,114 +1263,6 @@ func conversationViewportHeight(m AppModel) int {
     val h = rows - 12
     if h < 4 { return 4 }
     return h
-}
-
-// convoLogTopY returns the on-screen Y coordinate where the
-// conversation-log content area starts rendering — the row right
-// below the conversation panel's "Conversation with Team Lead"
-// header, inside the rounded mainPanel border. Driven by the inner
-// banner stack visible above the convo pane:
-//
-//   4 rows : top-level header (always)
-//   2 rows : recovery banner (when WipingWorktrees or RecoveryBannerVisible)
-//   1 row  : liveness banner (Delegating / QAGate / TLReview)
-//   N rows : toast queue (m.Toasts.Length() when non-empty)
-//   2 rows : approval banner (state Approval)
-//   1 row  : mainPanel top border (RoundedBorder)
-//   1 row  : "Conversation with Team Lead" panel header
-//
-// Mouse-drag selection reads this to map a (mouseX, mouseY) event
-// to a row offset within the rendered ConversationLog.
-func convoLogTopY(m AppModel) int {
-    val recoveryH = if (m.WipingWorktrees || m.RecoveryBannerVisible) 2 else 0
-    val livenessH = m.State match {
-        case Delegating(_) => 1
-        case QAGate(_)     => 1
-        case TLReview()    => 1
-        case _             => 0
-    }
-    val toastH = if (m.Toasts.IsEmpty()) 0 else m.Toasts.Length()
-    val approvalH = m.State match {
-        case Approval(_) => 2
-        case _           => 0
-    }
-    return 4 + recoveryH + livenessH + toastH + approvalH + 1 + 1
-}
-
-// mouseInConvoPane returns true when (x, y) falls inside the
-// conversation-log content area (not the sidebar, not the
-// composer / banners / border). Used by the drag-selection mouse
-// handler to ignore motion events that wander outside the pane.
-func mouseInConvoPane(m AppModel, x int, y int) bool {
-    val sidebarW = if (m.CompactSidebar) 20 else 28
-    val leftX = sidebarW + 1     // past sidebar + 1 cell of mainPanel left border
-    if x < leftX { return false }
-    val (cols, _) = TermSize()
-    val rightX = cols - 1        // inside the mainPanel right border
-    if x >= rightX { return false }
-    val topY = convoLogTopY(m)
-    val viewportH = conversationViewportHeight(m)
-    return y >= topY && y < topY + viewportH
-}
-
-// convoLineAtMouseY maps a screen-Y coordinate to the index of the
-// conversation line rendered at that row. Returns None when y is
-// outside the conversation pane or above/below all visible content.
-//
-// The math mirrors cvBuildLayout in gala-tui's ConversationLog:
-// each conversation line contributes one or more ConversationEntries
-// (renderConversationLine splits prose / code / fence bars), so we
-// sum entry heights to get a per-LINE total, then walk the lines
-// with the same sticky-bottom + offset rules the renderer uses.
-func convoLineAtMouseY(m AppModel, mouseY int) Option[int] {
-    if m.Conversation.IsEmpty() { return None[int]() }
-    val viewportH = conversationViewportHeight(m)
-    val viewportTopY = convoLogTopY(m)
-    val rowInLog = mouseY - viewportTopY
-    if rowInLog < 0 || rowInLog >= viewportH { return None[int]() }
-    val width = conversationPaneWidth(m)
-    // Per-line total heights = sum of entry heights for that line.
-    // Pre-compute so the walk below can do its sticky-bottom math
-    // against a cumulative offset without re-rendering.
-    var lineHeights = EmptyArray[int]()
-    var total = 0
-    var i = 0
-    val n = m.Conversation.Size()
-    for i < n {
-        val cl = m.Conversation.Get(i)
-        val entries = renderConversationLine(m, cl, width, false)
-        var lineH = 0
-        var j = 0
-        val e = entries.Size()
-        for j < e {
-            lineH = lineH + entries.Get(j).Height
-            j = j + 1
-        }
-        lineHeights = lineHeights.Append(lineH)
-        total = total + lineH
-        i = i + 1
-    }
-    val viewportTop = if (m.ConversationSticky) MaxInt(0, total - viewportH)
-                      else m.ConversationOffset
-    var cursor = 0
-    var k = 0
-    for k < n {
-        val h = lineHeights.Get(k)
-        val entryStart = cursor
-        val entryEnd = cursor + h
-        val visTop = MaxInt(viewportTop, entryStart)
-        val visBot = MinInt(viewportTop + viewportH, entryEnd)
-        if visBot > visTop {
-            val rowsBefore = visTop - viewportTop
-            val rowsAfter = visBot - viewportTop
-            if rowInLog >= rowsBefore && rowInLog < rowsAfter {
-                return Some(k)
-            }
-        }
-        cursor = entryEnd
-        k = k + 1
-    }
-    return None[int]()
 }
 
 // renderConversationLine produces one or more ConversationEntries for

@@ -600,13 +600,17 @@ sealed type AppMsg {
     // the clicked row; group-header rows additionally toggle
     // fold/unfold (matches the keyboard Space binding).
     case SidebarRowClicked(VisibleIdx int)
-    // Dispatched by gala-tui's per-entry OnClick wrapper inside the
-    // ConversationLogViewClick widget when the user left-clicks on a
-    // rendered conversation entry. Idx is the entry's 0-based index
-    // in the rendered ConversationLog (oldest-first); the handler
-    // sets m.SelectedEntry so subsequent Ctrl+Y copies just that
-    // entry's text rather than the whole transcript. Esc clears.
-    case ClickConversationEntry(Idx int)
+    // Dispatched by gala-tui's per-entry OnDrag wrapper inside the
+    // ConversationLogViewDrag widget across the press / motion-while-
+    // held / release lifecycle. Idx is the conversation-line idx
+    // (resolved from the underlying log entry's idx via the parallel
+    // lineIdxByEntry map view.gala builds each render). Phase
+    // distinguishes DragPress (anchor + focus = idx, Dragging=true),
+    // DragOver (focus = idx; only fires for entries different from
+    // the current focus to avoid redundant model copies), and
+    // DragRelease (Dragging=false; anchor/focus preserved so Ctrl+Y
+    // can read the range).
+    case ConversationDragMsg(Idx int, Phase DragPhase)
     // Dispatched by gala-tui on a click in the composer's
     // bordered band — switches Focus back to FocusComposer.
     case FocusComposerClicked

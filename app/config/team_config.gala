@@ -1,10 +1,10 @@
 package config
 
 import (
-    "strings"
     "martianoff/gala/yaml"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    s "martianoff/gala/strings"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/team"
 )
@@ -224,11 +224,11 @@ func convertWorkflow(ww WireWorkflow, yamlStr string) Workflow {
 // any leading whitespace. Used by the codec converters to tell
 // "field absent → use default" from "field set to false".
 func hasIndentedKey(yamlStr string, key string) bool =
-    strings.Contains(yamlStr, s"\n${key}:") ||
-    strings.Contains(yamlStr, s"\n  ${key}:") ||
-    strings.Contains(yamlStr, s"\n    ${key}:") ||
-    strings.Contains(yamlStr, s"\n      ${key}:") ||
-    strings.HasPrefix(yamlStr, s"${key}:")
+    s.Contains(yamlStr, s"\n${key}:") ||
+    s.Contains(yamlStr, s"\n  ${key}:") ||
+    s.Contains(yamlStr, s"\n    ${key}:") ||
+    s.Contains(yamlStr, s"\n      ${key}:") ||
+    s.HasPrefix(yamlStr, s"${key}:")
 
 func convertPolicy(wp WirePolicy, blockPresent bool) Policy {
     if !blockPresent { return DefaultPolicy() }
@@ -311,17 +311,17 @@ func mergeRuleFromString(s string) MergeRule {
 func hasYamlBlock(yamlStr string, name string) bool {
     val needle1 = s"\n${name}:"
     val needle2 = s"\n${name} :"
-    if strings.HasPrefix(yamlStr, s"${name}:") { return true }
-    if strings.HasPrefix(yamlStr, s"${name} :") { return true }
-    return strings.Contains(yamlStr, needle1) || strings.Contains(yamlStr, needle2)
+    if s.HasPrefix(yamlStr, s"${name}:") { return true }
+    if s.HasPrefix(yamlStr, s"${name} :") { return true }
+    return s.Contains(yamlStr, needle1) || s.Contains(yamlStr, needle2)
 }
 
 // slugify turns a team name into a usable Key fallback: trim, lower
 // case, replace whitespace runs with single dashes. "Transpiler
 // Wizards" → "transpiler-wizards".
 func slugify(name string) string {
-    val lower = strings.ToLower(strings.TrimSpace(name))
-    return strings.Join(strings.Fields(lower), "-")
+    val lower = s.ToLower(s.TrimSpace(name))
+    return s.Join(s.Fields(lower), "-")
 }
 
 // ----------------------------------------------------------------------------

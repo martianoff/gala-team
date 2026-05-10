@@ -3,12 +3,12 @@ package testdriver
 import (
     "os"
     "bufio"
-    "strings"
     "martianoff/gala/json"
     gala_tui "github.com/martianoff/gala-tui"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
+    s "martianoff/gala/strings"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/ui"
     . "github.com/martianoff/gala_team/app/team"
@@ -74,7 +74,7 @@ func RunTestDriver(initial AppModel) {
     emitFrame(model, term, None[string]())
     var stopped = false
     for !stopped && scanner.Scan() {
-        val raw = strings.TrimSpace(scanner.Text())
+        val raw = s.TrimSpace(scanner.Text())
         if raw == "" { continue }
         val step = applyOneCommand(model, term, raw)
         step match {

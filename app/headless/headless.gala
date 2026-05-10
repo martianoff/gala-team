@@ -1,13 +1,13 @@
 package headless
 
 import (
-    "strings"
     "martianoff/gala/json"
     "github.com/martianoff/gala_team/app/onboarding"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/go_interop"
     . "martianoff/gala/collection_immutable"
+    str "martianoff/gala/strings"
     . "github.com/martianoff/gala_team/app/directive"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
@@ -56,8 +56,8 @@ val headlessResultCodec    = json.Codec[HeadlessResultEvent](json.SnakeCase())
 // (extract Result on success, drop on error) produce visible text.
 // Everything else drops to "".
 func ExtractClaudeText(envelope string) string {
-    val trimmed = strings.TrimSpace(envelope)
-    if trimmed == "" || !strings.HasPrefix(trimmed, "{") { return "" }
+    val trimmed = str.TrimSpace(envelope)
+    if trimmed == "" || !str.HasPrefix(trimmed, "{") { return "" }
     val kind = headlessExtractType(trimmed)
     if kind == "assistant" {
         return headlessAssistantCodec.Decode(trimmed) match {
@@ -84,11 +84,11 @@ func ExtractClaudeText(envelope string) string {
 // drop unconditionally.
 func headlessExtractType(trimmed string) string {
     val needle = "\"type\":\""
-    val parts = strings.SplitN(trimmed, needle, 2)
-    if len(parts) < 2 { return "" }
-    val tail = strings.SplitN(parts[1], "\"", 2)
-    if len(tail) < 2 { return "" }
-    return tail[0]
+    val parts = str.SplitN(trimmed, needle, 2)
+    if parts.Length() < 2 { return "" }
+    val tail = str.SplitN(parts.Get(1), "\"", 2)
+    if tail.Length() < 2 { return "" }
+    return tail.Get(0)
 }
 
 // extractHeadlessEnvelopes is the headless equivalent of
@@ -159,9 +159,9 @@ func extractHeadlessEnvelopes(buf string) Tuple[Array[string], string] {
 // Local copy rather than a shared helper because app/headless and
 // app/ui have no shared utility module yet — duplicating one short
 // predicate is cheaper than introducing a dep.
-func looksLikeHeadlessEnvelope(s string) bool {
-    val t = strings.TrimSpace(s)
-    return strings.HasPrefix(t, "{\"type\":")
+func looksLikeHeadlessEnvelope(line string) bool {
+    val t = str.TrimSpace(line)
+    return str.HasPrefix(t, "{\"type\":")
 }
 
 // ============================================================================
@@ -286,20 +286,20 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
                 // have leftover means the prior chunk was truncated
                 // upstream. Drop the corrupt leftover so the brace
                 // counter doesn't glue half + whole into garbage.
-                if priorBufBeforeAppend != "" && looksLikeHeadlessEnvelope(strings.TrimSpace(line)) {
+                if priorBufBeforeAppend != "" && looksLikeHeadlessEnvelope(str.TrimSpace(line)) {
                     jsonBuf = ""
                 }
                 jsonBuf = jsonBuf + line + "\n"
                 val (envs, leftover) = extractHeadlessEnvelopes(jsonBuf)
                 jsonBuf = leftover
-                val hasNoJsonShapesHl = !strings.Contains(line, "{") &&
-                                        !strings.Contains(line, "\"") &&
-                                        !strings.Contains(line, "\\")
+                val hasNoJsonShapesHl = !str.Contains(line, "{") &&
+                                        !str.Contains(line, "\"") &&
+                                        !str.Contains(line, "\\")
                 // NUL byte filter — same rationale as the UI-side
                 // onChunk fast-path: a chunk of pure NULs passes the
                 // no-JSON-shapes test trivially and was rendering as
                 // member output. Real assistant prose never has NULs.
-                val hasControlBytesHl = strings.Contains(line, "\x00")
+                val hasControlBytesHl = str.Contains(line, "\x00")
                 if envs.IsEmpty() && hasNoJsonShapesHl && !hasControlBytesHl && priorBufBeforeAppend == "" {
                     // Plain prose: zero `{`, zero `"`, zero `\`, and
                     // the buffer was empty before this chunk. Real
@@ -307,7 +307,7 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
                     // tail-of-envelope JSON fragments that lost their
                     // leading `{` upstream do not (they always carry
                     // quotes / escapes), and they're dropped.
-                    val visible = strings.TrimSpace(line)
+                    val visible = str.TrimSpace(line)
                     if visible != "" && !isDuplicateOfLast(convo, name, visible) {
                         TraceClaudeLine(name, line, visible, "", false, "plain-prose")
                         LogMemberOutput(name, visible)

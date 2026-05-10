@@ -8,6 +8,7 @@ gala_library(
         "//app/policy",
         "//app/team",
         "@gala//collection_immutable",
+        "@gala//strings",
         "@gala//yaml",
     ],
     visibility = ["//visibility:public"],
@@ -22,6 +23,7 @@ gala_go_test(
         "//app/policy",
         "//app/team",
         "@gala//collection_immutable",
+        "@gala//strings",
         "@gala//yaml",
     ],
 )

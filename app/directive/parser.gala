@@ -1,10 +1,10 @@
 package directive
 
 import (
-    "strings"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
+    s "martianoff/gala/strings"
 )
 
 // ============================================================================
@@ -45,12 +45,12 @@ func ParseClosed(msg string) Array[Directive] = parseImpl(msg, true)
 
 func parseImpl(msg string, requireClose bool) Array[Directive] {
     var out = EmptyArray[Directive]()
-    val lines = strings.Split(msg, "\n")
+    val lines = s.Split(msg, "\n")
     var i = 0
-    val n = len(lines)
+    val n = lines.Length()
     var done = false
     for !done && i < n {
-        val line = lines[i]
+        val line = lines.Get(i)
         parseOpeningTag(line) match {
             case Some(o) => {
                 val (kind, target, projectOverride, sameLineRest) = unpackOpening(o)
@@ -92,30 +92,30 @@ func unpackOpening(o openingTag) Tuple4[string, string, Option[string], string] 
     (o.Kind, o.Target, o.ProjectOverride, o.SameLineRest)
 
 func parseOpeningTag(line string) Option[openingTag] {
-    val trimmed = strings.TrimLeft(line, " \t")
-    if strings.HasPrefix(trimmed, "@dispatch(") {
-        return parseDispatchOrConsult("dispatch", strings.TrimPrefix(trimmed, "@dispatch("))
+    val trimmed = s.TrimLeft(line, " \t")
+    if s.HasPrefix(trimmed, "@dispatch(") {
+        return parseDispatchOrConsult("dispatch", s.TrimPrefix(trimmed, "@dispatch("))
     }
-    if strings.HasPrefix(trimmed, "@consult(") {
-        return parseDispatchOrConsult("consult", strings.TrimPrefix(trimmed, "@consult("))
+    if s.HasPrefix(trimmed, "@consult(") {
+        return parseDispatchOrConsult("consult", s.TrimPrefix(trimmed, "@consult("))
     }
-    if strings.HasPrefix(trimmed, "@summary") {
-        return parseBodyOnlyTag("summary", strings.TrimPrefix(trimmed, "@summary"))
+    if s.HasPrefix(trimmed, "@summary") {
+        return parseBodyOnlyTag("summary", s.TrimPrefix(trimmed, "@summary"))
     }
-    if strings.HasPrefix(trimmed, "@done") {
-        return parseBodyOnlyTag("done", strings.TrimPrefix(trimmed, "@done"))
+    if s.HasPrefix(trimmed, "@done") {
+        return parseBodyOnlyTag("done", s.TrimPrefix(trimmed, "@done"))
     }
-    if strings.HasPrefix(trimmed, "@help") {
-        return parseBodyOnlyTag("help", strings.TrimPrefix(trimmed, "@help"))
+    if s.HasPrefix(trimmed, "@help") {
+        return parseBodyOnlyTag("help", s.TrimPrefix(trimmed, "@help"))
     }
-    if strings.HasPrefix(trimmed, "@blocked") {
-        return parseBodyOnlyTag("blocked", strings.TrimPrefix(trimmed, "@blocked"))
+    if s.HasPrefix(trimmed, "@blocked") {
+        return parseBodyOnlyTag("blocked", s.TrimPrefix(trimmed, "@blocked"))
     }
-    if strings.HasPrefix(trimmed, "@base") {
-        return parseBodyOnlyTag("base", strings.TrimPrefix(trimmed, "@base"))
+    if s.HasPrefix(trimmed, "@base") {
+        return parseBodyOnlyTag("base", s.TrimPrefix(trimmed, "@base"))
     }
-    if strings.HasPrefix(trimmed, "@plan") {
-        return parseBodyOnlyTag("plan", strings.TrimPrefix(trimmed, "@plan"))
+    if s.HasPrefix(trimmed, "@plan") {
+        return parseBodyOnlyTag("plan", s.TrimPrefix(trimmed, "@plan"))
     }
     return None[openingTag]()
 }
@@ -124,7 +124,7 @@ func parseOpeningTag(line string) Option[openingTag] {
 // @done, @help, @blocked). Body lives on the rest of the same line
 // (left-trimmed) plus subsequent lines until @end.
 func parseBodyOnlyTag(kind string, afterTag string) Option[openingTag] {
-    val rest = strings.TrimLeft(afterTag, " \t")
+    val rest = s.TrimLeft(afterTag, " \t")
     return Some[openingTag](openingTag{
         Kind:            kind,
         Target:          "",
@@ -137,11 +137,11 @@ func parseBodyOnlyTag(kind string, afterTag string) Option[openingTag] {
 // "@dispatch(" or "@consult(" prefix has been stripped, then splits at
 // the first ")" to separate the args from the same-line body.
 func parseDispatchOrConsult(kind string, afterOpen string) Option[openingTag] {
-    val parts = strings.SplitN(afterOpen, ")", 2)
-    if len(parts) < 2 { return None[openingTag]() }
-    val (target, projectOverride) = parseArgList(parts[0])
+    val parts = s.SplitN(afterOpen, ")", 2)
+    if parts.Length() < 2 { return None[openingTag]() }
+    val (target, projectOverride) = parseArgList(parts.Get(0))
     if target == "" { return None[openingTag]() }
-    val rest = strings.TrimLeft(parts[1], " \t")
+    val rest = s.TrimLeft(parts.Get(1), " \t")
     return Some[openingTag](openingTag{
         Kind:            kind,
         Target:          target,
@@ -151,30 +151,25 @@ func parseDispatchOrConsult(kind string, afterOpen string) Option[openingTag] {
 }
 
 func parseArgList(args string) Tuple[string, Option[string]] {
-    val parts = strings.Split(args, ",")
-    if len(parts) == 0 { return ("", None[string]()) }
-    val target = strings.TrimSpace(parts[0])
-    var projectOverride = None[string]()
-    var i = 1
-    for i < len(parts) {
-        val (key, value, ok) = splitKVPair(parts[i])
-        if ok && key == "project" {
-            projectOverride = Some[string](value)
-        }
-        i = i + 1
-    }
+    val parts = s.Split(args, ",")
+    if parts.IsEmpty() { return ("", None[string]()) }
+    val target = s.TrimSpace(parts.Get(0))
+    val pairs = parts.Drop(1).Map((seg string) => splitKVPair(seg))
+    val projectOverride = pairs
+        .Find((kvOk Tuple3[string, string, bool]) => kvOk.V3 && kvOk.V1 == "project")
+        .Map((kvOk Tuple3[string, string, bool]) => kvOk.V2)
     return (target, projectOverride)
 }
 
 // splitKVPair parses one "key=value" or "key=\"value\"" segment via
-// strings.SplitN(2) — no manual sub-string slicing. Quoted values strip
-// the surrounding quotes via TrimPrefix/TrimSuffix.
+// SplitN(2) — no manual sub-string slicing. Quoted values strip the
+// surrounding quotes via TrimPrefix/TrimSuffix.
 func splitKVPair(seg string) Tuple3[string, string, bool] {
-    val parts = strings.SplitN(strings.TrimSpace(seg), "=", 2)
-    if len(parts) < 2 { return ("", "", false) }
-    val key = strings.TrimSpace(parts[0])
-    val rawVal = strings.TrimSpace(parts[1])
-    val unquoted = strings.TrimSuffix(strings.TrimPrefix(rawVal, "\""), "\"")
+    val parts = s.SplitN(s.TrimSpace(seg), "=", 2)
+    if parts.Length() < 2 { return ("", "", false) }
+    val key = s.TrimSpace(parts.Get(0))
+    val rawVal = s.TrimSpace(parts.Get(1))
+    val unquoted = s.TrimSuffix(s.TrimPrefix(rawVal, "\""), "\"")
     return (key, unquoted, true)
 }
 
@@ -189,15 +184,15 @@ func splitKVPair(seg string) Tuple3[string, string, bool] {
 // arrive line-by-line — we don't want to fire a Blocked / Help /
 // Finished directive on the very first line before the body and @end
 // have arrived).
-func collectBody(lines []string, start int, n int, sameLineRest string) Tuple3[string, int, bool] {
+func collectBody(lines Array[string], start int, n int, sameLineRest string) Tuple3[string, int, bool] {
     var bodyParts = EmptyArray[string]()
     if sameLineRest != "" {
         bodyParts = bodyParts.Append(sameLineRest)
     }
     var i = start + 1
     for i < n {
-        val line = lines[i]
-        val trimmed = strings.TrimSpace(line)
+        val line = lines.Get(i)
+        val trimmed = s.TrimSpace(line)
         if trimmed == "@end" {
             return (joinBody(bodyParts), i + 1, true)
         }
@@ -208,7 +203,7 @@ func collectBody(lines []string, start int, n int, sameLineRest string) Tuple3[s
 }
 
 func joinBody(parts Array[string]) string =
-    strings.TrimSpace(parts.MkString("\n"))
+    s.TrimSpace(parts.MkString("\n"))
 
 func buildDirective(
     kind string,
@@ -244,10 +239,10 @@ func buildDirective(
         // first non-empty token. Empty ref is a parse failure (drop the
         // directive) so a stray "@base ... @end" doesn't silently lock
         // the team into a weird base.
-        val ref = strings.TrimSpace(body)
+        val ref = s.TrimSpace(body)
         if ref == "" { return None[Directive]() }
-        val firstTok = strings.SplitN(ref, "\n", 2)[0]
-        return Some[Directive](Base(Ref = strings.TrimSpace(firstTok)))
+        val firstTok = s.SplitN(ref, "\n", 2).Get(0)
+        return Some[Directive](Base(Ref = s.TrimSpace(firstTok)))
     }
     if kind == "plan" {
         // Each non-empty body line becomes one Item. Lenient about
@@ -262,35 +257,25 @@ func buildDirective(
     return None[Directive]()
 }
 
-func parsePlanItems(body string) Array[string] {
-    val lines = strings.Split(body, "\n")
-    var out = EmptyArray[string]()
-    var i = 0
-    val n = len(lines)
-    for i < n {
-        val cleaned = stripPlanBullet(strings.TrimSpace(lines[i]))
-        if cleaned != "" {
-            out = out.Append(cleaned)
-        }
-        i = i + 1
-    }
-    return out
-}
+func parsePlanItems(body string) Array[string] =
+    s.Split(body, "\n")
+        .Map((ln) => stripPlanBullet(s.TrimSpace(ln)))
+        .Filter((item) => item != "")
 
 // stripPlanBullet removes a leading list marker so the item body
 // matches the user-facing prompt the TL meant to send. Recognised:
 // "- ", "* ", "• ", "N.", "N)" (one or more digits). Anything else
 // passes through verbatim.
-func stripPlanBullet(s string) string {
-    if strings.HasPrefix(s, "- ")  { return strings.TrimSpace(strings.TrimPrefix(s, "- "))  }
-    if strings.HasPrefix(s, "* ")  { return strings.TrimSpace(strings.TrimPrefix(s, "* "))  }
-    if strings.HasPrefix(s, "• ")  { return strings.TrimSpace(strings.TrimPrefix(s, "• "))  }
-    val rs = ToRunes(s)
+func stripPlanBullet(line string) string {
+    if s.HasPrefix(line, "- ")  { return s.TrimSpace(s.TrimPrefix(line, "- "))  }
+    if s.HasPrefix(line, "* ")  { return s.TrimSpace(s.TrimPrefix(line, "* "))  }
+    if s.HasPrefix(line, "• ")  { return s.TrimSpace(s.TrimPrefix(line, "• "))  }
+    val rs = ToRunes(line)
     val n = len(rs)
     var i = 0
     for i < n && rs[i] >= '0' && rs[i] <= '9' { i = i + 1 }
     if i > 0 && i < n && (rs[i] == '.' || rs[i] == ')') {
-        return strings.TrimSpace(string(SliceFrom(rs, i + 1)))
+        return s.TrimSpace(string(SliceFrom(rs, i + 1)))
     }
-    return s
+    return line
 }

@@ -193,6 +193,40 @@ func TestWrapPrompt_PrependsOnboardingHeader(t T) T {
     return IsTrue(t4, onbPos < taskPos && taskPos < promptPos)
 }
 
+// The TL's protocol section MUST teach when to delegate vs act
+// alone — the directive vocabulary alone (without a "use it"
+// rule) leaves the model free to do all the work in its own cwd,
+// which is the failure mode we're trying to prevent. Pin the
+// section heading + a couple of load-bearing phrases so a future
+// careless edit can't silently drop the guidance.
+func TestWrapPrompt_TLProtocol_TeachesWhenToDelegate(t T) T {
+    val proj = mkProj("delegation_rules", EmptyArray[Tuple[string, string]]())
+    val tm = mkTeam(EmptyArray[string](), ArrayOf(
+        mkMember("Iris", TeamLead(), EmptyArray[string]()),
+        mkMember("Felix", Engineer(), EmptyArray[string]()),
+    ))
+    val res = WrapPrompt(proj, tm, tm.Lead, WorktreePerEngineer(), "ship it")
+    val out = res.Get()
+    val t1 = IsTrue(t, strings.Contains(out, "## When to delegate vs act yourself"))
+    val t2 = IsTrue(t1, strings.Contains(out, "Default to `@dispatch`"))
+    return IsTrue(t2, strings.Contains(out, "self-acting smells"))
+}
+
+// Engineers must NOT see the delegation rules — they're meant
+// for the TL only. The engineer protocol is reporting back
+// (@finished / @help / @blocked), nothing about dispatch.
+func TestWrapPrompt_EngineerProtocol_OmitsDelegationRules(t T) T {
+    val proj = mkProj("delegation_engineer", EmptyArray[Tuple[string, string]]())
+    val felix = mkMember("Felix", Engineer(), EmptyArray[string]())
+    val tm = mkTeam(EmptyArray[string](), ArrayOf(
+        mkMember("Iris", TeamLead(), EmptyArray[string]()),
+        felix,
+    ))
+    val res = WrapPrompt(proj, tm, felix, WorktreePerEngineer(), "implement parser")
+    val out = res.Get()
+    return IsFalse(t, strings.Contains(out, "## When to delegate vs act yourself"))
+}
+
 // Forgiving variant: missing doc surfaces in the second slot, prompt
 // flows through unchanged.
 func TestWrapPromptSafe_MissingDoc_DegradesGracefully(t T) T {

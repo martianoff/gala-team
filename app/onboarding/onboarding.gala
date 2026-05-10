@@ -224,7 +224,7 @@ func worktreeWorkspaceSection(proj Project, member Member, isTL bool, cwd string
         val leadBranch = leadBranchOf(proj)
         return header +
             s"Your cwd is your dedicated lead worktree at `${cwd}`. **You are checked out on branch `${leadBranch}`** — forked from `${proj.DefaultBranch}` (latest origin tip). The user's main repo lives at `${proj.Repo}` and is OFF LIMITS — never `cd` there, never `git checkout` / `git reset` / `git push` from there. Every git op you run stays inside your worktree.\n\n" +
-            s"Commit your work to this branch; the user opens a PR from it via Ctrl+A. Each fresh session removes this worktree, then re-creates it forked off `${proj.DefaultBranch}` again, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
+            s"Commits on this branch become the PR contents — typically fast-forward merges of engineer branches once they emit `@finished`, plus the occasional lead-side commit when the protocol's \"When to delegate vs act yourself\" rules say it's appropriate. The user opens a PR from this branch via Ctrl+A. Each fresh session removes this worktree, then re-creates it forked off `${proj.DefaultBranch}` again, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
             s"**Engineers and QAs each run in their own isolated git worktree** at " +
             s"`${proj.Repo}/.gala_team/worktrees/<MemberName>` on branch `${branchPattern}`. " +
             "Their file edits live ONLY on that branch until merged — they are NOT visible from your cwd.\n\n" +
@@ -301,6 +301,21 @@ func protocolSection(isTL bool, hasQa bool) string {
             "- `@summary ... @end` — finalize the turn for the user. The user is then asked to approve and the turn ends.\n" +
             "- `@base <ref> @end` — pick the base branch for the PR this turn will eventually open. See \"## Stacking PRs\" below.\n" +
             "- `@plan ... @end` — queue a multi-PR sequence. See \"## Multi-PR plans\" below.\n\n" +
+            "## When to delegate vs act yourself\n\n" +
+            "Your role is delegation, coordination, and review — not engineering. Engineers run in isolated worktrees on their own branches; their commits are what becomes the PR contents you eventually ship. Default to `@dispatch` whenever work fits any engineer's zone.\n\n" +
+            "**Delegate (`@dispatch`) when:**\n\n" +
+            "- The task involves writing or modifying code anywhere in the project. Multi-file changes, feature work, refactors, test additions, dependency bumps — all engineer work.\n" +
+            "- The task is decomposable across two or more engineers. A multi-zone change ships faster as parallel `@dispatch` blocks than as sequential lead-side edits, and that's the whole point of the parallel fan-out.\n" +
+            "- The task produces commits that need to land in the PR. Engineers commit on their branches; you fast-forward those into lead before `@summary`.\n\n" +
+            "**Act yourself (your own cwd) only when:**\n\n" +
+            "- You're inspecting / reading code to answer the user — no edit is going to ship.\n" +
+            "- You're merging an engineer's branch into your lead worktree (`git merge --ff-only`), running a final cross-engineer check, or composing the `@summary` body.\n" +
+            "- The work is a truly trivial one-line / one-file fix where the dispatch overhead is genuinely larger than the work — rare; when in doubt, dispatch.\n\n" +
+            "**Watch for these self-acting smells:**\n\n" +
+            "- You're on the third file edit of the turn inside your own cwd. That's engineer work — it belongs on an engineer's branch, behind a brief.\n" +
+            "- You're running the project's full build / test cycle in your own cwd. Engineers run tests inside their worktrees as part of `@finished` verification; the lead is not the test runner.\n" +
+            "- You're tempted to skip `@dispatch` because \"this is faster.\" Parallel `@dispatch` IS faster than sequential lead edits, and even a single-engineer dispatch produces the commit trail (branch, optional QA review, fast-forward into lead) that the PR pipeline depends on.\n\n" +
+            "A turn that ends with no directive at all means the work either lives only in your cwd (never reaches a PR) or lives in a polished prose summary the user can read on screen but cannot ship via Ctrl+A. Neither is the goal. If you did meaningful work, route it through engineer branches and close with `@summary`; if you didn't, reply briefly so the user can give you the next instruction.\n\n" +
             "## Example — two engineers in parallel\n\n" +
             "```\n" +
             "I'll split this two ways.\n\n" +

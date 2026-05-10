@@ -817,22 +817,24 @@ func approvalSnippet(body string) string {
 // HeaderApplePadCols, HeaderAppleWidth and HeaderRowsWide describe the
 // wide-mode header geometry. The Fixed-row totals here must match the
 // outer Column's `Fixed(N, header)` slot in View — kept in sync via
-// headerHeight.
-//   AppleWidth   = 10 cols of apple grid (see appleColumn).
-//   ApplePad     =  2 cols of breathing room between apple and brand.
-//   HeaderRowsWide = 1 spacer + 6 apple/brand rows + 1 separator = 8.
+// headerHeight, the inner Fixed(N, appleAndBrand) in wideHeader, and
+// the appleColumn / appleRow0..3 grid (any change must touch ALL of
+// them or the header crops or leaves a gap).
+//   AppleWidth   = 6 cols of apple grid (see appleColumn).
+//   ApplePad     = 2 cols of breathing room between apple and brand.
+//   HeaderRowsWide = 1 spacer + 4 apple/brand rows + 1 separator = 6.
 //   HeaderRowsNarrow = 1 spacer + 1 brand + 1 sub + 1 separator   = 4.
 //   NarrowCols   = below this terminal width, drop the apple and
 //                  fall back to the original 4-row single-line layout
 //                  so the brand doesn't get squeezed off-screen.
-func HeaderAppleWidth() int    = 10
+func HeaderAppleWidth() int    = 6
 func HeaderApplePad() int      = 2
-func HeaderRowsWide() int      = 8
+func HeaderRowsWide() int      = 6
 func HeaderRowsNarrow() int    = 4
 func HeaderNarrowCols() int    = 70
 
 // headerHeight is what the outer Column reserves for the header. Wide
-// mode grows to 8 rows to fit the apple; narrow stays at the legacy 4.
+// mode grows to 6 rows to fit the apple; narrow stays at the legacy 4.
 // Recomputed each frame so a live resize re-flows correctly.
 func headerHeight(m AppModel) int {
     val (cols, _) = TermSize()
@@ -872,10 +874,10 @@ func narrowHeader(m AppModel, cols int) Widget {
     ))
 }
 
-// wideHeader is the apple+brand layout. Apple takes a fixed 10-col
+// wideHeader is the apple+brand layout. Apple takes a fixed 6-col
 // slot on the left with a 2-col gap, brand text gets the remaining
 // flex. The brand line is built without the 🍎 prefix here because
-// the apple itself is the brand glyph. Total height: 8 rows.
+// the apple itself is the brand glyph. Total height: 6 rows.
 func wideHeader(m AppModel, cols int) Widget {
     val budget = cols - HeaderAppleWidth() - HeaderApplePad()
     val brand = buildBrandLineNoEmoji(m, budget)
@@ -894,7 +896,7 @@ func wideHeader(m AppModel, cols int) Widget {
     ))
     return Column(ArrayOf[LayoutChild](
         Fixed(1, Empty()),
-        Fixed(6, appleAndBrand),
+        Fixed(4, appleAndBrand),
         Fixed(1, FillCh('-')),
     ))
 }
@@ -913,35 +915,34 @@ func autoBadgeText(m AppModel) string {
     return s"  ·  AUTO (${m.OpenPrs.Size()} open${planSuffix})"
 }
 
-// appleColumn renders the gala apple as a 6-row × 10-col grid of
+// appleColumn renders the gala apple as a 4-row × 6-col grid of
 // styled cells. `tick` advances every 120 ms (TickSub in cmd/main),
 // driving a "shine" highlight that sweeps across the apple body
-// once per ~1.2 s, giving a 3D-rotating-with-fixed-light feel
-// without changing the silhouette frame-to-frame.
+// once per ~480 ms (4 zones × 120 ms), giving a 3D-rotating-with-
+// fixed-light feel without changing the silhouette frame-to-frame.
 //
-// Zone scheme: each body cell's zone == its column index (0..9).
-// Per render, shineZone = tick % numZones; the cell at that column
-// renders BrightWhite + bold (the highlight); the next column over
-// renders BrightRed (the trailing edge); everything else is plain
-// red. Cols 0-1 carry no body cells, so when shineZone falls there
-// the highlight visually "wraps" off the left edge for one tick —
-// reads as the shine going behind the apple, which is fine.
+// Zone scheme: nZones = 4 (the body width). Body cells live at cols
+// 1..4 with zone == col-1 (zones 0..3). Per render, shineZone =
+// tick % nZones; the cell at that zone renders BrightWhite + bold
+// (the highlight); the next zone over renders BrightRed (the
+// trailing edge); the remaining body cells are plain red. nZones is
+// the body width (not the full grid width) so every tick lands on
+// a visible cell — the shine never disappears off the empty side
+// columns, which it would if we mapped zones to grid cols 0..5.
 //
-// Stem ('╲') is yellow-dim, leaf ('│') is bright green, outline
-// ('╱╲╰─╯') is bright red — none of those animate.
+// Stem ('╲') is yellow-dim, leaf ('│') is bright green. Half-block
+// chamfer cells (▄ at the top corners, ▀ at the base corners) share
+// the body palette so the shine wraps the silhouette smoothly.
 func appleColumn(tick int) Widget {
-    val nZones = HeaderAppleWidth()
+    val nZones = 4
     val shineZone = tick % nZones
     val leafSt = DefaultStyle().WithFg(BrightGreen()).WithBold()
     val stemSt = DefaultStyle().WithFg(Yellow()).WithDim()
-    val outSt  = DefaultStyle().WithFg(BrightRed())
     return Column(ArrayOf[LayoutChild](
         Fixed(1, appleRow0(stemSt, leafSt)),
-        Fixed(1, appleRow1(outSt, shineZone, nZones)),
+        Fixed(1, appleRow1(shineZone, nZones)),
         Fixed(1, appleRow2(shineZone, nZones)),
         Fixed(1, appleRow3(shineZone, nZones)),
-        Fixed(1, appleRow4(outSt, shineZone, nZones)),
-        Fixed(1, appleRow5(outSt)),
     ))
 }
 
@@ -961,73 +962,45 @@ func applePalette(zone int, shineZone int, nZones int) Style =
 func appleSpace() LayoutChild = Fixed(1, TextStyled(" ", DefaultStyle()))
 func appleCell(g string, st Style) LayoutChild = Fixed(1, TextStyled(g, st))
 
-// appleRow0..5 paint the six rows of the apple in a 10-col grid:
+// appleRow0..3 paint the four rows of the apple in a 6-col grid:
 //
-//   col:    0   1   2   3   4   5   6   7   8   9
-//   row 0:  .   .   .   .   ╲   │   .   .   .   .     stem + leaf
-//   row 1:  .   .   .   ╱   █   █   ╲   .   .   .     top arc
-//   row 2:  .   .   █   █   █   █   █   █   █   █     belly
-//   row 3:  .   .   █   █   █   █   █   █   █   █     belly
-//   row 4:  .   .   .   ╲   █   █   █   █   ╱   .     under
-//   row 5:  .   .   .   .   ╰   ─   ─   ╯   .   .     base
+//   col:    0   1   2   3   4   5
+//   row 0:  .   .   ╲   │   .   .     stem + leaf
+//   row 1:  .   ▄   █   █   ▄   .     chamfered shoulders
+//   row 2:  .   █   █   █   █   .     belly
+//   row 3:  .   ▀   █   █   ▀   .     chamfered base
 func appleRow0(stemSt Style, leafSt Style) Widget = Row(ArrayOf[LayoutChild](
-    appleSpace(), appleSpace(), appleSpace(), appleSpace(),
+    appleSpace(), appleSpace(),
     appleCell("╲", stemSt),
     appleCell("│", leafSt),
-    appleSpace(), appleSpace(), appleSpace(), appleSpace(),
-))
-
-func appleRow1(outSt Style, shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
-    appleSpace(), appleSpace(), appleSpace(),
-    appleCell("╱", outSt),
-    appleCell("█", applePalette(4, shineZone, nZones)),
-    appleCell("█", applePalette(5, shineZone, nZones)),
-    appleCell("╲", outSt),
-    appleSpace(), appleSpace(), appleSpace(),
-))
-
-func appleRow2(shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
     appleSpace(), appleSpace(),
-    appleCell("█", applePalette(2, shineZone, nZones)),
-    appleCell("█", applePalette(3, shineZone, nZones)),
-    appleCell("█", applePalette(4, shineZone, nZones)),
-    appleCell("█", applePalette(5, shineZone, nZones)),
-    appleCell("█", applePalette(6, shineZone, nZones)),
-    appleCell("█", applePalette(7, shineZone, nZones)),
-    appleCell("█", applePalette(8, shineZone, nZones)),
-    appleCell("█", applePalette(9, shineZone, nZones)),
 ))
 
-func appleRow3(shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
-    appleSpace(), appleSpace(),
+func appleRow1(shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
+    appleSpace(),
+    appleCell("▄", applePalette(0, shineZone, nZones)),
+    appleCell("█", applePalette(1, shineZone, nZones)),
     appleCell("█", applePalette(2, shineZone, nZones)),
-    appleCell("█", applePalette(3, shineZone, nZones)),
-    appleCell("█", applePalette(4, shineZone, nZones)),
-    appleCell("█", applePalette(5, shineZone, nZones)),
-    appleCell("█", applePalette(6, shineZone, nZones)),
-    appleCell("█", applePalette(7, shineZone, nZones)),
-    appleCell("█", applePalette(8, shineZone, nZones)),
-    appleCell("█", applePalette(9, shineZone, nZones)),
-))
-
-func appleRow4(outSt Style, shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
-    appleSpace(), appleSpace(), appleSpace(),
-    appleCell("╲", outSt),
-    appleCell("█", applePalette(4, shineZone, nZones)),
-    appleCell("█", applePalette(5, shineZone, nZones)),
-    appleCell("█", applePalette(6, shineZone, nZones)),
-    appleCell("█", applePalette(7, shineZone, nZones)),
-    appleCell("╱", outSt),
+    appleCell("▄", applePalette(3, shineZone, nZones)),
     appleSpace(),
 ))
 
-func appleRow5(outSt Style) Widget = Row(ArrayOf[LayoutChild](
-    appleSpace(), appleSpace(), appleSpace(), appleSpace(),
-    appleCell("╰", outSt),
-    appleCell("─", outSt),
-    appleCell("─", outSt),
-    appleCell("╯", outSt),
-    appleSpace(), appleSpace(),
+func appleRow2(shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
+    appleSpace(),
+    appleCell("█", applePalette(0, shineZone, nZones)),
+    appleCell("█", applePalette(1, shineZone, nZones)),
+    appleCell("█", applePalette(2, shineZone, nZones)),
+    appleCell("█", applePalette(3, shineZone, nZones)),
+    appleSpace(),
+))
+
+func appleRow3(shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
+    appleSpace(),
+    appleCell("▀", applePalette(0, shineZone, nZones)),
+    appleCell("█", applePalette(1, shineZone, nZones)),
+    appleCell("█", applePalette(2, shineZone, nZones)),
+    appleCell("▀", applePalette(3, shineZone, nZones)),
+    appleSpace(),
 ))
 
 // tokenSuffix renders the running cumulative token usage + cost

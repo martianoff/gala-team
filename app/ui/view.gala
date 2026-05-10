@@ -833,6 +833,13 @@ func HeaderRowsWide() int      = 5
 func HeaderRowsNarrow() int    = 4
 func HeaderNarrowCols() int    = 70
 
+// appleShineDivisor scales how often the apple's shine column
+// advances — `shineZone = (tick / divisor) % nZones`. The global
+// TickSub fires every 120 ms; with divisor=3 the shine steps every
+// 360 ms and a full 6-zone lap takes ~2.16 s. Bumping the divisor
+// slows ONLY the apple — spinners elsewhere keep their 120 ms beat.
+func appleShineDivisor() int = 3
+
 // headerHeight is what the outer Column reserves for the header. Wide
 // mode grows to 5 rows to fit the apple; narrow stays at the legacy 4.
 // Recomputed each frame so a live resize re-flows correctly.
@@ -944,23 +951,28 @@ func autoBadgeText(m AppModel) string {
 
 // appleColumn renders the gala apple as a 3-row × 6-col grid of
 // styled cells. `tick` advances every 120 ms (TickSub in cmd/main),
-// driving a "shine" highlight that sweeps across the apple body
-// once per ~720 ms (6 zones × 120 ms), giving a 3D-rotating-with-
-// fixed-light feel without changing the silhouette frame-to-frame.
+// driving a "shine" highlight that sweeps across the apple body.
+//
+// Shine cadence: shineZone = (tick / appleShineDivisor) % nZones, so
+// the highlight advances one column every 3 ticks (~360 ms) and a
+// full lap takes 6 zones × 360 ms ≈ 2.16 s. The divisor decouples
+// the apple's animation rate from the global tick — the spinner
+// elsewhere on the screen still runs at the full 120 ms cadence,
+// which it needs to look "alive" while the apple breathes slower.
 //
 // Zone scheme: nZones = 6 (the body width). Every body cell carries
-// a zone == its column index (0..5). Per render, shineZone =
-// tick % nZones; the cell at that zone renders BrightWhite + bold
-// (the highlight), the next zone over BrightRed (the trailing edge),
-// the rest plain red. The body fills all six grid cols (no empty
-// padding columns), so every tick lands on a visible cell.
+// a zone == its column index (0..5). Per render, the cell at
+// shineZone renders BrightWhite + bold (the highlight), the next
+// zone over BrightRed (the trailing edge), the rest plain red. The
+// body fills all six grid cols (no empty padding columns), so every
+// shineZone lands on a visible cell.
 //
 // Stem ('╲') is yellow-dim; leaf cells ('│' + '▙') are bright green.
 // Half-block body corners (▄ at the top, ▀ at the base) share the
 // body palette so the shine wraps the silhouette smoothly.
 func appleColumn(tick int) Widget {
     val nZones = 6
-    val shineZone = tick % nZones
+    val shineZone = (tick / appleShineDivisor()) % nZones
     val leafSt = DefaultStyle().WithFg(BrightGreen()).WithBold()
     val stemSt = DefaultStyle().WithFg(Yellow()).WithDim()
     return Column(ArrayOf[LayoutChild](

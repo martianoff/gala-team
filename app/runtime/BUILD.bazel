@@ -1,4 +1,4 @@
-load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+load("@gala//:gala.bzl", "gala_library")
 
 gala_library(
     name = "runtime",
@@ -29,15 +29,8 @@ gala_library(
     visibility = ["//visibility:public"],
 )
 
-gala_go_test(
-    name = "runtime_glue_test",
-    srcs = ["runtime_glue_test.gala"],
-    deps = [
-        ":runtime",
-        "//app/project",
-        "//app/team",
-        "@gala//collection_immutable",
-        "@gala//go_interop",
-        "@gala//subprocess",
-    ],
-)
+# runtime_glue_test.gala runs via `gala test` (CI). It is an internal
+# test (`package runtime`) and would need a custom go_test setup here
+# because the lib mixes .gala sources with hand-written go_srcs that
+# `gala_go_test` cannot embed cleanly. Since CI now uses `gala test`,
+# we don't duplicate the harness in Bazel.

@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 env:
-  GALA_VERSION: "0.43.0"
+  GALA_VERSION: "0.48.0"
 
 jobs:
   test:
@@ -41,11 +41,13 @@ jobs:
           gala version
 
       - name: Build
-        # `gala test` doesn't handle multi-package projects (test files
-        # declare `package main` while libs declare their own package
-        # name — same convention gala_simple uses, which is why
-        # gala_simple's own CI uses bazel for tests). For now we
-        # smoke-test that the binary builds; per-package test
-        # iteration is a follow-up.
         run: gala build -o gala_team ./cmd
+
+      - name: Test
+        # Internal tests (`package <library>`) match the Go directory-
+        # package rule and work end-to-end through `gala test`. Older
+        # external-test files declared `package main` next to library
+        # sources — invalid Go layout that `gala test` correctly
+        # rejected. All test files now use the internal pattern.
+        run: gala test
 

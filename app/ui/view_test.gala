@@ -30,8 +30,14 @@ import (
 // vs bright) check for the marker characters ("▶", "…") rather than
 // the escape sequences.
 
+// viewportH is sized so the body has enough vertical room for the
+// historyIndexPanel's 18-row scroll window (plus its header + spacer
+// + border) AFTER the wide-mode header (apple+brand) takes its 5 rows.
+// 34 leaves 29 body rows — well above the 18-row scroll window
+// minimum, so this stays comfortably over-provisioned across header
+// geometry tweaks.
 val viewportW = 100
-val viewportH = 32
+val viewportH = 34
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -99,6 +105,59 @@ func TestView_Header_StateLabel_Idle(t T) T {
 func TestView_Header_StateLabel_Approval(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(State = Approval(SummaryBody = "ship"))
     return IsTrue(t, strings.Contains(render(m), "Open PR?"))
+}
+
+// Wide-mode header (cols >= 70) renders the multi-row apple to the
+// left of the brand text. We assert on a body-belly glyph + the top
+// and base chamfer half-blocks — if any of those vanish the apple
+// has lost its shape.
+func TestView_Header_WideMode_RendersApple(t T) T {
+    val out = render(mkModel(mkTeam("Skunkworks", "")))
+    val t1 = IsTrue(t,  strings.Contains(out, "█"))     // belly
+    val t2 = IsTrue(t1, strings.Contains(out, "▄"))     // top shoulder chamfer
+    val t3 = IsTrue(t2, strings.Contains(out, "▀"))     // base chamfer
+    return IsTrue(t3, strings.Contains(out, "Skunkworks"))
+}
+
+// Two ticks separated by a full appleShineDivisor step must produce
+// different snapshots — that's what tells the user the apple is
+// "alive" rather than a static glyph block. The shine highlight
+// advances every appleShineDivisor() ticks, so consecutive ticks
+// (Tick=0 vs Tick=1) hit the same shineZone and would compare equal;
+// we sample Tick=0 vs Tick=appleShineDivisor() so exactly one step
+// has elapsed. The shine moves by 1 cell, changing the SGR escape
+// sequence stream even when the visible glyphs are byte-identical,
+// so we compare the styled snapshot.
+func TestView_Header_AppleShine_AdvancesOnTick(t T) T {
+    val m0 = mkModel(mkTeam("Skunkworks", "")).Copy(Tick = 0)
+    val m1 = mkModel(mkTeam("Skunkworks", "")).Copy(Tick = appleShineDivisor())
+    val out0 = gala_tui.SnapshotStyled(View(m0), viewportW, viewportH)
+    val out1 = gala_tui.SnapshotStyled(View(m1), viewportW, viewportH)
+    return IsTrue(t, out0 != out1)
+}
+
+// Narrow-terminal fallback (cols < 70) is verified manually via
+// resize: under test, gala_tui.TermSize() can't read the redirected
+// stdio so it always returns its 80×24 default — meaning headerWidget
+// always picks wide mode regardless of the width passed to Snapshot.
+// The wide / narrow switch is exercised against a live terminal.
+
+// Wide header has 3 rows of brand content (brand line, state line,
+// tokens line) lined up against the 3 rows of the apple. The tokens
+// row sits empty until the first result event accrues usage —
+// asserting on the state row instead, which fills immediately.
+func TestView_Header_WideMode_BrandFlushWithApple(t T) T {
+    val out = render(mkModel(mkTeam("Skunkworks", "")))
+    val rows = strings.Split(out, "\n")
+    // Header rows: 0 spacer, 1 brand, 2 state, 3 tokens/empty, 4 sep.
+    // Both row 1 and row 2 carry apple cells (stem on r1, body on r2)
+    // AND text — that's the "flush" property the user asked for.
+    val brandRow = rows[1]
+    val stateRow = rows[2]
+    val t1 = IsTrue(t,  strings.Contains(brandRow, "│"))        // leaf in brand row
+    val t2 = IsTrue(t1, strings.Contains(brandRow, "Skunkworks")) // brand text on same row
+    val t3 = IsTrue(t2, strings.Contains(stateRow, "█"))        // body on state row
+    return IsTrue(t3, strings.Contains(stateRow, "state: idle")) // state text on same row
 }
 
 // ---------------------------------------------------------------------------
@@ -685,11 +744,16 @@ func TestView_Sidebar_ThickBorder_WhenSidebarFocused(t T) T {
 
 // splitTopBorder returns just the top border line so we can assert
 // "no thick glyph in the SIDEBAR border" without false positives
-// from the composer / mainpanel borders below.
+// from the composer / mainpanel borders below. The sidebar's top
+// border sits immediately under the header — at row HeaderRowsWide
+// in wide mode (viewportW = 100, the test default), or
+// HeaderRowsNarrow in the narrow fallback.
 func splitTopBorder(out string) string {
     val lines = strings.Split(out, "\n")
-    if len(lines) < 4 { return out }
-    return lines[3]  // header is rows 0-2, sidebar top border is row 3
+    val headerRows = if (viewportW < HeaderNarrowCols()) HeaderRowsNarrow()
+                     else                                 HeaderRowsWide()
+    if len(lines) <= headerRows { return out }
+    return lines[headerRows]
 }
 
 // ---------------------------------------------------------------------------

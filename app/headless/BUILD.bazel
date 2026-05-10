@@ -15,7 +15,6 @@ gala_library(
         "@gala//collection_immutable",
         "@gala//go_interop",
         "@gala//json",
-        "@gala//strings",
     ],
     visibility = ["//visibility:public"],
 )

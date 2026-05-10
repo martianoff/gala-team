@@ -1003,20 +1003,26 @@ func buildSidebarRightFields(m AppModel, members Array[Member]) HashMap[string, 
 // number as "stopwatch" and getting confused when it reset on every
 // chunk.
 //
-// Idle / queued / done shows nothing (no work to time). Failed and
-// help-waiting show their static labels.
+// The cap is SidebarRightWidth (10 cols). Slow/stuck/recovering states
+// drop their suffix words because the row glyph already encodes the
+// state — the half-speed spinner means slow, "!" means stuck, "↻"
+// means recovering. Recovering still keeps the "n/m" attempt counter
+// so the user can see how many retries are left.
+//
+// Idle / queued / done shows nothing (no work to time). Failed shows
+// "failed" and help-waiting shows "help" as static labels.
 func sidebarRightField(m AppModel, name string) string {
     val status = m.Statuses.Get(name).GetOrElse(StIdle())
     return status match {
-        case StIdle()           => totalWorkFor(m, name, false)
-        case StQueued()         => ""
-        case StDone()           => totalWorkFor(m, name, false)
-        case StFailed(_)        => "✗ failed"
-        case StRecovering(att, max) => s"${totalWorkFor(m, name, true)} (recov ${att}/${max})"
-        case StHelpWaiting(_)   => "help"
-        case StWorking()        => totalWorkFor(m, name, true)
-        case StSlow()           => s"${totalWorkFor(m, name, true)} slow"
-        case StStuck()          => s"${totalWorkFor(m, name, true)} stuck"
+        case StIdle()               => totalWorkFor(m, name, false)
+        case StQueued()             => ""
+        case StDone()               => totalWorkFor(m, name, false)
+        case StFailed(_)            => "failed"
+        case StRecovering(att, max) => s"${totalWorkFor(m, name, true)} ${att}/${max}"
+        case StHelpWaiting(_)       => "help"
+        case StWorking()            => totalWorkFor(m, name, true)
+        case StSlow()               => totalWorkFor(m, name, true)
+        case StStuck()              => totalWorkFor(m, name, true)
     }
 }
 

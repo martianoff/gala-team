@@ -137,6 +137,51 @@ func TestTeamPanel_FailedReason_NotRenderedInline(t T) T {
     return IsFalse(t1, contains(rendered, "something-very-specific-here"))
 }
 
+// When a working member has a right-side timer field, the left half
+// shrinks. Past versions still padded the name out to 10 chars and
+// trailed it with the status word, so a 6-char name in a 25-col
+// sidebar got clipped mid-name. The fix drops the padding + status
+// suffix when a right field is present; this guard catches a
+// regression by rendering at the actual production sidebar width
+// and asserting the full name is visible.
+func TestTeamPanel_WithRightField_NameNotTruncated(t T) T {
+    val vesper = Member(
+        Name = "Vesper", Role = TeamLead(),
+        Personality = "calm",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val lyra = Member(
+        Name = "Lyra", Role = Engineer(),
+        Personality = "visual",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val tm = Team(
+        Key                        = "loom",
+        Name                       = "Loom",
+        Description                = "",
+        Members                    = ArrayOf(vesper, lyra),
+        Lead                       = vesper,
+        Onboarding                 = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
+    )
+    val statuses = EmptyHashMap[string, Status]().Put("Lyra", StWorking())
+    val rightFields = EmptyHashMap[string, string]().Put("Lyra", "0:23")
+    val w = TeamPanelView(
+        tm, statuses,
+        cursor = -1,
+        collapsed = EmptyArray[string](),
+        tick = 0,
+        rightFields = rightFields,
+    )
+    // 25 cols matches the real content width inside a 28-col bordered
+    // sidebar (28 - 2 borders - 1 scrollbar).
+    val rendered = Snapshot(w, 25, 12)
+    val t1 = IsTrue(t, contains(rendered, "Vesper"))
+    return IsTrue(t1, contains(rendered, "Lyra"))
+}
+
 // contains is a test helper so we can assert on substring presence in
 // snapshot output without pulling in strings.* at every call site.
 func contains(haystack string, needle string) bool {

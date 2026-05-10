@@ -254,16 +254,26 @@ func appendGroup(
 // has no entry for a member (or the entry is ""), falls back to the simple
 // single-line label (preserves existing snapshot tests that don't pass a
 // timer map).
-val SidebarRightWidth = 14
+//
+// Width budget at the default 28-col sidebar: borders + scrollbar
+// reserve 3 cols, leaving 25 for content. SidebarRightWidth is sized
+// so the left half can hold an indent + glyph + a typical 9-char name
+// without clipping; if the right field is non-empty, the left text
+// drops the status word + name padding so the visible name isn't
+// truncated.
+val SidebarRightWidth = 10
 
 func renderSidebarRow(team Team, row SidebarRow, isCursor bool, tick int, rightFields HashMap[string, string]) Widget = row match {
     case GroupHeader(name, expanded) =>
         TextStyled(headerLabel(name, expanded, isCursor), rowStyle(isCursor, true))
     case MemberRow(m, status) => {
         val style = memberRowStyle(team, m, isCursor)
-        val left  = TextStyled(memberLabel(memberRowText(m, status, tick), isCursor), style)
         val right = rightFields.GetOrElse(m.Name, "")
-        if right == "" { return left }
+        if right == "" {
+            val full = memberLabel(memberRowFull(m, status, tick), isCursor)
+            return TextStyled(full, style)
+        }
+        val left  = TextStyled(memberLabel(memberRowCompact(m, status, tick), isCursor), style)
         val rightW = TextStyled(padLeft(right, SidebarRightWidth), DefaultStyle().WithDim())
         return Row(ArrayOf[LayoutChild](
             Flex(1, left),
@@ -354,15 +364,21 @@ func EngineerColor(ordinal int) Color {
     return Cyan()
 }
 
-// memberRowText is the visual encoding of one member row.  Padded to a
-// stable column width so the right-side status text aligns regardless
-// of name length. `tick` rotates the working-spinner glyph so the
-// user can see the row is alive; the other states are static.
-func memberRowText(m Member, status Status, tick int) string {
-    val glyph = statusGlyph(status, tick)
-    val padded = padRight(m.Name, 10)
-    return s"${glyph} ${padded} ${StatusName(status)}"
-}
+// memberRowFull is the visual encoding of a member row when no right-
+// hand status column is rendered. Padded to a stable column width so
+// the trailing status name aligns regardless of name length. `tick`
+// rotates the working-spinner glyph so the user can see the row is
+// alive; the other states are static.
+func memberRowFull(m Member, status Status, tick int) string =
+    s"${statusGlyph(status, tick)} ${padRight(m.Name, 10)} ${StatusName(status)}"
+
+// memberRowCompact is the encoding used when a right-hand timer/status
+// column is rendered alongside. Drops the trailing status word and the
+// name padding — the right column already conveys status, and dropping
+// the padding lets longer names render without clipping in the narrow
+// sidebar.
+func memberRowCompact(m Member, status Status, tick int) string =
+    s"${statusGlyph(status, tick)} ${m.Name}"
 
 // spinnerFrames is the canonical braille spinner — the same set
 // gala-tui's status_widgets uses, so the visual cadence matches

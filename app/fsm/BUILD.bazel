@@ -14,8 +14,9 @@ gala_library(
 gala_go_test(
     name = "state_machine_test",
     srcs = ["state_machine_test.gala"],
+    pkg = "fsm",
+    lib_srcs = ["state_machine.gala"],
     deps = [
-        ":fsm",
         "//app/directive",
         "@gala//collection_immutable",
     ],

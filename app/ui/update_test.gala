@@ -2891,3 +2891,137 @@ func TestJsonExtract_EscapedQuoteInsideString_StillTracksProperly(t T) T {
     return Eq(t, ext.Envelopes.Size(), 1)
 }
 
+// ---------------------------------------------------------------------------
+// TL self-acting + missing-summary nudges — empty-directive branch of
+// the lead's TLDone handler. The classifier predicates live in
+// app/directive (LooksLikeWorkTurn / LooksLikeProseSummary); these
+// tests cover the wiring: counter bookkeeping, threshold gating, and
+// FSM transition through the new TLSelfActing / TLProseSummary events.
+// ---------------------------------------------------------------------------
+
+// A long work-shaped buffer used by the self-acting tests. Includes
+// two distinct signals (tool-use prose + file paths) and clears the
+// 400-byte minimum so LooksLikeWorkTurn fires.
+func selfActingBuffer() string =
+    "Let me run bazel test //app/fsm:state_machine_test against the " +
+    "local checkout and confirm the new transitions land cleanly. Then " +
+    "we will review the diff against master to make sure nothing else " +
+    "moved while we were working. Once that lands I will roll forward " +
+    "through the rest of the suite to catch surprises before reporting " +
+    "back. Modified app/ui/view.gala and app/view/team_panel.gala along " +
+    "the way. Build clean across all 16 targets after the BUILD fixups."
+
+func TestSessionFailed_SelfActingBelowThreshold_BumpsCounter(t T) T {
+    // Threshold defaults to 2 (DefaultHeartbeat). Counter starts at 0,
+    // a single work-shaped empty turn brings it to 1 — still below
+    // threshold, so we land back in Idle without firing the nudge.
+    val seed = sampleModel().Copy(
+        State           = TLThinking(),
+        TurnBuffer      = selfActingBuffer(),
+        SelfActingTurns = 0,
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val t1 = Eq(t, m.SelfActingTurns, 1)
+    return m.State match {
+        case Idle() => IsTrue(t1, true)
+        case _      => IsTrue(t1, false)
+    }
+}
+
+func TestSessionFailed_SelfActingAtThreshold_FiresNudge(t T) T {
+    // Counter at threshold-1 (1) means this turn brings it to 2, the
+    // default threshold — fire the self-acting nudge. State must be
+    // TLNudging("self-acting"); counter resets to 0.
+    val seed = sampleModel().Copy(
+        State           = TLThinking(),
+        TurnBuffer      = selfActingBuffer(),
+        SelfActingTurns = 1,
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val t1 = Eq(t, m.SelfActingTurns, 0)
+    return m.State match {
+        case TLNudging(reason) => Eq(t1, reason, "self-acting")
+        case _                 => IsTrue(t1, false)
+    }
+}
+
+func TestSessionFailed_SelfActingDisabled_BehavesLikePlainChat(t T) T {
+    // SelfActingNudgeAfter = 0 disables the detector entirely. Even a
+    // perfectly work-shaped empty turn must NOT bump the counter or
+    // fire the nudge — falls through to the Idle path.
+    val pol = DefaultPolicy().Copy(
+        Heartbeat = DefaultHeartbeat().Copy(SelfActingNudgeAfter = 0),
+    )
+    val seed = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow(), pol).Copy(
+        State           = TLThinking(),
+        TurnBuffer      = selfActingBuffer(),
+        SelfActingTurns = 5,
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val t1 = Eq(t, m.SelfActingTurns, 0)  // plain-chat path resets the counter
+    return m.State match {
+        case Idle() => IsTrue(t1, true)
+        case _      => IsTrue(t1, false)
+    }
+}
+
+func TestSessionFailed_PlainChat_ResetsSelfActingCounter(t T) T {
+    // A short, non-work reply ends the streak even when the counter
+    // was elevated from prior work-shaped turns.
+    val seed = sampleModel().Copy(
+        State           = TLThinking(),
+        TurnBuffer      = "I'll wait for direction before dispatching.",
+        SelfActingTurns = 1,
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    return Eq(t, m.SelfActingTurns, 0)
+}
+
+func TestSessionFailed_ProseSummary_FiresMissingSummaryNudge(t T) T {
+    // Buffer has PR-shape headings + bullets + sign-off but no
+    // @summary token. Must transition to TLNudging("missing-summary"),
+    // not into Approval (which only fires on a parsed @summary
+    // directive) and not into Idle (the lead clearly intended to
+    // ship). Counter resets too.
+    val seed = sampleModel().Copy(
+        State      = TLThinking(),
+        TurnBuffer = "## Changes\n\n- bumped gala 0.44 → 0.48\n" +
+                     "- fixed sidebar truncation\n- migrated parser\n\n" +
+                     "Build clean, all tests pass.",
+        SelfActingTurns = 1,
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val t1 = Eq(t, m.SelfActingTurns, 0)
+    return m.State match {
+        case TLNudging(reason) => Eq(t1, reason, "missing-summary")
+        case _                 => IsTrue(t1, false)
+    }
+}
+
+func TestKeySubmit_ResetsSelfActingCounter(t T) T {
+    // A fresh user prompt means the lead is starting over on a new
+    // task — any pending self-acting streak from the prior task
+    // must NOT carry over.
+    val seed = sampleModel().Copy(
+        Composer        = "ship the new feature",
+        SelfActingTurns = 3,
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    return Eq(t, m.SelfActingTurns, 0)
+}
+
+// ---- Prompt builders -------------------------------------------------------
+
+func TestBuildSelfActingNudgePrompt_NamesEngineers(t T) T {
+    val msg = buildSelfActingNudgePrompt(2, sampleTeam())
+    val t1 = IsTrue(t, strings.Contains(msg, "2 consecutive turns"))
+    return IsTrue(t1, strings.Contains(msg, "Felix"))
+}
+
+func TestBuildMissingSummaryNudgePrompt_QuotesExcerpt(t T) T {
+    val body = "## What\n- shipped the metrics endpoint\n- added counter\nAll tests pass."
+    val msg = buildMissingSummaryNudgePrompt(body)
+    val t1 = IsTrue(t, strings.Contains(msg, "@summary"))
+    return IsTrue(t1, strings.Contains(msg, "shipped the metrics"))
+}
+

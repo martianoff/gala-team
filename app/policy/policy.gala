@@ -62,20 +62,32 @@ struct Hook(
 // abandoned, plus the auto-respawn budget on crashes. All values are
 // in seconds (or count, for MaxRetries). Defaults match the design's
 // 30/120/300/2 trio.
+//
+// SelfActingNudgeAfter is conceptually adjacent: rather than a
+// per-member liveness threshold it counts consecutive empty-directive
+// TL turns whose body looks like work (file edits, tool-use prose).
+// When the count crosses the threshold the orchestrator fires a
+// system-driven TLNudging("self-acting") turn so the lead is
+// reminded to @dispatch instead of acting solo. 0 disables the
+// detector entirely.
 struct Heartbeat(
-    SlowAfterSeconds    int64,
-    StuckAfterSeconds   int64,
-    AbandonAfterSeconds int64,
-    MaxRetries          int,
+    SlowAfterSeconds     int64,
+    StuckAfterSeconds    int64,
+    AbandonAfterSeconds  int64,
+    MaxRetries           int,
+    SelfActingNudgeAfter int,
 )
 
 // DefaultHeartbeat returns the design defaults — gentle 30s slow
-// nudge, escalate-to-TL after 2min, abandon at 5min, two crash retries.
+// nudge, escalate-to-TL after 2min, abandon at 5min, two crash retries,
+// nudge after 2 consecutive self-acting turns (one is normal scouting
+// before delegation; two in a row is the smell).
 func DefaultHeartbeat() Heartbeat = Heartbeat(
-    SlowAfterSeconds    = int64(30),
-    StuckAfterSeconds   = int64(120),
-    AbandonAfterSeconds = int64(300),
-    MaxRetries          = 2,
+    SlowAfterSeconds     = int64(30),
+    StuckAfterSeconds    = int64(120),
+    AbandonAfterSeconds  = int64(300),
+    MaxRetries           = 2,
+    SelfActingNudgeAfter = 2,
 )
 
 // Guardrails carries the §5.4 "block this PR if X" toggles. Defaults

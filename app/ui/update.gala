@@ -137,6 +137,8 @@ func eventTag(e Event) string = e match {
     case MemberStuck(_)              => "MemberStuck"
     case MemberAbandoned(_)          => "MemberAbandoned"
     case MemberCrashed(_, _, _)      => "MemberCrashed"
+    case TLSelfActing(_)             => "TLSelfActing"
+    case TLProseSummary(_)           => "TLProseSummary"
     case QADone()                    => "QADone"
     case ApprovalAccepted()          => "ApprovalAccepted"
     case ApprovalRejected()          => "ApprovalRejected"
@@ -163,6 +165,8 @@ func eventDetail(e Event) string = e match {
     case MemberStuck(name)                  => s"member=${name}"
     case MemberAbandoned(name)              => s"member=${name}"
     case MemberCrashed(name, err, retry)    => s"member=${name} retry=${retry} err=${err}"
+    case TLSelfActing(turns)                => s"turns=${turns}"
+    case TLProseSummary(_)                  => ""
     case QADone()                           => ""
     case ApprovalAccepted()                 => ""
     case ApprovalRejected()                 => ""
@@ -1403,6 +1407,10 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // in this turn if a multi-PR split is wanted again.
         Plan          = EmptyArray[string](),
         PlanShipped   = 0,
+        // A fresh user prompt starts a fresh self-acting count — the
+        // TL hasn't drifted yet on this new task, so prior streak
+        // shouldn't carry over.
+        SelfActingTurns = 0,
         // Drop a stale conversation-entry selection — the entry index
         // a click recorded earlier may shift as we append the new
         // user line + member responses, and a highlight on the wrong
@@ -2320,7 +2328,51 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                     )
                     return (m1, batchAll(nudgeCmds))
                 }
-                // Plain chat — return to Idle, no orchestration.
+                // Prose-summary classifier. The TL wrote what looks like
+                // a final PR summary (## Changes / bullets / "all tests
+                // pass") but never wrapped it in @summary, so the
+                // approval banner won't open and `gh pr create` won't
+                // fire. Nudge the lead to wrap-or-rewrite via the FSM's
+                // TLProseSummary event → TLNudging("missing-summary").
+                if LooksLikeProseSummary(cleanedB.TurnBuffer) {
+                    val nextState = transitionLogged(cleanedB.State, TLProseSummary(Body = cleanedB.TurnBuffer), transitionContext(cleanedB))
+                    val withState = setStatus(cleanedB.Copy(State = nextState, SelfActingTurns = 0), name, StIdle())
+                    val (m1, nudgeCmds) = spawnTLNudge(
+                        withState,
+                        "missing-summary",
+                        buildMissingSummaryNudgePrompt(cleanedB.TurnBuffer),
+                    )
+                    return (m1, batchAll(nudgeCmds))
+                }
+                // Self-acting classifier. The TL's body looks like
+                // engineer work (file edits, build/test invocations,
+                // sign-off phrases) but emitted no @dispatch — the
+                // lead drifted into doing the work itself. Counter +
+                // threshold so a single scouting turn doesn't trip;
+                // only repeated drift fires the nudge.
+                val threshold = cleanedB.Policy.Heartbeat.SelfActingNudgeAfter
+                if threshold > 0 && LooksLikeWorkTurn(cleanedB.TurnBuffer) {
+                    val nextCount = cleanedB.SelfActingTurns + 1
+                    if nextCount >= threshold {
+                        val nextState = transitionLogged(cleanedB.State, TLSelfActing(Turns = nextCount), transitionContext(cleanedB))
+                        val withState = setStatus(cleanedB.Copy(State = nextState, SelfActingTurns = 0), name, StIdle())
+                        val (m1, nudgeCmds) = spawnTLNudge(
+                            withState,
+                            "self-acting",
+                            buildSelfActingNudgePrompt(nextCount, cleanedB.Team),
+                        )
+                        return (m1, batchAll(nudgeCmds))
+                    }
+                    // Below threshold — bump the counter, fall through
+                    // to the plain-chat path so the lead's reply still
+                    // renders and control returns to the user.
+                    val bumped = cleanedB.Copy(SelfActingTurns = nextCount)
+                    val nextState = transitionLogged(bumped.State, TLDone(Directives = EmptyArray[Directive]()), transitionContext(bumped))
+                    return (setStatus(bumped.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
+                }
+                // Plain chat — return to Idle, no orchestration. Reset
+                // the self-acting counter: the lead just chatted, which
+                // breaks any prior work-shaped streak.
                 // Route through transitionLogged so the TLThinking→Idle
                 // hop lands in events.jsonl as a fsm_transition event.
                 // Without this, audits saw a fresh UserPrompted event
@@ -2329,7 +2381,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 // by construction, so the FSM agrees with the direct
                 // assignment that lived here before.
                 val nextState = transitionLogged(cleanedB.State, TLDone(Directives = EmptyArray[Directive]()), transitionContext(cleanedB))
-                return (setStatus(cleanedB.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
+                return (setStatus(cleanedB.Copy(State = nextState, SelfActingTurns = 0), name, StIdle()), NoCmd[AppMsg]())
             }
             // Empty-after-QA-filter guard. If every dispatch target
             // resolved to a QA member (and qa_required is on), the
@@ -2401,7 +2453,10 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 }
             }
             val nextState = transitionLogged(cleanedB.State, TLDone(Directives = dirs), transitionContext(cleanedB))
-            val withState = setStatus(cleanedB.Copy(State = nextState), name, StIdle())
+            // The TL emitted at least one directive (dispatch / summary
+            // / consult / plan / base) — that breaks any pending
+            // self-acting streak from prior empty-directive turns.
+            val withState = setStatus(cleanedB.Copy(State = nextState, SelfActingTurns = 0), name, StIdle())
             // If the new state is Delegating, fan out: spawn each
             // dispatched member's session with their per-target body
             // as the prompt. Without this, members stay StIdle forever
@@ -3133,6 +3188,29 @@ func detectMalformedDispatch(buffer string, tm Team) string {
         return s"bold heading naming a team member (e.g. `**${anyBold.Get()}:**`) — that's decorative prose, not a dispatch. Replace each with `@dispatch(${anyBold.Get()})`...`@end`."
     }
     return ""
+}
+
+// buildSelfActingNudgePrompt is the system message for the TL when
+// the lead has emitted N consecutive empty-directive turns whose
+// bodies looked like engineer work. The prompt names the streak
+// length (so the model has context for why a nudge is firing now)
+// and lists the engineers it could have dispatched to.
+func buildSelfActingNudgePrompt(turns int, tm Team) string {
+    val engineers = tm.Members
+        .Filter((m) => SameRole(m.Role, Engineer()))
+        .Map((m) => m.Name)
+        .MkString(" / ")
+    val list = if (engineers == "") "your engineers" else engineers
+    return s"System: you've spent ${turns} consecutive turns acting in your own workspace (file edits, build/test runs) without emitting a @dispatch. Your team has engineers (${list}) whose zone this work likely fits — delegating gives them the context AND keeps the lead branch clean for the eventual @summary.\n\nIf this work fits an engineer's zone, rewrite your previous response as one or more @dispatch(<Engineer>)...@end blocks describing the task as a brief. If you're done with the user's request, wrap your conclusion in @summary...@end so the approval banner opens. If you genuinely needed to act yourself (one-line fix, read-only inspection that produced an answer), reply briefly explaining why and the streak resets — but don't keep self-acting on multi-step engineer work."
+}
+
+// buildMissingSummaryNudgePrompt is the system message for the TL
+// when LooksLikeProseSummary classified the body as a final summary
+// in prose without the @summary directive wrap.
+func buildMissingSummaryNudgePrompt(body string) string {
+    val excerpt = runesPrefix(body, 240)
+    val ellipsis = if (len(body) > len(excerpt)) "…" else ""
+    return s"System: your last turn reads like a final summary (PR-shape headings, change list, sign-off phrase) but you never wrapped it in @summary...@end. Without that wrap the approval banner won't open and `gh pr create` won't fire — the user can't ship what you wrote.\n\nFirst 240 chars of your prose:\n${excerpt}${ellipsis}\n\nRewrite your previous response wrapping the summary body in:\n\n@summary\n## What\n<one-paragraph description of the change>\n\n## Why\n<motivation>\n\n## Follow-ups\n<bulleted list, or 'None.'>\n@end\n\nKeep the same content; just put the directive markers around it. If your previous body was actually NOT a final summary (e.g. you were planning aloud), reply with one sentence saying so plus what you actually intend to do next."
 }
 
 // buildMalformedDispatchPrompt assembles the nudge prompt sent back

@@ -107,10 +107,11 @@ struct WireHook(
 )
 
 struct WireHeartbeat(
-    SlowAfterSeconds    int64,
-    StuckAfterSeconds   int64,
-    AbandonAfterSeconds int64,
-    MaxRetries          int,
+    SlowAfterSeconds     int64,
+    StuckAfterSeconds    int64,
+    AbandonAfterSeconds  int64,
+    MaxRetries           int,
+    SelfActingNudgeAfter int,
 )
 
 struct WireGuardrails(
@@ -235,14 +236,16 @@ func convertPolicy(wp WirePolicy, blockPresent bool) Policy {
     val hb = if (wp.Heartbeat.SlowAfterSeconds == int64(0) &&
                   wp.Heartbeat.StuckAfterSeconds == int64(0) &&
                   wp.Heartbeat.AbandonAfterSeconds == int64(0) &&
-                  wp.Heartbeat.MaxRetries == 0) {
+                  wp.Heartbeat.MaxRetries == 0 &&
+                  wp.Heartbeat.SelfActingNudgeAfter == 0) {
         DefaultHeartbeat()
     } else {
         Heartbeat(
-            SlowAfterSeconds    = wp.Heartbeat.SlowAfterSeconds,
-            StuckAfterSeconds   = wp.Heartbeat.StuckAfterSeconds,
-            AbandonAfterSeconds = wp.Heartbeat.AbandonAfterSeconds,
-            MaxRetries          = wp.Heartbeat.MaxRetries,
+            SlowAfterSeconds     = wp.Heartbeat.SlowAfterSeconds,
+            StuckAfterSeconds    = wp.Heartbeat.StuckAfterSeconds,
+            AbandonAfterSeconds  = wp.Heartbeat.AbandonAfterSeconds,
+            MaxRetries           = wp.Heartbeat.MaxRetries,
+            SelfActingNudgeAfter = wp.Heartbeat.SelfActingNudgeAfter,
         )
     }
     val mode = if (wp.WorkspaceMode == "") Shared() else workspaceModeFromString(wp.WorkspaceMode)

@@ -346,6 +346,14 @@ struct AppModel(
     // (default, 28-cell rows) and compact (single-line rows, ~24
     // members visible). Bound to Ctrl+, / Ctrl+. — DESIGN.md §8.5.
     CompactSidebar bool,
+    // Consecutive empty-directive TL turns that classified as
+    // work-shaped (file edits, tool-use prose, build/test invocations
+    // — see directive.LooksLikeWorkTurn). Bumped on each such turn,
+    // reset on UserPrompted, on any directive-bearing TLDone, and on
+    // the self-acting nudge firing. When this crosses
+    // Policy.Heartbeat.SelfActingNudgeAfter, the orchestrator fires a
+    // TLNudging("self-acting") via the FSM's TLSelfActing event.
+    SelfActingTurns int,
 )
 
 // BatchPr is one PR opened during this session. Stored in
@@ -486,6 +494,7 @@ func InitialModelWithTeams(
     Recovery              = None[RecoveryChoice](),
     ReadOnlyMode          = false,
     CompactSidebar        = false,
+    SelfActingTurns       = 0,
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +

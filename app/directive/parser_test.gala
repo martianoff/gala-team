@@ -424,3 +424,111 @@ func TestParse_PlanThenDispatch_PreservesOrder(t T) T {
         case _              => IsTrue(t2, false)
     }
 }
+
+// ----- LooksLikeWorkTurn ----------------------------------------------------
+//
+// Conservative heuristic: requires two distinct signals (tool-use prose,
+// file paths, build/test invocations, sign-off phrases) on a body of
+// 400+ chars. Single signals or short bodies must NOT trip.
+
+func TestLooksLikeWorkTurn_ShortChat_False(t T) T {
+    return IsTrue(t, !LooksLikeWorkTurn("I'll wait for direction before dispatching."))
+}
+
+func TestLooksLikeWorkTurn_LongChatNoSignals_False(t T) T {
+    val msg = "Sure thing — happy to help with that. " +
+        "There are a few different angles to think about here. " +
+        "On one hand, the simpler approach is usually better, but " +
+        "on the other hand, sometimes a more thorough investigation " +
+        "pays off in the long run. I'd be happy to discuss whichever " +
+        "direction sounds right to you. Let me know what you'd prefer " +
+        "and we can go from there. Either approach has merit, really."
+    return IsTrue(t, !LooksLikeWorkTurn(msg))
+}
+
+func TestLooksLikeWorkTurn_OnlyOneSignal_False(t T) T {
+    // A single tool-use phrase isn't enough — body is over 400 chars but
+    // has only the one signal.
+    val msg = "Let me check the situation here. There are several things to think through " +
+        "before deciding on a direction, and I want to lay them out so we can pick " +
+        "together. Roughly speaking, the question is whether to invest in the change " +
+        "now or to keep the existing approach and revisit later. Both have tradeoffs " +
+        "and I don't have a strong prior. Worth a chat before I start anything."
+    return IsTrue(t, !LooksLikeWorkTurn(msg))
+}
+
+func TestLooksLikeWorkTurn_TwoSignals_True(t T) T {
+    val msg = "Let me check the BUILD.bazel changes carefully and review " +
+        "every target's deps before reaching for an edit anywhere in the tree. " +
+        "There are a few angles to weigh before we touch anything else " +
+        "and I want to be certain we don't disturb the existing layout. " +
+        "Going to take a moment to sketch the plan and confirm the test " +
+        "runner expectations on Windows are met by the existing setup so " +
+        "we don't get surprised when the suite spins up later in the loop."
+    return IsTrue(t, LooksLikeWorkTurn(msg))
+}
+
+func TestLooksLikeWorkTurn_ToolUsePlusFilePath_True(t T) T {
+    val msg = "Let me run bazel test //app/fsm:state_machine_test against " +
+        "the local checkout and confirm the new transitions land cleanly. " +
+        "Then we will review the diff against master to make sure nothing " +
+        "else moved while we were working. Once that lands I'll roll " +
+        "forward through the rest of the suite to catch any surprises " +
+        "before we report back to the user. Should be quick if the cache " +
+        "is warm; longer if bazel needs to re-transpile any sibling deps."
+    return IsTrue(t, LooksLikeWorkTurn(msg))
+}
+
+func TestLooksLikeWorkTurn_PassTallyPlusFilePath_True(t T) T {
+    val msg = "All tests pass. Modified app/ui/view.gala and app/view/team_panel.gala " +
+        "and a couple of BUILD.bazel files alongside them, plus a small " +
+        "tweak in app/cli/keymap.gala for the new shortcut. Build clean " +
+        "across all 16 targets after the BUILD config fixups. The diff is " +
+        "small enough to land as one PR — happy to split if you want " +
+        "tighter reviewability, but the migration touches related files " +
+        "that ride together cleanly. Let me know which way you'd prefer."
+    return IsTrue(t, LooksLikeWorkTurn(msg))
+}
+
+// ----- LooksLikeProseSummary ------------------------------------------------
+//
+// Strict: requires PR-section heading + 2+ bullet lines + sign-off phrase
+// + zero @summary tokens in the buffer. Each missing piece must drop the
+// classifier to false.
+
+func TestLooksLikeProseSummary_Empty_False(t T) T {
+    return IsTrue(t, !LooksLikeProseSummary(""))
+}
+
+func TestLooksLikeProseSummary_HasAtSummary_False(t T) T {
+    val msg = "@summary\n## What\n- did the thing\n- and another thing\nAll tests pass.\n@end"
+    return IsTrue(t, !LooksLikeProseSummary(msg))
+}
+
+func TestLooksLikeProseSummary_NoHeading_False(t T) T {
+    val msg = "- bumped gala\n- fixed truncation\n- migrated parser\nAll tests pass."
+    return IsTrue(t, !LooksLikeProseSummary(msg))
+}
+
+func TestLooksLikeProseSummary_HeadingButNoBullets_False(t T) T {
+    val msg = "## What\n\nFixed the bug. All tests pass."
+    return IsTrue(t, !LooksLikeProseSummary(msg))
+}
+
+func TestLooksLikeProseSummary_HeadingBulletsNoSignOff_False(t T) T {
+    val msg = "## Changes\n- A\n- B\n- C\n\nThoughts welcome."
+    return IsTrue(t, !LooksLikeProseSummary(msg))
+}
+
+func TestLooksLikeProseSummary_FullShape_True(t T) T {
+    val msg = "## Changes\n\n- bumped gala 0.44 → 0.48\n" +
+        "- fixed sidebar truncation\n- migrated parser to gala-strings\n\n" +
+        "Build clean, all tests pass."
+    return IsTrue(t, LooksLikeProseSummary(msg))
+}
+
+func TestLooksLikeProseSummary_BoldHeadingShape_True(t T) T {
+    val msg = "**Summary:** here's what landed.\n\n" +
+        "- bump\n- fix\n- migrate\n\nAll tests pass, ready to ship."
+    return IsTrue(t, LooksLikeProseSummary(msg))
+}

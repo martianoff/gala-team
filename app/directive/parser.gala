@@ -294,3 +294,91 @@ func stripPlanBullet(s string) string {
     }
     return s
 }
+
+// ============================================================================
+// Empty-directive classifiers — heuristics on the TL's turn body when
+// Parse() returned zero directives. Used by the orchestrator to decide
+// whether the lead just chatted (Idle is fine), drifted into doing the
+// engineers' work themselves (TLSelfActing nudge), or wrote a final
+// summary in prose without the @summary wrap (TLProseSummary nudge).
+//
+// Both are conservative — false positives stall the user, false
+// negatives just delay the nudge by one turn. They live next to the
+// directive parser because they share the same input shape and the
+// same caller (the empty-directive branch of the TL TLDone handler).
+// ============================================================================
+
+// LooksLikeWorkTurn returns true when the TL's body shows the
+// fingerprints of doing engineer work itself instead of dispatching:
+// long body + tool-use prose + file paths. Conservative — requires
+// at least two distinct signals so a chatty plain reply doesn't trip.
+func LooksLikeWorkTurn(buffer string) bool {
+    if len(buffer) < 400 { return false }
+    var signals = 0
+    val lower = strings.ToLower(buffer)
+    if hasAnySubstring(lower, ArrayOf(
+        "let me run", "let me check", "let me look", "let me read",
+        "let me find", "let me make", "let me edit", "let me update",
+        "let me migrate", "let me verify", "let me build",
+    )) { signals = signals + 1 }
+    if hasAnySubstring(lower, ArrayOf(
+        "bazel test", "bazel build", "bazel run",
+        "go test", "go build", "go vet",
+        "git status", "git commit", "git add", "git diff",
+        "gh pr", "npm test", "cargo test",
+    )) { signals = signals + 1 }
+    if hasAnySubstring(buffer, ArrayOf(".gala", ".go", ".bazel", ".yaml", ".yml", ".md", "BUILD.bazel"))
+        { signals = signals + 1 }
+    if hasAnySubstring(lower, ArrayOf(
+        "all tests pass", "build clean", "tests pass", "tests passed",
+        "build succeeded", "build success", "build completed",
+        "all targets build",
+    )) { signals = signals + 1 }
+    return signals >= 2
+}
+
+// LooksLikeProseSummary returns true when the TL's body is shaped
+// like a final PR summary (markdown headings, change list, pass/fail
+// tally) but without the @summary directive wrap. Strict — requires
+// PR-section headings AND an explicit "no @summary token in the
+// buffer" guard so legitimate work logs don't collide with "actually
+// emitted @summary but the parser dropped it for an unrelated reason."
+func LooksLikeProseSummary(buffer string) bool {
+    if buffer == "" { return false }
+    if strings.Contains(buffer, "@summary") { return false }
+    val lower = strings.ToLower(buffer)
+    val hasSummaryHeading = hasAnySubstring(lower, ArrayOf(
+        "## what", "## why", "## changes", "## summary",
+        "## follow-ups", "## follow ups", "## done",
+        "**summary:**", "**changes:**", "**what:**", "**why:**",
+    ))
+    if !hasSummaryHeading { return false }
+    val bulletCount = countLinesStartingWith(buffer, ArrayOf("- ", "* ", "• "))
+    if bulletCount < 2 { return false }
+    val signsOff = hasAnySubstring(lower, ArrayOf(
+        "all tests pass", "tests pass", "build clean", "ready to ship",
+        "ready to merge", "ready for review", "all done",
+    ))
+    return signsOff
+}
+
+// ----------------------------------------------------------------------------
+// Predicate helpers (package-private)
+// ----------------------------------------------------------------------------
+
+func hasAnySubstring(haystack string, needles Array[string]) bool =
+    needles.Find((n) => strings.Contains(haystack, n)).IsDefined()
+
+func countLinesStartingWith(buffer string, prefixes Array[string]) int {
+    val lines = strings.Split(buffer, "\n")
+    var count = 0
+    var i = 0
+    val n = len(lines)
+    for i < n {
+        val trimmed = strings.TrimLeft(lines[i], " \t")
+        val hit = prefixes.Find((p) => strings.HasPrefix(trimmed, p))
+        if hit.IsDefined() { count = count + 1 }
+        i = i + 1
+    }
+    return count
+}

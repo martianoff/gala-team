@@ -269,3 +269,93 @@ func TestDelegating_MemberDone_UnknownMember_StaysWithFullPending(t T) T {
         case _                => IsTrue(t, false)
     }
 }
+
+// ----- TL self-acting / prose-summary nudges --------------------------------
+//
+// The runtime heartbeat fires TLSelfActing when the TL has emitted N
+// consecutive TLDone events with no directives while clearly working
+// (file edits, long bodies). The directive parser fires TLProseSummary
+// when it sees a TL body shaped like a final summary but missing the
+// @summary wrap. Both route the FSM into TLNudging so the prompt builder
+// can shape a system-driven TL turn that re-states the rule the lead
+// drifted on.
+
+func nudgeReason(s AppState) Option[string] = s match {
+    case TLNudging(reason) => Some(reason)
+    case _                 => None[string]()
+}
+
+func TestTLThinking_OnTLSelfActing_GoesToTLNudging(t T) T {
+    val s = Transition(TLThinking(), TLSelfActing(Turns = 3), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "TLNudging")
+    return nudgeReason(s) match {
+        case Some(r) => Eq(t1, r, "self-acting")
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+func TestTLReview_OnTLSelfActing_GoesToTLNudging(t T) T {
+    val s = Transition(TLReview(), TLSelfActing(Turns = 5), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "TLNudging")
+    return nudgeReason(s) match {
+        case Some(r) => Eq(t1, r, "self-acting")
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+func TestTLThinking_OnTLProseSummary_GoesToTLNudging(t T) T {
+    val s = Transition(TLThinking(), TLProseSummary(Body = "## Changes\nbumped gala 0.44 → 0.48"), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "TLNudging")
+    return nudgeReason(s) match {
+        case Some(r) => Eq(t1, r, "missing-summary")
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+func TestTLReview_OnTLProseSummary_GoesToTLNudging(t T) T {
+    val s = Transition(TLReview(), TLProseSummary(Body = "## Done"), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "TLNudging")
+    return nudgeReason(s) match {
+        case Some(r) => Eq(t1, r, "missing-summary")
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+// Irrelevant-state guards: TLSelfActing / TLProseSummary only make
+// sense while the FSM is in a TL turn. In Delegating / QAGate / Approval
+// the TL isn't running, so the heartbeat / parser shouldn't fire — but
+// if a stray event arrives, the FSM must not advance.
+
+func TestDelegating_IgnoresTLSelfActing(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val s = Transition(Delegating(Pending = pending), TLSelfActing(Turns = 4), ctxWithQA(true))
+    return Eq(t, stateName(s), "Delegating")
+}
+
+func TestQAGate_IgnoresTLProseSummary(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo")
+    val s = Transition(QAGate(Pending = pending), TLProseSummary(Body = "..."), ctxWithQA(true))
+    return Eq(t, stateName(s), "QAGate")
+}
+
+func TestApproval_IgnoresTLSelfActing(t T) T {
+    val s = Transition(Approval(SummaryBody = "ship"), TLSelfActing(Turns = 7), ctxWithQA(true))
+    return Eq(t, stateName(s), "Approval")
+}
+
+// Once the FSM is in TLNudging, a fresh TLDone routes through
+// afterTLDone exactly like TLThinking / TLReview — the lead can resolve
+// the nudge by emitting a @dispatch (→ Delegating) or @summary
+// (→ Approval) on the next turn.
+
+func TestTLNudging_SelfActing_OnTLDoneDispatch_GoesToDelegating(t T) T {
+    val dirs = ArrayOf[Directive](dispatchTo("Felix"))
+    val s = Transition(TLNudging(Reason = "self-acting"), TLDone(Directives = dirs), ctxWithQA(true))
+    return Eq(t, stateName(s), "Delegating")
+}
+
+func TestTLNudging_MissingSummary_OnTLDoneSummary_GoesToApproval(t T) T {
+    val dirs = ArrayOf[Directive](summary("## What\nfixed sidebar truncation"))
+    val s = Transition(TLNudging(Reason = "missing-summary"), TLDone(Directives = dirs), ctxWithQA(true))
+    return Eq(t, stateName(s), "Approval")
+}

@@ -75,6 +75,21 @@ sealed type Event {
     // crosses Policy.MaxRetries the member becomes StFailed and the
     // FSM advances same as MemberAbandoned.
     case MemberCrashed(MemberName string, Err string, RetryCount int)
+    // TLSelfActing fires when the TL has emitted N consecutive TLDone
+    // events with no directives while the conversation shows it is
+    // clearly working (long bodies, repeated tool-use cycles). The
+    // threshold lives outside the FSM (policy knob in the runtime
+    // heartbeat); Turns is informational so the prompt builder can
+    // quote the count back to the lead when shaping the nudge.
+    case TLSelfActing(Turns int)
+    // TLProseSummary fires when the directive parser sees TL output
+    // shaped like a final summary (PR-style headings, file lists,
+    // pass/fail tally) but without a @summary directive wrapping it.
+    // Body carries the prose so the nudge prompt can quote it back —
+    // the FSM itself doesn't store it (the state only carries the
+    // reason; body is consumed by app/ui/update.gala's prompt builder
+    // at fire-time).
+    case TLProseSummary(Body string)
     case QADone
     case ApprovalAccepted
     case ApprovalRejected
@@ -138,13 +153,17 @@ func onIdle(event Event) AppState = event match {
 }
 
 func onTLThinking(event Event, ctx TransitionContext) AppState = event match {
-    case TLDone(dirs) => afterTLDone(dirs, ctx)
-    case _            => TLThinking()
+    case TLDone(dirs)        => afterTLDone(dirs, ctx)
+    case TLSelfActing(_)     => TLNudging(Reason = "self-acting")
+    case TLProseSummary(_)   => TLNudging(Reason = "missing-summary")
+    case _                   => TLThinking()
 }
 
 func onTLReview(event Event, ctx TransitionContext) AppState = event match {
-    case TLDone(dirs) => afterTLDone(dirs, ctx)
-    case _            => TLReview()
+    case TLDone(dirs)        => afterTLDone(dirs, ctx)
+    case TLSelfActing(_)     => TLNudging(Reason = "self-acting")
+    case TLProseSummary(_)   => TLNudging(Reason = "missing-summary")
+    case _                   => TLReview()
 }
 
 func onDelegating(pending HashSet[string], event Event, ctx TransitionContext) AppState = event match {

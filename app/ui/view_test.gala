@@ -32,11 +32,11 @@ import (
 
 // viewportH is sized so the body has enough vertical room for the
 // historyIndexPanel's 18-row scroll window (plus its header + spacer
-// + border) AFTER the wide-mode header (apple+brand) takes its 6 rows.
+// + border) AFTER the wide-mode header (apple+brand) takes its 5 rows.
 // Margin is header height + 28: narrow header (4 rows) → 32 was the
-// pre-apple default; current wide header (6 rows) → 34.
+// pre-apple default; current wide header (5 rows) → 33.
 val viewportW = 100
-val viewportH = 34
+val viewportH = 33
 
 // ---------------------------------------------------------------------------
 // fixtures
@@ -108,14 +108,15 @@ func TestView_Header_StateLabel_Approval(t T) T {
 
 // Wide-mode header (cols >= 70) renders the multi-row apple to the
 // left of the brand text. We assert on a body-belly glyph + the top
-// and base chamfer half-blocks — if any of those vanish the apple
-// has lost its shape.
+// and base chamfer half-blocks + the leaf-cluster cell — if any of
+// those vanish the apple has lost its shape.
 func TestView_Header_WideMode_RendersApple(t T) T {
     val out = render(mkModel(mkTeam("Skunkworks", "")))
     val t1 = IsTrue(t,  strings.Contains(out, "█"))     // belly
     val t2 = IsTrue(t1, strings.Contains(out, "▄"))     // top shoulder chamfer
     val t3 = IsTrue(t2, strings.Contains(out, "▀"))     // base chamfer
-    return IsTrue(t3, strings.Contains(out, "Skunkworks"))
+    val t4 = IsTrue(t3, strings.Contains(out, "▙"))     // leaf cluster cell
+    return IsTrue(t4, strings.Contains(out, "Skunkworks"))
 }
 
 // Two consecutive ticks must produce different snapshots — that's

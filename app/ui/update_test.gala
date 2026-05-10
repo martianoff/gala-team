@@ -223,6 +223,275 @@ func TestKeyReject_OutsideApproval_NoOp(t T) T {
     return Eq(t, m.Tick, 5)  // unchanged
 }
 
+// ----------------------------------------------------------------------------
+// Approval modal — input handling: keyboard, Tab focus cycle, and the
+// click path. The widget layer (ButtonClick on the Yes / No buttons in
+// view.gala::approvalButtonRow) emits KeyApprove / KeyReject AppMsgs
+// directly when clicked. These tests dispatch the same messages so a
+// regression in the modal's click wiring surfaces as a test failure
+// rather than as a "the No button is clickable but does nothing" bug
+// the user has to discover by trial.
+// ----------------------------------------------------------------------------
+
+// Tab cycles ApprovalFocus from ApproveFocus → RejectFocus while the
+// modal is open. KeyToggleFocus is the Tab message; approvalIntercept
+// routes it to onApprovalCycle when State = Approval.
+func TestApprovalModal_TabCyclesApproveToReject(t T) T {
+    val seed = sampleModel().Copy(
+        State         = Approval(SummaryBody = "ship it"),
+        ApprovalFocus = ApproveFocus(),
+    )
+    val (m, _) = Update(seed, KeyToggleFocus())
+    val a = m.State match {
+        case Approval(_) => IsTrue(t, true)   // modal still up
+        case _           => IsTrue(t, false)
+    }
+    return m.ApprovalFocus match {
+        case RejectFocus() => IsTrue(a, true)
+        case _             => IsTrue(a, false)
+    }
+}
+
+// Tab from RejectFocus wraps back to ApproveFocus.
+func TestApprovalModal_TabCyclesRejectToApprove(t T) T {
+    val seed = sampleModel().Copy(
+        State         = Approval(SummaryBody = "ship it"),
+        ApprovalFocus = RejectFocus(),
+    )
+    val (m, _) = Update(seed, KeyToggleFocus())
+    return m.ApprovalFocus match {
+        case ApproveFocus() => IsTrue(t, true)
+        case _              => IsTrue(t, false)
+    }
+}
+
+// Enter (KeySubmit with empty composer) dispatches the focused button.
+// With ApproveFocus, that's KeyApprove → State transitions to Idle and
+// "/approve" is logged.
+func TestApprovalModal_EnterFiresApproveFocus(t T) T {
+    val seed = sampleModel().Copy(
+        State         = Approval(SummaryBody = "ship it"),
+        ApprovalFocus = ApproveFocus(),
+        Composer      = "",
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    val t1 = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    val t2 = Eq(t1, m.Conversation.Size(), 1)
+    return Eq(t2, m.Conversation.Get(0).Text, "/approve")
+}
+
+// Enter with RejectFocus fires the rejection path: state → Idle, log
+// shows "/reject" + the system "type a prompt to redirect" hint. This
+// is the test that proves Tab+Enter is a real path to "no" — without
+// it, users were stuck with mouse / Ctrl+R / 'n'.
+func TestApprovalModal_EnterFiresRejectFocus(t T) T {
+    val seed = sampleModel().Copy(
+        State         = Approval(SummaryBody = "ship it"),
+        ApprovalFocus = RejectFocus(),
+        Composer      = "",
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    val t1 = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    val t2 = Eq(t1, m.Conversation.Size(), 2)
+    val t3 = Eq(t2, m.Conversation.Get(0).Text, "/reject")
+    return Eq(t3, m.Conversation.Get(1).Speaker, "system")
+}
+
+// Mouse click on the Yes button: ButtonClick wires KeyApprove() onto
+// the click region for that button. Dispatching KeyApprove() directly
+// must drive the same approval flow regardless of where focus sits —
+// a mouse click bypasses the focus state entirely. RejectFocus on the
+// model here proves that "click overrides focus" semantics.
+func TestApprovalModal_MouseClickYesApprovesEvenWhenFocusOnNo(t T) T {
+    val seed = sampleModel().Copy(
+        State         = Approval(SummaryBody = "ship it"),
+        ApprovalFocus = RejectFocus(),
+    )
+    val (m, _) = Update(seed, KeyApprove())
+    val t1 = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    return Eq(t1, m.Conversation.Get(0).Text, "/approve")
+}
+
+// Mouse click on the No button: same shape, opposite direction. The
+// ButtonClick on the No widget emits KeyReject(). Even with ApproveFocus
+// (default), the click drives the rejection flow.
+func TestApprovalModal_MouseClickNoRejectsEvenWhenFocusOnYes(t T) T {
+    val seed = sampleModel().Copy(
+        State         = Approval(SummaryBody = "ship it"),
+        ApprovalFocus = ApproveFocus(),
+    )
+    val (m, _) = Update(seed, KeyReject())
+    val t1 = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    return Eq(t1, m.Conversation.Get(0).Text, "/reject")
+}
+
+// y/Y still routes to KeyApprove independent of focus — the
+// focus-bypass keyboard shortcut for terminals that eat Ctrl+A.
+func TestApprovalModal_YShortcutApprovesEvenWhenFocusOnNo(t T) T {
+    val seed = sampleModel().Copy(
+        State         = Approval(SummaryBody = "ship it"),
+        ApprovalFocus = RejectFocus(),
+    )
+    val (m, _) = Update(seed, KeyChar(C = 'y'))
+    val t1 = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    return Eq(t1, m.Conversation.Get(0).Text, "/approve")
+}
+
+// n/N → KeyReject, regardless of focus.
+func TestApprovalModal_NShortcutRejectsEvenWhenFocusOnYes(t T) T {
+    val seed = sampleModel().Copy(
+        State         = Approval(SummaryBody = "ship it"),
+        ApprovalFocus = ApproveFocus(),
+    )
+    val (m, _) = Update(seed, KeyChar(C = 'n'))
+    val t1 = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    return Eq(t1, m.Conversation.Get(0).Text, "/reject")
+}
+
+// Entering Approval from a non-Approval state resets ApprovalFocus to
+// ApproveFocus, even when a residual RejectFocus from a prior approval
+// cycle is still on the model. Without the reset, the second time a
+// user lands on the modal in one session they'd land on the No button
+// without any visible signal — surprise rejection is the worst kind.
+func TestApprovalModal_FocusResetsOnReentry(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
+    runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "--allow-empty", "-q", "-m", "lead work"))
+    val goodBody = "## What\n- shipped the thing\n\n## Why\nthe user asked for it\n\n## Follow-ups\nnone"
+    val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
+        State         = TLThinking(),
+        TurnBuffer    = "@summary\n" + goodBody + "\n@end",
+        ApprovalFocus = RejectFocus(),  // residue from a prior approval cycle
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val t1 = m.State match {
+        case Approval(_) => IsTrue(t, true)
+        case _           => IsTrue(t, false)
+    }
+    return m.ApprovalFocus match {
+        case ApproveFocus() => IsTrue(t1, true)
+        case _              => IsTrue(t1, false)
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Conversation scroll — PgUp from a sticky bottom must NOT jump to top.
+//
+// Regression for "after resume, PgUp scrolls me far away from latest".
+// Before the fix, onConvoScroll did `proposed = m.ConversationOffset +
+// delta` which, when sticky was true, treated the stale stored offset
+// (typically 0) as the current top — adding delta and clamping to 0
+// meant any upward scroll landed at the TOP of the log.
+// ----------------------------------------------------------------------------
+
+// Build a long conversation so total lines comfortably exceeds any
+// plausible viewport. ~80 entries × ~1 line each = ~80 rows; viewport
+// is min 4 (TermSize-12 in tests typically 0 → clamped to 4). Even on
+// a wide test terminal, total - viewport stays positive.
+func longConversation(lines int) Array[session.ConversationLine] {
+    var convo = EmptyArray[session.ConversationLine]()
+    var i = 0
+    for i < lines {
+        convo = convo.Append(session.ConversationLine(
+            Speaker = "you",
+            Text    = s"prompt line ${i}",
+        ))
+        i = i + 1
+    }
+    return convo
+}
+
+// PgUp from a sticky bottom should land near the bottom (offset ≈
+// total - height - delta), not at offset 0 which would mean "top of
+// log". We assert the resulting offset is strictly greater than 0
+// for any conversation longer than the viewport — that's the bug
+// signature: pre-fix the offset stayed at 0.
+func TestConvoPageUp_FromStickyDoesNotJumpToTop(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation       = longConversation(80),
+        ConversationOffset = 0,
+        ConversationSticky = true,
+    )
+    val (m, _) = Update(seed, KeyConvoPageUp())
+    // Sticky must flip off after an upward scroll.
+    val t1 = IsFalse(t, m.ConversationSticky)
+    // The new offset must be strictly above 0 — the regression's bug
+    // signature is offset=0 = "top of log".
+    return IsTrue(t1, m.ConversationOffset > 0)
+}
+
+// PgDn from a non-sticky position toward the bottom should land at
+// the max offset and re-engage sticky. Defends the symmetric path:
+// "user scrolled up, then scrolled back down" must restore the
+// auto-follow-bottom behavior so new chunks remain visible.
+func TestConvoPageDown_AtBottomReengagesSticky(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation       = longConversation(80),
+        ConversationOffset = 0,
+        ConversationSticky = false,
+    )
+    // Scroll way past the bottom — clamp + sticky should engage.
+    val (m, _) = Update(seed, KeyConvoPageDown())
+    val (m2, _) = Update(m, KeyConvoPageDown())
+    val (m3, _) = Update(m2, KeyConvoPageDown())
+    val (m4, _) = Update(m3, KeyConvoPageDown())
+    val (m5, _) = Update(m4, KeyConvoPageDown())
+    val (m6, _) = Update(m5, KeyConvoPageDown())
+    val (m7, _) = Update(m6, KeyConvoPageDown())
+    val (m8, _) = Update(m7, KeyConvoPageDown())
+    val (m9, _) = Update(m8, KeyConvoPageDown())
+    return IsTrue(t, m9.ConversationSticky)
+}
+
+// Single-line scroll up from sticky still lands "near bottom" —
+// boundary check that the fix handles small deltas (KeyConvoScrollUp)
+// the same way as page deltas (KeyConvoPageUp).
+func TestConvoScrollUp_FromStickyDoesNotJumpToTop(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation       = longConversation(80),
+        ConversationOffset = 0,
+        ConversationSticky = true,
+    )
+    val (m, _) = Update(seed, KeyConvoScrollUp())
+    val t1 = IsFalse(t, m.ConversationSticky)
+    return IsTrue(t1, m.ConversationOffset > 0)
+}
+
+// Empty / short conversation: PgUp on a log shorter than the viewport
+// just stays at offset 0 with sticky off. Verifies the maxOffset = 0
+// branch doesn't regress to "negative offset, blank screen".
+func TestConvoPageUp_ShortConversation_StaysAtZero(t T) T {
+    val short = EmptyArray[session.ConversationLine]()
+        .Append(session.ConversationLine(Speaker = "you", Text = "hi"))
+    val seed = sampleModel().Copy(
+        Conversation       = short,
+        ConversationOffset = 0,
+        ConversationSticky = true,
+    )
+    val (m, _) = Update(seed, KeyConvoPageUp())
+    return Eq(t, m.ConversationOffset, 0)
+}
+
 // runGitInTmp shells out to `git` inside `dir` for one command. Tests
 // use it to set up tiny fixture repos for the PR-readiness path,
 // since checkPrReady actually runs `git rev-list --count`.

@@ -345,8 +345,8 @@ func approvalModalOverlay(m AppModel, body string, base Widget) Widget {
         s"  Repo:     ${m.Project.Name}",
     )
     val infoWidgets = info.Map((r) => Fixed(1, TextStyled(r, DefaultStyle().WithDim())))
-    val buttonRow = approvalButtonRow()
-    val footer = TextStyled("  Yes runs pre-merge hooks then `gh pr create`. Enter / Ctrl+A approves · Esc / Ctrl+R rejects.",
+    val buttonRow = approvalButtonRow(m)
+    val footer = TextStyled("  Tab cycles · Enter fires focused button · click either button · Esc / Ctrl+R rejects.",
         DefaultStyle().WithDim())
     val body2 = Column(ArrayOf[LayoutChild](
         Fixed(1, title),
@@ -364,9 +364,18 @@ func approvalModalOverlay(m AppModel, body string, base Widget) Widget {
 // on it was Ctrl+A / Ctrl+R from the keyboard — which on some
 // terminals (Windows console, certain SSH clients) gets eaten by
 // the host before reaching gala-tui.
-func approvalButtonRow() Widget {
-    val yesBtn = ButtonClick[AppMsg]("Yes — open PR", true,  KeyApprove())
-    val noBtn  = ButtonClick[AppMsg]("No — back",     false, KeyReject())
+//
+// `focused` parameter drives reverse-bold styling on the active
+// button. The user Tab-cycles ApprovalFocus in the model; mouse
+// clicks bypass focus and fire directly. Without per-render focus,
+// users had no visual cue that BOTH buttons were clickable — the
+// hardcoded "Yes always reverse, No always plain" rendering looked
+// like only Yes was actionable.
+func approvalButtonRow(m AppModel) Widget {
+    val yesFocused = isApproveFocus(m.ApprovalFocus)
+    val noFocused  = isRejectFocus(m.ApprovalFocus)
+    val yesBtn = ButtonClick[AppMsg]("Yes — open PR", yesFocused, KeyApprove())
+    val noBtn  = ButtonClick[AppMsg]("No — back",     noFocused,  KeyReject())
     return Row(ArrayOf[LayoutChild](
         Flex(1, Empty()),
         Fixed(18, yesBtn),
@@ -374,6 +383,18 @@ func approvalButtonRow() Widget {
         Fixed(14, noBtn),
         Flex(1, Empty()),
     ))
+}
+
+// isApproveFocus / isRejectFocus split the ApprovalChoice match into
+// single-call predicates so approvalButtonRow stays flat. Same shape
+// as the recovery modal's isResumeFocus / isInspectFocus.
+func isApproveFocus(c ApprovalChoice) bool = c match {
+    case ApproveFocus() => true
+    case _              => false
+}
+func isRejectFocus(c ApprovalChoice) bool = c match {
+    case RejectFocus() => true
+    case _             => false
 }
 
 // approvalFirstLine flattens the summary's first non-empty line and

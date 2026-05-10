@@ -257,14 +257,16 @@ func decodeMouse(d *json.JsonDecoderImpl) Option[AppMsg] {
     var x = 0
     var y = 0
     var pressed = false
+    var motion = false
     for d.HasMoreFields() {
         val k = d.ReadKey()
-        if k == "x"           { x = d.ReadInt() }
-        else if k == "y"      { y = d.ReadInt() }
+        if k == "x"            { x = d.ReadInt() }
+        else if k == "y"       { y = d.ReadInt() }
         else if k == "pressed" { pressed = d.ReadBool() }
-        else                  { d.Skip() }
+        else if k == "motion"  { motion = d.ReadBool() }
+        else                   { d.Skip() }
     }
-    return Some[AppMsg](MouseAt(X = x, Y = y, Pressed = pressed))
+    return Some[AppMsg](MouseAt(X = x, Y = y, Pressed = pressed, Motion = motion))
 }
 
 // decodeNamedMsg reads {"name":"ChunkArrived","member":"Iris","line":"..."}.

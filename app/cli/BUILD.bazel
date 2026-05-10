@@ -42,11 +42,19 @@ gala_go_test(
 gala_go_test(
     name = "picker_test",
     srcs = ["picker_test.gala"],
+    pkg = "cli",
+    lib_srcs = [
+        "keymap.gala",
+        "picker.gala",
+    ],
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
     deps = [
-        ":cli",
         "//app/config",
         "//app/policy",
         "//app/team",
+        "//app/ui",
         "@gala//collection_immutable",
     ],
 )

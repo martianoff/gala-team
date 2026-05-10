@@ -27,30 +27,71 @@ gala_library(
 gala_go_test(
     name = "registry_test",
     srcs = ["registry_test.gala"],
+    pkg = "consult",
+    lib_srcs = [
+        "registry.gala",
+        "runner.gala",
+        "streaming.gala",
+    ],
     deps = [
-        ":consult",
+        "//app/config",
+        "//app/headless",
+        "//app/onboarding",
+        "//app/policy",
+        "//app/project",
+        "//app/runtime",
+        "//app/team",
         "@gala//collection_immutable",
+        "@gala//concurrent",
         "@gala//go_interop",
+        "@gala//yaml",
     ],
 )
 
 gala_go_test(
     name = "runner_test",
     srcs = ["runner_test.gala"],
+    pkg = "consult",
+    lib_srcs = [
+        "registry.gala",
+        "runner.gala",
+        "streaming.gala",
+    ],
     deps = [
-        ":consult",
+        "//app/config",
         "//app/headless",
+        "//app/onboarding",
+        "//app/policy",
+        "//app/project",
+        "//app/runtime",
+        "//app/team",
         "@gala//collection_immutable",
+        "@gala//concurrent",
+        "@gala//go_interop",
+        "@gala//yaml",
     ],
 )
 
 gala_go_test(
     name = "dispatch_test",
     srcs = ["dispatch_test.gala"],
+    pkg = "consult",
+    lib_srcs = [
+        "registry.gala",
+        "runner.gala",
+        "streaming.gala",
+    ],
     deps = [
-        ":consult",
+        "//app/config",
+        "//app/headless",
+        "//app/onboarding",
+        "//app/policy",
         "//app/project",
+        "//app/runtime",
         "//app/team",
         "@gala//collection_immutable",
+        "@gala//concurrent",
+        "@gala//go_interop",
+        "@gala//yaml",
     ],
 )

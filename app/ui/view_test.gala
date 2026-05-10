@@ -119,14 +119,18 @@ func TestView_Header_WideMode_RendersApple(t T) T {
     return IsTrue(t3, strings.Contains(out, "Skunkworks"))
 }
 
-// Two consecutive ticks must produce different snapshots — that's
-// what tells the user the apple is "alive" rather than a static
-// glyph block. The shine highlight column moves by 1 cell per tick,
-// which changes the SGR escape sequence stream even when the visible
-// glyphs are byte-identical, so we compare the styled snapshot.
+// Two ticks separated by a full appleShineDivisor step must produce
+// different snapshots — that's what tells the user the apple is
+// "alive" rather than a static glyph block. The shine highlight
+// advances every appleShineDivisor() ticks, so consecutive ticks
+// (Tick=0 vs Tick=1) hit the same shineZone and would compare equal;
+// we sample Tick=0 vs Tick=appleShineDivisor() so exactly one step
+// has elapsed. The shine moves by 1 cell, changing the SGR escape
+// sequence stream even when the visible glyphs are byte-identical,
+// so we compare the styled snapshot.
 func TestView_Header_AppleShine_AdvancesOnTick(t T) T {
     val m0 = mkModel(mkTeam("Skunkworks", "")).Copy(Tick = 0)
-    val m1 = mkModel(mkTeam("Skunkworks", "")).Copy(Tick = 1)
+    val m1 = mkModel(mkTeam("Skunkworks", "")).Copy(Tick = appleShineDivisor())
     val out0 = gala_tui.SnapshotStyled(View(m0), viewportW, viewportH)
     val out1 = gala_tui.SnapshotStyled(View(m1), viewportW, viewportH)
     return IsTrue(t, out0 != out1)

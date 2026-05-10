@@ -18,7 +18,14 @@ gala_library(
 gala_go_test(
     name = "resolver_test",
     srcs = ["resolver_test.gala"],
+    pkg = "project",
+    lib_srcs = [
+        "project.gala",
+        "resolver.gala",
+    ],
     deps = [
-        ":project",
+        "@gala//collection_immutable",
+        "@gala//go_interop",
+        "@gala//subprocess",
     ],
 )

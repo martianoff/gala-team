@@ -39,7 +39,7 @@ func InputToAppMsg(ev InputEvent) AppMsg = ev match {
 func mouseToAppMsg(me MouseEvent) AppMsg = me.Btn match {
     case MouseScrollUp()   => KeyConvoScrollUp()
     case MouseScrollDown() => KeyConvoScrollDown()
-    case _                 => MouseAt(X = me.X, Y = me.Y, Pressed = me.Pressed)
+    case _                 => MouseAt(X = me.X, Y = me.Y, Pressed = me.Pressed, Motion = me.Motion)
 }
 
 // KeyToAppMsg translates one keyboard event into an AppMsg.

@@ -1206,10 +1206,18 @@ func conversationPanel(m AppModel) Widget {
     var lineIdxByEntry = EmptyArray[int]()
     var lineIdx = 0
     val totalLines = m.Conversation.Size()
-    val selectedLine = m.SelectedEntry.GetOrElse(-1)
+    // Selection range (inclusive): min(anchor, focus) .. max. When
+    // both are None the range is (-1, -2) which excludes everything,
+    // so isSelected stays false for every line. When only anchor is
+    // set (legacy V1-style state) we fall back to single-entry
+    // highlight by treating focus = anchor.
+    val anchor = m.SelectedEntry.GetOrElse(-1)
+    val focus  = m.SelectionFocus.GetOrElse(anchor)
+    val rangeLo = if (anchor < focus) anchor else focus
+    val rangeHi = if (anchor < focus) focus else anchor
     for lineIdx < totalLines {
         val cl = m.Conversation.Get(lineIdx)
-        val isSelected = lineIdx == selectedLine
+        val isSelected = m.SelectedEntry.IsDefined() && lineIdx >= rangeLo && lineIdx <= rangeHi
         val newEntries = renderConversationLine(m, cl, width, isSelected)
         var k = 0
         val nNew = newEntries.Size()
@@ -1229,13 +1237,15 @@ func conversationPanel(m AppModel) Widget {
     val mapSize = lineIdxByEntry.Size()
     return Column(ArrayOf[LayoutChild](
         Fixed(1, header),
-        Flex(1, ConversationLogViewClick[AppMsg](log, viewportH, (logIdx) => {
-            // Defensive clamp — gala-tui should never dispatch an
-            // out-of-range idx for a non-empty log, but a stray click
-            // mid-redraw is safer to ignore than to crash.
+        Flex(1, ConversationLogViewDrag[AppMsg](log, viewportH, (logIdx, phase) => {
+            // Defensive clamp — gala-tui shouldn't dispatch an out-of-
+            // range idx for a non-empty log, but a stale frame is
+            // safer to ignore than to crash. Resolves the log-entry
+            // idx to a conversation-line idx through the parallel
+            // map built above.
             val safe = if (logIdx < 0 || logIdx >= mapSize) -1
                        else lineIdxByEntry.Get(logIdx)
-            return ClickConversationEntry(Idx = safe)
+            return ConversationDragMsg(Idx = safe, Phase = phase)
         })),
     ))
 }

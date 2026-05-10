@@ -10,6 +10,7 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/directive"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
@@ -1007,40 +1008,29 @@ func sampleConversation() Array[session.ConversationLine] = ArrayOf(
     session.ConversationLine(Speaker = "Felix", Text = "done. Histogram + counter, lints clean."),
 )
 
-func TestClickEntry_SetsSelectedEntry(t T) T {
+func TestDragPress_SetsSelectedEntry(t T) T {
     val seed = sampleModel().Copy(Conversation = sampleConversation())
-    val (m, _) = Update(seed, ClickConversationEntry(Idx = 1))
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 1, Phase = DragPress()))
     return m.SelectedEntry match {
         case Some(idx) => Eq(t, idx, 1)
         case None()    => IsTrue(t, false)
     }
 }
 
-// Click outside the conversation range is dropped — no selection.
-func TestClickEntry_OutOfRange_DroppedSilently(t T) T {
+// Press out of range clamps to the last entry — guards against a
+// stale event during a fast append.
+func TestDragPress_OutOfRange_Clamped(t T) T {
     val seed = sampleModel().Copy(Conversation = sampleConversation())
-    val (m1, _) = Update(seed, ClickConversationEntry(Idx = 99))
-    val t1 = Eq(t, m1.Conversation.Size(), seed.Conversation.Size())
-    return m1.SelectedEntry match {
-        case Some(idx) => Eq(t1, idx, 2)  // clamped to last entry
-        case None()    => IsTrue(t1, false)
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 99, Phase = DragPress()))
+    return m.SelectedEntry match {
+        case Some(idx) => Eq(t, idx, 2)  // clamped to last entry
+        case None()    => IsTrue(t, false)
     }
 }
 
-// Clicking on the same entry that's already selected toggles selection
-// off — natural "deselect" gesture without forcing the user to Esc.
-func TestClickEntry_ClickSameAgain_DeselectsByToggle(t T) T {
-    val seed = sampleModel().Copy(
-        Conversation  = sampleConversation(),
-        SelectedEntry = Some(1),
-    )
-    val (m, _) = Update(seed, ClickConversationEntry(Idx = 1))
-    return IsFalse(t, m.SelectedEntry.IsDefined())
-}
-
-// Clicking an empty conversation is a no-op.
-func TestClickEntry_EmptyConversation_NoOp(t T) T {
-    val (m, _) = Update(sampleModel(), ClickConversationEntry(Idx = 0))
+// DragPress on an empty conversation is a no-op.
+func TestDragPress_EmptyConversation_NoOp(t T) T {
+    val (m, _) = Update(sampleModel(), ConversationDragMsg(Idx = 0, Phase = DragPress()))
     return IsFalse(t, m.SelectedEntry.IsDefined())
 }
 
@@ -1088,7 +1078,112 @@ func TestKeySubmit_ClearsSelectedEntry(t T) T {
         Composer      = "next prompt",
     )
     val (m, _) = Update(seed, KeySubmit())
-    return IsFalse(t, m.SelectedEntry.IsDefined())
+    val t1 = IsFalse(t, m.SelectedEntry.IsDefined())
+    val t2 = IsFalse(t1, m.SelectionFocus.IsDefined())
+    return IsFalse(t2, m.Dragging)
+}
+
+// ---------------------------------------------------------------------------
+// V2 drag selection — click sets anchor + focus + Dragging; motion
+// while-held updates focus; release clears Dragging while preserving
+// the range so Ctrl+Y can copy it.
+// ---------------------------------------------------------------------------
+
+// DragPress sets anchor=focus=idx and engages Dragging so subsequent
+// DragOver events extend the range.
+func TestDragPress_EngagesDragging(t T) T {
+    val seed = sampleModel().Copy(Conversation = sampleConversation())
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 1, Phase = DragPress()))
+    val anchor = m.SelectedEntry.GetOrElse(-1)
+    val focus  = m.SelectionFocus.GetOrElse(-1)
+    val t1 = Eq(t,  anchor, 1)
+    val t2 = Eq(t1, focus,  1)
+    return IsTrue(t2, m.Dragging)
+}
+
+// DragOver moves SelectionFocus to the new entry while leaving
+// SelectedEntry (the anchor) put.
+func TestDragOver_UpdatesFocusKeepsAnchor(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(0),
+        Dragging       = true,
+    )
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 2, Phase = DragOver()))
+    val t1 = Eq(t, m.SelectedEntry.GetOrElse(-1), 0)
+    return Eq(t1, m.SelectionFocus.GetOrElse(-1), 2)
+}
+
+// DragOver on the same line as the current focus is a no-op (avoids
+// model copies on horizontal mouse wiggles inside one row).
+func TestDragOver_SameLine_NoOp(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(1),
+        SelectionFocus = Some(1),
+        Dragging       = true,
+    )
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 1, Phase = DragOver()))
+    return Eq(t, m.SelectionFocus.GetOrElse(-1), 1)
+}
+
+// DragRelease clears Dragging without touching anchor / focus —
+// the user has finished the drag but the range stays selected so
+// Ctrl+Y can still copy it.
+func TestDragRelease_ClearsDraggingPreservesRange(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(2),
+        Dragging       = true,
+    )
+    val (m, _) = Update(seed, ConversationDragMsg(Idx = 2, Phase = DragRelease()))
+    val t1 = IsFalse(t, m.Dragging)
+    val t2 = Eq(t1, m.SelectedEntry.GetOrElse(-1),  0)
+    return Eq(t2, m.SelectionFocus.GetOrElse(-1), 2)
+}
+
+// Ctrl+Y on a multi-line range copies the joined "Speaker: Text"
+// of the inclusive range. Toast text reflects the line count.
+func TestCtrlY_WithRange_CopiesJoinedRange(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(2),
+    )
+    val (m, _) = Update(seed, KeyYankConversation())
+    val msg = m.Toasts.Items.Get(0).Message
+    return IsTrue(t, strings.Contains(msg, "3 lines"))
+}
+
+// Ctrl+Y with anchor==focus still goes through the single-entry
+// path, not the range path (toast says "X's entry", not "N lines").
+func TestCtrlY_AnchorEqualsFocus_TreatsAsSingleEntry(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(2),
+        SelectionFocus = Some(2),
+    )
+    val (m, _) = Update(seed, KeyYankConversation())
+    val msg = m.Toasts.Items.Get(0).Message
+    return IsTrue(t, strings.Contains(msg, "Felix"))
+}
+
+// Esc clears all three selection fields together — anchor + focus +
+// Dragging. Required so Ctrl+Y after Esc falls back to full
+// transcript.
+func TestEsc_ClearsAllSelectionFields(t T) T {
+    val seed = sampleModel().Copy(
+        Conversation   = sampleConversation(),
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(2),
+        Dragging       = true,
+    )
+    val (m, _) = Update(seed, HistoryDeselect())
+    val t1 = IsFalse(t,  m.SelectedEntry.IsDefined())
+    val t2 = IsFalse(t1, m.SelectionFocus.IsDefined())
+    return IsFalse(t2, m.Dragging)
 }
 
 // ---------------------------------------------------------------------------
@@ -1274,14 +1369,14 @@ func TestPrCreated_DoesNotClearPriorLastError(t T) T {
 // without ambiguity.
 func TestMouseAt_IsNoopOnModel(t T) T {
     val seed = sampleModel().Copy(Composer = "keep me", Tick = 4)
-    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true))
+    val (m, _) = Update(seed, MouseAt(X = 10, Y = 5, Pressed = true, Motion = false))
     val t1 = Eq(t, m.Composer, "keep me")
     val t2 = Eq(t1, m.Tick, 4)
     return Eq(t2, m.Conversation.Size(), 0)
 }
 
 func TestMouseAt_ReleaseAlsoNoop(t T) T {
-    val (m, _) = Update(sampleModel(), MouseAt(X = 0, Y = 0, Pressed = false))
+    val (m, _) = Update(sampleModel(), MouseAt(X = 0, Y = 0, Pressed = false, Motion = false))
     return Eq(t, m.Composer, "")
 }
 
@@ -1666,7 +1761,7 @@ func TestFocusSidebarClicked_FocusesWithoutCursorChange(t T) T {
 // registered HitRegistry entry. Render shouldn't change.
 func TestMouseAt_FallthroughIsNoOp(t T) T {
     val seed = sampleModel().Copy(Focus = FocusSidebar(), SidebarCursor = 3)
-    val (m, _) = Update(seed, MouseAt(X = 50, Y = 8, Pressed = true))
+    val (m, _) = Update(seed, MouseAt(X = 50, Y = 8, Pressed = true, Motion = false))
     val t1 = m.Focus match {
         case FocusSidebar()  => IsTrue(t, true)
         case FocusComposer() => IsTrue(t, false)

@@ -482,11 +482,15 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case HistoryDeselect()           => onEscOrDeselect(m)
     case HistoryArchiveLoaded(snap)  => (m.Copy(ViewingArchive = Some(snap)), NoCmd[AppMsg]())
     case HistoryArchiveFailed(err)   => (m.Copy(LastError = Some(s"history: ${err}")), NoCmd[AppMsg]())
-    case MouseAt(_, _, _)            => (m, NoCmd[AppMsg]())
+    // Mouse events that don't hit a registered drag/click region.
+    // Conversation drag is now driven by ConversationDragMsg (see
+    // ConversationLogViewDrag in view.gala); MouseAt is left as a
+    // catch-all no-op for raw clicks elsewhere on the screen.
+    case MouseAt(_, _, _, _)         => (m, NoCmd[AppMsg]())
     case FocusSidebarClicked()       => (m.Copy(Focus = FocusSidebar()), NoCmd[AppMsg]())
     case FocusComposerClicked()      => (m.Copy(Focus = FocusComposer()), NoCmd[AppMsg]())
     case SidebarRowClicked(idx)      => onSidebarRowClicked(m, idx)
-    case ClickConversationEntry(idx) => onClickConversationEntry(m, idx)
+    case ConversationDragMsg(idx, phase) => onConversationDrag(m, idx, phase)
     case KeyEraseSession()           => onEraseSession(m)
     case KeyYankConversation()       => onYankConversation(m)
     case KeyPasteClipboard()         => onPasteClipboard(m)
@@ -735,33 +739,41 @@ func onSidebarRowClicked(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
     }
 }
 
-// onClickConversationEntry records a left-click on a rendered
-// ConversationLog entry. The user can then Ctrl+Y to copy just that
-// entry, or Esc to clear the selection. Clicking again on a
-// different entry simply moves the selection.
+// onConversationDrag handles every gala-tui drag event for the
+// conversation pane. ConversationLogViewDrag wraps each rendered
+// entry in OnDrag, the runtime threads drag-active state, and we
+// receive phase-tagged messages here. The press / motion / release
+// machinery lives in gala-tui (see runtime.gala::ResolveClickEventWithDrag);
+// this handler is just the state transitions on AppModel.
 //
-// idx is in the same coordinate space as cvBuildLayout's entry
-// indices (oldest-first into the ConversationLog). We clamp to the
-// conversation size so a stale click during a fast append (entry
-// index recorded a frame before the conversation grew) doesn't land
-// out of bounds.
-//
-// Clicking on the already-selected entry toggles selection off — a
-// natural deselect gesture without forcing the user to hunt for Esc.
-func onClickConversationEntry(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
+// idx arrives as the conversation-line index — view.gala's
+// ConversationLogViewDrag callback resolves the underlying log
+// entry's idx through the parallel lineIdxByEntry map. We clamp
+// defensively: a stale event during a fast append could land out
+// of bounds.
+func onConversationDrag(m AppModel, idx int, phase DragPhase) Tuple[AppModel, Cmd[AppMsg]] {
     val total = m.Conversation.Size()
     if total == 0 { return (m, NoCmd[AppMsg]()) }
     val clamped = if (idx < 0) 0
                   else if (idx >= total) total - 1
                   else idx
-    val isToggleOff = m.SelectedEntry match {
-        case Some(prev) => prev == clamped
-        case None()     => false
+    return phase match {
+        case DragPress() => (m.Copy(
+            SelectedEntry  = Some(clamped),
+            SelectionFocus = Some(clamped),
+            Dragging       = true,
+        ), NoCmd[AppMsg]())
+        case DragOver() => {
+            // Only emit a Copy when the focus actually moves — drag
+            // motion fires per row, so a horizontal mouse wiggle
+            // within the same row would otherwise re-render the
+            // whole pane.
+            val current = m.SelectionFocus.GetOrElse(-1)
+            if clamped == current { return (m, NoCmd[AppMsg]()) }
+            return (m.Copy(SelectionFocus = Some(clamped)), NoCmd[AppMsg]())
+        }
+        case DragRelease() => (m.Copy(Dragging = false), NoCmd[AppMsg]())
     }
-    if isToggleOff {
-        return (m.Copy(SelectedEntry = None[int]()), NoCmd[AppMsg]())
-    }
-    return (m.Copy(SelectedEntry = Some(clamped)), NoCmd[AppMsg]())
 }
 
 // onSidebarToggleGroup folds or unfolds the role group at
@@ -1211,8 +1223,14 @@ func onYankConversation(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
     }
     return m.SelectedEntry match {
-        case Some(idx) => yankSingleEntry(m, idx)
-        case None()    => yankFullTranscript(m)
+        case None()       => yankFullTranscript(m)
+        case Some(anchor) => {
+            val focus = m.SelectionFocus.GetOrElse(anchor)
+            val lo = if (anchor < focus) anchor else focus
+            val hi = if (anchor < focus) focus else anchor
+            if lo == hi { return yankSingleEntry(m, lo) }
+            return yankRange(m, lo, hi)
+        }
     }
 }
 
@@ -1229,6 +1247,32 @@ func yankSingleEntry(m AppModel, idx int) Tuple[AppModel, Cmd[AppMsg]] {
         return (m.Copy(LastError = Some(s"clipboard copy failed: ${err.Error()}")), NoCmd[AppMsg]())
     }
     val toast = m.Toasts.PushInfo(s"copied ${cl.Speaker}'s entry to clipboard", time_utils.Now(), time_utils.Seconds(int64(3)))
+    return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
+}
+
+// yankRange copies the inclusive [lo, hi] slice of m.Conversation
+// joined by newlines (each line as "Speaker: Text"). Out-of-range
+// indices clamp to the valid window so a stale drag focus from a
+// fast append still produces a reasonable copy.
+func yankRange(m AppModel, lo int, hi int) Tuple[AppModel, Cmd[AppMsg]] {
+    val total = m.Conversation.Size()
+    val safeLo = if (lo < 0) 0 else lo
+    val safeHi = if (hi >= total) total - 1 else hi
+    if safeLo > safeHi { return yankFullTranscript(m) }
+    var parts = EmptyArray[string]()
+    var i = safeLo
+    for i <= safeHi {
+        val cl = m.Conversation.Get(i)
+        parts = parts.Append(s"${cl.Speaker}: ${cl.Text}")
+        i = i + 1
+    }
+    val rendered = parts.MkString("\n")
+    val (_, err) = CopyToClipboard(rendered)
+    if err != nil {
+        return (m.Copy(LastError = Some(s"clipboard copy failed: ${err.Error()}")), NoCmd[AppMsg]())
+    }
+    val n = safeHi - safeLo + 1
+    val toast = m.Toasts.PushInfo(s"copied ${n} lines to clipboard", time_utils.Now(), time_utils.Seconds(int64(3)))
     return (m.Copy(Toasts = toast), NoCmd[AppMsg]())
 }
 
@@ -1297,6 +1341,8 @@ func clearSessionState(m AppModel) AppModel {
         ComposerCursor        = 0,
         LastError             = None[string](),
         SelectedEntry         = None[int](),
+        SelectionFocus        = None[int](),
+        Dragging              = false,
     )
 }
 
@@ -1361,7 +1407,9 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // a click recorded earlier may shift as we append the new
         // user line + member responses, and a highlight on the wrong
         // row would read as a ghost.
-        SelectedEntry = None[int](),
+        SelectedEntry  = None[int](),
+        SelectionFocus = None[int](),
+        Dragging       = false,
         // First user prompt after a recovery dismisses the banner
         // automatically — the user has signaled they want to
         // continue, so the "type to resume · Esc to discard" hint
@@ -4712,7 +4760,11 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return (m.Copy(MemberDetailOpen = None[string]()), NoCmd[AppMsg]())
     }
     if m.SelectedEntry.IsDefined() {
-        return (m.Copy(SelectedEntry = None[int]()), NoCmd[AppMsg]())
+        return (m.Copy(
+            SelectedEntry  = None[int](),
+            SelectionFocus = None[int](),
+            Dragging       = false,
+        ), NoCmd[AppMsg]())
     }
     if m.RecoveryBannerVisible {
         return (m.Copy(

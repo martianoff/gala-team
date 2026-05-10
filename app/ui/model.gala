@@ -140,6 +140,16 @@ struct AppModel(
     // name. Cleared on every new user prompt, every Approval acceptance
     // (PR has been opened), and every Approval rejection.
     ActiveBase   Option[string],
+    // Branch name of the PR currently being iterated on. Set on the
+    // first PR opened in this session; subsequent approvals reuse
+    // this branch so that user feedback → TL fix → re-approve UPDATES
+    // the existing PR instead of cutting a fresh `gala_team/<proj>/pr/<sha>`
+    // every time. Cleared on merge (PR shipped → next is a fresh
+    // identity), on Start fresh / Ctrl+N (worktree wipe invalidates
+    // the branch), and at each plan auto-continue boundary (each
+    // step of a `@plan` is a separate PR by design). None when no
+    // PR is currently open.
+    ActivePrBranch Option[string],
     // Multi-PR plan queued by the TL via `@plan`. Plan is the full
     // ordered list of step prompts; PlanShipped counts how many of
     // them have already produced a PR. The step currently in
@@ -445,6 +455,7 @@ func InitialModelWithTeams(
     OpenPrs      = EmptyArray[BatchPr](),
     AutoApprove  = policy.AutoApprove,
     ActiveBase   = None[string](),
+    ActivePrBranch = None[string](),
     Plan         = EmptyArray[string](),
     PlanShipped  = 0,
     SelectedEntry  = None[int](),

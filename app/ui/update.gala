@@ -1343,6 +1343,7 @@ func clearSessionState(m AppModel) AppModel {
         SelectedEntry         = None[int](),
         SelectionFocus        = None[int](),
         Dragging              = false,
+        ActivePrBranch        = None[string](),
     )
 }
 
@@ -3857,7 +3858,7 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = "/approve")),
     )
     if m.Policy.PreMerge.IsEmpty() {
-        return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body, m.ActiveBase)))
+        return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body, m.ActiveBase, prBranchOverrideFor(m))))
     }
     val noted = withState.Copy(
         Conversation = withState.Conversation.Append(
@@ -4121,7 +4122,7 @@ func onPreMergeHooksPassed(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]]
             session.ConversationLine(Speaker = "policy", Text = "pre-merge hooks: ✓ all green, opening PR"),
         ),
     )
-    return (withLog, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body, m.ActiveBase)))
+    return (withLog, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body, m.ActiveBase, prBranchOverrideFor(m))))
 }
 
 // onPreMergeHooksFailed records the first failing hook's error and
@@ -4135,6 +4136,32 @@ func onPreMergeHooksFailed(m AppModel, err string) Tuple[AppModel, Cmd[AppMsg]] 
             session.ConversationLine(Speaker = "policy", Text = s"pre-merge hooks: ✗ ${err}"),
         ),
     ), NoCmd[AppMsg]())
+}
+
+// prBranchOverrideFor decides whether the next `gh pr create` should
+// reuse the active PR's branch (force-push → updates the existing PR)
+// or cut a fresh branch (creates a new PR). Reuse is the iteration
+// path the user explicitly asked for — TL emits @summary, user
+// approves, gets PR1; user types feedback, TL fixes, user approves
+// again → push lands on PR1's branch, GitHub auto-updates it.
+//
+// Reuse is suppressed in two cases where the next PR is intentionally
+// distinct:
+//   - AutoApprove batch mode: each user prompt produces a separate
+//     PR (the explicit "ship many in one sitting" affordance). We
+//     don't collapse them onto the same branch.
+//   - `@base <ref>` (stacked PRs): the TL is signalling "build this
+//     PR on top of <ref>", so the new PR has its own head branch.
+//     Force-pushing to the prior PR's branch would clobber it.
+//
+// `@plan` auto-continuation is handled separately in onPrCreated by
+// clearing ActivePrBranch at the step boundary, so by the time the
+// next plan step's @summary lands here we're already in "no override"
+// territory regardless of these gates.
+func prBranchOverrideFor(m AppModel) Option[string] {
+    if m.AutoApprove { return None[string]() }
+    if m.ActiveBase.IsDefined() { return None[string]() }
+    return m.ActivePrBranch
 }
 
 // onReject mirrors onApprove but transitions the FSM via
@@ -4215,12 +4242,13 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
                 Text    = s"plan: continuing ${nextShipped + 1}/${total} → ${nextStep}",
             ))
         return (m.Copy(
-            OpenPrs      = m.OpenPrs.Append(entry),
-            ActiveBase   = None[string](),
-            PlanShipped  = nextShipped,
-            Composer     = nextStep,
-            Toasts       = toast,
-            Conversation = convoWithPlan,
+            OpenPrs        = m.OpenPrs.Append(entry),
+            ActiveBase     = None[string](),
+            ActivePrBranch = None[string](),
+            PlanShipped    = nextShipped,
+            Composer       = nextStep,
+            Toasts         = toast,
+            Conversation   = convoWithPlan,
         ), MsgCmd[AppMsg](Msg = KeySubmit()))
     }
     // Plan exhausted (this PR was the last step) — surface a
@@ -4246,13 +4274,20 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
     // Clear ActiveBase now that the PR has been opened — the next
     // turn starts with a fresh base decision (defaulting back to the
     // project's default branch unless the TL emits another @base).
+    //
+    // ActivePrBranch is set to the branch we just opened/updated:
+    // the user can now reject the summary, give feedback, the TL
+    // fixes it, and the next approval will push to the SAME branch
+    // (force-push updates the existing PR instead of cutting a new
+    // one). Cleared on merge / Start fresh.
     val finalShipped = if (planActive) nextShipped else m.PlanShipped
     return (m.Copy(
-        OpenPrs      = m.OpenPrs.Append(entry),
-        ActiveBase   = None[string](),
-        PlanShipped  = finalShipped,
-        Toasts       = toast,
-        Conversation = convoWithHint,
+        OpenPrs        = m.OpenPrs.Append(entry),
+        ActiveBase     = None[string](),
+        ActivePrBranch = Some(effectiveBranch),
+        PlanShipped    = finalShipped,
+        Toasts         = toast,
+        Conversation   = convoWithHint,
     ), MsgCmd[AppMsg](Msg = OpenBrowser(Url = url)))
 }
 
@@ -4344,9 +4379,16 @@ func mergeAndKickPostMerge(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] 
 // PostMergeHooksPassed appends the final "✓ all green" line.
 func onMerged(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
     val _ = session.ArchiveLatest(m.Project.Repo, "merged")  // best-effort; failure is silent
+    // Clear ActivePrBranch when the merged URL matches the active
+    // PR — the next approval starts a fresh PR identity. In
+    // AutoApprove batch mode, OpenPrs may hold multiple PRs and
+    // ActivePrBranch tracks the most recent one; clearing
+    // unconditionally on any merge is harmless because a subsequent
+    // approval will repopulate it.
     val withMerge = resetAllStatuses(m.Copy(
-        OpenPrs      = m.OpenPrs.Filter((p) => p.Url != url),
-        Conversation = m.Conversation.Append(
+        OpenPrs        = m.OpenPrs.Filter((p) => p.Url != url),
+        ActivePrBranch = None[string](),
+        Conversation   = m.Conversation.Append(
             session.ConversationLine(Speaker = "gh", Text = s"merged: ${url}"),
         ),
     ))

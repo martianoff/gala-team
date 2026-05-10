@@ -731,44 +731,74 @@ func MsgMember(msg Msg) string = msg match {
 // case); Some(ref) is set when the TL emitted an `@base <ref>`
 // directive earlier in the turn (V2 stacking).
 //
+// `forceBranch` decides the PR snapshot branch name:
+//   - None         → derive `gala_team/<project>/pr/<short-sha>` from
+//                    the lead tip. Used for the FIRST PR of an
+//                    iteration cycle (or after merge/Start-fresh).
+//   - Some(branch) → reuse `branch` verbatim. Used after the user
+//                    rejects a summary, gives feedback, the TL fixes
+//                    it, and re-approves: pushing the new lead tip to
+//                    the SAME branch makes GitHub auto-update the
+//                    existing PR instead of cutting a new one.
+//
 // Returns RtPrCreated(url, branch) on success — `gh` prints the PR
 // URL on its last stdout line, so we read until the stream closes and
 // take the last non-empty line. The snapshot branch is also surfaced
 // so the model can record it on the BatchPr entry; that's what later
 // `@base previous` directives resolve against.
 //
+// If a PR already exists for the target branch (because the user is
+// updating an existing PR with feedback, or a prior session opened
+// it), we detect that BEFORE calling `gh pr create` and return the
+// existing URL — `gh pr create` would otherwise fail with "a pull
+// request for branch ... already exists" and leave the user without
+// a clickable link.
+//
 // Returns RtPrFailed(err) on any spawn or non-zero exit. The user
 // typically reads the URL from the conversation log then opens it in
 // their browser; the alternative `gh pr view --web` would bypass the
 // audit trail of "what summary did the team agree to".
-func GhPrCreateFuture(proj Project, body string, baseRef Option[string]) concurrent.Future[Msg] {
+func GhPrCreateFuture(proj Project, body string, baseRef Option[string], forceBranch Option[string] = None[string]()) concurrent.Future[Msg] {
     val title = GhTitle(body)
     val bodyWithFooter = body + "\n\n---\n🍎 orchestrated by [Gala Team](https://github.com/martianoff/gala-team)"
     val leadBranch = LeadBranchFor(proj)
     val leadWtPath = LeadWorktreePath(proj)
     return concurrent.FutureApply[Msg](() => {
-        // Snapshot the lead branch's current tip onto a UNIQUE
-        // per-PR branch so multiple PRs from this team can coexist
-        // without colliding. Without this, every PR would ship from
-        // `gala_team/<project>/lead`, and the second time the user
-        // hit Approve in the same workspace, `gh pr create` would
-        // fail with "a pull request for branch ... already exists".
-        //
-        // Naming: `gala_team/<project>/pr/<short-sha>` — short SHA
-        // is stable and deterministic per content (same lead state
-        // → same PR branch, so a re-Approve after a hook failure
-        // doesn't proliferate ghost branches). The lead branch
-        // itself stays put as the orchestrator's working ref;
-        // engineers / future turns continue to fast-forward INTO
-        // lead, and each PR snapshots out from there.
-        val sha = readShortSha(leadWtPath, leadBranch)
+        // Snapshot the lead branch's current tip onto a per-PR
+        // branch. With `forceBranch` set we reuse the named branch
+        // (the user is iterating on an existing PR — push updates
+        // it). Otherwise we derive a fresh `gala_team/<project>/pr/<short-sha>`
+        // so the first PR of a cycle gets its own identity.
+        val sha = forceBranch match {
+            case Some(_) => "skip"
+            case None()  => readShortSha(leadWtPath, leadBranch)
+        }
         if sha == "" {
             return RtPrFailed(Err = errors.New("could not resolve lead branch tip — is the branch present?"))
         }
-        val prBranch = "gala_team/" + gitSlug(proj.Name) + "/pr/" + sha
+        val prBranch = forceBranch match {
+            case Some(b) => b
+            case None()  => "gala_team/" + gitSlug(proj.Name) + "/pr/" + sha
+        }
         val pushResult = pushSnapshotBranch(proj, leadBranch, prBranch)
         if pushResult != "" {
             return RtPrFailed(Err = errors.New(s"git push pr branch failed: ${pushResult}"))
+        }
+        // Existing-PR detection: before calling `gh pr create`, ask gh
+        // whether an open PR already targets this branch. Two cases
+        // hit this path:
+        //   - The user is iterating on the active PR (forceBranch is
+        //     Some — push above already landed the new commits, so
+        //     the PR auto-updates; we just need its URL).
+        //   - The branch SHA happened to collide with an earlier PR
+        //     in this project (rare but possible after a revert or
+        //     amend cycle).
+        // Either way, surfacing the existing URL is what the user
+        // wants — `gh pr create` would error with "a pull request for
+        // branch ... already exists" and leave them stuck.
+        val existing = lookupExistingPrUrl(leadWtPath, prBranch)
+        if existing != "" {
+            return RtPrCreated(Url = existing, Branch = prBranch)
         }
         val baseArgs = baseRef match {
             case None()    => EmptyArray[string]()
@@ -783,9 +813,52 @@ func GhPrCreateFuture(proj Project, body string, baseRef Option[string]) concurr
         )
         return subprocess.Spawn(opts) match {
             case Failure(err) => RtPrFailed(Err = err)
-            case Success(p)   => readGhPrUrl(p, prBranch)
+            case Success(p)   => readGhPrUrl(p, prBranch, leadWtPath)
         }
     })
+}
+
+// lookupExistingPrUrl asks gh for the URL of an open PR whose head is
+// `branch`. Returns "" when no PR exists, when gh fails (auth missing,
+// no remote, etc.), or when the JSON output is empty. Best-effort: a
+// failure here just falls through to `gh pr create`, which surfaces
+// any environmental errors with its own clearer messaging.
+//
+// Uses `gh pr list --json url --jq .[0].url` rather than `gh pr view
+// --json url` because pr view picks the PR for the CURRENT branch and
+// we may be querying a snapshot branch we just pushed but never
+// checked out.
+func lookupExistingPrUrl(cwd string, branch string) string {
+    val opts = subprocess.NewSpawnOpts(
+        "gh",
+        ArrayOf("pr", "list", "--head", branch, "--state", "open", "--json", "url", "--jq", ".[0].url").ToGoSlice(),
+        SliceEmpty[string](),
+        cwd,
+    )
+    return subprocess.Spawn(opts) match {
+        case Failure(_) => ""
+        case Success(p) => {
+            var lastLine = ""
+            for {
+                val line = p.ReadLine()
+                if line.IsFailure() { break }
+                val trimmed = strings.TrimSpace(line.Get())
+                if trimmed != "" {
+                    lastLine = trimmed
+                }
+            }
+            // Drain stderr too so the subprocess doesn't block on a
+            // full pipe; we don't need the contents.
+            for {
+                val line = p.ReadStderrLine()
+                if line.IsFailure() { break }
+            }
+            return p.Wait() match {
+                case Failure(_)  => ""
+                case Success(_)  => lastLine
+            }
+        }
+    }
 }
 
 // readShortSha runs `git rev-parse --short=10 <ref>` in `cwd` and
@@ -881,7 +954,7 @@ func drainGitPushResult(p subprocess.Process) string {
 // stderr after stdout is drained keeps the code linear without
 // risking deadlock for the size of output gh pr create produces
 // (stderr is typically a few short lines).
-func readGhPrUrl(p subprocess.Process, prBranch string) Msg {
+func readGhPrUrl(p subprocess.Process, prBranch string, cwd string) Msg {
     var lastLine = ""
     for {
         val line = p.ReadLine()
@@ -905,6 +978,17 @@ func readGhPrUrl(p subprocess.Process, prBranch string) Msg {
         case Failure(err)  => RtPrFailed(Err = err)
         case Success(code) =>
             if (code != 0) {
+                // "a pull request for branch <X> already exists" race:
+                // the pre-create lookup missed it (PR was opened
+                // between our list and create call, or the user opened
+                // it manually). Recover by surfacing the existing URL
+                // instead of an opaque non-zero exit.
+                if (stderrMentionsExistingPr(stderrJoined)) {
+                    val existing = lookupExistingPrUrl(cwd, prBranch)
+                    if (existing != "") {
+                        return RtPrCreated(Url = existing, Branch = prBranch)
+                    }
+                }
                 val detail = if (stderrJoined != "") s": ${stderrJoined}" else ""
                 RtPrFailed(Err = errors.New(s"gh pr create exited with code ${code}${detail}"))
             }
@@ -914,6 +998,17 @@ func readGhPrUrl(p subprocess.Process, prBranch string) Msg {
             }
             else                     RtPrCreated(Url = lastLine, Branch = prBranch)
     }
+}
+
+// stderrMentionsExistingPr matches the gh CLI's "a pull request for
+// branch ... already exists" error so we can recover by fetching the
+// existing PR's URL instead of failing the whole approval. gh phrases
+// this consistently across versions; we match on the stable substring
+// "already exists" qualified by "pull request" so we don't false-match
+// unrelated errors.
+func stderrMentionsExistingPr(stderr string) bool {
+    val lower = strings.ToLower(stderr)
+    return strings.Contains(lower, "pull request") && strings.Contains(lower, "already exists")
 }
 
 // GhPrMergeFuture spawns `gh pr merge <url> --<rule>` from the lead

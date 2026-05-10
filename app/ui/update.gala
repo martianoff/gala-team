@@ -50,7 +50,10 @@ import (
 func Update(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     val (m1, cmd) = dispatchMsg(m, msg)
     val sameTag = stateTag(m.State) == stateTag(m1.State)
-    val m2 = if (sameTag) m1 else m1.Copy(StateEnteredAt = m1.NowAt)
+    val m1b = if (!sameTag && stateTag(m1.State) == "Approval")
+                  m1.Copy(ApprovalFocus = ApproveFocus())
+              else m1
+    val m2 = if (sameTag) m1b else m1b.Copy(StateEnteredAt = m1b.NowAt)
     // Any transition INTO TLReview from a working state (Delegating,
     // QAGate, or TLNudging) fires the TL relay turn so the lead has a
     // chance to consolidate. Without QAGate→TLReview wired, a member
@@ -572,8 +575,10 @@ func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
 // approvalIntercept gives the user keyboard fallbacks when the
 // FSM is in Approval, on top of Ctrl+A / Ctrl+R from the keymap:
 //
-//   Enter / y / Y  → KeyApprove
-//   n / N          → KeyReject
+//   Enter          → fires whichever button is focused
+//   Tab            → cycles ApprovalFocus (Approve ↔ Reject)
+//   y / Y          → KeyApprove (focus-independent shortcut)
+//   n / N          → KeyReject  (focus-independent shortcut)
 //
 // The y/n keys cover the case where Ctrl combos are eaten by the
 // terminal / host (Windows Console intercepts Ctrl+A as Select-All
@@ -584,17 +589,40 @@ func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
 // allowed (rejection routes through the chat composer for the
 // next prompt).
 func approvalIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg]]] = msg match {
-    // Enter approves when the composer is whitespace-only. TrimSpace
-    // (not raw `== ""`) so a stray space or tab the user didn't
-    // notice doesn't sink the keyboard fallback — the original
-    // strict check left users staring at "why doesn't Enter work?"
-    // when their composer had a leading space. If the user typed
-    // real text, fall through so onSubmit submits it (an implicit
-    // redirect — they clearly didn't mean to approve blindly).
-    case KeySubmit() if strings.TrimSpace(m.Composer) == "" => Some(onApprove(m))
+    // Enter dispatches the focused button when the composer is
+    // whitespace-only. TrimSpace (not raw `== ""`) so a stray space
+    // or tab the user didn't notice doesn't sink the keyboard
+    // fallback — the original strict check left users staring at
+    // "why doesn't Enter work?" when their composer had a leading
+    // space. If the user typed real text, fall through so onSubmit
+    // submits it (an implicit redirect — they clearly didn't mean
+    // to approve blindly).
+    case KeySubmit() if strings.TrimSpace(m.Composer) == "" => Some(onApprovalEnter(m))
+    case KeyToggleFocus()                                   => Some(onApprovalCycle(m))
     case KeyChar(c) if c == 'y' || c == 'Y'                 => Some(onApprove(m))
     case KeyChar(c) if c == 'n' || c == 'N'                 => Some(onReject(m))
     case _                                                  => None[Tuple[AppModel, Cmd[AppMsg]]]()
+}
+
+// onApprovalCycle flips the focus between the Yes and No buttons in
+// the approval modal. Bound to Tab via the approvalIntercept route.
+// Two buttons → simple toggle; if more buttons are added later this
+// becomes a cycle helper like onRecoveryCycle.
+func onApprovalCycle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val next = m.ApprovalFocus match {
+        case ApproveFocus() => RejectFocus()
+        case RejectFocus()  => ApproveFocus()
+    }
+    return (m.Copy(ApprovalFocus = next), NoCmd[AppMsg]())
+}
+
+// onApprovalEnter dispatches the action for whichever button is
+// currently focused. Approval-by-default (matches the prior
+// "press Enter to ship" muscle memory whenever the user hasn't
+// Tab'd to the No button).
+func onApprovalEnter(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.ApprovalFocus match {
+    case ApproveFocus() => onApprove(m)
+    case RejectFocus()  => onReject(m)
 }
 
 // onRecoveryCycle advances the focus across the recovery modal's
@@ -899,22 +927,74 @@ func onWorktreesWiped(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 func conversationPageSize() int = 10
 
 // onConvoScroll moves the scroll offset by `delta` lines (positive =
-// down, negative = up). Negative offset goes into "user scrolled up"
-// territory: ConversationSticky flips off so subsequent appends don't
-// yank the view back to the bottom while the user is reading. Once
-// the user scrolls back past the conceptual bottom, sticky re-engages.
+// down, negative = up).
 //
-// We don't have a content-line count here (it depends on terminal
-// width and per-line wrapping computed at view time) so the offset
-// is allowed to grow unbounded — the view-side ConversationLogView
-// clamps it back into range each frame. That's the "store loose,
-// clamp on render" pattern.
+// ConversationOffset is interpreted as the visible top line index (0 =
+// top of log, total-height = pinned to bottom). When ConversationSticky
+// is true the view paints from total-height regardless of the stored
+// offset; that means the stored offset can be stale (typically 0 from
+// init) the moment the user starts scrolling. If we naively added the
+// delta to the stale 0, PgUp from a sticky bottom would compute
+// `0 + (-10)` → clamped to 0 → renders the TOP of the log, jumping
+// the user far away from where they were looking. That's the bug
+// users reported as "PgUp moves me far away after resume".
+//
+// Fix: when we're currently sticky, treat the effective offset as the
+// real bottom (total-height) and apply the delta from there. Compute
+// total + viewport size up front and clamp both sides so PgDn past
+// the bottom re-engages sticky instead of running into blank space.
+//
+// The total line count requires rendering every conversation entry at
+// the current pane width — O(n) and the work is duplicated by the
+// view next frame. Acceptable: scroll events are rare relative to
+// renders, and skipping it produces the misalignment that motivated
+// this whole fix.
 func onConvoScroll(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] {
-    val proposed = m.ConversationOffset + delta
-    val clamped = if (proposed < 0) 0 else proposed
-    // Any upward scroll unsticks; pure downward scroll keeps stickiness.
-    val sticky = if (delta < 0) false else m.ConversationSticky
+    val height = conversationViewportHeight(m)
+    val total  = conversationTotalLines(m)
+    val maxOffset = if (total > height) total - height else 0
+    val baseline = if (m.ConversationSticky) maxOffset else m.ConversationOffset
+    val proposed = baseline + delta
+    val clamped = if (proposed < 0) 0
+                  else if (proposed > maxOffset) maxOffset
+                  else proposed
+    // Sticky re-engages on a downward scroll that lands at or past the
+    // bottom; upward scrolls always unstick; pure no-op scrolls (delta
+    // zero or no movement against an already-clamped edge) keep the
+    // prior stickiness.
+    val sticky = if (delta < 0) false
+                 else if (delta > 0 && clamped >= maxOffset) true
+                 else m.ConversationSticky
     return (m.Copy(ConversationOffset = clamped, ConversationSticky = sticky), NoCmd[AppMsg]())
+}
+
+// conversationTotalLines is the sum of rendered-row heights across the
+// whole conversation, computed at the current pane width. Mirrors the
+// `Sum entry.Height` used inside `cvBuildLayout` so onConvoScroll can
+// reason about absolute positions instead of relying on the
+// view-internal sticky-bottom calculation.
+//
+// `isSelected` is forced false here — selection styling doesn't affect
+// row count, only color/reverse-video. Passing the actual selection
+// flag would entangle the scroll math with selection state for no
+// benefit.
+func conversationTotalLines(m AppModel) int {
+    val width = conversationPaneWidth(m)
+    var total = 0
+    var i = 0
+    val n = m.Conversation.Size()
+    for i < n {
+        val cl = m.Conversation.Get(i)
+        val entries = renderConversationLine(m, cl, width, false)
+        var k = 0
+        val ne = entries.Size()
+        for k < ne {
+            total = total + entries.Get(k).Height
+            k = k + 1
+        }
+        i = i + 1
+    }
+    return total
 }
 
 // interceptPaletteMsg routes input through the open palette when one

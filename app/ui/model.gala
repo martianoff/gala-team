@@ -356,6 +356,13 @@ struct AppModel(
     // (default, 28-cell rows) and compact (single-line rows, ~24
     // members visible). Bound to Ctrl+, / Ctrl+. — DESIGN.md §8.5.
     CompactSidebar bool,
+    // ApprovalFocus is which button of the §6.1 approval modal
+    // currently holds focus. Only meaningful when State = Approval(_).
+    // Tab cycles ApproveFocus ↔ RejectFocus; Enter fires the focused
+    // choice. The view derives the focused button's reverse-bold
+    // styling from this. Defaults to ApproveFocus so first-Enter
+    // still ships, matching prior behavior.
+    ApprovalFocus ApprovalChoice,
 )
 
 // BatchPr is one PR opened during this session. Stored in
@@ -377,6 +384,17 @@ sealed type RecoveryChoice {
     case ResumeFocus
     case InspectFocus
     case StartFreshFocus
+}
+
+// ApprovalChoice tracks which button of the approval modal currently
+// holds focus. Tab cycles between the two; Enter fires the focused
+// choice. Mouse-clicks bypass focus and dispatch directly. Defaults
+// to ApproveFocus on entry to the Approval state so a quick Enter
+// still ships the PR (preserves the prior "press Enter to approve"
+// muscle memory).
+sealed type ApprovalChoice {
+    case ApproveFocus
+    case RejectFocus
 }
 
 // FocusState selects which panel handles directional / activation
@@ -497,6 +515,7 @@ func InitialModelWithTeams(
     Recovery              = None[RecoveryChoice](),
     ReadOnlyMode          = false,
     CompactSidebar        = false,
+    ApprovalFocus         = ApproveFocus(),
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +

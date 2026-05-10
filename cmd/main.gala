@@ -430,6 +430,15 @@ func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match
         }
         return m.Copy(
             Conversation          = snap.Conversation,
+            // Pin the conversation pane to the bottom on resume so the
+            // user lands on the most recent messages — not partway up
+            // the restored log where their old scroll position would
+            // otherwise leave them. Both fields are explicitly set
+            // (rather than relying on InitialModel defaults) so a
+            // future Copy() chain over a stale model can't carry a
+            // pre-resume offset into the new session.
+            ConversationOffset    = 0,
+            ConversationSticky    = true,
             RecoveredMembers      = snap.ActiveMembers,
             RecoveryBannerVisible = true,
             Recovery              = Some(ResumeFocus()),

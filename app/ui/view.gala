@@ -820,25 +820,18 @@ func approvalSnippet(body string) string {
 // headerHeight, the inner Fixed(N, appleAndBrand) in wideHeader, and
 // the appleColumn / appleRow0..2 grid (any change must touch ALL of
 // them or the header crops or leaves a gap).
-//   AppleWidth   = 6 cols of apple grid (see appleColumn).
+//   AppleWidth   = 10 cols of apple grid (see appleColumn).
 //   ApplePad     = 2 cols of breathing room between apple and brand.
 //   HeaderRowsWide = 1 spacer + 3 apple/brand rows + 1 separator = 5.
-//   HeaderRowsNarrow = 1 spacer + 1 brand + 1 sub + 1 separator   = 4.
+//   HeaderRowsNarrow = 1 spacer + 1 brand + 1 sub + 1 separator  = 4.
 //   NarrowCols   = below this terminal width, drop the apple and
 //                  fall back to the original 4-row single-line layout
 //                  so the brand doesn't get squeezed off-screen.
-func HeaderAppleWidth() int    = 6
+func HeaderAppleWidth() int    = 10
 func HeaderApplePad() int      = 2
 func HeaderRowsWide() int      = 5
 func HeaderRowsNarrow() int    = 4
 func HeaderNarrowCols() int    = 70
-
-// appleShineDivisor scales how often the apple's shine column
-// advances — `shineZone = (tick / divisor) % nZones`. The global
-// TickSub fires every 120 ms; with divisor=3 the shine steps every
-// 360 ms and a full 6-zone lap takes ~2.16 s. Bumping the divisor
-// slows ONLY the apple — spinners elsewhere keep their 120 ms beat.
-func appleShineDivisor() int = 3
 
 // headerHeight is what the outer Column reserves for the header. Wide
 // mode grows to 5 rows to fit the apple; narrow stays at the legacy 4.
@@ -881,23 +874,24 @@ func narrowHeader(m AppModel, cols int) Widget {
     ))
 }
 
-// wideHeader is the apple+brand layout. Apple takes a fixed 6-col
+// wideHeader is the apple+brand layout. Apple takes a fixed 10-col
 // slot on the left with a 2-col gap, brand text gets the remaining
 // flex. The brand line is built without the 🍎 prefix here because
 // the apple itself is the brand glyph. Total height: 5 rows.
 //
-// The brand right column is laid out as 3 Fixed(1) rows so its full
-// vertical span matches the 3-row apple — no Flex(1, Empty()) trailing
-// gap. Row 1 is the bold brand line; row 2 is the dim state + AUTO
-// badge; row 3 is the dim token / cost suffix when work has accrued
-// usage, otherwise Empty(). The "no usage yet → empty third row"
-// shape only shows transiently at session start; once any member
-// emits a result event the row fills.
+// The brand right column is a 3-row block whose rows line up 1:1
+// with the apple's 3 rows: the stem/leaf row carries the brand
+// title, the top-chamfered belly carries the state line, the
+// bottom-chamfered belly carries the tokens line. tokens shows
+// empty when no usage has accrued (transiently at session start);
+// once any member emits a result event it fills. No vertical empty
+// rows are needed because the brand block matches the apple's row
+// count — the layout has no wasted vertical space.
 func wideHeader(m AppModel, cols int) Widget {
     val budget = cols - HeaderAppleWidth() - HeaderApplePad()
     val brand = buildBrandLineNoEmoji(m, budget)
     val brandLine = TextStyled(brand, DefaultStyle().WithBold().WithFg(BrightCyan()))
-    val stateLine = TextStyled(s"  ${stateLabel(m.State)}${autoBadgeText(m)}",
+    val stateLine = TextStyled(s"${stateLabel(m.State)}${autoBadgeText(m)}",
         DefaultStyle().WithDim())
     val tokens = wideTokensText(m)
     val tokensLine = if (tokens == "") Empty()
@@ -921,7 +915,7 @@ func wideHeader(m AppModel, cols int) Widget {
 
 // wideTokensText is the wide-header variant of tokenSuffix without
 // the leading "  ·  " separator — that separator made sense when
-// tokens were appended inline to the state row, but in the 3-row
+// tokens were appended inline to the state row, but in the 5-row
 // brand column tokens stand on their own line. Empty string when
 // no usage has accrued so wideHeader can replace the row with
 // Empty() (avoids painting a stray "·" on a fresh launch).
@@ -932,7 +926,7 @@ func wideTokensText(m AppModel) string {
     val ins   = formatTokenCount(usg.InputTokens)
     val outs  = formatTokenCount(usg.OutputTokens)
     val cache = formatTokenCount(usg.CacheReadInputTokens)
-    return s"  ${ins} in / ${outs} out  ·  cache ${cache}  ·  ${formatCostUsd(m.TotalCostUsd)}"
+    return s"${ins} in / ${outs} out  ·  cache ${cache}  ·  ${formatCostUsd(m.TotalCostUsd)}"
 }
 
 // autoBadgeText extracts the AUTO (N open · plan x/y) suffix that
@@ -949,30 +943,28 @@ func autoBadgeText(m AppModel) string {
     return s"  ·  AUTO (${m.OpenPrs.Size()} open${planSuffix})"
 }
 
-// appleColumn renders the gala apple as a 3-row × 6-col grid of
+// appleColumn renders the gala apple as a 3-row × 10-col grid of
 // styled cells. `tick` advances every 120 ms (TickSub in cmd/main),
-// driving a "shine" highlight that sweeps across the apple body.
+// driving a "shine" highlight that sweeps across the apple body once
+// per ~1.2 s (10 zones × 120 ms), giving a 3D-rotating-with-fixed-
+// light feel without changing the silhouette frame-to-frame.
 //
-// Shine cadence: shineZone = (tick / appleShineDivisor) % nZones, so
-// the highlight advances one column every 3 ticks (~360 ms) and a
-// full lap takes 6 zones × 360 ms ≈ 2.16 s. The divisor decouples
-// the apple's animation rate from the global tick — the spinner
-// elsewhere on the screen still runs at the full 120 ms cadence,
-// which it needs to look "alive" while the apple breathes slower.
+// Zone scheme: nZones = 10 (the body width). Body cells live at every
+// grid col 0..9 in the two belly rows, with zone == col. Per render,
+// shineZone = tick % nZones; the cell at that zone renders
+// BrightWhite + bold (the highlight); the next zone over renders
+// BrightRed (the trailing edge); the rest of the body is plain red.
+// Half-block chamfer cells (▄ at the top corners, ▀ at the base
+// corners) share the body palette so the shine wraps the silhouette
+// smoothly. The chamfering compresses the apple visually so 3 rows
+// of cells read as a fuller silhouette than the literal row count.
 //
-// Zone scheme: nZones = 6 (the body width). Every body cell carries
-// a zone == its column index (0..5). Per render, the cell at
-// shineZone renders BrightWhite + bold (the highlight), the next
-// zone over BrightRed (the trailing edge), the rest plain red. The
-// body fills all six grid cols (no empty padding columns), so every
-// shineZone lands on a visible cell.
-//
-// Stem ('╲') is yellow-dim; leaf cells ('│' + '▙') are bright green.
-// Half-block body corners (▄ at the top, ▀ at the base) share the
-// body palette so the shine wraps the silhouette smoothly.
+// Stem ('╲') is yellow-dim, leaf ('│' + cluster '▙') is bright
+// green — the cluster glyph gives the leaf visible volume without
+// stealing a second row.
 func appleColumn(tick int) Widget {
-    val nZones = 6
-    val shineZone = (tick / appleShineDivisor()) % nZones
+    val nZones = 10
+    val shineZone = tick % nZones
     val leafSt = DefaultStyle().WithFg(BrightGreen()).WithBold()
     val stemSt = DefaultStyle().WithFg(Yellow()).WithDim()
     return Column(ArrayOf[LayoutChild](
@@ -998,18 +990,21 @@ func applePalette(zone int, shineZone int, nZones int) Style =
 func appleSpace() LayoutChild = Fixed(1, TextStyled(" ", DefaultStyle()))
 func appleCell(g string, st Style) LayoutChild = Fixed(1, TextStyled(g, st))
 
-// appleRow0..2 paint the three rows of the apple in a 6-col grid:
+// appleRow0..2 paint the three rows of the apple in a 10-col grid:
 //
-//   col:    0   1   2   3   4   5
-//   row 0:  .   .   ╲   │   ▙   .     stem + leaf cluster
-//   row 1:  ▄   █   █   █   █   ▄     top body (chamfered shoulders)
-//   row 2:  ▀   █   █   █   █   ▀     bottom body (chamfered base)
+//   col:    0   1   2   3   4   5   6   7   8   9
+//   row 0:  .   .   .   .   ╲   │   ▙   .   .   .     stem + leaf cluster
+//   row 1:  ▄   █   █   █   █   █   █   █   █   ▄     top body (chamfered shoulders)
+//   row 2:  ▀   █   █   █   █   █   █   █   █   ▀     bottom body (chamfered base)
+//
+// Both belly rows span the full 10-col width so every shine zone
+// lands on a visible cell — the shine never disappears off-grid.
 func appleRow0(stemSt Style, leafSt Style) Widget = Row(ArrayOf[LayoutChild](
-    appleSpace(), appleSpace(),
+    appleSpace(), appleSpace(), appleSpace(), appleSpace(),
     appleCell("╲", stemSt),
     appleCell("│", leafSt),
     appleCell("▙", leafSt),
-    appleSpace(),
+    appleSpace(), appleSpace(), appleSpace(),
 ))
 
 func appleRow1(shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
@@ -1018,7 +1013,11 @@ func appleRow1(shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
     appleCell("█", applePalette(2, shineZone, nZones)),
     appleCell("█", applePalette(3, shineZone, nZones)),
     appleCell("█", applePalette(4, shineZone, nZones)),
-    appleCell("▄", applePalette(5, shineZone, nZones)),
+    appleCell("█", applePalette(5, shineZone, nZones)),
+    appleCell("█", applePalette(6, shineZone, nZones)),
+    appleCell("█", applePalette(7, shineZone, nZones)),
+    appleCell("█", applePalette(8, shineZone, nZones)),
+    appleCell("▄", applePalette(9, shineZone, nZones)),
 ))
 
 func appleRow2(shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
@@ -1027,7 +1026,11 @@ func appleRow2(shineZone int, nZones int) Widget = Row(ArrayOf[LayoutChild](
     appleCell("█", applePalette(2, shineZone, nZones)),
     appleCell("█", applePalette(3, shineZone, nZones)),
     appleCell("█", applePalette(4, shineZone, nZones)),
-    appleCell("▀", applePalette(5, shineZone, nZones)),
+    appleCell("█", applePalette(5, shineZone, nZones)),
+    appleCell("█", applePalette(6, shineZone, nZones)),
+    appleCell("█", applePalette(7, shineZone, nZones)),
+    appleCell("█", applePalette(8, shineZone, nZones)),
+    appleCell("▀", applePalette(9, shineZone, nZones)),
 ))
 
 // tokenSuffix renders the running cumulative token usage + cost
@@ -1092,9 +1095,13 @@ func buildBrandLine(m AppModel, cols int) string =
 
 // buildBrandLineNoEmoji is the wide-mode variant — drops the 🍎
 // from the prefix because the rendered apple sits to the left of
-// this text. Same fit / truncate behaviour as buildBrandLine.
+// this text. Same fit / truncate behaviour as buildBrandLine. No
+// leading whitespace either — the apple column + HeaderApplePad
+// already supply the left margin, so a "  Gala Team v..." prefix
+// would compound into an awkward 4-cell gap between the apple's
+// right edge and the title.
 func buildBrandLineNoEmoji(m AppModel, cols int) string =
-    buildBrandLineAt(m, cols, s"  Gala Team v${version.Version()}")
+    buildBrandLineAt(m, cols, s"Gala Team v${version.Version()}")
 
 // buildBrandLineAt is the shared truncation core: try the full line,
 // then drop the description, then drop the team name, then runes-cap

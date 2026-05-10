@@ -19,3 +19,8 @@ MODULE.bazel.lock
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+
+# Local team config — references docs in sibling checkouts (e.g.
+# ../gala_simple/docs), so the layout assumption shouldn't be baked
+# into the public repo. Each maintainer keeps their own.
+team.yaml

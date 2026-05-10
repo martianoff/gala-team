@@ -19,3 +19,5 @@ MODULE.bazel.lock
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+
+team.yaml

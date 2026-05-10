@@ -30,8 +30,12 @@ import (
 // vs bright) check for the marker characters ("▶", "…") rather than
 // the escape sequences.
 
+// viewportH is sized so the body has enough vertical room for the
+// historyIndexPanel's 18-row scroll window (plus its header + spacer
+// + border) AFTER the wide-mode header (apple+brand) takes its 8 rows.
+// 32 was fine when the header was 4 rows; with the apple it's 36.
 val viewportW = 100
-val viewportH = 32
+val viewportH = 36
 
 // ---------------------------------------------------------------------------
 // fixtures

@@ -254,16 +254,27 @@ func appendGroup(
 // has no entry for a member (or the entry is ""), falls back to the simple
 // single-line label (preserves existing snapshot tests that don't pass a
 // timer map).
-val SidebarRightWidth = 14
+//
+// When the right field IS present, the left text drops the verbose
+// StatusName + padding — the right field already conveys the status
+// (`1:23 slow`, `✗ failed`, `1:23 r2/3`), so duplicating the word
+// "slow" / "failed" / "recovering" on the left just steals room from
+// the name. Inner sidebar width is ~25 cells (28-col panel minus
+// border + scrollbar); `Fixed(SidebarRightWidth)` reserves the
+// right column and the rest flexes to the name. Without this trim,
+// names beyond ~5 chars got clipped whenever a timer was visible.
+val SidebarRightWidth = 9
 
 func renderSidebarRow(team Team, row SidebarRow, isCursor bool, tick int, rightFields HashMap[string, string]) Widget = row match {
     case GroupHeader(name, expanded) =>
         TextStyled(headerLabel(name, expanded, isCursor), rowStyle(isCursor, true))
     case MemberRow(m, status) => {
         val style = memberRowStyle(team, m, isCursor)
-        val left  = TextStyled(memberLabel(memberRowText(m, status, tick), isCursor), style)
         val right = rightFields.GetOrElse(m.Name, "")
-        if right == "" { return left }
+        if right == "" {
+            return TextStyled(memberLabel(memberRowText(m, status, tick), isCursor), style)
+        }
+        val left = TextStyled(memberLabel(memberRowTextCompact(m, status, tick), isCursor), style)
         val rightW = TextStyled(padLeft(right, SidebarRightWidth), DefaultStyle().WithDim())
         return Row(ArrayOf[LayoutChild](
             Flex(1, left),
@@ -362,6 +373,16 @@ func memberRowText(m Member, status Status, tick int) string {
     val glyph = statusGlyph(status, tick)
     val padded = padRight(m.Name, 10)
     return s"${glyph} ${padded} ${StatusName(status)}"
+}
+
+// memberRowTextCompact is the trimmed form used when the right-side
+// timer field is rendered next to this row. The right field already
+// carries the status text (and an elapsed timer), so the left side
+// drops the verbose StatusName + name padding to leave room for the
+// full member name.
+func memberRowTextCompact(m Member, status Status, tick int) string {
+    val glyph = statusGlyph(status, tick)
+    return s"${glyph} ${m.Name}"
 }
 
 // spinnerFrames is the canonical braille spinner — the same set

@@ -1012,7 +1012,7 @@ func sidebarRightField(m AppModel, name string) string {
         case StQueued()         => ""
         case StDone()           => totalWorkFor(m, name, false)
         case StFailed(_)        => "✗ failed"
-        case StRecovering(att, max) => s"${totalWorkFor(m, name, true)} (recov ${att}/${max})"
+        case StRecovering(att, max) => s"${totalWorkFor(m, name, true)} r${att}/${max}"
         case StHelpWaiting(_)   => "help"
         case StWorking()        => totalWorkFor(m, name, true)
         case StSlow()           => s"${totalWorkFor(m, name, true)} slow"

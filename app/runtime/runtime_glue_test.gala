@@ -1,4 +1,4 @@
-package main
+package runtime
 
 import (
     "errors"
@@ -10,7 +10,6 @@ import (
     . "martianoff/gala/go_interop"
     "martianoff/gala/subprocess"
     . "github.com/martianoff/gala_team/app/project"
-    . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
 )
 

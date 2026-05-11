@@ -516,6 +516,8 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case KeyRecoveryCycle()          => onRecoveryCycle(m)
     case KeyRecoveryConfirm()        => onRecoveryConfirm(m)
     case KeyRecoveryClick(c)         => onRecoveryConfirm(m.Copy(Recovery = Some(c)))
+    case AskUserQuestion(member, id, txt) => onAskUserQuestion(m, member, id, txt)
+    case KeyQuestionDismiss()        => onQuestionDismiss(m)
     case TickMsg()                   => onTick(m)
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
@@ -1460,6 +1462,16 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if m.Composer == "" {
         return (m, NoCmd[AppMsg]())
     }
+    // A pending AskUserQuestion takes precedence over starting a new
+    // turn. Composer text becomes the answer to the question — sent
+    // back as a `tool_result` envelope on the member's existing
+    // stdin so the model can finish its in-flight turn instead of
+    // forking a new one. Without this branch, typing an answer would
+    // produce a fresh @summary cycle while the model still blocks on
+    // the tool call, and "the user dismissed the prompt" resurfaces.
+    if m.PendingQuestion.IsDefined() {
+        return onAnswerPendingQuestion(m, m.Composer)
+    }
     val prompt = m.Composer
     LogUserInput(prompt)
     val ctx = transitionContext(m)
@@ -1526,6 +1538,103 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
                 case None()  => m1
             }
             return (setStatus(m2, lead.Name, StWorking()), sendAndPumpCmd(m2, lead, effectivePrompt))
+        }
+    }
+}
+
+// onAskUserQuestion sets the PendingQuestion state and appends a
+// system-line hint to the transcript so the user can see there's a
+// question waiting. Called both inline from applyChunkVisible (when
+// the chunk pump sees a tool_use block) and as a dispatched AppMsg
+// path so tests can exercise the state transition without simulating
+// a whole stream-json envelope.
+func onAskUserQuestion(m AppModel, member string, toolUseId string, questionText string) Tuple[AppModel, Cmd[AppMsg]] {
+    val pending = PendingQuestion(
+        Member       = member,
+        ToolUseId    = toolUseId,
+        QuestionText = questionText,
+    )
+    val hint = if (questionText != "")
+                   s"${member} is waiting for your answer: ${questionText}"
+               else
+                   s"${member} is waiting for your answer — type it in the composer and press Enter."
+    val convo = m.Conversation.Append(
+        session.ConversationLine(Speaker = "system", Text = hint, At = time_utils.Now().UnixNanos()),
+    )
+    return (m.Copy(
+        PendingQuestion = Some(pending),
+        Conversation    = convo,
+    ), NoCmd[AppMsg]())
+}
+
+// onAnswerPendingQuestion routes a composer submit into the
+// pending AskUserQuestion tool call: writes a tool_result envelope to
+// the originating member's stdin (so the model unblocks and finishes
+// its turn) and appends the user's answer to the transcript as a
+// regular "you" line for the audit trail.
+//
+// The member's existing claude subprocess is reused — its session is
+// still alive, mid-turn, blocked on stdin waiting for the tool_result.
+// No new spawn, no fresh --resume turn — the model picks up exactly
+// where it left off and emits more output through the same read pump.
+func onAnswerPendingQuestion(m AppModel, answer string) Tuple[AppModel, Cmd[AppMsg]] = m.PendingQuestion match {
+    case None() => (m, NoCmd[AppMsg]())
+    case Some(pending) => {
+        val convo = m.Conversation.Append(
+            session.ConversationLine(Speaker = "you", Text = answer, At = time_utils.Now().UnixNanos()),
+        )
+        val withAnswer = m.Copy(
+            PendingQuestion    = None[PendingQuestion](),
+            Composer           = "",
+            ComposerCursor     = 0,
+            Conversation       = convo,
+            ConversationSticky = true,
+        )
+        val persisted = persistConversation(withAnswer, convo)
+        return persisted.Sessions.Get(pending.Member) match {
+            case None() => {
+                // Session crashed / was wiped between question and
+                // answer. Without it we can't satisfy the tool call;
+                // surface a hint so the user knows the answer didn't
+                // reach anyone instead of silently dropping it.
+                val toast = persisted.Toasts.PushError(
+                    s"${pending.Member} is no longer running — answer not delivered",
+                    time_utils.Now(),
+                    time_utils.Seconds(int64(6)),
+                )
+                return (persisted.Copy(Toasts = toast), NoCmd[AppMsg]())
+            }
+            case Some(s) => {
+                val sendCmd = runtimeFutureToCmd(SendToolResultFuture(s, pending.ToolUseId, answer))
+                return (persisted, sendCmd)
+            }
+        }
+    }
+}
+
+// onQuestionDismiss drops the pending question without sending an
+// answer. The member's subprocess is still mid-turn, blocked on
+// stdin — closing it sends EOF and the model interprets the tool
+// call as unanswered. Mirrors the prior (involuntary) behavior but
+// now an explicit user choice via Esc.
+func onQuestionDismiss(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.PendingQuestion match {
+    case None() => (m, NoCmd[AppMsg]())
+    case Some(pending) => {
+        val convo = m.Conversation.Append(
+            session.ConversationLine(
+                Speaker = "system",
+                Text    = s"dismissed ${pending.Member}'s question",
+                At      = time_utils.Now().UnixNanos(),
+            ),
+        )
+        val withDrop = m.Copy(
+            PendingQuestion = None[PendingQuestion](),
+            Conversation    = convo,
+        )
+        val persisted = persistConversation(withDrop, convo)
+        return persisted.Sessions.Get(pending.Member) match {
+            case None()  => (persisted, NoCmd[AppMsg]())
+            case Some(s) => (persisted, runtimeFutureToCmd(CloseSendFuture(s)))
         }
     }
 }
@@ -1781,11 +1890,14 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     val isAllProse = trimmedLine != "" && hasNoJsonShapes && !hasControlBytes && priorBufQuick == ""
     if isAllProse {
         val proseChunk = ClaudeChunk(
-            Visible   = line,
-            ErrorText = "",
-            LiveTurn  = None[ClaudeUsage](),
-            FinalTurn = None[ClaudeUsage](),
-            CostUsd   = 0.0,
+            Visible         = line,
+            ErrorText       = "",
+            LiveTurn        = None[ClaudeUsage](),
+            FinalTurn       = None[ClaudeUsage](),
+            CostUsd         = 0.0,
+            AskQuestionId   = "",
+            AskQuestionText = "",
+            TurnEnded       = false,
         )
         val (m1, c) = applyChunkVisible(m, name, proseChunk)
         val pumpCmd = m1.Sessions.Get(name) match {
@@ -1878,8 +1990,48 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
         val toast = mRecovered.Toasts.PushError(s"${name}: ${chunk.ErrorText}", time_utils.Now(), time_utils.Seconds(int64(8)))
         mRecovered.Copy(Toasts = toast, LastError = Some(s"${name}: ${chunk.ErrorText}"))
     }
+    // AskUserQuestion forwarding. The model's tool_use block fires
+    // BEFORE the model emits any narrative `text` part for the same
+    // turn (claude streams content[] in source order). Capture it
+    // here, set PendingQuestion so the composer's Enter routes to
+    // the tool_result path, and append a one-line transcript hint so
+    // the user sees there's a question waiting (the question body
+    // itself is usually visible in the assistant chat narration that
+    // streams alongside).
+    val withAsk = if (chunk.AskQuestionId == "") withErrSurface else {
+        val pending = PendingQuestion(
+            Member       = name,
+            ToolUseId    = chunk.AskQuestionId,
+            QuestionText = chunk.AskQuestionText,
+        )
+        val hint = if (chunk.AskQuestionText != "")
+                       s"${name} is waiting for your answer: ${chunk.AskQuestionText}"
+                   else
+                       s"${name} is waiting for your answer — type it in the composer and press Enter."
+        withErrSurface.Copy(
+            PendingQuestion = Some(pending),
+            Conversation    = withErrSurface.Conversation.Append(
+                session.ConversationLine(Speaker = "system", Text = hint, At = time_utils.Now().UnixNanos()),
+            ),
+        )
+    }
+    // Turn-end handling. With `--input-format stream-json` claude does
+    // NOT exit on its own; it idles waiting for more stdin. Once the
+    // turn's `result` event lands AND there's no pending question
+    // blocking the model, we close stdin so the subprocess wraps up.
+    // If a question IS pending, leave stdin open — the turn will
+    // resume after the user answers (claude will emit more chunks
+    // and another `result`).
+    val withCloseCmd = if (chunk.TurnEnded && withAsk.PendingQuestion.IsEmpty()) {
+        withAsk.Sessions.Get(name) match {
+            case Some(s) => runtimeFutureToCmd(CloseSendFuture(s))
+            case None()  => NoCmd[AppMsg]()
+        }
+    } else {
+        NoCmd[AppMsg]()
+    }
     if displayText == "" {
-        return (withErrSurface, NoCmd[AppMsg]())
+        return (withAsk, withCloseCmd)
     }
     // Store displayText RAW (with @summary / @end / @dispatch
     // markers intact). The view renderer applies formatDirective-
@@ -1891,20 +2043,20 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     // still drop without being persisted.
     val rendered = formatDirectiveMarkers(displayText)
     val nextConvo = if (rendered == "") {
-        withErrSurface.Conversation
-    } else if (isDuplicateOfLastConvoLine(withErrSurface.Conversation, name, displayText)) {
-        withErrSurface.Conversation
+        withAsk.Conversation
+    } else if (isDuplicateOfLastConvoLine(withAsk.Conversation, name, displayText)) {
+        withAsk.Conversation
     } else {
         LogMemberOutput(name, displayText)
-        withErrSurface.Conversation.Append(session.ConversationLine(Speaker = name, Text = displayText, At = time_utils.Now().UnixNanos()))
+        withAsk.Conversation.Append(session.ConversationLine(Speaker = name, Text = displayText, At = time_utils.Now().UnixNanos()))
     }
-    val withLastSeen = withErrSurface.Copy(RetryCount = withErrSurface.RetryCount.Remove(name))
+    val withLastSeen = withAsk.Copy(RetryCount = withAsk.RetryCount.Remove(name))
     val current = withLastSeen.Statuses.Get(name).GetOrElse(StIdle())
     val nextStatus = if (isStickyStatus(current)) current else StWorking()
     val withLine = setStatus(persistConversation(withLastSeen, nextConvo), name, nextStatus)
     val (m1, consultCmds) = maybeDispatchConsults(withLine, name, displayText)
     val (m2, memberCmds)  = maybeHandleMemberDirectives(m1, name, displayText)
-    val allCmds = memberCmds.FoldLeft(consultCmds, (a, c) => a.Append(c))
+    val allCmds = memberCmds.FoldLeft(consultCmds.Append(withCloseCmd), (a, c) => a.Append(c))
     return (m2, batchAll(allCmds))
 }
 
@@ -2357,7 +2509,19 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
     if pending > 0 {
         return (m.Copy(PendingClosures = m.PendingClosures.Put(name, pending - 1)), NoCmd[AppMsg]())
     }
-    val cleaned = m.Copy(Sessions = m.Sessions.Remove(name))
+    // Drop a stale PendingQuestion when the originating session
+    // exits — its subprocess is gone, no tool_result envelope can
+    // reach the model now. Without this, the composer stays stuck
+    // in answer-mode after a crash and the user has no obvious way
+    // to recover other than Esc.
+    val droppedPending = m.PendingQuestion match {
+        case Some(p) if p.Member == name => None[PendingQuestion]()
+        case other                       => other
+    }
+    val cleaned = m.Copy(
+        Sessions        = m.Sessions.Remove(name),
+        PendingQuestion = droppedPending,
+    )
     if isCleanCloseError(err) {
         // Clean turn end. Two shapes depending on who finished:
         //   - Team Lead → TLDone(directives parsed from the lead's
@@ -3335,9 +3499,20 @@ func buildMemberNudgePrompt(reason string, mem Member) string {
 
 // ClaudePart is one element of an assistant message's content[]
 // array. Claude emits `text`, `tool_use`, `tool_result`, `thinking`,
-// etc.; we only render `text`. The Type discriminator is the field
-// the dispatcher reads.
-struct ClaudePart(Type string, Text string)
+// etc. We render `text` and additionally recognise tool_use blocks
+// whose Name is `AskUserQuestion` so the orchestrator can forward
+// the question to the user instead of letting it auto-dismiss. The
+// remaining fields (Id, Name) are populated only for tool_use parts
+// — text parts decode them as empty strings, which the call sites
+// branch on safely.
+//
+// `input` is intentionally NOT decoded here: it has different shapes
+// per tool (Bash's `command`, Read's `file_path`, AskUserQuestion's
+// `questions`), and gala's codec is happiest when struct fields
+// have a single concrete type. assistantEventChunk does a targeted
+// follow-up extraction against the raw envelope when it sees an
+// AskUserQuestion part — that keeps this struct simple.
+struct ClaudePart(Type string, Text string, Id string, Name string)
 
 // ClaudeAssistantMsg is the inner `message` object. Usage is the
 // per-turn cumulative count claude attaches to every assistant
@@ -3401,15 +3576,32 @@ struct ClaudeChunk(
     LiveTurn  Option[ClaudeUsage],
     FinalTurn Option[ClaudeUsage],
     CostUsd   float64,
+    // AskQuestionId is non-empty when this chunk's assistant envelope
+    // contained an `AskUserQuestion` tool_use block. Carries the
+    // tool_use_id we'll join on when sending the user's answer back as
+    // a tool_result envelope. The chunk also carries the question
+    // text (extracted from the input JSON) so the conversation log
+    // can render it cleanly even when the model's narration is sparse.
+    AskQuestionId   string,
+    AskQuestionText string,
+    // TurnEnded fires on the `result` envelope and tells onChunk it's
+    // time to close the subprocess's stdin so the per-turn process
+    // can exit. With `--input-format stream-json` claude keeps stdin
+    // open forever; without this signal the subprocess would idle
+    // after every turn.
+    TurnEnded bool,
 )
 
 // emptyChunk is the "drop this line" marker.
 func emptyChunk() ClaudeChunk = ClaudeChunk(
-    Visible   = "",
-    ErrorText = "",
-    LiveTurn  = None[ClaudeUsage](),
-    FinalTurn = None[ClaudeUsage](),
-    CostUsd   = 0.0,
+    Visible         = "",
+    ErrorText       = "",
+    LiveTurn        = None[ClaudeUsage](),
+    FinalTurn       = None[ClaudeUsage](),
+    CostUsd         = 0.0,
+    AskQuestionId   = "",
+    AskQuestionText = "",
+    TurnEnded       = false,
 )
 
 // filterClaudeStreamJsonFor is the chunk classifier. The `member`
@@ -3457,8 +3649,8 @@ func filterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
     if kind == "assistant" {
         return claudeAssistantCodec.Decode(trimmed) match {
             case Success(evt) => {
-                val chunk = assistantEventChunk(evt)
-                val dropped = chunk.Visible == ""
+                val chunk = assistantEventChunk(evt, trimmed)
+                val dropped = chunk.Visible == "" && chunk.AskQuestionId == ""
                 val reason = if (dropped) "assistant chunk with no text parts" else ""
                 TraceClaudeLine(member, envelope, chunk.Visible, "", dropped, reason)
                 return chunk
@@ -3622,22 +3814,92 @@ func looksLikeClaudeEnvelope(s string) bool {
 }
 
 // assistantEventChunk extracts the joined text from a complete
-// `assistant` envelope's content[]. Filters parts to `text` only —
-// tool_use / tool_result / thinking are dropped (the sidebar spinner
-// already conveys "tools are running"). Buffer-and-extract upstream
-// guarantees we only ever see complete envelopes here, so the old
-// sanitize / truncate / looksLikeStreamJson guards are gone.
-func assistantEventChunk(evt ClaudeAssistantEvent) ClaudeChunk {
+// `assistant` envelope's content[]. Filters parts to `text` for the
+// visible body. tool_use / tool_result / thinking are otherwise
+// dropped (the sidebar spinner already conveys "tools are running"),
+// EXCEPT for AskUserQuestion: those carry the id needed to satisfy
+// the model's blocking tool call, so we promote them onto the
+// returned chunk as AskQuestionId / AskQuestionText. The raw
+// envelope string is passed through so we can scrape the question
+// text out of the un-decoded `input` JSON.
+func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChunk {
     val texts = evt.Message.Content.Collect({
-        case ClaudePart(kind, text) if kind == "text" => text
+        case ClaudePart(kind, text, _, _) if kind == "text" => text
     })
+    val askId = firstAskUserQuestionId(evt.Message.Content)
+    val askText = if (askId == "") "" else extractFirstQuestionText(rawEnvelope)
     return ClaudeChunk(
-        Visible   = texts.MkString("\n"),
-        ErrorText = "",
-        LiveTurn  = Some(evt.Message.Usage),
-        FinalTurn = None[ClaudeUsage](),
-        CostUsd   = 0.0,
+        Visible         = texts.MkString("\n"),
+        ErrorText       = "",
+        LiveTurn        = Some(evt.Message.Usage),
+        FinalTurn       = None[ClaudeUsage](),
+        CostUsd         = 0.0,
+        AskQuestionId   = askId,
+        AskQuestionText = askText,
+        TurnEnded       = false,
     )
+}
+
+// firstAskUserQuestionId walks content[] and returns the `id` of the
+// first AskUserQuestion tool_use block, or "" when none is present.
+// We support exactly one pending question at a time today; a hypothetical
+// second tool_use in the same content[] is ignored — the user answers
+// the first question, then the model can re-ask in its next turn.
+func firstAskUserQuestionId(parts Array[ClaudePart]) string {
+    var i = 0
+    val n = parts.Size()
+    for i < n {
+        val p = parts.Get(i)
+        if p.Type == "tool_use" && p.Name == "AskUserQuestion" && p.Id != "" {
+            return p.Id
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// extractFirstQuestionText pulls the first `"question":"..."` value
+// out of the raw envelope JSON. Targeted string scan rather than a
+// nested codec because the surrounding `input` object has different
+// shapes per tool — we don't want to force a generic schema on it.
+// The scan respects the JSON string-escape rules (skips `\"` etc.)
+// and returns "" when no `"question"` key is found or the value
+// can't be parsed cleanly. Worst case the modal renders without a
+// preview line and the user reads the question from the model's
+// chat text — already visible in the transcript above the prompt.
+func extractFirstQuestionText(envelope string) string {
+    val needle = "\"question\":\""
+    val parts = strings.SplitN(envelope, needle, 2)
+    if len(parts) < 2 { return "" }
+    val afterKey = parts[1]
+    val rs = ToRunes(afterKey)
+    val n = len(rs)
+    var out = EmptyArray[string]()
+    var i = 0
+    var escaped = false
+    for i < n {
+        val c = rs[i]
+        if escaped {
+            // Decode the common escapes we'd see in a question string
+            // (newline, quote, backslash). Everything else passes
+            // through as the literal char after the backslash so the
+            // user-visible text doesn't accumulate hex codes.
+            if c == 'n' {
+                out = out.Append("\n")
+            } else {
+                out = out.Append(string(c))
+            }
+            escaped = false
+        } else if c == '\\' {
+            escaped = true
+        } else if c == '"' {
+            return out.MkString("")
+        } else {
+            out = out.Append(string(c))
+        }
+        i = i + 1
+    }
+    return ""
 }
 
 // resultEventChunk dispatches result events: errors surface as
@@ -3650,11 +3912,14 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
     if evt.IsError {
         val msg = if (evt.Result == "") "claude reported an error" else evt.Result
         return ClaudeChunk(
-            Visible   = "",
-            ErrorText = msg,
-            LiveTurn  = None[ClaudeUsage](),
-            FinalTurn = tokens,
-            CostUsd   = evt.TotalCostUsd,
+            Visible         = "",
+            ErrorText       = msg,
+            LiveTurn        = None[ClaudeUsage](),
+            FinalTurn       = tokens,
+            CostUsd         = evt.TotalCostUsd,
+            AskQuestionId   = "",
+            AskQuestionText = "",
+            TurnEnded       = true,
         )
     }
     // Render the `result` field as visible text on a clean turn. Two
@@ -3674,11 +3939,14 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
     // is the lesser evil vs. silent drop in case (b) — DESIGN.md says
     // "we'd rather under-format than under-render".
     return ClaudeChunk(
-        Visible   = evt.Result,
-        ErrorText = "",
-        LiveTurn  = None[ClaudeUsage](),
-        FinalTurn = tokens,
-        CostUsd   = evt.TotalCostUsd,
+        Visible         = evt.Result,
+        ErrorText       = "",
+        LiveTurn        = None[ClaudeUsage](),
+        FinalTurn       = tokens,
+        CostUsd         = evt.TotalCostUsd,
+        AskQuestionId   = "",
+        AskQuestionText = "",
+        TurnEnded       = true,
     )
 }
 
@@ -4847,6 +5115,13 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     // recovery, guidance, project-info, member-detail, archive view.
     if m.HelpVisible {
         return (m.Copy(HelpVisible = false), NoCmd[AppMsg]())
+    }
+    if m.PendingQuestion.IsDefined() {
+        // Esc on a pending question = "skip this question". The model
+        // sees its tool call unanswered when stdin closes and continues
+        // with whatever default it had in mind. Surfaced as an explicit
+        // dismissal in the transcript so the user has a record of it.
+        return onQuestionDismiss(m)
     }
     if m.Recovery.IsDefined() {
         // Esc on the recovery modal = "discard prior session" — same

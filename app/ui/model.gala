@@ -363,6 +363,29 @@ struct AppModel(
     // styling from this. Defaults to ApproveFocus so first-Enter
     // still ships, matching prior behavior.
     ApprovalFocus ApprovalChoice,
+    // PendingQuestion carries the in-flight `AskUserQuestion` tool
+    // call from a member's claude subprocess. Set when the chunk
+    // pump sees a `tool_use` block with name=AskUserQuestion; cleared
+    // when the user submits an answer (Enter on the composer) or
+    // dismisses (Esc). While set, composer Enter routes to
+    // onAnswerPendingQuestion (which sends the user's text back as a
+    // tool_result envelope) instead of onSubmit (which would queue a
+    // fresh user prompt).
+    PendingQuestion Option[PendingQuestion],
+)
+
+// PendingQuestion captures the state needed to answer one in-flight
+// AskUserQuestion tool call. The matching subprocess is identified by
+// `Member`; `ToolUseId` is the id from the assistant's tool_use block
+// and must round-trip back unchanged in the tool_result envelope.
+// `QuestionText` is the question body — extracted from the input JSON
+// and rendered in the conversation log so the user can see what's
+// being asked even when the model's surrounding chat narration was
+// sparse.
+struct PendingQuestion(
+    Member       string,
+    ToolUseId    string,
+    QuestionText string,
 )
 
 // BatchPr is one PR opened during this session. Stored in
@@ -516,6 +539,7 @@ func InitialModelWithTeams(
     ReadOnlyMode          = false,
     CompactSidebar        = false,
     ApprovalFocus         = ApproveFocus(),
+    PendingQuestion       = None[PendingQuestion](),
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -730,6 +754,19 @@ sealed type AppMsg {
     // the session is still alive — matches the stdout pump shape.
     case StderrArrived(Member string, Line string)
     case StderrEnded(Member string)
+    // AskUserQuestion fires when the chunk pump sees a tool_use
+    // block in `Member`'s stream with name=AskUserQuestion. Sets
+    // m.PendingQuestion so composer Enter routes to the tool_result
+    // path. `Id` is the tool_use_id that the eventual tool_result
+    // must echo back to satisfy the model's blocking tool call.
+    case AskUserQuestion(Member string, Id string, QuestionText string)
+    // KeyQuestionDismiss is Esc while a question is pending — drops
+    // PendingQuestion without sending an answer. The model sees the
+    // subprocess exit before the tool_result arrives, which it
+    // treats as a user dismissal. Same effect as the regression we
+    // just fixed, but now an explicit user choice instead of an
+    // unavoidable side effect of the stream-json plumbing.
+    case KeyQuestionDismiss
     // Lifecycle
     case TickMsg
     case QuitMsg

@@ -309,3 +309,4 @@ func TestGhTitle_BoldWrapAndLongTitleRegression(t T) T {
     val t3 = IsTrue(t2, strings.HasPrefix(title, "Crypto MVP"))
     return t3
 }
+

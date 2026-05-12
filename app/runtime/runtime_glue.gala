@@ -609,20 +609,17 @@ func PruneWorktrees(proj Project) Try[bool] = Try(() => {
 //     claude's implicit "most recent in cwd" `--continue`
 //     semantics.
 func claudeArgs(m Member, dangerouslySkipPermissions bool, sessionId string, isNewSession bool) Array[string] {
-    // `--input-format stream-json` lets us pipe multiple JSON envelopes
-    // (initial prompt + zero-or-more tool_result envelopes) to the
-    // subprocess on a single stdin without closing it after the first
-    // write. Required for AskUserQuestion handling: when the model
-    // emits a tool_use, claude blocks on stdin waiting for the
-    // matching tool_result; with the prior plain-text input mode there
-    // was no way to satisfy that block, so the tool call was reported
-    // back to the model as "user dismissed" and the question was lost
-    // to the user. Now we keep stdin open for the duration of the
-    // turn, forward the question to the UI, and write the tool_result
-    // envelope back when the user answers.
+    // Stream-json INPUT mode (`--input-format stream-json`) was the
+    // mechanism that let us write a tool_result envelope mid-turn for
+    // AskUserQuestion. It also requires us to keep stdin open until
+    // the `result` event arrives — which we got wrong in a way that
+    // broke first-turn chat. Until the answer-flow is reworked we
+    // keep stdin in text mode and accept that AskUserQuestion tool
+    // calls auto-dismiss as before (the parser still detects them
+    // and logs a system hint, so the user at least sees what was
+    // asked).
     val base = ArrayOf(
         "--print",
-        "--input-format", "stream-json",
         "--output-format", "stream-json",
         "--verbose",
     )
@@ -670,26 +667,27 @@ func NextStderrFuture(s MemberSession) concurrent.Future[Msg] {
     })
 }
 
-// SendFuture writes the initial-turn user prompt to claude's stdin as
-// a `{"type":"user","message":{"role":"user","content":"..."}}`
-// envelope. Stdin is intentionally left OPEN — with
-// `--input-format stream-json` claude reads additional envelopes (tool_result
-// for AskUserQuestion, follow-up prompts) on the same stdin. Closing
-// it would terminate the subprocess mid-turn the moment a tool_use
-// block is emitted, which used to happen on every clarifying question.
+// SendFuture writes `prompt` + "\n" to the session's stdin AND
+// closes stdin afterward. claude with `--print` (text input mode)
+// reads stdin to EOF before producing output — without an explicit
+// close, the child waits forever for more input.
 //
-// CloseSendFuture is the explicit close path, dispatched once the
-// turn's `result` event lands (no more tool calls coming).
+// The combined "write then close" lives in one Future so the read
+// pump can be started in parallel without an interleaving worry:
+// the child sees the prompt + EOF as a single transaction.
 //
-// Returns WriteSent on success, SessionFailed on a write error
-// (rare; usually means claude already exited).
+// Returns WriteSent on success, SessionFailed on a write or close
+// error (rare; usually means claude already exited).
 func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
     val name = s.Member.Name
     return concurrent.FutureApply[Msg](() => {
-        val line = encodeUserPromptEnvelope(prompt)
-        val w = s.Process.WriteLine(line)
+        val w = s.Process.WriteLine(prompt)
         if w.IsFailure() {
             return RtSessionFailed(Member = name, Err = w.GetError())
+        }
+        val c = s.Process.CloseStdin()
+        if c.IsFailure() {
+            return RtSessionFailed(Member = name, Err = c.GetError())
         }
         return RtWriteSent(Member = name)
     })

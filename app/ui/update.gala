@@ -1462,16 +1462,13 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if m.Composer == "" {
         return (m, NoCmd[AppMsg]())
     }
-    // A pending AskUserQuestion takes precedence over starting a new
-    // turn. Composer text becomes the answer to the question — sent
-    // back as a `tool_result` envelope on the member's existing
-    // stdin so the model can finish its in-flight turn instead of
-    // forking a new one. Without this branch, typing an answer would
-    // produce a fresh @summary cycle while the model still blocks on
-    // the tool call, and "the user dismissed the prompt" resurfaces.
-    if m.PendingQuestion.IsDefined() {
-        return onAnswerPendingQuestion(m, m.Composer)
-    }
+    // NOTE: the tool_result routing for AskUserQuestion is disabled
+    // until the stream-json input mode is reworked — the previous
+    // wiring closed stdin before the answer could be written, which
+    // broke first-turn chat (composer Enter landed on
+    // onAnswerPendingQuestion against a session that was no longer
+    // running). The detection / system-hint path still runs so the
+    // user at least sees the question text in the transcript.
     val prompt = m.Composer
     LogUserInput(prompt)
     val ctx = transitionContext(m)
@@ -2015,23 +2012,12 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
             ),
         )
     }
-    // Turn-end handling. With `--input-format stream-json` claude does
-    // NOT exit on its own; it idles waiting for more stdin. Once the
-    // turn's `result` event lands AND there's no pending question
-    // blocking the model, we close stdin so the subprocess wraps up.
-    // If a question IS pending, leave stdin open — the turn will
-    // resume after the user answers (claude will emit more chunks
-    // and another `result`).
-    val withCloseCmd = if (chunk.TurnEnded && withAsk.PendingQuestion.IsEmpty()) {
-        withAsk.Sessions.Get(name) match {
-            case Some(s) => runtimeFutureToCmd(CloseSendFuture(s))
-            case None()  => NoCmd[AppMsg]()
-        }
-    } else {
-        NoCmd[AppMsg]()
-    }
+    // With stdin closed at SendFuture time, claude exits naturally
+    // after the `result` event so there is no explicit close-on-end
+    // to schedule here — the read pump observes EOF and dispatches
+    // SessionFailed(io.EOF) which the FSM treats as turn-done.
     if displayText == "" {
-        return (withAsk, withCloseCmd)
+        return (withAsk, NoCmd[AppMsg]())
     }
     // Store displayText RAW (with @summary / @end / @dispatch
     // markers intact). The view renderer applies formatDirective-
@@ -2056,7 +2042,7 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     val withLine = setStatus(persistConversation(withLastSeen, nextConvo), name, nextStatus)
     val (m1, consultCmds) = maybeDispatchConsults(withLine, name, displayText)
     val (m2, memberCmds)  = maybeHandleMemberDirectives(m1, name, displayText)
-    val allCmds = memberCmds.FoldLeft(consultCmds.Append(withCloseCmd), (a, c) => a.Append(c))
+    val allCmds = memberCmds.FoldLeft(consultCmds, (a, c) => a.Append(c))
     return (m2, batchAll(allCmds))
 }
 

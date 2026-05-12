@@ -260,15 +260,10 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
     // GALA_TEAM_DEBUG is off.
     LogUserInput(displayPrompt)
 
-    // Fire the prompt write, then close stdin so claude wraps up the
-    // turn. With `--input-format stream-json` SendFuture no longer
-    // closes stdin on its own — that was changed so the TUI can write
-    // tool_result envelopes mid-turn for AskUserQuestion. Headless
-    // doesn't surface a UI for interactive tool calls, so we close
-    // stdin immediately and the model proceeds with whatever defaults
-    // it would have used had a UI dismissed the question.
+    // Fire the prompt write — SendFuture writes the prompt and
+    // closes stdin so claude (running with --print) sees the
+    // request as a complete transaction and produces output.
     val _ = SendFuture(s, wirePrompt).Await()
-    val _ = CloseSendFuture(s).Await()
 
     var stopped = false
     var failure = onbErr.Map((e) => s"onboarding: ${e}")

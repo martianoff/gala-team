@@ -3234,14 +3234,14 @@ func TestAskUserQuestion_AppMsg_SetsPendingQuestion(t T) T {
     }
 }
 
-// 5+6+7: composer Enter while a question is pending — currently the
-// tool_result back-channel is disabled (the stream-json input mode
-// that made it possible broke first-turn chat), so we fall through
-// to the normal onSubmit path: the FSM transitions to TLThinking,
-// the composer empties, a "you" line is logged. The pending question
-// stays in place as a transcript-only record of what was asked. This
-// is a placeholder assertion until Option B is reworked.
-func TestAskUserQuestion_ComposerSubmit_LogsAnswerAsNormalPrompt(t T) T {
+// 5+6+7: composer Enter routes through the tool_result path when a
+// question is pending. The pending state clears AND the composer
+// empties — the user's answer is the tool_result, not a fresh user
+// prompt. The "you" line is logged to the transcript for the audit
+// trail. The actual stdin write is verified separately at the runtime
+// layer (encodeToolResultEnvelope test); the model-level guarantee
+// is that no new TL turn fires.
+func TestAskUserQuestion_ComposerSubmit_RoutesToToolResult(t T) T {
     val seeded = sampleModel().Copy(
         PendingQuestion = Some(PendingQuestion(
             Member       = "Iris",
@@ -3252,11 +3252,13 @@ func TestAskUserQuestion_ComposerSubmit_LogsAnswerAsNormalPrompt(t T) T {
         ComposerCursor = 14,
     )
     val (m, _) = Update(seeded, KeySubmit())
-    val t1 = Eq(t, m.Composer, "")
+    val t1 = IsFalse(t, m.PendingQuestion.IsDefined())
+    val t2 = Eq(t1, m.Composer, "")
+    // "you" line carries the answer text — audit trail of what we sent.
     val youLines = m.Conversation.Filter((cl) => cl.Speaker == "you")
-    val t2 = IsTrue(t1, youLines.Size() >= 1)
+    val t3 = IsTrue(t2, youLines.Size() >= 1)
     val text = youLines.Get(youLines.Size() - 1).Text
-    return Eq(t2, text, "yes, extend fs")
+    return Eq(t3, text, "yes, extend fs")
 }
 
 // 8: KeyQuestionDismiss (also bound to Esc via onEscOrDeselect) drops
@@ -3355,10 +3357,29 @@ func TestEncodeToolResultEnvelope_MultilineAnswer_IsSingleLine(t T) T {
     return IsTrue(t2, strings.Contains(line, "line two"))
 }
 
-// Placeholder for the "AskUserQuestion takes precedence over Approval"
-// invariant — currently the tool_result back-channel is disabled, so
-// this assertion is a no-op until Option B is reworked.
-func TestAskUserQuestion_TakesPrecedenceOverApproval_Pending(t T) T {
-    return IsTrue(t, true)
+// onApprove / onReject / KeyApprove from the approval modal must NOT
+// fire when a question is pending — different state, different intent.
+// The composer's Enter routes to onAnswerPendingQuestion before any
+// of the FSM-state branches run. Verifies the precedence by seeding
+// both states: a pending question wins, and the FSM doesn't transition.
+func TestAskUserQuestion_TakesPrecedenceOverApproval(t T) T {
+    val seeded = sampleModel().Copy(
+        State           = Approval(SummaryBody = "draft summary"),
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Iris",
+            ToolUseId    = "toolu_pre",
+            QuestionText = "Continue?",
+        )),
+        Composer        = "yes",
+        ComposerCursor  = 3,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    val t1 = IsFalse(t, m.PendingQuestion.IsDefined())
+    // FSM stayed in Approval — composer text was NOT promoted to a
+    // user-prompt-then-transition; it was a tool_result instead.
+    return m.State match {
+        case Approval(_) => IsTrue(t1, true)
+        case _           => IsTrue(t1, false)
+    }
 }
 

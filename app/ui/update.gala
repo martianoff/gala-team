@@ -297,6 +297,13 @@ func spawnAggregatedStuckNudge(
 // stuck member in one block. Falls back to the single-member prompt
 // when only one is stuck — the additional "members listed below"
 // boilerplate is wasted cognitive load when there's just one.
+//
+// IMPORTANT directive: the prompt explicitly tells the TL NOT to
+// re-dispatch members who weren't named in the stuck list. The
+// real-world failure mode (audit log 05:18:30→05:24:54) was the TL
+// re-dispatching the WHOLE team on every Kael-stuck nudge, killing
+// Lyra's in-flight work each cycle and producing 5 redundant Lyra
+// spawns for one prompt.
 func buildAggregatedStuckPrompt(m AppModel, stuck Array[string], now time_utils.Instant) string {
     if stuck.Size() == 1 {
         return buildStuckNudgePrompt(m, stuck.Get(0), now)
@@ -309,7 +316,8 @@ func buildAggregatedStuckPrompt(m AppModel, stuck Array[string], now time_utils.
         return s"  • ${name} silent for ${elapsed}s"
     })
     val joined = rows.MkString("\n")
-    return s"System: ${stuck.Size()} members went stuck simultaneously past the heartbeat threshold:\n${joined}\n\nDecide what to do — re-prompt them with a single @dispatch listing every stuck name, reassign to other members, or @summary the turn as-is and surface the failures."
+    val onlyTheseNames = stuck.MkString(", ")
+    return s"System: ${stuck.Size()} members went stuck simultaneously past the heartbeat threshold:\n${joined}\n\nDecide what to do — re-prompt ONLY these stuck members via @dispatch(${onlyTheseNames}), reassign their work to a non-stuck teammate, or @summary the turn as-is and surface the failures.\n\nDO NOT re-dispatch other team members — every other engineer is still actively making progress on their original brief. Re-dispatching them now would kill their in-flight work and waste the turn they've already spent."
 }
 
 // spawnTLNudge fires a fresh TL turn with the given system prompt.
@@ -332,13 +340,15 @@ func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Arra
 // buildStuckNudgePrompt formats the system message the TL gets when
 // a member goes stuck. Includes elapsed seconds so the lead can
 // decide whether to re-prompt the same member, reassign the work, or
-// abandon the task.
+// abandon the task. Scoped to JUST the named stuck member — see
+// buildAggregatedStuckPrompt for the rationale on why TL must NOT
+// re-dispatch healthy teammates.
 func buildStuckNudgePrompt(m AppModel, name string, now time_utils.Instant) string {
     val elapsed = m.LastChunkAt.Get(name) match {
         case None()   => int64(0)
         case Some(at) => elapsedSeconds(now, at)
     }
-    return s"System: ${name} has been silent for ${elapsed}s past the stuck threshold. Decide what to do — re-prompt them via @dispatch(${name}), reassign the work to another member, or @summary the turn as-is. Reply with the directive(s) you want me to execute."
+    return s"System: ${name} has been silent for ${elapsed}s past the stuck threshold. Decide what to do — re-prompt them via @dispatch(${name}), reassign the work to a non-stuck teammate, or @summary the turn as-is. Reply with the directive(s) you want me to execute.\n\nDO NOT re-dispatch other team members — only ${name} is stuck. Other engineers are still actively working on their original briefs; re-dispatching them now would kill their in-flight work."
 }
 
 // pushTransitionToast maps a status escalation to a toast and pushes
@@ -1806,9 +1816,20 @@ func ensureSession(m AppModel, member Member) Either[string, AppModel] {
             return SpawnSession(m.Project, member, ws, m.Team.DangerouslySkipPermissions, sid, isNew) match {
                 case Success(s) => {
                     val nextRecovered = m.RecoveredMembers.FilterNot((n) => n == member.Name)
+                    // Reset LastChunkAt to NOW so the heartbeat
+                    // doesn't immediately mark this fresh subprocess
+                    // stuck against the prior subprocess's stale
+                    // timestamp. Past audits (re-dispatch storm in
+                    // 05:18:30→05:24:08) showed MemberStuck firing
+                    // 50 ms after a fresh spawn because the heartbeat
+                    // was comparing against an old LastChunkAt from
+                    // the killed session. The new subprocess deserves
+                    // a fresh `now` so liveness math starts from spawn,
+                    // not from whenever the prior session last spoke.
                     return Right[string, AppModel](m.Copy(
                         Sessions              = m.Sessions.Put(member.Name, s),
                         SessionIds            = m.SessionIds.Put(member.Name, sid),
+                        LastChunkAt           = m.LastChunkAt.Put(member.Name, time_utils.Now()),
                         RecoveredMembers      = nextRecovered,
                         RecoveryBannerVisible = m.RecoveryBannerVisible && nextRecovered.Size() > 0,
                     ))
@@ -2709,6 +2730,24 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 case Some(mm) => sendMemberNudge(cleaned, mm, memberMalformed)
             }
         }
+        // Duplicate-MemberDone guard. If `@done` was parsed out of the
+        // member's stream already in this turn (onMemberDone wrote the
+        // body into MemberDoneBodies and closed the session via
+        // closeLiveSession), the FSM has already advanced through
+        // MemberDone. The EOF we're processing now is the trailing
+        // signal from that same closure — re-firing MemberDone here
+        // produces the doubled `fsm_transition MemberDone(name)` event
+        // pair observed in the audit log (2 events 54 ms apart). The
+        // FSM tolerates the no-op self-loop but it churns state and
+        // could mis-trigger any future event handler that isn't
+        // idempotent. PendingClosures usually catches this race
+        // (closeLiveSession bumps it before EOF arrives), but the
+        // counter occasionally lands at 0 when timing is unkind.
+        // MemberDoneBodies acts as the in-turn watermark.
+        val alreadyFired = cleaned.MemberDoneBodies.Get(name).GetOrElse("") != ""
+        if alreadyFired {
+            return (setStatus(cleaned, name, StIdle()), NoCmd[AppMsg]())
+        }
         val body = cleaned.MemberDoneBodies.Get(name).GetOrElse("")
         val nextState = transitionLogged(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
         return (setStatus(cleaned.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
@@ -2803,9 +2842,29 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
         // Y" mismatch detectable from the log alone — which is the
         // class of bug that surfaced as the ghost-Mira investigation.
         LogDispatch(name, body)
-        return findMemberByName(curM.Team.Members, name) match {
-            case None() => (curM, curCmds)
-            case Some(mem) => ensureSession(curM, mem) match {
+        // Kill any in-flight subprocess for the same member BEFORE
+        // spawning the new one. Without this, the previous claude
+        // keeps streaming chunks (still attached to the old session
+        // pointer's closure in the read pump) AND the new one
+        // streams in parallel — both dispatch under the same member
+        // name, so @done / @help / @blocked can fire twice for one
+        // logical turn. closeLiveSession bumps PendingClosures so
+        // the trailing EOF from the killed subprocess is recognised
+        // as stale and skipped. Same shape as onSubmit's lead-side
+        // close.
+        //
+        // Also reset the directive-parser watermark + buffer so the
+        // new dispatch starts with a clean slate — a re-dispatched
+        // member's NEW @done shouldn't be skipped just because the
+        // last turn's @done already incremented the fired counter.
+        val mClosed = closeLiveSession(curM, name).Copy(
+            MemberBuffers         = curM.MemberBuffers.Remove(name),
+            MemberDirectivesFired = curM.MemberDirectivesFired.Remove(name),
+            MemberDoneBodies      = curM.MemberDoneBodies.Remove(name),
+        )
+        return findMemberByName(mClosed.Team.Members, name) match {
+            case None() => (mClosed, curCmds)
+            case Some(mem) => ensureSession(mClosed, mem) match {
                 case Left(err)  => (curM.Copy(LastError = Some(s"dispatch ${name}: ${err}")), curCmds)
                 case Right(m1)  => {
                     // Pipeline upsert: append (or refresh status of)
@@ -3840,8 +3899,20 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
     })
     val askId = firstAskUserQuestionId(evt.Message.Content)
     val askText = if (askId == "") "" else extractFirstQuestionText(rawEnvelope)
+    // Tool-activity surface: when an assistant chunk carries a
+    // tool_use part (Edit, Read, Bash, Write…) but no visible text,
+    // synthesize a dim "using <ToolName>" line so the user sees
+    // activity instead of dead air. The audit log of the 0.49.0
+    // migration showed Kael producing 148 tool_use chunks and only
+    // 12 visible-text chunks over a 33-minute session — the user-
+    // facing transcript looked frozen while claude was actually
+    // editing files at full speed. AskUserQuestion is excluded
+    // (the AskQuestion path already surfaces a dedicated hint).
+    val visibleText = texts.MkString("\n")
+    val toolName = if (visibleText != "" || askId != "") "" else firstToolUseName(evt.Message.Content)
+    val visibleOut = if (toolName == "") visibleText else s"using ${toolName}"
     return ClaudeChunk(
-        Visible         = texts.MkString("\n"),
+        Visible         = visibleOut,
         ErrorText       = "",
         LiveTurn        = Some(evt.Message.Usage),
         FinalTurn       = None[ClaudeUsage](),
@@ -3850,6 +3921,23 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
         AskQuestionText = askText,
         TurnEnded       = false,
     )
+}
+
+// firstToolUseName returns the `name` of the first non-AskUserQuestion
+// tool_use block in content, or "" when no such block exists.
+// AskUserQuestion is excluded because it has its own UI surface
+// (the system hint appended by applyChunkVisible).
+func firstToolUseName(parts Array[ClaudePart]) string {
+    var i = 0
+    val n = parts.Size()
+    for i < n {
+        val p = parts.Get(i)
+        if p.Type == "tool_use" && p.Name != "" && p.Name != "AskUserQuestion" {
+            return p.Name
+        }
+        i = i + 1
+    }
+    return ""
 }
 
 // firstAskUserQuestionId walks content[] and returns the `id` of the

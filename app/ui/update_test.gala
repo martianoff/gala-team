@@ -2450,11 +2450,19 @@ func TestRealClaude_AssistantThinking_IsDropped(t T) T {
     return Eq(t, m.Conversation.Filter((cl) => cl.Speaker == "Iris").Size(), 0)
 }
 
-func TestRealClaude_AssistantToolUse_IsDropped(t T) T {
+// `tool_use` chunks now surface a one-line "using <ToolName>"
+// activity hint in the conversation so the user (and the heartbeat)
+// can see when claude is editing / reading / running commands but
+// not emitting visible prose. Without this surface, a member doing
+// 30 minutes of Edit calls looked frozen in the TUI even though
+// claude was working at full speed — see the 0.49.0-migration audit.
+func TestRealClaude_AssistantToolUse_SurfacesActivityHint(t T) T {
     val seed = sampleModel()
     val line = "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-7\",\"id\":\"msg_02\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_01\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\",\"description\":\"list files\"},\"caller\":{\"type\":\"direct\"}}],\"usage\":{\"input_tokens\":5,\"output_tokens\":48,\"cache_read_input_tokens\":0}}}"
     val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
-    return Eq(t, m.Conversation.Filter((cl) => cl.Speaker == "Iris").Size(), 0)
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Iris")
+    val t1 = Eq(t, entries.Size(), 1)
+    return Eq(t1, entries.Get(0).Text, "using Bash")
 }
 
 func TestRealClaude_UserToolResult_IsDropped(t T) T {
@@ -3564,5 +3572,144 @@ func TestFirstTurn_PendingWithEmptyMember_FallsThroughToNormalSubmit(t T) T {
     // No empty-member toast.
     val noEmptyMemberToast = !m.Toasts.Items.Exists((tt) => strings.HasPrefix(tt.Message, " is no longer running"))
     return IsTrue(t3, noEmptyMemberToast)
+}
+
+// ----------------------------------------------------------------------------
+// Orchestrator dispatch bugs uncovered in the 0.49.0-migration audit log
+// (gala_team .gala_team/sessions/debug/events.jsonl, 04:55–05:37 UTC):
+//   - Duplicate MemberDone fired twice for Lyra within 54 ms.
+//   - Stuck-nudge cascade re-dispatched both engineers 5× even though
+//     only one was stuck; the healthy one lost in-flight work each cycle.
+//   - Freshly-respawned member marked stuck within 50 ms because
+//     LastChunkAt still held the prior subprocess's stale timestamp.
+//   - 148 tool_use chunks produced zero conversation entries —
+//     transcripts looked frozen while Kael was editing at full speed.
+//
+// Each test below pins one of those invariants. Names start with
+// `TestDispatchBugs_` so future readers can grep the audit narrative.
+// ----------------------------------------------------------------------------
+
+// 1. Duplicate MemberDone suppression.
+//
+// When `@done` has already been parsed for a member (MemberDoneBodies
+// has an entry), the subsequent EOF-driven MemberDone in
+// onSessionFailed must NOT fire. The FSM tolerates the no-op self
+// loop but it churns transition events; the audit log showed two
+// MemberDone transitions for Lyra 54ms apart in the Delegating→
+// Delegating loop. After the fix only one transition is emitted.
+func TestDispatchBugs_NoDuplicateMemberDoneOnEofAfterAtDone(t T) T {
+    val seed = sampleModel().Copy(
+        State            = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        MemberDoneBodies = EmptyHashMap[string, string]().Put("Felix", "shipped"),
+    )
+    val before = pendingSizeOf(seed.State)
+    val (m, _) = Update(seed, SessionFailed(Member = "Felix", ErrText = "EOF"))
+    val after = pendingSizeOf(m.State)
+    // The pending set must be UNCHANGED — afterMemberDone would have
+    // removed "Felix" from Pending (Felix already done via @done).
+    // The post-fix path early-returns before transitionLogged, so
+    // Pending stays at its prior size.
+    return Eq(t, after, before)
+}
+
+// pendingSizeOf returns the size of the Delegating pending set, or
+// -1 when the state isn't Delegating. Test helper for the duplicate-
+// MemberDone assertion.
+func pendingSizeOf(s AppState) int = s match {
+    case Delegating(pending) => pending.Size()
+    case _                   => -1
+}
+
+func arrayToHashSet(xs Array[string]) HashSet[string] =
+    xs.FoldLeft(EmptyHashSet[string](), (acc, s) => acc.Add(s))
+
+// 2. Stuck-nudge prompt scoping.
+//
+// The aggregated prompt MUST tell the TL not to re-dispatch healthy
+// teammates. Audit log: TL re-dispatched Lyra five times even though
+// only Kael was stuck — the prior wording invited "reassign to other
+// members" which the model interpreted as "respawn the whole team."
+func TestDispatchBugs_StuckPrompt_ScopedToStuckMembersOnly(t T) T {
+    val now = time_utils.Now()
+    val m = sampleModel()
+    val singleStuck = buildStuckNudgePrompt(m, "Kael", now)
+    val t1 = IsTrue(t, strings.Contains(singleStuck, "DO NOT re-dispatch other team members"))
+    val multiStuck = buildAggregatedStuckPrompt(m, ArrayOf("Kael", "Mira"), now)
+    val t2 = IsTrue(t1, strings.Contains(multiStuck, "DO NOT re-dispatch other team members"))
+    // Sanity: the aggregate prompt lists exactly the stuck names, not
+    // every team member.
+    val t3 = IsTrue(t2, strings.Contains(multiStuck, "@dispatch(Kael, Mira)"))
+    return IsFalse(t3, strings.Contains(multiStuck, "@dispatch(Felix"))
+}
+
+// 3. LastChunkAt grace period on respawn.
+//
+// ensureSession must reset LastChunkAt[name] = now when it spawns a
+// fresh subprocess so the heartbeat's "stuck since LastChunkAt"
+// math measures against the NEW process, not the old one's stale
+// last-chunk time. Without this, the new subprocess could be marked
+// stuck 50 ms after spawn (audit log 05:18:38 → 05:18:38.199).
+func TestDispatchBugs_EnsureSession_ResetsLastChunkAtToNow(t T) T {
+    val proj = sampleProject()
+    val team = sampleTeam()
+    val member = team.Members.Get(0)  // first member — sampleTeam's lead "Iris"
+    // Seed a model with LastChunkAt pointed at the deep past (stale
+    // from a prior subprocess that crashed an hour ago).
+    val pastInstant = time_utils.UnixEpoch()
+    val seed = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy()).Copy(
+        LastChunkAt = EmptyHashMap[string, time_utils.Instant]().Put(member.Name, pastInstant),
+    )
+    return ensureSession(seed, member) match {
+        case Left(_)   => IsTrue(t, false)  // spawn failed — test setup issue
+        case Right(m1) => {
+            // The new LastChunkAt MUST be more recent than the
+            // stale past instant. Any post-epoch timestamp counts;
+            // we don't pin to exact-now because the production
+            // path uses time_utils.Now() which moves.
+            val updated = m1.LastChunkAt.Get(member.Name).GetOrElse(pastInstant)
+            return IsTrue(t, updated.UnixNanos() > pastInstant.UnixNanos())
+        }
+    }
+}
+
+// 4. Tool-use activity hint.
+//
+// An assistant chunk containing a tool_use part but no visible text
+// produces a "using <ToolName>" line in the transcript — the
+// audit log showed 148 such chunks producing zero conversation
+// entries, making the user think Kael had frozen. Multiple chunks
+// for the SAME tool dedupe via isDuplicateOfLastConvoLine so the
+// transcript doesn't get spammed with 148 identical "using Edit"
+// lines.
+func TestDispatchBugs_ToolUseChunk_AppendsActivityHint(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Edit\",\"input\":{\"file_path\":\"a.go\"}}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Felix")
+    val t1 = Eq(t, entries.Size(), 1)
+    return Eq(t1, entries.Get(0).Text, "using Edit")
+}
+
+func TestDispatchBugs_RepeatedSameToolUse_DedupesInTranscript(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t2\",\"name\":\"Edit\",\"input\":{\"file_path\":\"b.go\"}}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}"
+    val (m1, _) = Update(seed, ChunkArrived(Member = "Felix", Line = line))
+    val (m2, _) = Update(m1,   ChunkArrived(Member = "Felix", Line = line))
+    val (m3, _) = Update(m2,   ChunkArrived(Member = "Felix", Line = line))
+    // Three identical "using Edit" chunks → exactly one entry in
+    // the transcript thanks to isDuplicateOfLastConvoLine.
+    return Eq(t, m3.Conversation.Filter((cl) => cl.Speaker == "Felix").Size(), 1)
+}
+
+// Tool-use hint does NOT fire when the assistant chunk has visible
+// text — claude's real reasoning takes precedence; the "using <X>"
+// surface is only for the silent-tool-call case.
+func TestDispatchBugs_ToolUseWithText_KeepsTextNotHint(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Plan: edit a.go\"},{\"type\":\"tool_use\",\"id\":\"t3\",\"name\":\"Edit\",\"input\":{\"file_path\":\"a.go\"}}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = line))
+    val entries = m.Conversation.Filter((cl) => cl.Speaker == "Felix")
+    val t1 = Eq(t, entries.Size(), 1)
+    return Eq(t1, entries.Get(0).Text, "Plan: edit a.go")
 }
 

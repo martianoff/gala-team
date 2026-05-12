@@ -1463,24 +1463,36 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return (m, NoCmd[AppMsg]())
     }
     // A pending AskUserQuestion takes precedence over starting a new
-    // turn. Composer text becomes the answer to the question — sent
-    // back as a `tool_result` envelope on the member's existing
-    // stdin so the model can finish its in-flight turn instead of
-    // forking a new one. Without this branch, typing an answer would
-    // produce a fresh @summary cycle while the model still blocks on
-    // the tool call, and "the user dismissed the prompt" resurfaces.
-    if m.PendingQuestion.IsDefined() {
+    // turn ONLY when the originating member's subprocess is still
+    // alive. Without the liveness gate, a stale PendingQuestion (one
+    // whose subprocess crashed or finished its turn before the user
+    // typed an answer) would swallow every subsequent composer
+    // submit behind an "answer not delivered" toast and the user
+    // would lose every prompt they typed — that was the user-facing
+    // failure mode of the original wiring. When the session is gone,
+    // we drop the stale pending state and fall through to the normal
+    // new-turn path, treating the composer text as a fresh prompt
+    // for the lead. An empty `Member` (defensive guard against future
+    // refactors that might construct PendingQuestion without one) is
+    // treated identically to a missing session.
+    val pendingLive = m.PendingQuestion match {
+        case Some(p) if p.Member != "" && m.Sessions.Get(p.Member).IsDefined() => true
+        case _                                                                   => false
+    }
+    if pendingLive {
         return onAnswerPendingQuestion(m, m.Composer)
     }
-    val prompt = m.Composer
+    val droppedStalePending = m.PendingQuestion.IsDefined() && !pendingLive
+    val mClean = if (droppedStalePending) m.Copy(PendingQuestion = None[PendingQuestion]()) else m
+    val prompt = mClean.Composer
     LogUserInput(prompt)
-    val ctx = transitionContext(m)
-    val nextState = transitionLogged(m.State, UserPrompted(), ctx)
-    val withState = m.Copy(
+    val ctx = transitionContext(mClean)
+    val nextState = transitionLogged(mClean.State, UserPrompted(), ctx)
+    val withState = mClean.Copy(
         State = nextState,
         Composer = "",
         ComposerCursor = 0,
-        Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt, At = time_utils.Now().UnixNanos())),
+        Conversation = mClean.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt, At = time_utils.Now().UnixNanos())),
         // Sending a new message means the user is acting "now" — re-stick
         // to the bottom of the conversation so they see their own line
         // and the incoming response without having to press End.
@@ -1512,13 +1524,13 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // always the first node — they're the one we're about to
         // spawn for this prompt. Engineers / QA append later as
         // dispatches fire.
-        Pipeline = PipelineUpsert(EmptyPipelineState(), m.Team.Lead.Name, StWorking()),
+        Pipeline = PipelineUpsert(EmptyPipelineState(), mClean.Team.Lead.Name, StWorking()),
     )
-    val lead = m.Team.Lead
+    val lead = mClean.Team.Lead
     // First-turn detection keys on whether we have a SessionId for
     // the lead — claude with `--print` doesn't keep processes alive
     // across turns, so the SessionId map is the source of truth.
-    val firstTurn = !m.SessionIds.Get(lead.Name).IsDefined()
+    val firstTurn = !mClean.SessionIds.Get(lead.Name).IsDefined()
     // Kill any in-flight lead subprocess BEFORE spawning a new one.
     // Without this, a fast-double-submit (user types, hits Enter, types
     // again, hits Enter while claude is still streaming) leaves the
@@ -1531,7 +1543,7 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         case Left(err)  => (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
         case Right(m1)  => {
             val (effectivePrompt, onboardingErr) =
-                if (firstTurn) onboarding.WrapPromptSafe(m.Project, m.Team, lead, m.Policy.WorkspaceMode, prompt)
+                if (firstTurn) onboarding.WrapPromptSafe(mClean.Project, mClean.Team, lead, mClean.Policy.WorkspaceMode, prompt)
                 else           (prompt, None[string]())
             val m2 = onboardingErr match {
                 case Some(e) => m1.Copy(LastError = Some(s"onboarding: ${e}"))

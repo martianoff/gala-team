@@ -3383,3 +3383,186 @@ func TestAskUserQuestion_TakesPrecedenceOverApproval(t T) T {
     }
 }
 
+// ----------------------------------------------------------------------------
+// First-turn-with-AskUserQuestion regression — reproduces the user-reported
+// "doesn't work anymore" symptom (PR #21 build): typing a fresh prompt,
+// pressing Enter, getting an empty-member "is no longer running — answer
+// not delivered" toast plus a saved transcript line whose Text contains
+// a literal "you: " prefix. The story below walks the exact state the
+// user hit; each step asserts the invariant we expect.
+//
+// Story:
+//   1. Idle model, no sessions, no PendingQuestion.
+//   2. User types "update gala to 0.49.0..." into the composer.
+//   3. User presses Enter (KeySubmit).
+//   4. The first conversation entry MUST be a "you" line whose Text
+//      equals the composer string verbatim. No "you:" speaker prefix
+//      may leak into the Text field — that's the symptom the user
+//      saw in latest.json after the failure.
+//   5. PendingQuestion is None at this point: no chunk has arrived yet.
+// ----------------------------------------------------------------------------
+
+func TestFirstTurn_PromptText_HasNoSpeakerPrefix(t T) T {
+    val seeded = sampleModel().Copy(
+        Composer       = "update gala to 0.49.0...",
+        ComposerCursor = 24,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    val youLines = m.Conversation.Filter((cl) => cl.Speaker == "you")
+    val t1 = IsTrue(t, youLines.Size() >= 1)
+    val text = youLines.Get(0).Text
+    // The text MUST be the raw composer string. Any "you: " prefix
+    // means we routed through onAnswerPendingQuestion against a
+    // stale PendingQuestion, OR the renderer leaked the speaker
+    // prefix back into the model — both are the regression.
+    val t2 = IsFalse(t1, strings.HasPrefix(text, "you:"))
+    return Eq(t2, text, "update gala to 0.49.0...")
+}
+
+// 5 (cont'd): after the first KeySubmit the model must NOT have a
+// PendingQuestion — nothing in the chunk pump has fired yet. The
+// regression on the user's build had `PendingQuestion = Some(empty)`
+// at this point, which then trapped the *next* KeySubmit into
+// onAnswerPendingQuestion.
+func TestFirstTurn_NoPendingQuestionImmediatelyAfterSubmit(t T) T {
+    val seeded = sampleModel().Copy(
+        Composer       = "hello there",
+        ComposerCursor = 11,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    return IsFalse(t, m.PendingQuestion.IsDefined())
+}
+
+// 6. After an AskUserQuestion chunk arrives, PendingQuestion must
+// carry the MEMBER NAME from the chunk — not "" — so the
+// follow-up onAnswerPendingQuestion lookup hits the live session
+// instead of falling through to the "is no longer running" toast
+// with an empty member in its format string.
+func TestFirstTurn_AskUserQuestion_PendingHasNonEmptyMember(t T) T {
+    val seed = sampleModel()
+    val (m, _) = Update(seed, ChunkArrived(Member = "Vesper", Line = askUserQuestionEnvelope))
+    return m.PendingQuestion match {
+        case None() => IsTrue(t, false)
+        case Some(p) => {
+            val t1 = IsTrue(t, p.Member != "")
+            return Eq(t1, p.Member, "Vesper")
+        }
+    }
+}
+
+// 7. After AskUserQuestion is set AND the user types an answer + Enter,
+// onAnswerPendingQuestion appends a "you" line whose Text equals the
+// composer verbatim. No speaker prefix leak. The session lookup will
+// fail in this test (no live session) and surface a toast — the
+// invariant under test is the TEXT, not the toast.
+func TestFirstTurn_AnswerText_HasNoSpeakerPrefix(t T) T {
+    val seeded = sampleModel().Copy(
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Vesper",
+            ToolUseId    = "toolu_x",
+            QuestionText = "Continue?",
+        )),
+        Composer       = "extend fs",
+        ComposerCursor = 9,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    val youLines = m.Conversation.Filter((cl) => cl.Speaker == "you")
+    val t1 = IsTrue(t, youLines.Size() >= 1)
+    val text = youLines.Get(youLines.Size() - 1).Text
+    val t2 = IsFalse(t1, strings.HasPrefix(text, "you:"))
+    return Eq(t2, text, "extend fs")
+}
+
+// 8. With the liveness guard, a pending question against a missing
+// session NEVER surfaces a toast — composer Enter falls through to
+// the normal new-turn path. The user's previous experience (red
+// "answer not delivered" toast, lost prompt) does not recur.
+// This is the regression net for the "answer not delivered" toast
+// reappearing on stale state.
+func TestFirstTurn_NoLiveSession_NoAnswerNotDeliveredToast(t T) T {
+    val seeded = sampleModel().Copy(
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Vesper",
+            ToolUseId    = "toolu_x",
+            QuestionText = "Continue?",
+        )),
+        Composer       = "extend fs",
+        ComposerCursor = 9,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    val anyDeliverToast = m.Toasts.Items.Exists((tt) => strings.Contains(tt.Message, "answer not delivered"))
+    return IsFalse(t, anyDeliverToast)
+}
+
+// 9. KEY REGRESSION: composer Enter must NOT route through
+// onAnswerPendingQuestion when the pending member's session doesn't
+// exist. The user's report ("doesn't work anymore", "it start working
+// from 2nd sentences") was driven by this exact case: the model
+// had a stale PendingQuestion from an earlier (now-dead) session,
+// and EVERY composer submit got swallowed by the "answer not
+// delivered" toast — the user's actual input was logged as a
+// pseudo-answer instead of a fresh prompt. Falling through to
+// onSubmit treats the input as the new turn the user intended,
+// and clears the stale pending state on the way through.
+func TestFirstTurn_PendingWithNoSession_FallsThroughToNormalSubmit(t T) T {
+    val seeded = sampleModel().Copy(
+        // PendingQuestion set, but Sessions has NO entry for "Vesper".
+        // This is the state the user landed in: stale pending from a
+        // crashed / completed prior session.
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Vesper",
+            ToolUseId    = "toolu_old",
+            QuestionText = "scope?",
+        )),
+        Composer       = "update gala to 0.49.0",
+        ComposerCursor = 20,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    // Pending is cleared (normal onSubmit + the fall-through path
+    // both clear it).
+    val t1 = IsFalse(t, m.PendingQuestion.IsDefined())
+    // The conversation logs the user's text as a REGULAR PROMPT —
+    // not as an answer that got swallowed. Speaker="you", text
+    // matches the composer verbatim (no "you: " prefix from a
+    // stale code path).
+    val youLines = m.Conversation.Filter((cl) => cl.Speaker == "you")
+    val t2 = IsTrue(t1, youLines.Size() >= 1)
+    val lastYou = youLines.Get(youLines.Size() - 1).Text
+    val t3 = Eq(t2, lastYou, "update gala to 0.49.0")
+    // Composer is cleared, ready for the next message.
+    val t4 = Eq(t3, m.Composer, "")
+    // No "answer not delivered" toast — that's the user-visible
+    // signal that the regression came back.
+    val noDeliverToast = !m.Toasts.Items.Exists((tt) => strings.Contains(tt.Message, "answer not delivered"))
+    return IsTrue(t4, noDeliverToast)
+}
+
+// 10. KEY REGRESSION (variant): defensively guard against
+// PendingQuestion being set with an empty member name. The user's
+// screenshot showed " is no longer running" — leading space from
+// an empty `${pending.Member}` interpolation. Even if we never set
+// it that way intentionally, a snapshot import / future refactor
+// could land us in that state; the routing should ignore an
+// invalid pending rather than swallow user input behind a
+// confusing toast.
+func TestFirstTurn_PendingWithEmptyMember_FallsThroughToNormalSubmit(t T) T {
+    val seeded = sampleModel().Copy(
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "",
+            ToolUseId    = "toolu_z",
+            QuestionText = "?",
+        )),
+        Composer       = "real prompt",
+        ComposerCursor = 11,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    val t1 = IsFalse(t, m.PendingQuestion.IsDefined())
+    val youLines = m.Conversation.Filter((cl) => cl.Speaker == "you")
+    val t2 = IsTrue(t1, youLines.Size() >= 1)
+    val lastYou = youLines.Get(youLines.Size() - 1).Text
+    val t3 = Eq(t2, lastYou, "real prompt")
+    // No empty-member toast.
+    val noEmptyMemberToast = !m.Toasts.Items.Exists((tt) => strings.HasPrefix(tt.Message, " is no longer running"))
+    return IsTrue(t3, noEmptyMemberToast)
+}
+

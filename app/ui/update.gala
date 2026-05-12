@@ -1931,6 +1931,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
             AskQuestionId   = "",
             AskQuestionText = "",
             TurnEnded       = false,
+            IsToolActivity  = false,
         )
         val (m1, c) = applyChunkVisible(m, name, proseChunk)
         val pumpCmd = m1.Sessions.Get(name) match {
@@ -2064,6 +2065,16 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
         NoCmd[AppMsg]()
     }
     if displayText == "" {
+        // Tool-activity flip: a silent tool_use chunk still means
+        // the member is alive and working. Keep the heartbeat clock
+        // ticking by flipping status back to StWorking, but DON'T
+        // append a conversation line — the sidebar timer is the
+        // signal; per-tool rows in chat were noise.
+        if chunk.IsToolActivity {
+            val current = withAsk.Statuses.Get(name).GetOrElse(StIdle())
+            val nextStatus = if (isStickyStatus(current)) current else StWorking()
+            return (setStatus(withAsk, name, nextStatus), withCloseCmd)
+        }
         return (withAsk, withCloseCmd)
     }
     // Store displayText RAW (with @summary / @end / @dispatch
@@ -3661,6 +3672,15 @@ struct ClaudeChunk(
     // open forever; without this signal the subprocess would idle
     // after every turn.
     TurnEnded bool,
+    // IsToolActivity is true when the assistant chunk contains only a
+    // `tool_use` part (Edit/Read/Bash/...) and no visible text — i.e.
+    // the model is silently doing work. The orchestrator uses this
+    // flag to flip the member's status back to StWorking (so the
+    // sidebar timer keeps ticking and the heartbeat doesn't escalate
+    // to Slow/Stuck) WITHOUT appending a conversation line — those
+    // "using <Tool>" lines added no value to the chat and would have
+    // spammed the transcript with one entry per tool call.
+    IsToolActivity bool,
 )
 
 // emptyChunk is the "drop this line" marker.
@@ -3673,6 +3693,7 @@ func emptyChunk() ClaudeChunk = ClaudeChunk(
     AskQuestionId   = "",
     AskQuestionText = "",
     TurnEnded       = false,
+    IsToolActivity  = false,
 )
 
 // filterClaudeStreamJsonFor is the chunk classifier. The `member`
@@ -3899,20 +3920,18 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
     })
     val askId = firstAskUserQuestionId(evt.Message.Content)
     val askText = if (askId == "") "" else extractFirstQuestionText(rawEnvelope)
-    // Tool-activity surface: when an assistant chunk carries a
-    // tool_use part (Edit, Read, Bash, Write…) but no visible text,
-    // synthesize a dim "using <ToolName>" line so the user sees
-    // activity instead of dead air. The audit log of the 0.49.0
-    // migration showed Kael producing 148 tool_use chunks and only
-    // 12 visible-text chunks over a 33-minute session — the user-
-    // facing transcript looked frozen while claude was actually
-    // editing files at full speed. AskUserQuestion is excluded
-    // (the AskQuestion path already surfaces a dedicated hint).
+    // Tool-activity flag: when an assistant chunk carries a tool_use
+    // part (Edit, Read, Bash, Write…) but no visible text and no
+    // AskUserQuestion, raise IsToolActivity. The chunk pump uses the
+    // flag to flip the member back to StWorking so the heartbeat
+    // doesn't escalate during a long edit run, but does NOT append
+    // a conversation line — the user gets activity signal via the
+    // sidebar timer instead of dozens of "using <Tool>" rows
+    // spamming the chat.
     val visibleText = texts.MkString("\n")
-    val toolName = if (visibleText != "" || askId != "") "" else firstToolUseName(evt.Message.Content)
-    val visibleOut = if (toolName == "") visibleText else s"using ${toolName}"
+    val isToolActivity = visibleText == "" && askId == "" && hasAnyToolUse(evt.Message.Content)
     return ClaudeChunk(
-        Visible         = visibleOut,
+        Visible         = visibleText,
         ErrorText       = "",
         LiveTurn        = Some(evt.Message.Usage),
         FinalTurn       = None[ClaudeUsage](),
@@ -3920,24 +3939,25 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
         AskQuestionId   = askId,
         AskQuestionText = askText,
         TurnEnded       = false,
+        IsToolActivity  = isToolActivity,
     )
 }
 
-// firstToolUseName returns the `name` of the first non-AskUserQuestion
-// tool_use block in content, or "" when no such block exists.
-// AskUserQuestion is excluded because it has its own UI surface
-// (the system hint appended by applyChunkVisible).
-func firstToolUseName(parts Array[ClaudePart]) string {
+// hasAnyToolUse returns true when any content part is a non-empty
+// non-AskUserQuestion tool_use block. Used to flag silent tool work
+// so the heartbeat treats the chunk as "alive" without surfacing
+// per-tool lines in the user-facing transcript.
+func hasAnyToolUse(parts Array[ClaudePart]) bool {
     var i = 0
     val n = parts.Size()
     for i < n {
         val p = parts.Get(i)
         if p.Type == "tool_use" && p.Name != "" && p.Name != "AskUserQuestion" {
-            return p.Name
+            return true
         }
         i = i + 1
     }
-    return ""
+    return false
 }
 
 // firstAskUserQuestionId walks content[] and returns the `id` of the
@@ -4020,6 +4040,7 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
             AskQuestionId   = "",
             AskQuestionText = "",
             TurnEnded       = true,
+            IsToolActivity  = false,
         )
     }
     // Render the `result` field as visible text on a clean turn. Two
@@ -4047,6 +4068,7 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
         AskQuestionId   = "",
         AskQuestionText = "",
         TurnEnded       = true,
+        IsToolActivity  = false,
     )
 }
 

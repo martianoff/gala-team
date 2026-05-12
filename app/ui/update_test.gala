@@ -3160,3 +3160,226 @@ func TestJsonExtract_EscapedQuoteInsideString_StillTracksProperly(t T) T {
     return Eq(t, ext.Envelopes.Size(), 1)
 }
 
+// ----------------------------------------------------------------------------
+// AskUserQuestion forwarding — regression net for the "TL asks but the
+// user never gets the question" bug. The stream-json subprocess emits a
+// tool_use block with name=AskUserQuestion, the orchestrator must:
+//   1. Detect the tool_use in the assistant content[]
+//   2. Set m.PendingQuestion (with member + tool_use_id + question text)
+//   3. Append a "waiting for your answer" system line to the transcript
+//   4. NOT close the subprocess's stdin (turn isn't done yet)
+// On the user's reply via the composer:
+//   5. Format the answer as a tool_result envelope
+//   6. Write it to the originating member's stdin (does NOT spawn a new
+//      claude --resume — the existing subprocess unblocks and continues
+//      its in-flight turn)
+//   7. Clear PendingQuestion and re-render the composer hint
+// On Esc:
+//   8. Drop PendingQuestion + log a dismissal line (mirrors the prior
+//      involuntary behavior but as an explicit user choice)
+// ----------------------------------------------------------------------------
+
+// Sample stream-json envelope carrying an AskUserQuestion tool_use,
+// pulled to a constant so each test reads as the shape it asserts on.
+// The single-line layout mirrors what claude actually writes — one
+// envelope per line, no embedded newlines.
+val askUserQuestionEnvelope =
+    "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-7\",\"id\":\"msg_ask\",\"type\":\"message\",\"role\":\"assistant\"," +
+    "\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_ask_01\",\"name\":\"AskUserQuestion\"," +
+    "\"input\":{\"questions\":[{\"question\":\"Should the new fs/streaming.gala be a separate package?\",\"header\":\"Scope\",\"multiSelect\":false," +
+    "\"options\":[{\"label\":\"Yes — new package\",\"description\":\"keeps fs/fs.gala stable\"}," +
+    "{\"label\":\"No — extend fs\",\"description\":\"single package, more cohesion\"}]}]}}]," +
+    "\"usage\":{\"input_tokens\":10,\"output_tokens\":80,\"cache_read_input_tokens\":0}}}"
+
+// 1+2: parsing the assistant envelope with an AskUserQuestion tool_use
+// populates PendingQuestion with the member name, the tool_use_id, and
+// the extracted first-question text.
+func TestAskUserQuestion_StreamJsonChunk_SetsPendingQuestion(t T) T {
+    val seed = sampleModel()
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = askUserQuestionEnvelope))
+    return m.PendingQuestion match {
+        case None() => IsTrue(t, false)
+        case Some(pending) => {
+            val t1 = Eq(t, pending.Member, "Iris")
+            val t2 = Eq(t1, pending.ToolUseId, "toolu_ask_01")
+            return IsTrue(t2, strings.Contains(pending.QuestionText, "Should the new fs/streaming.gala"))
+        }
+    }
+}
+
+// 3: the transcript gets a system line announcing the wait so the user
+// notices the question (alongside the model's own chat narration).
+func TestAskUserQuestion_StreamJsonChunk_AppendsSystemHint(t T) T {
+    val seed = sampleModel()
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = askUserQuestionEnvelope))
+    val systemLines = m.Conversation.Filter((cl) => cl.Speaker == "system")
+    val t1 = IsTrue(t, systemLines.Size() >= 1)
+    val last = systemLines.Get(systemLines.Size() - 1).Text
+    return IsTrue(t1, strings.Contains(last, "waiting for your answer"))
+}
+
+// Direct AppMsg dispatch (test path) sets the same state as the
+// stream-json arrival. Lets future test authors exercise the modal /
+// answer flow without building a synthetic envelope.
+func TestAskUserQuestion_AppMsg_SetsPendingQuestion(t T) T {
+    val seed = sampleModel()
+    val (m, _) = Update(seed, AskUserQuestion(
+        Member       = "Felix",
+        Id           = "toolu_xyz",
+        QuestionText = "Pick streaming or batched?",
+    ))
+    return m.PendingQuestion match {
+        case Some(p) => Eq(t, p.ToolUseId, "toolu_xyz")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// 5+6+7: composer Enter routes through the tool_result path when a
+// question is pending. The pending state clears AND the composer
+// empties — the user's answer is the tool_result, not a fresh user
+// prompt. The "you" line is logged to the transcript for the audit
+// trail. The actual stdin write is verified separately at the runtime
+// layer (encodeToolResultEnvelope test); the model-level guarantee
+// is that no new TL turn fires.
+func TestAskUserQuestion_ComposerSubmit_RoutesToToolResult(t T) T {
+    val seeded = sampleModel().Copy(
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Iris",
+            ToolUseId    = "toolu_42",
+            QuestionText = "Continue?",
+        )),
+        Composer       = "yes, extend fs",
+        ComposerCursor = 14,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    val t1 = IsFalse(t, m.PendingQuestion.IsDefined())
+    val t2 = Eq(t1, m.Composer, "")
+    // "you" line carries the answer text — audit trail of what we sent.
+    val youLines = m.Conversation.Filter((cl) => cl.Speaker == "you")
+    val t3 = IsTrue(t2, youLines.Size() >= 1)
+    val text = youLines.Get(youLines.Size() - 1).Text
+    return Eq(t3, text, "yes, extend fs")
+}
+
+// 8: KeyQuestionDismiss (also bound to Esc via onEscOrDeselect) drops
+// the pending question and surfaces it as an explicit dismissal in
+// the transcript. The subprocess gets stdin closed via the runtime
+// Cmd; we don't assert on the Cmd shape (handled at runtime test
+// boundary), only that the model state is cleared.
+func TestAskUserQuestion_Dismiss_ClearsPending(t T) T {
+    val seeded = sampleModel().Copy(
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Iris",
+            ToolUseId    = "toolu_99",
+            QuestionText = "Continue?",
+        )),
+    )
+    val (m, _) = Update(seeded, KeyQuestionDismiss())
+    val t1 = IsFalse(t, m.PendingQuestion.IsDefined())
+    val systemLines = m.Conversation.Filter((cl) => cl.Speaker == "system")
+    val t2 = IsTrue(t1, systemLines.Size() >= 1)
+    return IsTrue(t2, strings.Contains(systemLines.Get(systemLines.Size() - 1).Text, "dismissed"))
+}
+
+// extractFirstQuestionText pulls the first `"question":"…"` value out
+// of a raw stream-json envelope. Used by the AskUserQuestion parser
+// to surface the question body in the conversation log. JSON
+// string-escape rules: `\"` inside a string must NOT close the
+// string; `\n` decodes back to a literal newline.
+func TestExtractFirstQuestionText_SimpleQuestion(t T) T {
+    val env = askUserQuestionEnvelope
+    return IsTrue(t, strings.Contains(extractFirstQuestionText(env), "Should the new fs/streaming.gala"))
+}
+
+func TestExtractFirstQuestionText_NoQuestionKey_ReturnsEmpty(t T) T {
+    val env = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}"
+    return Eq(t, extractFirstQuestionText(env), "")
+}
+
+func TestExtractFirstQuestionText_EscapedQuoteInsideQuestion(t T) T {
+    // A backslash-quote inside the JSON string must NOT terminate the
+    // extraction — common in questions that quote a code identifier
+    // like `"Should I rename \"Foo\" to \"Bar\"?"`.
+    val env = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"x\",\"name\":\"AskUserQuestion\"," +
+              "\"input\":{\"questions\":[{\"question\":\"Should I rename \\\"Foo\\\" to \\\"Bar\\\"?\"}]}}]}}"
+    val got = extractFirstQuestionText(env)
+    return IsTrue(t, strings.Contains(got, "Foo"))
+}
+
+// Non-AskUserQuestion tools still drop silently — preserves the prior
+// behavior so the regression net for "Bash tool_use isn't visible"
+// (TestRealClaude_AssistantToolUse_IsDropped) keeps holding. This
+// test is the contrapositive: only the AskUserQuestion name triggers
+// the pending-question state; other tool names don't.
+func TestAskUserQuestion_OtherToolUse_NoPendingQuestion(t T) T {
+    val seed = sampleModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"toolu_b\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}]," +
+               "\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = line))
+    return IsFalse(t, m.PendingQuestion.IsDefined())
+}
+
+// ----------------------------------------------------------------------------
+// stream-json envelope wire-format — runtime contract guards for the
+// tool_use_id round-trip. Drift in any of these field names breaks
+// claude's tool-call join (the model would block forever on stdin),
+// so each test doubles as runtime-protocol documentation.
+// ----------------------------------------------------------------------------
+
+func TestEncodeUserPromptEnvelope_WireFormat(t T) T {
+    val line = EncodeUserPromptEnvelopeForTest("hello")
+    val t1 = IsTrue(t, strings.Contains(line, "\"type\":\"user\""))
+    val t2 = IsTrue(t1, strings.Contains(line, "\"role\":\"user\""))
+    val t3 = IsTrue(t2, strings.Contains(line, "hello"))
+    return IsFalse(t3, strings.Contains(line, "\n"))
+}
+
+func TestEncodeToolResultEnvelope_WireFormat(t T) T {
+    val line = EncodeToolResultEnvelopeForTest("toolu_abc", "use option 2")
+    val t1 = IsTrue(t, strings.Contains(line, "\"type\":\"user\""))
+    val t2 = IsTrue(t1, strings.Contains(line, "\"role\":\"user\""))
+    val t3 = IsTrue(t2, strings.Contains(line, "\"type\":\"tool_result\""))
+    val t4 = IsTrue(t3, strings.Contains(line, "\"tool_use_id\":\"toolu_abc\""))
+    val t5 = IsTrue(t4, strings.Contains(line, "use option 2"))
+    return IsFalse(t5, strings.Contains(line, "\n"))
+}
+
+func TestEncodeToolResultEnvelope_IncludesIsErrorFalse(t T) T {
+    val line = EncodeToolResultEnvelopeForTest("toolu_1", "yes")
+    return IsTrue(t, strings.Contains(line, "\"is_error\":false"))
+}
+
+func TestEncodeToolResultEnvelope_MultilineAnswer_IsSingleLine(t T) T {
+    val answer = "line one\nline two with a \"quote\" in it"
+    val line = EncodeToolResultEnvelopeForTest("toolu_ml", answer)
+    val t1 = IsFalse(t, strings.Contains(line, "\n"))
+    val t2 = IsTrue(t1, strings.Contains(line, "line one"))
+    return IsTrue(t2, strings.Contains(line, "line two"))
+}
+
+// onApprove / onReject / KeyApprove from the approval modal must NOT
+// fire when a question is pending — different state, different intent.
+// The composer's Enter routes to onAnswerPendingQuestion before any
+// of the FSM-state branches run. Verifies the precedence by seeding
+// both states: a pending question wins, and the FSM doesn't transition.
+func TestAskUserQuestion_TakesPrecedenceOverApproval(t T) T {
+    val seeded = sampleModel().Copy(
+        State           = Approval(SummaryBody = "draft summary"),
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Iris",
+            ToolUseId    = "toolu_pre",
+            QuestionText = "Continue?",
+        )),
+        Composer        = "yes",
+        ComposerCursor  = 3,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    val t1 = IsFalse(t, m.PendingQuestion.IsDefined())
+    // FSM stayed in Approval — composer text was NOT promoted to a
+    // user-prompt-then-transition; it was a tool_result instead.
+    return m.State match {
+        case Approval(_) => IsTrue(t1, true)
+        case _           => IsTrue(t1, false)
+    }
+}
+

@@ -1808,7 +1808,10 @@ func composerStyle(m AppModel) Style =
 // of where the cursor actually is.
 func composerRendered(m AppModel) string {
     if m.Composer == "" {
-        return s"  Type to ${m.Team.Lead.Name}…▌"
+        return m.PendingQuestion match {
+            case Some(pending) => s"  Answer for ${pending.Member}… (Esc to skip)▌"
+            case None()        => s"  Type to ${m.Team.Lead.Name}…▌"
+        }
     }
     val rs = ToRunes(m.Composer)
     val n = len(rs)

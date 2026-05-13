@@ -326,10 +326,26 @@ func buildAggregatedStuckPrompt(m AppModel, stuck Array[string], now time_utils.
 // the next user turn. Failure to spawn lands in LastError; no retries
 // — TL nudges that fail just leave the team paused until the user
 // types another prompt.
+//
+// Before spawning we MUST:
+//   1. Close any prior TL subprocess — without this, the previous
+//      claude keeps streaming chunks under the lead's name, racing
+//      with the new spawn and firing TLDone twice.
+//   2. Clear TurnBuffer + ConsultsFired — `onSessionFailed` parses
+//      the whole TurnBuffer when the TL session closes and fires
+//      EVERY directive it finds. Leaving stale @dispatch blocks
+//      from the prior turn in the buffer makes each new TL session
+//      re-fire them, producing the livelock observed in the
+//      0.49.0-migration audit (250 dispatches for Kael over 80
+//      minutes, every body byte-identical to the first turn's).
 func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val lead = m.Team.Lead
-    return ensureSession(m, lead) match {
-        case Left(err) => (m.Copy(LastError = Some(s"TL nudge spawn (${reason}): ${err}")), EmptyArray[Cmd[AppMsg]]())
+    val mClosed = closeLiveSession(m, lead.Name).Copy(
+        TurnBuffer    = "",
+        ConsultsFired = 0,
+    )
+    return ensureSession(mClosed, lead) match {
+        case Left(err) => (mClosed.Copy(LastError = Some(s"TL nudge spawn (${reason}): ${err}")), EmptyArray[Cmd[AppMsg]]())
         case Right(m1) => {
             val withStatus = setStatus(m1, lead.Name, StWorking())
             return (withStatus, ArrayOf[Cmd[AppMsg]](sendAndPumpCmd(withStatus, lead, prompt)))

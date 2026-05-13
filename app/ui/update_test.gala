@@ -3731,3 +3731,46 @@ func TestDispatchBugs_ToolUseWithText_RendersTextOnly(t T) T {
     return Eq(t1, entries.Get(0).Text, "Plan: edit a.go")
 }
 
+// ----------------------------------------------------------------------------
+// TL livelock regression — `TurnBuffer` carrying stale `@dispatch`
+// blocks from a prior turn caused the TL to re-fire the same dispatches
+// on every nudge / relay. Audit log of the 0.49.0-migration session
+// showed 250 dispatches for Kael over 80 minutes, every body
+// byte-identical to the first turn's.
+//
+// Fix lives in spawnTLNudge: it clears TurnBuffer + ConsultsFired +
+// closes any prior TL subprocess before spawning. Every TL re-spawn
+// path (spawnTLRelay, stuck nudge, blocked nudge, help nudge,
+// malformed-dispatch nudge, …) flows through spawnTLNudge, so
+// fixing it there is structural.
+// ----------------------------------------------------------------------------
+
+func TestTlLivelock_SpawnTLNudge_ClearsStaleTurnBuffer(t T) T {
+    // Seed: the TL just ran its prior turn and left a populated
+    // TurnBuffer + a non-zero ConsultsFired. A nudge fires now (e.g.
+    // because a member went stuck). The new TL session MUST start
+    // with an empty buffer so the stale @dispatch in the old buffer
+    // doesn't get re-parsed and re-fired.
+    val staleTurnBuffer = "@dispatch(Felix)\nupgrade gala from 0.44.0 to 0.49.0\n@end"
+    val seeded = sampleModel().Copy(
+        TurnBuffer    = staleTurnBuffer,
+        ConsultsFired = 7,
+    )
+    val (m, _) = spawnTLNudge(seeded, "stuck-felix", "System: Felix is stuck — decide")
+    val t1 = Eq(t, m.TurnBuffer, "")
+    return Eq(t1, m.ConsultsFired, 0)
+}
+
+// Belt-and-suspenders: spawnTLRelay funnels through spawnTLNudge, so
+// the relay path also gets a clean TurnBuffer. Direct test pins it
+// in case a future refactor takes a different route.
+func TestTlLivelock_SpawnTLRelay_ClearsStaleTurnBuffer(t T) T {
+    val seeded = sampleModel().Copy(
+        TurnBuffer    = "@dispatch(Felix)\nold work\n@end",
+        ConsultsFired = 3,
+    )
+    val (m, _) = spawnTLRelay(seeded)
+    val t1 = Eq(t, m.TurnBuffer, "")
+    return Eq(t1, m.ConsultsFired, 0)
+}
+

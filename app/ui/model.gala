@@ -2,6 +2,7 @@ package ui
 
 import (
     "github.com/martianoff/gala_team/app/session"
+    "github.com/martianoff/gala_team/app/directive"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/time_utils"
@@ -372,6 +373,30 @@ struct AppModel(
     // tool_result envelope) instead of onSubmit (which would queue a
     // fresh user prompt).
     PendingQuestion Option[PendingQuestion],
+    // PendingSummaryDirs holds Iris's just-parsed turn directives
+    // while the off-thread PR-readiness probe runs. The lead's
+    // EOF handler (onSessionFailed clean-close path) parses dirs,
+    // detects a provisional Approval transition, stashes the dirs
+    // here, and fires SummaryReadyCmd. When SummaryReadyResult
+    // lands, onSummaryReady reads the dirs back and completes the
+    // FSM transition (or nudges the TL if checkPrReady reported
+    // the lead branch wasn't shippable). Stays None outside this
+    // window; reset by onSummaryReady to None before returning.
+    //
+    // Wrapped in a local PendingSummary struct rather than stored
+    // as Option[Array[directive.Directive]] directly because gala
+    // gen-code strips package qualifiers from None[Array[X]]{}'s
+    // inner type parameter, which breaks the cross-package
+    // construction in cmd/main's gen output. None[PendingSummary]
+    // sidesteps the issue since PendingSummary is local to ui.
+    PendingSummaryDirs Option[PendingSummary],
+)
+
+// PendingSummary wraps the parsed TL directives so AppModel's
+// default-value emission can stay package-qualifier-free; see
+// the PendingSummaryDirs comment above.
+struct PendingSummary(
+    Dirs Array[directive.Directive],
 )
 
 // PendingQuestion captures the state needed to answer one in-flight
@@ -540,6 +565,7 @@ func InitialModelWithTeams(
     CompactSidebar        = false,
     ApprovalFocus         = ApproveFocus(),
     PendingQuestion       = None[PendingQuestion](),
+    PendingSummaryDirs    = None[PendingSummary](),
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -767,6 +793,45 @@ sealed type AppMsg {
     // just fixed, but now an explicit user choice instead of an
     // unavoidable side effect of the stream-json plumbing.
     case KeyQuestionDismiss
+    // Async-IO result messages. Each of these is the back-channel
+    // for a synchronous subprocess that used to run on the UI
+    // thread; the handler fires a concurrent.FutureApply that
+    // returns one of these once the IO completes, so the gala-tui
+    // event loop stays responsive (keys + ticks keep flowing) while
+    // git / clipboard subprocesses are in flight. Past audits
+    // caught a session that froze indefinitely after a
+    // Delegating→QAGate transition because buildQAReviewPrompt's
+    // git diff invocations blocked on a stale index.lock; the
+    // queue of UI events stalled behind it.
+    //
+    // QAPromptReady carries the synthesised QA review prompt back
+    // to applyQAPromptReady, which then runs the FoldLeft over QA
+    // members that used to live inside spawnQAReview directly.
+    case QAPromptReady(Prompt string)
+    // ClipboardPasted / ClipboardFailed are the off-thread paste
+    // result. Replaces the synchronous powershell.exe Get-Clipboard
+    // shell-out that used to block the UI thread for the duration
+    // of PowerShell startup (~200–1500ms on Windows).
+    case ClipboardPasted(Text string)
+    case ClipboardFailed(ErrText string)
+    // UncommittedCheckResult carries the engineer's @finished body
+    // plus the dirty/clean answer from the async git diff probe.
+    // Replaces the inline hasUncommittedWork() call inside
+    // onMemberDone — that one fired 2 sync git subprocesses on
+    // every engineer @finished and could wedge on index.lock.
+    case UncommittedCheckResult(Member string, Body string, Dirty bool)
+    // ApprovalReadyResult carries the @summary body plus the
+    // checkPrReady answer (None = ready, Some(reason) = blocked).
+    // Replaces the inline checkPrReady() call inside
+    // approveAndKickHooks — that one fired git rev-list + maybe
+    // git rev-parse on every Ctrl+A.
+    case ApprovalReadyResult(Body string, Reason Option[string])
+    // SummaryReadyResult carries the parsed TL turn's directives
+    // back after the off-thread PR-readiness probe completes.
+    // Replaces the inline checkPrReady() call in the TL @summary
+    // chunk path — that one fired on every Iris @summary turn and
+    // could freeze the UI mid-stream.
+    case SummaryReadyResult(Member string, Reason Option[string])
     // Lifecycle
     case TickMsg
     case QuitMsg

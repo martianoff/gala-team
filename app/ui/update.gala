@@ -547,6 +547,15 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case KeyRecoveryClick(c)         => onRecoveryConfirm(m.Copy(Recovery = Some(c)))
     case AskUserQuestion(member, id, txt) => onAskUserQuestion(m, member, id, txt)
     case KeyQuestionDismiss()        => onQuestionDismiss(m)
+    // Async-IO result handlers. See model.gala's AppMsg block for
+    // why these exist (they replace synchronous subprocess calls
+    // that used to freeze the UI thread).
+    case QAPromptReady(prompt)              => applyQAPromptReady(m, prompt)
+    case ClipboardPasted(txt)               => onClipboardPasted(m, txt)
+    case ClipboardFailed(err)               => onClipboardFailed(m, err)
+    case UncommittedCheckResult(n, b, d)    => onUncommittedCheckResult(m, n, b, d)
+    case ApprovalReadyResult(body, reason)  => onApprovalReadyResult(m, body, reason)
+    case SummaryReadyResult(member, reason) => onSummaryReadyResult(m, member, reason)
     case TickMsg()                   => onTick(m)
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
@@ -1259,17 +1268,38 @@ func runesPrefix(s string, n int) string {
 // non-empty line is stripped because most clipboard tools tack on a
 // stray newline. Read failures land in LastError so the user knows
 // the paste didn't take instead of silently appending nothing.
-func onPasteClipboard(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = readClipboard() match {
-    case Failure(err) => (m.Copy(LastError = Some(s"clipboard read: ${err.Error()}")), NoCmd[AppMsg]())
-    case Success(txt) => {
-        val clean = strings.TrimRight(txt, " \t\r\n")
-        val toast = m.Toasts.PushInfo(s"pasted ${len(clean)} chars", time_utils.Now(), time_utils.Seconds(int64(2)))
-        // Insert at cursor — same path as KeyChar — so paste lands
-        // wherever the user's editing cursor is, not always at the end.
-        val (next, cur) = composerInsertAt(m.Composer, m.ComposerCursor, clean)
-        return (m.Copy(Composer = next, ComposerCursor = cur, Toasts = toast), NoCmd[AppMsg]())
-    }
+// onPasteClipboard kicks off the clipboard read OFF the UI thread.
+// readClipboard shells out to powershell.exe Get-Clipboard on Windows,
+// pbpaste on macOS, xclip/xsel on Linux — and on Windows the
+// PowerShell process spin-up alone is 200–1500ms even on a warm
+// system. Calling it inline on the UI thread froze the TUI for the
+// duration of every Ctrl+V (animation paused, keystrokes queued).
+// Now we fire a Future-Cmd that posts back ClipboardPasted /
+// ClipboardFailed, and the existing insert / toast / error logic
+// runs in those handlers.
+func onPasteClipboard(m AppModel) Tuple[AppModel, Cmd[AppMsg]] =
+    (m, FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() => readClipboard() match {
+        case Failure(err) => ClipboardFailed(ErrText = err.Error())
+        case Success(txt) => ClipboardPasted(Text = txt)
+    })))
+
+// onClipboardPasted lands the off-thread clipboard read result and
+// runs the same insert-at-cursor + toast logic the inline version
+// did. The trailing-whitespace strip preserves "TrimRight"-style
+// behaviour: most paste sources (browser address bar, terminal
+// selection, IDE copy) tack on a trailing newline that would push
+// the composer onto an empty line.
+func onClipboardPasted(m AppModel, txt string) Tuple[AppModel, Cmd[AppMsg]] {
+    val clean = strings.TrimRight(txt, " \t\r\n")
+    val toast = m.Toasts.PushInfo(s"pasted ${len(clean)} chars", time_utils.Now(), time_utils.Seconds(int64(2)))
+    val (next, cur) = composerInsertAt(m.Composer, m.ComposerCursor, clean)
+    return (m.Copy(Composer = next, ComposerCursor = cur, Toasts = toast), NoCmd[AppMsg]())
 }
+
+// onClipboardFailed surfaces the off-thread read error to LastError so
+// the user sees "clipboard read: <reason>" instead of a silent paste.
+func onClipboardFailed(m AppModel, err string) Tuple[AppModel, Cmd[AppMsg]] =
+    (m.Copy(LastError = Some(s"clipboard read: ${err}")), NoCmd[AppMsg]())
 
 // readClipboard shells out to whichever clipboard CLI the host OS
 // ships:
@@ -2269,34 +2299,65 @@ func extractBlockedReason(d Directive) Option[string] = d match {
     case _          => None[string]()
 }
 
-// onMemberDone records the @done body for the relay turn (#28) and
-// drops the member back to StIdle without raising LastError. EOF on
-// the underlying session is the actual session-handle cleanup; this
+// onMemberDone records the @done body for the relay turn and drops
+// the member back to StIdle without raising LastError. EOF on the
+// underlying session is the actual session-handle cleanup; this
 // just captures the deliverable text.
+//
+// Engineers get a commit-gate: if the worktree still has uncommitted
+// changes (modified tracked files OR untracked files), we respawn
+// them with a system nudge demanding they commit first. That check
+// fires `git diff --name-only HEAD` + `git ls-files --others`, both
+// synchronous subprocesses — historically run inline on the UI
+// thread, which created a freeze risk identical to the QA-gate one
+// (any held index.lock and the whole TUI stalls). Now we hand the
+// check off to a worker Future and finish onMemberDone in the
+// UncommittedCheckResult handler that lands once git replies.
+//
+// Non-engineers skip the check entirely and finalise synchronously,
+// since there's nothing to validate against (QA / TL don't own
+// engineer worktrees and don't emit @finished in this path).
 func onMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppMsg]] {
-    // Commit-gate (engineers only): if the member emitted @finished
-    // but their worktree has uncommitted changes (modified tracked
-    // files OR untracked files), reject the @finished and respawn
-    // them with a system nudge demanding they commit first. The QA
-    // review pipeline runs against committed work — letting an
-    // uncommitted @finished slip through means QA either reviews
-    // nothing or has to inspect the engineer's working tree
-    // directly. Past audits captured this as a dominant failure
-    // mode.
     val mem = findMemberByName(m.Team.Members, name)
     val isEngineer = mem match {
         case Some(member) => SameRole(member.Role, Engineer())
         case None()       => false
     }
-    if isEngineer {
-        val cwd = mem match {
-            case Some(member) => onboarding.WorkspacePathFor(m.Project, member, m.Policy.WorkspaceMode)
-            case None()       => ""
-        }
-        if cwd != "" && hasUncommittedWork(cwd) {
-            return nudgeEngineerToCommit(m, name, mem.GetOrElse(m.Team.Lead))
-        }
+    if !isEngineer { return finaliseMemberDone(m, name, body) }
+    val cwd = mem match {
+        case Some(member) => onboarding.WorkspacePathFor(m.Project, member, m.Policy.WorkspaceMode)
+        case None()       => ""
     }
+    if cwd == "" { return finaliseMemberDone(m, name, body) }
+    return (m, uncommittedCheckCmd(cwd, name, body))
+}
+
+// uncommittedCheckCmd fires hasUncommittedWork off the UI thread.
+// Captures `cwd` (immutable string) and the engineer's @finished
+// body so the result handler has everything it needs to decide
+// nudge-or-finalise without re-reading model state. The Future
+// resolves into UncommittedCheckResult, dispatched through Update.
+func uncommittedCheckCmd(cwd string, name string, body string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+        UncommittedCheckResult(Member = name, Body = body, Dirty = hasUncommittedWork(cwd))))
+
+// onUncommittedCheckResult is the back-channel for the engineer
+// commit-gate. Dirty → nudge the engineer to commit before QA sees
+// the work. Clean → finalise as if the check passed inline.
+func onUncommittedCheckResult(m AppModel, name string, body string, dirty bool) Tuple[AppModel, Cmd[AppMsg]] {
+    if dirty {
+        val mem = findMemberByName(m.Team.Members, name).GetOrElse(m.Team.Lead)
+        return nudgeEngineerToCommit(m, name, mem)
+    }
+    return finaliseMemberDone(m, name, body)
+}
+
+// finaliseMemberDone runs the rest of @finished processing once the
+// commit-gate has passed (or been skipped for non-engineers): toast,
+// kill the subprocess, record the body for the relay turn, set
+// status. Same shape as the inline tail that used to live at the
+// end of onMemberDone.
+func finaliseMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppMsg]] {
     val toast = m.Toasts.PushSuccess(s"${name} done", time_utils.Now(), time_utils.Seconds(int64(3)))
     // Kill the member's claude subprocess once they've reported back —
     // anything they emit AFTER @finished is just trailing tool calls
@@ -2709,33 +2770,16 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 case _           => false
             }
             if provisionalIsApproval {
-                val readiness = checkPrReady(cleanedB.Project)
-                if readiness.IsDefined() {
-                    val reason = readiness.GetOrElse("")
-                    val (m1, nudgeCmds) = spawnTLNudge(
-                        setStatus(cleanedB, name, StIdle()),
-                        "summary-without-pr-ready",
-                        buildSummaryNotPrReadyNudge(reason, cleanedB.Team, cleanedB.Project),
-                    )
-                    return (m1, batchAll(nudgeCmds))
-                }
-                // PR description quality gate. The @summary body
-                // becomes the PR description verbatim; once we let it
-                // through, the user has no chance to revise before
-                // gh pr create runs. Validate up front and nudge the
-                // TL to rewrite if the body lacks structure or
-                // mentions internal orchestration nuance.
-                val summaryBody = firstSummaryBody(dirs)
-                val bodyIssue = validatePrBody(summaryBody, cleanedB.Team)
-                if bodyIssue.IsDefined() {
-                    val issueText = bodyIssue.GetOrElse("")
-                    val (m1, nudgeCmds) = spawnTLNudge(
-                        setStatus(cleanedB, name, StIdle()),
-                        "summary-bad-body",
-                        buildBadSummaryBodyNudge(issueText, summaryBody),
-                    )
-                    return (m1, batchAll(nudgeCmds))
-                }
+                // PR-readiness check runs OFF the UI thread. The
+                // synchronous version (`git rev-list --count`) blocked
+                // the event loop while git acquired locks — a sibling
+                // of the QAGate freeze. We stash `dirs` on the model
+                // and resume in onSummaryReadyResult once the probe
+                // posts back its answer; the post-result handler runs
+                // the same nudge / validatePrBody / transition logic
+                // that used to live inline here.
+                return (cleanedB.Copy(PendingSummaryDirs = Some(PendingSummary(Dirs = dirs))),
+                        summaryReadyCmd(cleanedB.Project, name))
             }
             val nextState = transitionLogged(cleanedB.State, TLDone(Directives = dirs), transitionContext(cleanedB))
             val withState = setStatus(cleanedB.Copy(State = nextState), name, StIdle())
@@ -3226,19 +3270,52 @@ func gitSlugForTeam(s string) string {
     return strings.Trim(out.MkString(""), "-/.")
 }
 
-// spawnQAReview kicks off a QA review session for every QA member on
-// the team. Mirrors spawnDispatchedMembers but for the QA role: the
-// review body is a synthesised "review these deliverables" prompt
-// composed of every engineer's @finished body.
+// spawnQAReview is the UI-thread entrypoint for the Delegating→QAGate
+// fan-out. The actual review prompt construction runs OFF the UI
+// thread — buildQAReviewPrompt does N×3 synchronous git invocations
+// (`git diff --name-only`, `ls-files --others`) per engineer, and a
+// past audit caught one of those wedging on a stale index.lock
+// while the entire gala-tui event loop blocked behind it: no keys,
+// no TickMsg, no animation, no further log writes. The frozen TUI
+// looked identical to a crash.
 //
-// QA members are first-turn from the orchestrator's perspective even
-// when subsequent turns happen — claude --print is one-shot per
-// invocation; SessionIds picks up the existing session id and
-// switches to --resume on the second QA pass automatically.
+// We dispatch the heavy work to a concurrent.Future and resolve back
+// into applyQAPromptReady(m, prompt) once the manifest is built. The
+// FSM stays in QAGate during the wait; new chunks (none expected
+// since QAGate fires only after every engineer reported back) and
+// keys keep flowing normally.
 func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val qa = MembersOf(m.Team, QA())
     if qa.IsEmpty() { return (m, NoCmd[AppMsg]()) }
-    val reviewBody = buildQAReviewPrompt(m)
+    return (m, qaPromptReadyCmd(m))
+}
+
+// qaPromptReadyCmd wraps buildQAReviewPrompt in a worker Future so
+// the git subprocesses inside listEngineerDeliverable can't block the
+// UI thread. The model captured in the closure is a snapshot at
+// spawn time — that's fine: the engineers' @finished bodies and
+// dispatched-engineers list don't move once QAGate fires, and the
+// FSM holds in QAGate until the result lands. If something else
+// transitions the FSM away during the wait (Ctrl+C, recovery), the
+// applyQAPromptReady handler guards on State == QAGate and drops
+// the result quietly.
+func qaPromptReadyCmd(m AppModel) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() => QAPromptReady(Prompt = buildQAReviewPrompt(m))))
+
+// applyQAPromptReady consumes a QAPromptReady message — the result
+// of the off-thread buildQAReviewPrompt — and runs the same
+// FoldLeft over QA members that spawnQAReview used to do inline. The
+// State == QAGate guard drops late results that arrive after the
+// FSM has moved on (e.g. a TL recovery nudge fired while the Future
+// was building).
+func applyQAPromptReady(m AppModel, reviewBody string) Tuple[AppModel, Cmd[AppMsg]] {
+    val inQaGate = m.State match {
+        case QAGate(_) => true
+        case _         => false
+    }
+    if !inQaGate { return (m, NoCmd[AppMsg]()) }
+    val qa = MembersOf(m.Team, QA())
+    if qa.IsEmpty() { return (m, NoCmd[AppMsg]()) }
     val seed = (m, EmptyArray[Cmd[AppMsg]]())
     val (after, cmds) = qa.FoldLeft(seed, (acc, mem) => {
         val (curM, curCmds) = acc
@@ -3400,9 +3477,15 @@ func listEngineerDeliverable(cwd string, defaultBranch string) Array[string] {
 // the manifest — the prefix-tagged display already conveys "no
 // files in this category").
 func gitFilesList(cwd string, args Array[string]) Array[string] {
+    // Prefix `--no-optional-locks` so a sibling git process refreshing
+    // the index can't block us. Per git-glossary, this prevents `git
+    // diff` / `git status` from acquiring the lock that refreshes the
+    // stat cache — historically a freeze contributor when a background
+    // `claude` or `gh` process was holding the lock during a turn.
+    val fullArgs = args.FoldLeft(ArrayOf("--no-optional-locks"), (acc, a) => acc.Append(a))
     val opts = subprocess.NewSpawnOpts(
         "git",
-        args.ToGoSlice(),
+        fullArgs.ToGoSlice(),
         SliceEmpty[string](),
         cwd,
     )
@@ -4350,35 +4433,55 @@ func resetAllStatuses(m AppModel) AppModel {
     return m.Copy(Statuses = statuses)
 }
 
-func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
-    // PR-readiness pre-check: refuse to launch `gh pr create` when the
-    // current branch has no commits ahead of the default branch.
-    // Without this, hitting Ctrl+A on a chat-only summary (or before
-    // engineers' worktree commits have landed on the lead's branch)
-    // crashes `gh` with an opaque "no commits" error and the user is
-    // left wondering why the PR didn't open.
-    //
-    // CRITICAL: when the check fails we MUST dismiss the modal too.
-    // A past audit caught a session where the user was stuck on
-    // Approval for 30 minutes — Ctrl+A reached onApprove, the
-    // check failed (lead branch had 0 commits ahead of master), and
-    // the original code returned without changing State. Modal
-    // stayed up, conversation log update was hidden behind it, the
-    // user pressed every key and got nothing visible. Now: transition
-    // via ApprovalRejected (so the FSM exits Approval) AND push a
-    // toast (visible above any modal) AND keep the conversation log
-    // entry so the audit trail records the why.
-    val readiness = checkPrReady(m.Project)
-    if readiness.IsDefined() {
-        val reason = readiness.GetOrElse("")
+// approveAndKickHooks is the Ctrl+A handler. The PR-readiness check
+// (refuses to launch gh pr create when the lead branch has no commits
+// ahead of master) used to run inline; it shells out to git rev-list
+// (and sometimes git rev-parse). Past audits caught those wedging on
+// git lock contention and freezing the TUI — same class of bug as
+// the QAGate manifest. Now we fire the check off the UI thread and
+// finish the work in onApprovalReadyResult.
+//
+// Approval modal stays up during the wait. Tests for the inline path
+// continue to pass because the result handler runs all the same
+// transitions / toasts / Conversation appends; only the entry-point
+// shape changed.
+func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] =
+    (m, approvalReadyCmd(m.Project, body))
+
+// approvalReadyCmd lifts checkPrReady into a worker Future. body
+// rides along in the result message so onApprovalReadyResult has
+// everything it needs without re-reading model state. Capturing
+// `proj` by value is fine — it's an immutable struct.
+func approvalReadyCmd(proj Project, body string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+        ApprovalReadyResult(Body = body, Reason = checkPrReady(proj))))
+
+// onApprovalReadyResult resumes approveAndKickHooks once the off-
+// thread readiness probe completes. The body / blocked / hook-fan-out
+// logic is unchanged from the prior inline implementation — only the
+// preceding `checkPrReady` call moved out of band.
+//
+// CRITICAL: when the check fails we MUST dismiss the modal too.
+// A past audit caught a session where the user was stuck on
+// Approval for 30 minutes — Ctrl+A reached onApprove, the check
+// failed (lead branch had 0 commits ahead of master), and the
+// original code returned without changing State. Modal stayed up,
+// conversation log update was hidden behind it, the user pressed
+// every key and got nothing visible. Now: transition via
+// ApprovalRejected (so the FSM exits Approval) AND push a toast
+// (visible above any modal) AND keep the conversation log entry
+// so the audit trail records the why.
+func onApprovalReadyResult(m AppModel, body string, reason Option[string]) Tuple[AppModel, Cmd[AppMsg]] {
+    if reason.IsDefined() {
+        val r = reason.GetOrElse("")
         val nextState = transitionLogged(m.State, ApprovalRejected(), transitionContext(m))
-        val toast = m.Toasts.PushError(s"approval blocked: ${reason}", time_utils.Now(), time_utils.Seconds(int64(8)))
+        val toast = m.Toasts.PushError(s"approval blocked: ${r}", time_utils.Now(), time_utils.Seconds(int64(8)))
         return (m.Copy(
             State        = nextState,
-            LastError    = Some(s"approval: ${reason}"),
+            LastError    = Some(s"approval: ${r}"),
             Toasts       = toast,
             Conversation = m.Conversation.Append(
-                session.ConversationLine(Speaker = "policy", Text = s"approval blocked: ${reason}"),
+                session.ConversationLine(Speaker = "policy", Text = s"approval blocked: ${r}"),
             ),
         ), NoCmd[AppMsg]())
     }
@@ -4402,6 +4505,74 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] {
     // own bazel-* output symlinks from the outer workspace.
     val leadCwd = onboarding.WorkspacePathFor(m.Project, m.Team.Lead, m.Policy.WorkspaceMode)
     return (noted, hooksFutureCmd(leadCwd, m.Policy.PreMerge, body))
+}
+
+// summaryReadyCmd lifts checkPrReady into a worker Future for the
+// TL @summary path. The caller has already stashed the parsed
+// directives on `PendingSummaryDirs`; once this Future resolves,
+// onSummaryReadyResult reads them back, decides nudge-or-transition,
+// and clears the field.
+func summaryReadyCmd(proj Project, member string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+        SummaryReadyResult(Member = member, Reason = checkPrReady(proj))))
+
+// onSummaryReadyResult resumes onSessionFailed's TL @summary branch.
+// The directives Iris just parsed live on PendingSummaryDirs; this
+// handler clears the field and runs the same nudge / validatePrBody
+// / transition / AutoApprove logic that used to live inline.
+//
+// Drop conditions (return m unchanged):
+//   - PendingSummaryDirs is None — a stray result (e.g. the user
+//     pressed Esc and the FSM unwound). Treat as no-op.
+//   - The result arrived for a different member than the lead — the
+//     check was inherited from a recovered model that no longer
+//     matches the live one.
+func onSummaryReadyResult(m AppModel, member string, reason Option[string]) Tuple[AppModel, Cmd[AppMsg]] {
+    val dirsOpt = m.PendingSummaryDirs
+    if !dirsOpt.IsDefined() { return (m, NoCmd[AppMsg]()) }
+    val dirs = dirsOpt.GetOrElse(PendingSummary(Dirs = EmptyArray[Directive]())).Dirs
+    val cleared = m.Copy(PendingSummaryDirs = None[PendingSummary]())
+    if reason.IsDefined() {
+        val r = reason.GetOrElse("")
+        val (m1, nudgeCmds) = spawnTLNudge(
+            setStatus(cleared, member, StIdle()),
+            "summary-without-pr-ready",
+            buildSummaryNotPrReadyNudge(r, cleared.Team, cleared.Project),
+        )
+        return (m1, batchAll(nudgeCmds))
+    }
+    // PR description quality gate. The @summary body becomes the PR
+    // description verbatim; once we let it through, the user has no
+    // chance to revise before gh pr create runs. Validate up front
+    // and nudge the TL to rewrite if the body lacks structure or
+    // mentions internal orchestration nuance.
+    val summaryBody = firstSummaryBody(dirs)
+    val bodyIssue = validatePrBody(summaryBody, cleared.Team)
+    if bodyIssue.IsDefined() {
+        val issueText = bodyIssue.GetOrElse("")
+        val (m1, nudgeCmds) = spawnTLNudge(
+            setStatus(cleared, member, StIdle()),
+            "summary-bad-body",
+            buildBadSummaryBodyNudge(issueText, summaryBody),
+        )
+        return (m1, batchAll(nudgeCmds))
+    }
+    val nextState = transitionLogged(cleared.State, TLDone(Directives = dirs), transitionContext(cleared))
+    val withState = setStatus(cleared.Copy(State = nextState), member, StIdle())
+    // AutoApprove: when the @summary lands cleanly and the batch
+    // toggle is on, run the same approveAndKickHooks pipeline Ctrl+A
+    // would have triggered. Dispatched via KeyApprove so the activity
+    // log records a synthetic approve event.
+    if withState.AutoApprove {
+        val nextIsApproval = nextState match {
+            case Approval(_) => true
+            case _           => false
+        }
+        if nextIsApproval {
+            return (withState, MsgCmd[AppMsg](Msg = KeyApprove()))
+        }
+    }
+    return (withState, NoCmd[AppMsg]())
 }
 
 // recoverApprovalIfReady scans `m.Conversation` in reverse for the
@@ -4557,9 +4728,11 @@ func parseRenderedSummary(text string) string {
 func checkPrReady(proj Project) Option[string] {
     if proj.DefaultBranch == "" { return None[string]() }
     val leadRef = "gala_team/" + gitSlugForTeam(proj.Name) + "/lead"
+    // `--no-optional-locks` keeps this query off the stat-cache lock;
+    // see gitFilesList for the rationale.
     val opts = subprocess.NewSpawnOpts(
         "git",
-        ArrayOf("rev-list", "--count", proj.DefaultBranch + ".." + leadRef).ToGoSlice(),
+        ArrayOf("--no-optional-locks", "rev-list", "--count", proj.DefaultBranch + ".." + leadRef).ToGoSlice(),
         SliceEmpty[string](),
         proj.Repo,
     )
@@ -4614,7 +4787,7 @@ func checkPrReady(proj Project) Option[string] {
 func refMissing(repo string, ref string) bool {
     val opts = subprocess.NewSpawnOpts(
         "git",
-        ArrayOf("rev-parse", "--verify", "--quiet", ref).ToGoSlice(),
+        ArrayOf("--no-optional-locks", "rev-parse", "--verify", "--quiet", ref).ToGoSlice(),
         SliceEmpty[string](),
         repo,
     )

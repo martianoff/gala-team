@@ -194,7 +194,7 @@ func TestKeyApprove_OutsideApproval_NoOp(t T) T {
 
 func TestKeyApprove_InApproval_TransitionsToIdleAndLogs(t T) T {
     val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))
-    val (m, _) = Update(seed, KeyApprove())
+    val m = resolveApprovalReady(seed, KeyApprove())
     val t1 = m.State match {
         case Idle() => IsTrue(t, true)
         case _      => IsTrue(t, false)
@@ -276,7 +276,7 @@ func TestApprovalModal_EnterFiresApproveFocus(t T) T {
         ApprovalFocus = ApproveFocus(),
         Composer      = "",
     )
-    val (m, _) = Update(seed, KeySubmit())
+    val m = resolveApprovalReady(seed, KeySubmit())
     val t1 = m.State match {
         case Idle() => IsTrue(t, true)
         case _      => IsTrue(t, false)
@@ -315,7 +315,7 @@ func TestApprovalModal_MouseClickYesApprovesEvenWhenFocusOnNo(t T) T {
         State         = Approval(SummaryBody = "ship it"),
         ApprovalFocus = RejectFocus(),
     )
-    val (m, _) = Update(seed, KeyApprove())
+    val m = resolveApprovalReady(seed, KeyApprove())
     val t1 = m.State match {
         case Idle() => IsTrue(t, true)
         case _      => IsTrue(t, false)
@@ -346,7 +346,7 @@ func TestApprovalModal_YShortcutApprovesEvenWhenFocusOnNo(t T) T {
         State         = Approval(SummaryBody = "ship it"),
         ApprovalFocus = RejectFocus(),
     )
-    val (m, _) = Update(seed, KeyChar(C = 'y'))
+    val m = resolveApprovalReady(seed, KeyChar(C = 'y'))
     val t1 = m.State match {
         case Idle() => IsTrue(t, true)
         case _      => IsTrue(t, false)
@@ -385,7 +385,7 @@ func TestApprovalModal_FocusResetsOnReentry(t T) T {
         TurnBuffer    = "@summary\n" + goodBody + "\n@end",
         ApprovalFocus = RejectFocus(),  // residue from a prior approval cycle
     )
-    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val m = resolveSummaryReady(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
     val t1 = m.State match {
         case Approval(_) => IsTrue(t, true)
         case _           => IsTrue(t, false)
@@ -508,6 +508,46 @@ func runGitInTmp(dir string, args Array[string]) {
     val _ = proc.Wait().Get()
 }
 
+// resolveSummaryReady is a test helper that runs the TL @summary
+// path end-to-end. The production code splits the path in two —
+// SessionFailed parks the parsed dirs on PendingSummaryDirs and
+// fires an off-thread checkPrReady probe; the result lands as
+// SummaryReadyResult and drives the actual FSM transition. Tests
+// want to assert against the final model, so we synthesise the
+// readiness probe by calling checkPrReady inline (the test fixture
+// has a real git repo, so it returns the same answer the Future
+// would) and feed the result back through Update.
+//
+// Past audits caught the synchronous version of this path freezing
+// the TUI when git wedged on index.lock contention. The Update-
+// twice shape preserves the prior behaviour for assertion purposes
+// while keeping the production hot path off the UI thread.
+func resolveSummaryReady(seed AppModel, msg AppMsg) AppModel {
+    val (m1, _) = Update(seed, msg)
+    if !m1.PendingSummaryDirs.IsDefined() { return m1 }
+    val leadName = m1.Team.Lead.Name
+    val reason = checkPrReady(m1.Project)
+    val (m2, _) = Update(m1, SummaryReadyResult(Member = leadName, Reason = reason))
+    return m2
+}
+
+// resolveApprovalReady mirrors resolveSummaryReady but for the
+// Ctrl+A / KeyApprove path. seed must already be in Approval(body)
+// — that's the precondition the production path enforces too.
+// Pulls body out of seed.State so we can rebuild the
+// ApprovalReadyResult after KeyApprove returns the off-thread
+// readiness probe.
+func resolveApprovalReady(seed AppModel, msg AppMsg) AppModel {
+    val body = seed.State match {
+        case Approval(b) => b
+        case _           => ""
+    }
+    val (m1, _) = Update(seed, msg)
+    val reason = checkPrReady(m1.Project)
+    val (m2, _) = Update(m1, ApprovalReadyResult(Body = body, Reason = reason))
+    return m2
+}
+
 // emptyLeadBranchProject returns a Project whose repo is a real git
 // init'd dir with HEAD == main + zero commits ahead. Triggers
 // checkPrReady's Some(reason) early return — the precondition for
@@ -550,7 +590,7 @@ func TestTLSummary_BlocksApprovalWhenLeadBranchEmpty(t T) T {
         TurnBuffer   = "@summary\nship it\n@end",
         Conversation = seedConvo,
     )
-    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val m = resolveSummaryReady(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
     val notApproval = m.State match {
         case Approval(_) => IsTrue(t, false)
         case _           => IsTrue(t, true)
@@ -575,7 +615,7 @@ func TestTLSummary_EntersApprovalWhenLeadBranchHasCommits(t T) T {
         State      = TLThinking(),
         TurnBuffer = "@summary\n" + goodBody + "\n@end",
     )
-    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val m = resolveSummaryReady(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
     return m.State match {
         case Approval(body) => Eq(t, body, goodBody)
         case _              => IsTrue(t, false)
@@ -605,7 +645,7 @@ func TestTLSummary_LeadHasCommitsButHeadOnMasterStillEntersApproval(t T) T {
         State      = TLThinking(),
         TurnBuffer = "@summary\n" + goodBody + "\n@end",
     )
-    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val m = resolveSummaryReady(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
     return m.State match {
         case Approval(body) => Eq(t, body, goodBody)
         case _              => IsTrue(t, false)
@@ -628,7 +668,7 @@ func TestTLSummary_NudgesWhenBodyLacksSections(t T) T {
         State      = TLThinking(),
         TurnBuffer = "@summary\nshipped the thing, all good\n@end",
     )
-    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val m = resolveSummaryReady(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
     val notApproval = m.State match {
         case Approval(_) => IsTrue(t, false)
         case _           => IsTrue(t, true)
@@ -650,7 +690,7 @@ func TestTLSummary_NudgesWhenBodyMentionsMemberName(t T) T {
         State      = TLThinking(),
         TurnBuffer = "@summary\n## What\nFelix added the parser\n\n## Why\nbug\n\n## Follow-ups\nnone\n@end",
     )
-    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val m = resolveSummaryReady(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
     return m.State match {
         case Approval(_) => IsTrue(t, false)
         case _           => IsTrue(t, true)
@@ -1142,8 +1182,14 @@ func TestApprove_WithEmptyHooks_GoesStraightToPr(t T) T {
     // FSM and emit the gh pr create Cmd directly. We can't observe the
     // Cmd's effect in a unit test, but we can confirm the model side:
     // exactly one "/approve" line was logged and no policy line.
+    //
+    // Drives the message twice — KeyApprove kicks the off-thread
+    // PR-readiness probe; ApprovalReadyResult lands with the answer
+    // (None, because sampleProject's temp dir isn't a git repo so
+    // checkPrReady's subprocess exits non-zero and falls through to
+    // None). resolveApprovalReady wraps both steps.
     val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))
-    val (m, _) = Update(seed, KeyApprove())
+    val m = resolveApprovalReady(seed, KeyApprove())
     val t1 = Eq(t, m.Conversation.Size(), 1)
     return Eq(t1, m.Conversation.Get(0).Text, "/approve")
 }
@@ -1157,7 +1203,7 @@ func TestApprove_WithHooks_LogsRunningBanner(t T) T {
     ))
     val seed = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow(), pol)
         .Copy(State = Approval(SummaryBody = "ship it"))
-    val (m, _) = Update(seed, KeyApprove())
+    val m = resolveApprovalReady(seed, KeyApprove())
     val t1 = Eq(t, m.Conversation.Size(), 2)
     val t2 = Eq(t1, m.Conversation.Get(0).Speaker, "you")
     val t3 = Eq(t2, m.Conversation.Get(0).Text, "/approve")
@@ -3861,3 +3907,270 @@ func TestOnStderr_FiresLogStderrEvent(t T) T {
     return IsTrue(t, strings.Contains(contents, "rate limit reached"))
 }
 
+// ---------------------------------------------------------------------------
+// UI-thread offload regression tests.
+//
+// Past audits caught a session that froze indefinitely after a
+// Delegating→QAGate FSM transition because buildQAReviewPrompt's
+// synchronous git invocations blocked the gala-tui event loop.
+// Animation stopped, keys went unanswered, no further events landed
+// in events.jsonl. The TUI looked identical to a crash.
+//
+// Audits later identified the same pattern in onPasteClipboard
+// (Ctrl+V → blocking powershell.exe shell-out), onMemberDone
+// (engineer @finished → blocking hasUncommittedWork), and
+// approveAndKickHooks / TL @summary (blocking checkPrReady).
+//
+// These tests pin the off-thread contract: the entry-point handler
+// must return a Cmd that runs the IO in a worker Future, so Update
+// itself stays non-blocking. Each test asserts:
+//   1. the handler returns immediately with no model mutation that
+//      depends on the IO result (state is held until the result
+//      message lands), AND
+//   2. the result-message handler applies the changes correctly.
+// ---------------------------------------------------------------------------
+
+// spawnQAReview's UI-thread half: when the FSM lands in QAGate and
+// the team has a QA member, the entry returns the model UNCHANGED.
+// The reviewBody / FoldLeft over QA members runs after QAPromptReady
+// lands (and that handler is the one that flips Sable to StWorking).
+func TestSpawnQAReview_ReturnsImmediatelyForQATeam(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    val sable = Member(
+        Name = "Sable", Role = QA(),
+        Personality = "rigorous",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
+    val seed = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy()).Copy(
+        State    = QAGate(Pending = EmptyHashSet[string]()),
+        Statuses = EmptyHashMap[string, Status]().Put("Felix", StIdle()),
+    )
+    val (m, _) = spawnQAReview(seed)
+    // Status map untouched — applyQAPromptReady is the one that
+    // upserts Sable to StWorking once the Future resolves.
+    val sableStatus = m.Statuses.Get("Sable")
+    return IsFalse(t, sableStatus.IsDefined())
+}
+
+// applyQAPromptReady is the back-channel of the QA fan-out. Fed a
+// QAPromptReady result with the FSM in QAGate, it must upsert the
+// QA member to StWorking (the visible UI signal that Sable started
+// the review).
+func TestApplyQAPromptReady_FlipsQAToWorking(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    val sable = Member(
+        Name = "Sable", Role = QA(),
+        Personality = "rigorous",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
+    val seed = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy()).Copy(
+        State    = QAGate(Pending = EmptyHashSet[string]()),
+        Statuses = EmptyHashMap[string, Status]().Put("Felix", StIdle()),
+    )
+    val (m, _) = applyQAPromptReady(seed, "synthetic review prompt")
+    return m.Statuses.Get("Sable") match {
+        case Some(s) => s match {
+            case StWorking() => IsTrue(t, true)
+            case _           => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+// applyQAPromptReady should drop the result silently if the FSM has
+// moved out of QAGate by the time the Future resolves (e.g. the user
+// pressed Esc, a recovery flow ran, etc.). Without the guard, late
+// results would re-dispatch the QA member after the model already
+// transitioned away.
+func TestApplyQAPromptReady_DroppedWhenNotInQAGate(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    val sable = Member(
+        Name = "Sable", Role = QA(),
+        Personality = "rigorous",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
+    val seed = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy()).Copy(
+        State = Idle(),  // moved on — no longer waiting on QA
+    )
+    val (m, _) = applyQAPromptReady(seed, "synthetic review prompt")
+    return IsFalse(t, m.Statuses.Get("Sable").IsDefined())
+}
+
+// onPasteClipboard's UI-thread half: Ctrl+V returns immediately
+// with the model unchanged. The actual insert / toast / LastError
+// updates fire when ClipboardPasted / ClipboardFailed lands.
+func TestOnPasteClipboard_ReturnsImmediatelyUnchanged(t T) T {
+    val seed = sampleModel().Copy(Composer = "abc", ComposerCursor = 3)
+    val (m, _) = onPasteClipboard(seed)
+    val t1 = Eq(t, m.Composer, "abc")
+    return Eq(t1, m.ComposerCursor, 3)
+}
+
+// ClipboardPasted handler inserts the pasted text at cursor and
+// pushes a toast. Mirrors the previous inline path's behaviour.
+func TestOnClipboardPasted_InsertsAtCursorAndToasts(t T) T {
+    val seed = sampleModel().Copy(Composer = "hi", ComposerCursor = 2)
+    val (m, _) = onClipboardPasted(seed, "X\n")  // trailing \n stripped
+    val t1 = Eq(t, m.Composer, "hiX")
+    return Eq(t1, m.ComposerCursor, 3)
+}
+
+// ClipboardFailed surfaces the read error to LastError so the user
+// sees why their paste didn't take.
+func TestOnClipboardFailed_SetsLastError(t T) T {
+    val (m, _) = onClipboardFailed(sampleModel(), "xclip not installed")
+    return m.LastError match {
+        case Some(s) => IsTrue(t, strings.Contains(s, "xclip not installed"))
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// onMemberDone's UI-thread half for engineers: the @finished
+// handler returns the model unchanged (no toast, no closeLiveSession,
+// no MemberDoneBodies entry) until the uncommitted-work probe lands.
+// Non-engineer roles bypass the probe entirely and finalise inline.
+func TestOnMemberDone_Engineer_DefersUntilUncommittedCheckResult(t T) T {
+    val proj = sampleProject()
+    val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
+        Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
+    )
+    val (m, _) = onMemberDone(seed, "Felix", "shipped it")
+    // MemberDoneBodies must NOT have a Felix entry yet — it lands
+    // when UncommittedCheckResult fires, not on the initial @finished.
+    val noBodyYet = !m.MemberDoneBodies.Get("Felix").IsDefined()
+    // Status must NOT have flipped to StIdle yet either.
+    val stillWorking = m.Statuses.Get("Felix") match {
+        case Some(s) => s match {
+            case StWorking() => true
+            case _           => false
+        }
+        case None() => false
+    }
+    return IsTrue(t, noBodyYet && stillWorking)
+}
+
+// UncommittedCheckResult with dirty=false (clean worktree) finalises
+// the @finished — adds the body to MemberDoneBodies and flips status
+// to StIdle. Mirrors the inline path's behaviour.
+func TestOnUncommittedCheckResult_CleanFinalises(t T) T {
+    val seed = sampleModel().Copy(
+        Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
+    )
+    val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped it", Dirty = false))
+    val bodyLogged = m.MemberDoneBodies.Get("Felix") match {
+        case Some(b) => b == "shipped it"
+        case None()  => false
+    }
+    val idleNow = m.Statuses.Get("Felix") match {
+        case Some(s) => s match {
+            case StIdle() => true
+            case _        => false
+        }
+        case None() => false
+    }
+    return IsTrue(t, bodyLogged && idleNow)
+}
+
+// approveAndKickHooks's UI-thread half: KeyApprove inside Approval
+// returns the model UNCHANGED (no transition, no conversation log
+// entry, no toast). The transition fires when ApprovalReadyResult
+// lands. Crucial guarantee for the freeze fix — past audits caught a
+// 30-minute Approval freeze because Ctrl+A → checkPrReady wedged the
+// UI thread; now there's nothing on the hot path that can block.
+func TestApprove_ReturnsImmediatelyWithoutTransition(t T) T {
+    val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))
+    val (m, _) = Update(seed, KeyApprove())
+    val stillApproval = m.State match {
+        case Approval(_) => true
+        case _           => false
+    }
+    val noLogYet = m.Conversation.IsEmpty()
+    return IsTrue(t, stillApproval && noLogYet)
+}
+
+// ApprovalReadyResult with Some(reason) lands the failure path:
+// modal dismissed (FSM exits Approval via ApprovalRejected), error
+// toast, LastError set. Without the dismissal, the past audit's
+// 30-minute Approval-freeze regression would slip back in.
+func TestOnApprovalReadyResult_BlockedDismissesModal(t T) T {
+    val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))
+    val (m, _) = Update(seed, ApprovalReadyResult(
+        Body   = "ship it",
+        Reason = Some("no commits ahead of main"),
+    ))
+    val notApproval = m.State match {
+        case Approval(_) => false
+        case _           => true
+    }
+    val hasError = m.LastError match {
+        case Some(s) => strings.Contains(s, "no commits ahead of main")
+        case None()  => false
+    }
+    return IsTrue(t, notApproval && hasError)
+}
+
+// onSessionFailed for the lead's @summary path: model must hold the
+// parsed directives on PendingSummaryDirs and NOT transition the FSM
+// until SummaryReadyResult lands. Confirms the freeze-fix split that
+// keeps checkPrReady's git rev-list off the UI thread.
+func TestTLSummary_DefersTransitionUntilSummaryReadyResult(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
+    runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                                   "commit", "--allow-empty", "-q", "-m", "lead work"))
+    val goodBody = "## What\n- shipped the thing\n\n## Why\nthe user asked for it\n\n## Follow-ups\nnone"
+    val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
+        State      = TLThinking(),
+        TurnBuffer = "@summary\n" + goodBody + "\n@end",
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val held = m.PendingSummaryDirs.IsDefined()
+    // FSM must not have transitioned to Approval yet — the probe
+    // hasn't resolved.
+    val notApprovalYet = m.State match {
+        case Approval(_) => false
+        case _           => true
+    }
+    return IsTrue(t, held && notApprovalYet)
+}
+
+// SummaryReadyResult landing with PendingSummaryDirs=None must be a
+// no-op. Late results (e.g. the user pressed Esc / recovery flow
+// reset the model) MUST NOT side-effect — without the guard, a
+// stray late SummaryReadyResult could nudge the TL out of an
+// unrelated state.
+func TestOnSummaryReadyResult_DroppedWhenNothingPending(t T) T {
+    val seed = sampleModel()
+    val (m, _) = Update(seed, SummaryReadyResult(Member = "Iris", Reason = None[string]()))
+    val sameState = stateTag(m.State) == stateTag(seed.State)
+    val sameConvo = m.Conversation.Size() == seed.Conversation.Size()
+    return IsTrue(t, sameState && sameConvo)
+}
+
+// gitFilesList must prefix `--no-optional-locks` to defang stat-cache
+// lock contention. We can't observe the subprocess args directly from
+// a test, but we can confirm the helper still returns sensible output
+// in a real git repo (the flag is silent on success — `git diff
+// --no-optional-locks` is identical to `git diff` for read-only
+// queries). Treating the test as an existence/smoke check.
+func TestGitFilesList_RunsAgainstRealRepo(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_gitfiles_test_")
+    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    defer os.RemoveAll(dir)
+    runGitInTmp(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInTmp(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                             "commit", "--allow-empty", "-q", "-m", "base"))
+    val files = gitFilesList(dir, ArrayOf("ls-files"))
+    // Empty repo, no tracked files — IsEmpty() is the expected shape.
+    return IsTrue(t, files.IsEmpty())
+}

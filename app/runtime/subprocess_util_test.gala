@@ -33,14 +33,15 @@ func TestRunWithTimeout_QuickCommand_Succeeds(t T) T {
     }
 }
 
-// Watchdog must kill a long-running subprocess. We can't reliably
-// invoke `sleep` cross-platform (Windows lacks GNU sleep), but
-// `git wait-for-event` doesn't exist either. The most portable
-// approach: shell-out to a deliberately-stuck command. Python is
-// not guaranteed. The pragmatic option: use the watchdog path with
-// a near-zero timeout against a fast command and assert TimedOut.
-// The 1ms deadline guarantees the watchdog fires before `git
-// --version` can return on any realistic machine.
+// Watchdog deadline contract: when elapsed wall-clock exceeds
+// `timeout`, the result must carry TimedOut=true. Uses a 1-ns
+// deadline against `git --version` so the assertion is platform-
+// independent — every realistic CI runner takes more than 1 ns
+// across Spawn + ReadLine + Wait, including the GitHub Actions
+// Linux runner where the original 1-ms test flaked because git
+// completed in microseconds. The earlier 1-ms threshold sat right
+// on top of a fast runner's actual completion time; 1 ns sits well
+// below any possible measurement.
 func TestRunWithTimeout_TightDeadline_FiresTimeout(t T) T {
     val opts = subprocess.NewSpawnOpts(
         "git",
@@ -48,7 +49,7 @@ func TestRunWithTimeout_TightDeadline_FiresTimeout(t T) T {
         SliceEmpty[string](),
         ".",
     )
-    val resTry = RunWithTimeout(opts, time_utils.Milliseconds(int64(1)))
+    val resTry = RunWithTimeout(opts, time_utils.Nanoseconds(int64(1)))
     return resTry match {
         case Failure(_) => IsTrue(t, false)
         case Success(r) => IsTrue(t, r.TimedOut)

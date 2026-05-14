@@ -6,6 +6,7 @@ gala_library(
         "debuglog.gala",
         "runtime_glue.gala",
         "session_id.gala",
+        "subprocess_util.gala",
         "trace.gala",
     ],
     go_srcs = [
@@ -25,6 +26,7 @@ gala_library(
         "@gala//go_interop",
         "@gala//json",
         "@gala//subprocess",
+        "@gala//time_utils",
     ],
     visibility = ["//visibility:public"],
 )

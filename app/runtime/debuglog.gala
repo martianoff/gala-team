@@ -77,6 +77,21 @@ val KindHookResult        = "hook_result"
 val KindWorktreeCreate    = "worktree_create"
 val KindStaleWorktree     = "stale_worktree"
 val KindError             = "error"
+// spawn_failure records a member-spawn that returned Left from
+// ensureSession (workspace creation failed OR subprocess.Spawn failed).
+// Before this event the failure only landed in m.LastError (toast-
+// only); a member who was supposed to start producing chunks just
+// silently produced nothing. Audit log of the 0.49.0-migration
+// session showed Sable producing ZERO events after QAGate fired the
+// auto-QA spawn — no clue why. Now we can replay events.jsonl and
+// see the actual error string.
+val KindSpawnFailure      = "spawn_failure"
+// stderr records each non-empty stderr line from a claude subprocess.
+// Mirrors the toast surface in onStderr but durable. Catches the
+// most common silent-failure roots directly: claude's "usage limit
+// reached" / "session not found" / "auth required" lines all land
+// on stderr first.
+val KindStderr            = "stderr"
 
 // LogEvent appends one event to events.jsonl. No-op when
 // GALA_TEAM_DEBUG is off OR when SetDebugRepo hasn't been called
@@ -298,4 +313,56 @@ func LogClaudeChunk(member string, dropped bool, reason string, visible string, 
     ))
     if enc.IsFailure() { return }
     LogEvent(KindClaudeChunk, member, enc.Get())
+}
+
+// SpawnFailurePayload records why ensureSession returned Left for a
+// member. `Origin` tags the call site (`onSubmit`, `dispatch`,
+// `qa_auto`, `respawn`, `tl_nudge`) so replay tooling can correlate
+// the failure with the FSM context that triggered the spawn. `Reason`
+// is the raw error string from ensureSession; we keep it verbatim so
+// future categorisation (rate_limit / auth / worktree / etc) can be
+// post-hoc without a schema change here.
+struct SpawnFailurePayload(
+    Origin string,
+    Reason string,
+)
+val spawnFailureCodec = json.Codec[SpawnFailurePayload](json.SnakeCase())
+
+// LogSpawnFailure emits a `spawn_failure` event for a member-spawn
+// that produced no live subprocess. Call from every ensureSession
+// failure site so the next "Sable disappeared" replay has the actual
+// error in events.jsonl, not just a transient toast.
+func LogSpawnFailure(member string, origin string, reason string) {
+    if !DebugEnabled() { return }
+    val enc = spawnFailureCodec.Encode(SpawnFailurePayload(
+        Origin = origin,
+        Reason = reason,
+    ))
+    if enc.IsFailure() { return }
+    LogEvent(KindSpawnFailure, member, enc.Get())
+}
+
+// StderrPayload carries one non-empty stderr line from a claude
+// subprocess. We log the trimmed text verbatim so claude's exit
+// messages (rate limit, auth, session-id not found) are durable.
+// Length is also captured to spot truncation if claude flushes a
+// huge stderr blob.
+struct StderrPayload(
+    Text    string,
+    TextLen int,
+)
+val stderrCodec = json.Codec[StderrPayload](json.SnakeCase())
+
+// LogStderr emits a `stderr` event for one stderr line. Drops empty/
+// whitespace-only lines defensively (claude periodically flushes
+// them and they have no signal). Callers should still pre-trim.
+func LogStderr(member string, line string) {
+    if !DebugEnabled() { return }
+    if line == "" { return }
+    val enc = stderrCodec.Encode(StderrPayload(
+        Text    = line,
+        TextLen = len(line),
+    ))
+    if enc.IsFailure() { return }
+    LogEvent(KindStderr, member, enc.Get())
 }

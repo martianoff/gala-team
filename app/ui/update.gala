@@ -345,7 +345,10 @@ func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Arra
         ConsultsFired = 0,
     )
     return ensureSession(mClosed, lead) match {
-        case Left(err) => (mClosed.Copy(LastError = Some(s"TL nudge spawn (${reason}): ${err}")), EmptyArray[Cmd[AppMsg]]())
+        case Left(err) => {
+            LogSpawnFailure(lead.Name, "tl_nudge", err)
+            return (mClosed.Copy(LastError = Some(s"TL nudge spawn (${reason}): ${err}")), EmptyArray[Cmd[AppMsg]]())
+        }
         case Right(m1) => {
             val withStatus = setStatus(m1, lead.Name, StWorking())
             return (withStatus, ArrayOf[Cmd[AppMsg]](sendAndPumpCmd(withStatus, lead, prompt)))
@@ -1566,7 +1569,10 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     // its EOF closes the new turn before any new chunks reach onChunk.
     val cleared = closeLiveSession(withState, lead.Name)
     return ensureSession(cleared, lead) match {
-        case Left(err)  => (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
+        case Left(err)  => {
+            LogSpawnFailure(lead.Name, "submit", err)
+            return (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
+        }
         case Right(m1)  => {
             val (effectivePrompt, onboardingErr) =
                 if (firstTurn) onboarding.WrapPromptSafe(mClean.Project, mClean.Team, lead, mClean.Policy.WorkspaceMode, prompt)
@@ -1750,6 +1756,13 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
         case None()  => NoCmd[AppMsg]()
     }
     if trimmed == "" { return (m, pumpCmd) }
+    // Durable: log every non-empty stderr line to events.jsonl
+    // BEFORE branching on content. The toast surface is transient
+    // (lives for 6-8 seconds); the event log is the audit trail
+    // when we're investigating "Sable produced zero events for 10
+    // hours" days later. claude's most informative exit messages
+    // (rate-limit, auth, session-not-found) ride this stream.
+    LogStderr(name, trimmed)
     // "No conversation found with session ID..." means our recorded
     // SessionId is stale (claude restarted or session expired). The
     // best we can do is forget the id so the next dispatch starts a
@@ -2338,7 +2351,10 @@ func nudgeEngineerToCommit(m AppModel, name string, mem Member) Tuple[AppModel, 
     val toast = m.Toasts.PushError(s"${name}: commit before @finished", time_utils.Now(), time_utils.Seconds(int64(8)))
     val closed = closeLiveSession(m, name)
     return ensureSession(closed.Copy(Toasts = toast), mem) match {
-        case Left(err) => (closed.Copy(LastError = Some(s"commit nudge spawn (${name}): ${err}"), Toasts = toast), NoCmd[AppMsg]())
+        case Left(err) => {
+            LogSpawnFailure(name, "commit_nudge", err)
+            return (closed.Copy(LastError = Some(s"commit nudge spawn (${name}): ${err}"), Toasts = toast), NoCmd[AppMsg]())
+        }
         case Right(m1) => {
             val withStatus = setStatus(m1, name, StWorking())
             return (withStatus, sendAndPumpCmd(withStatus, mem, prompt))
@@ -2824,7 +2840,10 @@ func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
     return findMemberByName(m.Team.Members, name) match {
         case None() => (m, NoCmd[AppMsg]())
         case Some(mem) => ensureSession(m, mem) match {
-            case Left(err)  => (m.Copy(LastError = Some(s"respawn ${name}: ${err}")), NoCmd[AppMsg]())
+            case Left(err)  => {
+                LogSpawnFailure(name, "respawn", err)
+                return (m.Copy(LastError = Some(s"respawn ${name}: ${err}")), NoCmd[AppMsg]())
+            }
             case Right(m1)  => (setStatus(m1, name, StWorking()), sendAndPumpCmd(m1, mem, "Continue your previous task."))
         }
     }
@@ -2908,7 +2927,10 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
         return findMemberByName(mClosed.Team.Members, name) match {
             case None() => (mClosed, curCmds)
             case Some(mem) => ensureSession(mClosed, mem) match {
-                case Left(err)  => (curM.Copy(LastError = Some(s"dispatch ${name}: ${err}")), curCmds)
+                case Left(err)  => {
+                    LogSpawnFailure(name, "dispatch", err)
+                    return (curM.Copy(LastError = Some(s"dispatch ${name}: ${err}")), curCmds)
+                }
                 case Right(m1)  => {
                     // Pipeline upsert: append (or refresh status of)
                     // the dispatched member's node so the chain-of-
@@ -3238,7 +3260,10 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         LogDispatch(mem.Name, reviewBody)
         val firstTurn = !curM.SessionIds.Get(mem.Name).IsDefined()
         return ensureSession(curM, mem) match {
-            case Left(err)  => (curM.Copy(LastError = Some(s"qa ${mem.Name}: ${err}")), curCmds)
+            case Left(err)  => {
+                LogSpawnFailure(mem.Name, "qa_auto", err)
+                return (curM.Copy(LastError = Some(s"qa ${mem.Name}: ${err}")), curCmds)
+            }
             case Right(m1)  => {
                 // Pipeline upsert mirrors the engineer-dispatch path —
                 // QA branches off the same Iris node visually.
@@ -3566,7 +3591,10 @@ func detectMalformedMemberReport(buffer string, mem Member) string {
 func sendMemberNudge(m AppModel, mem Member, reason string) Tuple[AppModel, Cmd[AppMsg]] {
     val prompt = buildMemberNudgePrompt(reason, mem)
     return ensureSession(m, mem) match {
-        case Left(err)  => (m.Copy(LastError = Some(s"nudge ${mem.Name}: ${err}")), NoCmd[AppMsg]())
+        case Left(err)  => {
+            LogSpawnFailure(mem.Name, "member_nudge", err)
+            return (m.Copy(LastError = Some(s"nudge ${mem.Name}: ${err}")), NoCmd[AppMsg]())
+        }
         case Right(m1)  => {
             val withStatus = setStatus(m1, mem.Name, StWorking())
             return (withStatus, sendAndPumpCmd(withStatus, mem, prompt))

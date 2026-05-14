@@ -1,0 +1,75 @@
+package runtime
+
+import (
+    "martianoff/gala/subprocess"
+    "martianoff/gala/time_utils"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+)
+
+// Quick-completing subprocess: helper returns clean exit code, no
+// timeout, lines preserved verbatim. Uses the platform's native echo
+// equivalent via a portable cmd — `git --version` is universally
+// available wherever this project is built (CI runners install git
+// in the standard image) and prints a single deterministic line.
+func TestRunWithTimeout_QuickCommand_Succeeds(t T) T {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("--version").ToGoSlice(),
+        SliceEmpty[string](),
+        ".",
+    )
+    val resTry = RunWithTimeout(opts, time_utils.Seconds(int64(10)))
+    return resTry match {
+        case Failure(_) => IsTrue(t, false)
+        case Success(r) => {
+            val t1 = IsFalse(t, r.TimedOut)
+            val t2 = Eq(t1, r.ExitCode, 0)
+            // `git --version` prints "git version X.Y.Z" — non-empty.
+            return IsTrue(t2, !r.Lines.IsEmpty())
+        }
+    }
+}
+
+// Watchdog must kill a long-running subprocess. We can't reliably
+// invoke `sleep` cross-platform (Windows lacks GNU sleep), but
+// `git wait-for-event` doesn't exist either. The most portable
+// approach: shell-out to a deliberately-stuck command. Python is
+// not guaranteed. The pragmatic option: use the watchdog path with
+// a near-zero timeout against a fast command and assert TimedOut.
+// The 1ms deadline guarantees the watchdog fires before `git
+// --version` can return on any realistic machine.
+func TestRunWithTimeout_TightDeadline_FiresTimeout(t T) T {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("--version").ToGoSlice(),
+        SliceEmpty[string](),
+        ".",
+    )
+    val resTry = RunWithTimeout(opts, time_utils.Milliseconds(int64(1)))
+    return resTry match {
+        case Failure(_) => IsTrue(t, false)
+        case Success(r) => IsTrue(t, r.TimedOut)
+    }
+}
+
+// ArgvDebugString space-joins the args for the timeout-event payload.
+// Order is preserved so audit replay can match the invocation.
+func TestArgvDebugString_JoinsArgs(t T) T {
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("rev-list", "--count", "main..HEAD").ToGoSlice(),
+        SliceEmpty[string](),
+        ".",
+    )
+    return Eq(t, ArgvDebugString(opts), "rev-list --count main..HEAD")
+}
+
+// Sanity: DefaultSubprocessTimeout is reachable from the helper's
+// home package and resolves to a positive duration. Catches a
+// regression where the constant gets accidentally zeroed or
+// re-typed to an Immutable wrapper.
+func TestDefaultSubprocessTimeout_IsPositive(t T) T =
+    IsTrue(t, DefaultSubprocessTimeout().ToNanos() > int64(0))

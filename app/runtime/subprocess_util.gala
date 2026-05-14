@@ -1,0 +1,143 @@
+package runtime
+
+import (
+    "strings"
+    "martianoff/gala/concurrent"
+    "martianoff/gala/subprocess"
+    "martianoff/gala/time_utils"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// app/runtime/subprocess_util — watchdog-bounded subprocess helper.
+//
+// Every synchronous `git` / `gh` / `powershell.exe` invocation could
+// historically wedge indefinitely on lock contention, antivirus
+// inspection, or a stuck pipe. The QA-gate freeze fix moved those
+// calls off the UI thread so a hang no longer freezes the gala-tui
+// event loop — but a hung subprocess still leaks a worker goroutine
+// + file descriptors forever.
+//
+// RunWithTimeout bounds the failure: after `timeout`, a watchdog
+// goroutine Kill()s the process; the function returns with
+// TimedOut=true. Callers are responsible for emitting a
+// `subprocess_timeout` audit event via LogSubprocessTimeout —
+// separating telemetry from mechanism keeps this helper free of the
+// debug package's transitive deps.
+// ============================================================================
+
+// SubprocessOutput is the result of a watchdog-bounded subprocess
+// invocation:
+//
+//   ExitCode — the child's exit code on clean completion. Undefined
+//              (often non-zero but OS-dependent) when TimedOut is
+//              true; callers should branch on TimedOut first.
+//   Lines    — trimmed stdout, one entry per non-empty line. Same
+//              shape gitFilesList / readClipboard built by hand
+//              before the helper landed.
+//   TimedOut — true iff the watchdog fired before the child exited.
+//              Wall-clock-derived, so a process that exits coincident
+//              with the deadline is treated as timely (no false
+//              positives).
+struct SubprocessOutput(
+    ExitCode int,
+    Lines    Array[string],
+    TimedOut bool,
+)
+
+// RunWithTimeout spawns `opts`, drains stdout to EOF, waits for
+// exit, and bounds the whole sequence by `timeout`. If the process
+// doesn't exit within the deadline a watchdog goroutine kills it
+// and the result lands with TimedOut=true.
+//
+// The watchdog is fire-and-forget. When the subprocess exits cleanly
+// before the deadline, the kill on an already-exited process is a
+// silent no-op on every supported OS (Windows / macOS / Linux); no
+// cancel-token plumbing required.
+//
+// Caller contract: invoke from a worker goroutine, not the UI thread.
+// RunWithTimeout still blocks the calling goroutine for up to
+// `timeout`; the bounded-failure property is what's new, not
+// off-thread-ness. Pair with concurrent.FutureApply for the off-
+// thread half (every existing call site already does this).
+func RunWithTimeout(opts subprocess.SpawnOpts, timeout time_utils.Duration) Try[SubprocessOutput] {
+    val procTry = subprocess.Spawn(opts)
+    if procTry.IsFailure() {
+        return Failure[SubprocessOutput](procTry.GetError())
+    }
+    val proc = procTry.Get()
+
+    // Watchdog goroutine. On a timely exit, Kill() races with the
+    // parent's reaping; either Kill fires on an already-exited
+    // process (no-op) or fires fractions of a millisecond before
+    // — irrelevant once stdout is drained.
+    concurrent.FutureApply[bool](() => {
+        time_utils.Sleep(timeout)
+        proc.Kill()
+        return true
+    })
+
+    val started = time_utils.Now()
+    var lines = EmptyArray[string]()
+    var stopped = false
+    for !stopped {
+        val ln = proc.ReadLine()
+        if ln.IsFailure() {
+            stopped = true
+        } else {
+            // TrimRight to normalise Windows CR; do NOT filter empty
+            // lines — readClipboard needs them to preserve multi-line
+            // pastes with blank rows. Callers that want a compact
+            // file list (gitFilesList) filter on their end.
+            lines = lines.Append(strings.TrimRight(ln.Get(), " \t\r\n"))
+        }
+    }
+    val codeTry = proc.Wait()
+    if codeTry.IsFailure() {
+        // Wait failure usually means the watchdog killed the process
+        // mid-read; still report as TimedOut so callers don't treat
+        // the (likely 0-line) output as a real result. Exit code is
+        // unobservable in this branch; fall back to -1.
+        val elapsedNanos = time_utils.Now().UnixNanos() - started.UnixNanos()
+        val timedOut = elapsedNanos >= timeout.ToNanos()
+        return Success(SubprocessOutput(
+            ExitCode = -1,
+            Lines    = lines,
+            TimedOut = timedOut,
+        ))
+    }
+    val code = codeTry.Get()
+    val elapsedNanos = time_utils.Now().UnixNanos() - started.UnixNanos()
+    val timedOut = elapsedNanos >= timeout.ToNanos()
+    return Success(SubprocessOutput(
+        ExitCode = code,
+        Lines    = lines,
+        TimedOut = timedOut,
+    ))
+}
+
+// ArgvDebugString renders the spawn args as a single space-joined
+// string for the timeout-event payload. Quoting is intentionally
+// best-effort (no escaping of embedded spaces) — this is purely for
+// human consumption when grepping events.jsonl, not for shell
+// re-execution.
+func ArgvDebugString(opts subprocess.SpawnOpts) string {
+    val parts = ArrayFromSlice[string](opts.Args)
+    return parts.MkString(" ")
+}
+
+// DefaultSubprocessTimeout is the watchdog deadline for git / gh /
+// clipboard invocations from update.gala helpers. Generous enough
+// that a healthy command completes well under it (most git
+// queries finish in < 100ms; PowerShell cold-start tops out around
+// 1.5s on Windows), tight enough that a hung process gets killed
+// before resources accumulate. Tunable per call site if a specific
+// command needs more headroom.
+//
+// Exposed as a function (not a `val`) so callers see the unwrapped
+// Duration directly instead of an `Immutable[Duration]` wrapper —
+// cross-package `val` references go through Immutable, which would
+// force every caller to `.Get()` the value before passing it to
+// RunWithTimeout.
+func DefaultSubprocessTimeout() time_utils.Duration = time_utils.Seconds(int64(30))

@@ -1311,19 +1311,20 @@ func onClipboardFailed(m AppModel, err string) Tuple[AppModel, Cmd[AppMsg]] =
 func readClipboard() Try[string] = Try(() => {
     val (cmd, args) = clipboardReadCmd()
     val opts = subprocess.NewSpawnOpts(cmd, args.ToGoSlice(), SliceEmpty[string](), ".")
-    val proc = subprocess.Spawn(opts) match {
-        case Success(p)   => p
-        case Failure(err) => panic(s"spawn ${cmd}: ${err.Error()}")
+    // Watchdog: PowerShell startup is the slowest case (~1.5s cold)
+    // but well under 30s. A timeout here means the OS clipboard
+    // subsystem is wedged; surface as a "clipboard read timed out"
+    // error rather than leaking a worker goroutine.
+    val resTry = RunWithTimeout(opts, DefaultSubprocessTimeout())
+    if resTry.IsFailure() { panic(s"spawn ${cmd}: ${resTry.GetError().Error()}") }
+    val res = resTry.Get()
+    if res.TimedOut {
+        LogSubprocessTimeout(cmd, ArgvDebugString(opts),
+            DefaultSubprocessTimeout().ToNanos() / int64(1000000))
+        panic(s"${cmd} timed out after ${DefaultSubprocessTimeout().ToNanos() / int64(1000000000)}s")
     }
-    var sb = EmptyArray[string]()
-    for {
-        val line = proc.ReadLine()
-        if line.IsFailure() { break }
-        sb = sb.Append(line.Get())
-    }
-    val code = proc.Wait().Get()
-    if code != 0 { panic(s"${cmd} exited ${code}") }
-    return sb.MkString("\n")
+    if res.ExitCode != 0 { panic(s"${cmd} exited ${res.ExitCode}") }
+    return res.Lines.MkString("\n")
 })
 
 // clipboardReadCmd picks the right (cmd, args) pair for the host OS.
@@ -3489,24 +3490,23 @@ func gitFilesList(cwd string, args Array[string]) Array[string] {
         SliceEmpty[string](),
         cwd,
     )
-    val procTry = subprocess.Spawn(opts)
-    if procTry.IsFailure() { return EmptyArray[string]() }
-    val proc = procTry.Get()
-    var out = EmptyArray[string]()
-    var stopped = false
-    for !stopped {
-        val ln = proc.ReadLine()
-        if ln.IsFailure() {
-            stopped = true
-        } else {
-            val t = strings.TrimSpace(ln.Get())
-            if t != "" { out = out.Append(t) }
-        }
+    // Watchdog: bound the subprocess at 30s so a wedged git can't
+    // leak a worker goroutine forever. TimedOut logs to events.jsonl
+    // for audit; the empty-array return on timeout matches the
+    // existing "silent failure" contract.
+    val resTry = RunWithTimeout(opts, DefaultSubprocessTimeout())
+    if resTry.IsFailure() { return EmptyArray[string]() }
+    val res = resTry.Get()
+    if res.TimedOut {
+        LogSubprocessTimeout("git", ArgvDebugString(opts),
+            DefaultSubprocessTimeout().ToNanos() / int64(1000000))
+        return EmptyArray[string]()
     }
-    val codeTry = proc.Wait()
-    if codeTry.IsFailure() { return EmptyArray[string]() }
-    if codeTry.Get() != 0 { return EmptyArray[string]() }
-    return out
+    if res.ExitCode != 0 { return EmptyArray[string]() }
+    // Helper preserves empty lines (so readClipboard can keep
+    // multi-line paste content); filter here since file lists
+    // shouldn't carry blanks.
+    return res.Lines.Filter((s) => s != "")
 }
 
 // manifestBranchFor picks the branch each engineer's work lives on.
@@ -4736,24 +4736,20 @@ func checkPrReady(proj Project) Option[string] {
         SliceEmpty[string](),
         proj.Repo,
     )
-    val procTry = subprocess.Spawn(opts)
-    if procTry.IsFailure() { return None[string]() }
-    val proc = procTry.Get()
-    var lastLine = ""
-    var stopped = false
-    for !stopped {
-        val ln = proc.ReadLine()
-        if ln.IsFailure() {
-            stopped = true
-        } else {
-            val t = strings.TrimSpace(ln.Get())
-            if t != "" { lastLine = t }
-        }
+    val resTry = RunWithTimeout(opts, DefaultSubprocessTimeout())
+    if resTry.IsFailure() { return None[string]() }
+    val res = resTry.Get()
+    if res.TimedOut {
+        LogSubprocessTimeout("git", ArgvDebugString(opts),
+            DefaultSubprocessTimeout().ToNanos() / int64(1000000))
+        return None[string]()
     }
-    val codeTry = proc.Wait()
-    if codeTry.IsFailure() { return None[string]() }
-    val code = codeTry.Get()
-    if code != 0 {
+    // git rev-list --count outputs exactly one number line; pick the
+    // last non-empty entry to defang any trailing blank the helper
+    // would otherwise preserve.
+    val nonEmpty = res.Lines.Filter((s) => s != "")
+    val lastLine = if (nonEmpty.IsEmpty()) "" else nonEmpty.Last()
+    if res.ExitCode != 0 {
         // `git rev-list <default>..<leadRef>` failed. Two shapes
         // produce non-zero here, and they want different responses:
         //   (a) ref missing — the lead branch was never created (no
@@ -4791,20 +4787,18 @@ func refMissing(repo string, ref string) bool {
         SliceEmpty[string](),
         repo,
     )
-    val procTry = subprocess.Spawn(opts)
-    if procTry.IsFailure() { return false }
-    val proc = procTry.Get()
-    var stopped = false
-    for !stopped {
-        val ln = proc.ReadLine()
-        if ln.IsFailure() { stopped = true }
+    val resTry = RunWithTimeout(opts, DefaultSubprocessTimeout())
+    if resTry.IsFailure() { return false }
+    val res = resTry.Get()
+    if res.TimedOut {
+        LogSubprocessTimeout("git", ArgvDebugString(opts),
+            DefaultSubprocessTimeout().ToNanos() / int64(1000000))
+        return false
     }
-    val codeTry = proc.Wait()
-    if codeTry.IsFailure() { return false }
     // git rev-parse --verify --quiet exits 0 if the ref resolves,
     // 1 if it doesn't (and 128 for "not a git repo" / other env
     // failures). Only treat exit code 1 as "ref missing".
-    return codeTry.Get() == 1
+    return res.ExitCode == 1
 }
 
 // hooksFutureCmd lifts policy.RunHooksFuture into a Cmd[AppMsg]. The

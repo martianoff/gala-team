@@ -1980,20 +1980,42 @@ func planProgressGlyphs(shipped int, total int) string {
 // always need to know how to exit. Tab moves focus to the sidebar
 // (Ctrl+L is the alias); Ctrl+T toggles the consult viewer modal;
 // Ctrl+H opens the saved-archive browser.
-func footerHints(m AppModel) string = m.Focus match {
-    case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc composer · F2/F3/F4/F5 views · F6 help · Ctrl+Q quit"
-    case FocusComposer() => {
-        if (m.AutoApprove) {
-            // AutoApprove suppresses Ctrl+A / Ctrl+R hints — the gate is
-            // off. Merge stays manual so Ctrl+M shows whenever any PR
-            // is open in the batch.
-            val mergeHint = if (m.OpenPrs.IsEmpty()) "" else " · Ctrl+M merge"
-            return s"  Enter send${mergeHint} · F7 auto:on · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+func footerHints(m AppModel) string {
+    // Selection-aware override. When the user has clicked or
+    // drag-selected a conversation entry (or a range of them), the
+    // footer should advertise the actions specific to selection —
+    // Ctrl+Y copy, Esc clear — rather than the default Enter-send
+    // hints which aren't useful while reviewing a highlighted range.
+    // Without this, users reported "I select text in the chat box
+    // but I no longer see the menu with Ctrl-Y etc." — the reverse-
+    // video highlight was the only feedback that anything had
+    // happened.
+    if m.SelectedEntry.IsDefined() {
+        val isRange = m.SelectionFocus match {
+            case Some(focus) => m.SelectedEntry match {
+                case Some(anchor) => anchor != focus
+                case None()       => false
+            }
+            case None()      => false
         }
-        if (!m.OpenPrs.IsEmpty()) {
-            return "  Ctrl+M merge · Ctrl+A re-approve · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+        val label = if (isRange) "selected range" else "selected entry"
+        return s"  ${label} · Ctrl+Y copy · Esc clear · Ctrl+P palette · F6 help · Ctrl+Q quit"
+    }
+    return m.Focus match {
+        case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc composer · F2/F3/F4/F5 views · F6 help · Ctrl+Q quit"
+        case FocusComposer() => {
+            if (m.AutoApprove) {
+                // AutoApprove suppresses Ctrl+A / Ctrl+R hints — the gate is
+                // off. Merge stays manual so Ctrl+M shows whenever any PR
+                // is open in the batch.
+                val mergeHint = if (m.OpenPrs.IsEmpty()) "" else " · Ctrl+M merge"
+                return s"  Enter send${mergeHint} · F7 auto:on · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+            }
+            if (!m.OpenPrs.IsEmpty()) {
+                return "  Ctrl+M merge · Ctrl+A re-approve · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+            }
+            return "  Enter send · Ctrl+A approve · Ctrl+R reject · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
         }
-        return "  Enter send · Ctrl+A approve · Ctrl+R reject · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
     }
 }
 

@@ -2530,10 +2530,26 @@ func activeMemberNames(m AppModel) Array[string] =
 // persistConversation writes the new conversation log to disk under
 // m.Project.Repo and returns the updated model. Save failures only set
 // LastError — the in-memory transcript stays canonical.
-func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) AppModel = session.Save(m.Project.Repo, m.Project.Name, nextConvo, activeMemberNames(m)) match {
+//
+// The snapshot also includes the per-member SessionIds map so the next
+// launch's `ensureSession` can hand `--resume <id>` to claude and
+// recover the prior in-process conversation. Without this, post-
+// recovery TL turns started with a fresh claude session that had no
+// memory of the prior work and produced the "fresh session, clean
+// worktree" amnesia symptom.
+func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) AppModel = session.Save(
+    m.Project.Repo, m.Project.Name, nextConvo, activeMemberNames(m), serialiseSessionIds(m),
+) match {
     case Success(_)   => m.Copy(Conversation = nextConvo)
     case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some(s"session save: ${err.Error()}"))
 }
+
+// serialiseSessionIds flattens AppModel.SessionIds (HashMap) into the
+// SessionIdEntry array shape the snapshot persists. Empty map → empty
+// array (no entries written).
+func serialiseSessionIds(m AppModel) Array[session.SessionIdEntry] =
+    m.SessionIds.FoldLeftKV(EmptyArray[session.SessionIdEntry](), (acc, name, sid) =>
+        acc.Append(session.SessionIdEntry(Member = name, SessionId = sid)))
 
 // MaxAutoRetries is sourced from m.Policy.Heartbeat.MaxRetries (#29).
 // Kept as a function shim so call sites stay readable.

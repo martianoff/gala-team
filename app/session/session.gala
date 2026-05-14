@@ -40,6 +40,14 @@ import (
 // stamped via `time_utils.Now().UnixNanos()` at append time.
 struct ConversationLine(Speaker string, Text string, At int64 = int64(0))
 
+// SessionIdEntry pairs a member name with the persisted claude session
+// UUID. Stored as an array (not a HashMap) so the JSON codec handles
+// it cleanly — gala's codec has a stable encoding for `Array[T]` of
+// struct values; HashMap-of-strings is also supported but the
+// per-entry shape here makes the on-disk format easier to inspect by
+// hand.
+struct SessionIdEntry(Member string, SessionId string)
+
 // Snapshot is the on-disk shape. ProjectName is informational (lets us
 // detect cross-project mismatches later); SavedAt is unix nanos at the
 // moment Save was called.
@@ -49,11 +57,28 @@ struct ConversationLine(Speaker string, Text string, At int64 = int64(0))
 // uses this list to spawn those members with `--continue` so Claude
 // picks up its prior in-process conversation instead of starting a
 // fresh session.
+//
+// SessionIds is the per-member claude session UUID map (flattened to
+// an array for codec round-tripping). On the next launch,
+// `primeFromSnapshot` restores these into AppModel.SessionIds so the
+// first `ensureSession` for each member spawns claude with
+// `--resume <id>` (loading the prior conversation from claude's own
+// session storage) instead of `--session-id <new>` (a fresh session
+// with no context). Without this the TL sees a brand-new claude
+// process on every relaunch and loses the conversation thread —
+// observed as "fresh session, clean worktree, no in-flight work I can
+// see" in audit logs even though the user clearly resumed.
+//
+// Defaulted to empty so legacy snapshots (saved before this field
+// existed) decode cleanly — gala's codec fills missing fields with
+// their type zero, and the empty-array path through ensureSession is
+// the same as a first-launch behaviour.
 struct Snapshot(
     ProjectName    string,
     SavedAt        int64,
     Conversation   Array[ConversationLine],
     ActiveMembers  Array[string],
+    SessionIds     Array[SessionIdEntry] = EmptyArray[SessionIdEntry](),
 )
 
 // SessionPath returns the canonical save path for a given project repo.
@@ -83,12 +108,14 @@ func Save(
     projectName string,
     conversation Array[ConversationLine],
     activeMembers Array[string],
+    sessionIds Array[SessionIdEntry] = EmptyArray[SessionIdEntry](),
 ) Try[bool] = Try(() => {
     val snap = Snapshot(
         ProjectName   = projectName,
         SavedAt       = time.Now().UnixNano(),
         Conversation  = conversation,
         ActiveMembers = activeMembers,
+        SessionIds    = sessionIds,
     )
     val encoded = snapshotCodec().Encode(snap).Get()
     val path    = SessionPath(repoDir)

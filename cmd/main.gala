@@ -440,8 +440,28 @@ func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match
             ConversationOffset    = 0,
             ConversationSticky    = true,
             RecoveredMembers      = snap.ActiveMembers,
+            // Restore per-member claude session UUIDs so the FIRST
+            // ensureSession on the next prompt passes --resume <id>
+            // instead of --session-id <new>. claude loads the prior
+            // session's conversation from its own storage; the TL
+            // wakes up with full context instead of acting like a
+            // fresh agent. If claude's session storage was wiped
+            // (rare), the spawn errors with "No conversation found
+            // with session ID" and looksLikeStaleSessionError drops
+            // the bad id so the next attempt is a clean --session-id.
+            SessionIds            = deserialiseSessionIds(snap.SessionIds),
             RecoveryBannerVisible = true,
             Recovery              = Some(ResumeFocus()),
         )
     }
 }
+
+// deserialiseSessionIds turns the on-disk SessionIdEntry array back
+// into the AppModel's HashMap[string,string]. Symmetric with
+// app/ui/update.gala::serialiseSessionIds. Skips empty entries
+// defensively so a half-corrupt snapshot row (missing member or sid)
+// doesn't poison the rest.
+func deserialiseSessionIds(entries Array[session.SessionIdEntry]) HashMap[string, string] =
+    entries.FoldLeft(EmptyHashMap[string, string](), (acc, e) =>
+        if (e.Member == "" || e.SessionId == "") acc
+        else acc.Put(e.Member, e.SessionId))

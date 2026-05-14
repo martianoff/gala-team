@@ -257,3 +257,84 @@ func TestLoadOrError_OnCorrupted_LeftWithDecodeError(t T) T {
         case Left(err) => IsTrue(t, len(err) > 0)
     }
 }
+
+// ----------------------------------------------------------------------------
+// SessionIds round-trip — pinning the TL-amnesia fix.
+//
+// On a recovery launch, primeFromSnapshot needs the per-member claude
+// session UUIDs back so the first ensureSession can hand `--resume <id>`
+// to claude. The Snapshot struct gained SessionIds as Array[SessionIdEntry]
+// for codec round-tripping; these tests confirm Save → Load preserves
+// the entries verbatim (Member + SessionId) and that legacy snapshots
+// without the field decode cleanly into an empty array.
+// ----------------------------------------------------------------------------
+
+func TestSessionIds_RoundTrip(t T) T {
+    val dir = mkTempDir("sids_rt")
+    defer os.RemoveAll(dir)
+    val entries = ArrayOf(
+        SessionIdEntry(Member = "Vesper", SessionId = "11111111-aaaa-bbbb-cccc-222222222222"),
+        SessionIdEntry(Member = "Kael",   SessionId = "33333333-aaaa-bbbb-cccc-444444444444"),
+    )
+    val saveRes = Save(
+        dir,
+        "demo",
+        EmptyArray[ConversationLine](),
+        EmptyArray[string](),
+        entries,
+    )
+    val t1 = IsTrue(t, saveRes.IsSuccess())
+    return Load(dir) match {
+        case None()       => IsTrue(t1, false)
+        case Some(snap)   => {
+            val t2 = Eq(t1, snap.SessionIds.Size(), 2)
+            val first = snap.SessionIds.Get(0)
+            val t3 = Eq(t2, first.Member, "Vesper")
+            val t4 = Eq(t3, first.SessionId, "11111111-aaaa-bbbb-cccc-222222222222")
+            val second = snap.SessionIds.Get(1)
+            val t5 = Eq(t4, second.Member, "Kael")
+            return Eq(t5, second.SessionId, "33333333-aaaa-bbbb-cccc-444444444444")
+        }
+    }
+}
+
+// Legacy snapshots saved before SessionIds existed must still load —
+// gala's codec fills missing optional fields with their type zero,
+// and the AppModel-side primeFromSnapshot path treats an empty array
+// the same as "no recovered ids" (first ensureSession spawns fresh).
+func TestSessionIds_LegacySnapshotLoadsAsEmptyArray(t T) T {
+    val dir = mkTempDir("sids_legacy")
+    defer os.RemoveAll(dir)
+    val parent = filepath.Dir(SessionPath(dir))
+    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
+    if mkErr != nil { panic(mkErr.Error()) }
+    // Hand-rolled snapshot WITHOUT a session_ids key — what older
+    // installs would have on disk.
+    val legacy = "{\"project_name\":\"demo\",\"saved_at\":1700000000000000000,\"conversation\":[],\"active_members\":[]}"
+    val writeErr = os.WriteFile(SessionPath(dir), ToBytes(legacy), os.FileMode(0644))
+    if writeErr != nil { panic(writeErr.Error()) }
+    return Load(dir) match {
+        case None()       => IsTrue(t, false)
+        case Some(snap)   => Eq(t, snap.SessionIds.Size(), 0)
+    }
+}
+
+// Empty SessionIds (default) round-trips as an empty array on disk
+// — pinned so that a save during normal operation doesn't break the
+// decode of the next launch.
+func TestSessionIds_EmptyRoundTrip(t T) T {
+    val dir = mkTempDir("sids_empty")
+    defer os.RemoveAll(dir)
+    val saveRes = Save(
+        dir,
+        "demo",
+        EmptyArray[ConversationLine](),
+        EmptyArray[string](),
+        EmptyArray[SessionIdEntry](),
+    )
+    val t1 = IsTrue(t, saveRes.IsSuccess())
+    return Load(dir) match {
+        case None()       => IsTrue(t1, false)
+        case Some(snap)   => Eq(t1, snap.SessionIds.Size(), 0)
+    }
+}

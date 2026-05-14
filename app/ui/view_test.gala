@@ -1197,3 +1197,61 @@ func TestFlow_MouseInConsultViewer_DoesNotClose(t T) T {
     val (m, _) = Update(seed, MouseAt(X = 50, Y = 10, Pressed = true, Motion = false))
     return IsTrue(t, strings.Contains(render(m), "Consult viewer"))
 }
+
+// ---------------------------------------------------------------------------
+// Selection-aware footer hints
+//
+// When the user clicks or drag-selects a conversation entry, the footer
+// MUST surface the selection actions (Ctrl+Y copy, Esc clear). Without
+// this hint the reverse-video highlight is the only signal — the user
+// reported "I select text but no longer see menu with Ctrl-Y etc."
+// The click-to-select feature added SelectedEntry state but never
+// updated footerHints; this set of tests pins the new branch.
+// ---------------------------------------------------------------------------
+
+// Helper: seed a model with a populated conversation so SelectedEntry
+// indices have something to point at. Without entries, selection
+// state would be nonsensical and harder to assert against.
+func mkModelWithChat(team Team) AppModel = mkModel(team).Copy(
+    Conversation = ArrayOf(
+        session.ConversationLine(Speaker = "you",  Text = "hello"),
+        session.ConversationLine(Speaker = "Iris", Text = "world"),
+        session.ConversationLine(Speaker = "Iris", Text = "third"),
+    ),
+)
+
+// Single-entry selection (click on one row) → footer says
+// "selected entry · Ctrl+Y copy · Esc clear".
+func TestView_Footer_SingleEntrySelection_ShowsCopyHint(t T) T {
+    val seed = mkModelWithChat(mkTeam("X", "")).Copy(
+        SelectedEntry  = Some(1),
+        SelectionFocus = Some(1),
+    )
+    val out = render(seed)
+    val t1 = IsTrue(t, strings.Contains(out, "selected entry"))
+    val t2 = IsTrue(t1, strings.Contains(out, "Ctrl+Y copy"))
+    return IsTrue(t2, strings.Contains(out, "Esc clear"))
+}
+
+// Range selection (drag spanning multiple rows) → footer says
+// "selected range" — slightly different label so the user knows
+// Ctrl+Y will copy the whole span, not just one entry.
+func TestView_Footer_RangeSelection_ShowsRangeLabel(t T) T {
+    val seed = mkModelWithChat(mkTeam("X", "")).Copy(
+        SelectedEntry  = Some(0),
+        SelectionFocus = Some(2),
+    )
+    val out = render(seed)
+    val t1 = IsTrue(t, strings.Contains(out, "selected range"))
+    return IsTrue(t1, strings.Contains(out, "Ctrl+Y copy"))
+}
+
+// Without selection, the footer falls back to the default
+// composer hints (Enter send · Ctrl+A approve · …). Pinning the
+// inverse so a future refactor doesn't leak the selection legend
+// into normal mode.
+func TestView_Footer_NoSelection_ShowsDefaultHints(t T) T {
+    val out = render(mkModelWithChat(mkTeam("X", "")))
+    val t1 = IsTrue(t, strings.Contains(out, "Enter send"))
+    return IsFalse(t1, strings.Contains(out, "Ctrl+Y copy"))
+}

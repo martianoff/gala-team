@@ -92,6 +92,12 @@ val KindSpawnFailure      = "spawn_failure"
 // reached" / "session not found" / "auth required" lines all land
 // on stderr first.
 val KindStderr            = "stderr"
+// `subprocess_timeout` is emitted when a helper-wrapped subprocess
+// hits the watchdog deadline and gets killed. Lets audits spot
+// "git wedged for 30s" without needing a user reproduction —
+// distinguishes a slow-but-eventual completion from a hang that
+// would otherwise look identical in the absence of telemetry.
+val KindSubprocessTimeout = "subprocess_timeout"
 
 // LogEvent appends one event to events.jsonl. No-op when
 // GALA_TEAM_DEBUG is off OR when SetDebugRepo hasn't been called
@@ -365,4 +371,33 @@ func LogStderr(member string, line string) {
     ))
     if enc.IsFailure() { return }
     LogEvent(KindStderr, member, enc.Get())
+}
+
+// SubprocessTimeoutPayload records the wedged-then-killed subprocess
+// invocation: the binary, the joined-arg string, and the wall-clock
+// timeout the watchdog enforced. Argv is a single string (space-
+// joined) rather than an array so the payload stays one flat JSON
+// object — easier to grep in events.jsonl than nested arrays.
+struct SubprocessTimeoutPayload(
+    Cmd       string,
+    Argv      string,
+    TimeoutMs int64,
+)
+val subprocessTimeoutCodec = json.Codec[SubprocessTimeoutPayload](json.SnakeCase())
+
+// LogSubprocessTimeout emits a `subprocess_timeout` event when the
+// watchdog kills a wedged subprocess. Callers pass the same cmd /
+// argv they handed to subprocess.NewSpawnOpts plus the timeout
+// duration in milliseconds. Member is empty because timeouts are
+// session-level — the offending git / gh / pwsh process isn't
+// attributed to a single team member.
+func LogSubprocessTimeout(cmd string, argv string, timeoutMs int64) {
+    if !DebugEnabled() { return }
+    val enc = subprocessTimeoutCodec.Encode(SubprocessTimeoutPayload(
+        Cmd       = cmd,
+        Argv      = argv,
+        TimeoutMs = timeoutMs,
+    ))
+    if enc.IsFailure() { return }
+    LogEvent(KindSubprocessTimeout, "", enc.Get())
 }

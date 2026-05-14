@@ -2,6 +2,7 @@ package ui
 
 import (
     "os"
+    "path/filepath"
     "strings"
     "martianoff/gala/subprocess"
     "github.com/martianoff/gala_team/app/session"
@@ -15,6 +16,7 @@ import (
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
 )
 
@@ -3772,5 +3774,90 @@ func TestTlLivelock_SpawnTLRelay_ClearsStaleTurnBuffer(t T) T {
     val (m, _) = spawnTLRelay(seeded)
     val t1 = Eq(t, m.TurnBuffer, "")
     return Eq(t1, m.ConsultsFired, 0)
+}
+
+// ----------------------------------------------------------------------------
+// Spawn-failure + stderr instrumentation regression tests.
+//
+// `ensureSession` failures used to land only in `m.LastError` (toast-
+// only); the silent QA-spawn-zero-output bug in the 0.49.0-migration
+// audit took 10 hours to surface and had no durable trace explaining
+// why. `LogSpawnFailure` and `LogStderr` close that visibility gap.
+// These tests pin the event shapes so a future refactor doesn't
+// silently drop the new fields from `events.jsonl`.
+//
+// `DebugEnabled()` reads `GALA_TEAM_DEBUG`; the helpers are no-ops
+// when that env var isn't set. Tests flip it on for the duration,
+// point SetDebugRepo at a temp dir, and read back the resulting
+// events.jsonl. Sequential ordering matters — we share a single
+// per-process debug repo, so each test mkTempDir's a fresh dir AND
+// re-sets the repo to keep events isolated.
+// ----------------------------------------------------------------------------
+
+func setupDebugRepo(label string) string {
+    val _ = os.Setenv("GALA_TEAM_DEBUG", "1")
+    val dir, mkErr = os.MkdirTemp("", "gala_team_debug_" + label)
+    if mkErr != nil { panic(s"MkdirTemp: ${mkErr.Error()}") }
+    SetDebugRepo(dir)
+    // Close any cached events.jsonl handle left over from a prior
+    // test in the same binary — debugFile is a package-level singleton
+    // and a stale handle from test A would silently swallow our
+    // writes (the file was deleted from disk on test A's cleanup,
+    // but the FD lives on). ResetDebugDir wipes the (still-empty)
+    // debug subdir of the new repo and drops the handle so the next
+    // AppendDebugEvent re-opens cleanly.
+    val _ = ResetDebugDir()
+    return dir
+}
+
+func eventsFilePath(repo string) string =
+    filepath.Join(repo, ".gala_team", "sessions", "debug", "events.jsonl")
+
+func readEventsFile(path string) string {
+    val b, err = os.ReadFile(path)
+    if err != nil { return "" }
+    return string(b)
+}
+
+func TestSpawnFailureLog_EmitsEvent(t T) T {
+    val dir = setupDebugRepo("spawn_fail")
+    defer os.RemoveAll(dir)
+    LogSpawnFailure("Sable", "qa_auto", "spawn Sable: workspace failed")
+    val contents = readEventsFile(eventsFilePath(dir))
+    val t1 = IsTrue(t, strings.Contains(contents, "\"kind\":\"spawn_failure\""))
+    val t2 = IsTrue(t1, strings.Contains(contents, "\"member\":\"Sable\""))
+    val t3 = IsTrue(t2, strings.Contains(contents, "qa_auto"))
+    return IsTrue(t3, strings.Contains(contents, "workspace failed"))
+}
+
+func TestStderrLog_EmitsEventWithTextAndLength(t T) T {
+    val dir = setupDebugRepo("stderr")
+    defer os.RemoveAll(dir)
+    LogStderr("Sable", "usage_limit_reached")
+    val contents = readEventsFile(eventsFilePath(dir))
+    val t1 = IsTrue(t, strings.Contains(contents, "\"kind\":\"stderr\""))
+    val t2 = IsTrue(t1, strings.Contains(contents, "\"member\":\"Sable\""))
+    return IsTrue(t2, strings.Contains(contents, "usage_limit_reached"))
+}
+
+func TestStderrLog_DropsEmptyLine(t T) T {
+    val dir = setupDebugRepo("stderr_empty")
+    defer os.RemoveAll(dir)
+    LogStderr("Sable", "")
+    val contents = readEventsFile(eventsFilePath(dir))
+    return IsFalse(t, strings.Contains(contents, "\"kind\":\"stderr\""))
+}
+
+// End-to-end: onStderr should call LogStderr for non-empty lines.
+// Verifies the wiring inside the chunk pump matches the durable
+// log so a real claude stderr (rate limit message) survives in
+// events.jsonl even after the toast TTL expires.
+func TestOnStderr_FiresLogStderrEvent(t T) T {
+    val dir = setupDebugRepo("on_stderr")
+    defer os.RemoveAll(dir)
+    val m = sampleModel()
+    val (_, _) = Update(m, StderrArrived(Member = "Sable", Line = "Error: rate limit reached"))
+    val contents = readEventsFile(eventsFilePath(dir))
+    return IsTrue(t, strings.Contains(contents, "rate limit reached"))
 }
 

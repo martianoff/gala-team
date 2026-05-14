@@ -112,6 +112,19 @@ func TestRunHooks_NonZeroExit_IsFailure(t T) T {
     return IsFailure(t, res)
 }
 
+// HookTimeout is the watchdog deadline for a single hook subprocess.
+// Past audits captured a `bazel build //...` wedging for 2+ hours and
+// leaving the gala_team TUI awaiting a hook Future forever; the work
+// was already merged onto lead but `gh pr create` never fired. The
+// watchdog caps that hang at 30 minutes.
+func TestHookTimeout_IsPositiveAndGenerous(t T) T {
+    val d = HookTimeout()
+    val t1 = IsTrue(t, d.ToNanos() > int64(0))
+    // ≥ 10 minutes — anything tighter risks killing healthy cold-cache
+    // bazel builds; anything looser stops being a meaningful bound.
+    return IsTrue(t1, d.ToNanos() >= int64(10) * int64(60) * int64(1000000000))
+}
+
 // Default policy round-trips through DefaultPolicy() + accessors —
 // guards future struct-field reorderings from accidentally changing
 // what teams without an explicit `policy:` block get.

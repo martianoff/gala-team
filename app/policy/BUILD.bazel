@@ -12,6 +12,7 @@ gala_library(
         "@gala//concurrent",
         "@gala//go_interop",
         "@gala//subprocess",
+        "@gala//time_utils",
     ],
     visibility = ["//visibility:public"],
 )
@@ -30,5 +31,6 @@ gala_go_test(
         "@gala//concurrent",
         "@gala//go_interop",
         "@gala//subprocess",
+        "@gala//time_utils",
     ],
 )

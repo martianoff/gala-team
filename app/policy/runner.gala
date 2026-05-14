@@ -3,6 +3,7 @@ package policy
 import (
     "martianoff/gala/subprocess"
     "martianoff/gala/concurrent"
+    "martianoff/gala/time_utils"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
@@ -71,10 +72,34 @@ func RunHooks(cwd string, hooks Array[Hook]) Try[bool] = Try(() => {
 func RunHooksFuture(cwd string, hooks Array[Hook]) concurrent.Future[Try[bool]] =
     concurrent.FutureApply[Try[bool]](() => RunHooks(cwd, hooks))
 
+// HookTimeout caps how long a single hook can run before the watchdog
+// kills it. Past audits caught a session where `bazel build //...`
+// wedged in the bazel daemon for 2+ hours, leaving the gala_team TUI
+// awaiting a hook Future that would never complete. The work was
+// already merged onto the lead branch but `gh pr create` never fired.
+//
+// Bazel builds + test suites can legitimately consume tens of minutes
+// on cold caches, so the bound has to be generous. 30 minutes is well
+// above any realistic healthy run on this codebase yet still bounds
+// the failure mode at a finite ceiling.
+//
+// Exposed as a function (not a `val`) so callers see the unwrapped
+// Duration; cross-package `val` references go through Immutable and
+// would force every caller to `.Get()` before using it.
+func HookTimeout() time_utils.Duration = time_utils.Minutes(int64(30))
+
 // runOne spawns a single hook in `cwd` and drains its stdout / stderr.
 // Returns HookResult on success (the spawn ran to completion; the exit
 // code might still be non-zero), Failure if the spawn itself failed
-// (executable not found, etc.).
+// (executable not found, etc.) or the hook overran HookTimeout.
+//
+// Watchdog: a fire-and-forget goroutine sleeps HookTimeout then calls
+// proc.Kill(). On a timely exit, Kill races with the parent's
+// reaping — either fires on an already-exited process (no-op) or
+// fires just before. On a hang, Kill terminates the wedged process,
+// the drainStream loops break, and we surface a Failure tagged with
+// the hook name + elapsed duration so the user sees "<hook>: timed
+// out after 30m" rather than an indefinite stall.
 func runOne(cwd string, hook Hook) Try[HookResult] = Try(() => {
     val opts = subprocess.NewSpawnOpts(
         hook.Cmd,
@@ -86,9 +111,21 @@ func runOne(cwd string, hook Hook) Try[HookResult] = Try(() => {
         case Success(p)   => p
         case Failure(err) => panic(s"spawn ${hook.Cmd}: ${err.Error()}")
     }
+    val timeout = HookTimeout()
+    val started = time_utils.Now()
+    concurrent.FutureApply[bool](() => {
+        time_utils.Sleep(timeout)
+        proc.Kill()
+        return true
+    })
     val stdout = drainStream(proc, true)
     val stderr = drainStream(proc, false)
     val code = proc.Wait().Get()
+    val elapsed = time_utils.Between(started, time_utils.Now())
+    if elapsed.ToNanos() >= timeout.ToNanos() {
+        val minutes = timeout.ToNanos() / int64(60000000000)
+        panic(s"${hook.Name}: timed out after ${minutes}m (watchdog killed the subprocess)")
+    }
     return HookResult(
         Name     = hook.Name,
         ExitCode = code,

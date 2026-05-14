@@ -1,14 +1,13 @@
 package guidance
 
 import (
-    "os"
     "crypto/sha256"
     "encoding/hex"
     "path/filepath"
-    "strings"
+    "martianoff/gala/fs"
+    "martianoff/gala/strings"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "martianoff/gala/go_interop"
 )
 
 // ============================================================================
@@ -45,14 +44,7 @@ struct GuidanceDoc(
 // struct receivers (the Go-style receiver syntax doesn't apply).
 func Sha256Short(d GuidanceDoc) string {
     if len(d.Sha256) <= 8 { return d.Sha256 }
-    var prefix = EmptyArray[string]()
-    val rs = ToRunes(d.Sha256)
-    var i = 0
-    for i < 8 {
-        prefix = prefix.Append(string(rs[i]))
-        i = i + 1
-    }
-    return prefix.MkString("")
+    return strings.S(d.Sha256).Take(8).ToString()
 }
 
 // Guidance is the loaded guidance bundle. Docs is the ordered list
@@ -71,11 +63,12 @@ func EmptyGuidance() Guidance = Guidance(Docs = EmptyArray[GuidanceDoc]())
 // forgiving behaviour (interactive UX panics; CI fall-through).
 func LoadDoc(repoDir string, slot string, rawPath string) Try[GuidanceDoc] = Try(() => {
     val resolved = if (filepath.IsAbs(rawPath)) rawPath else filepath.Join(repoDir, rawPath)
-    val body, err = os.ReadFile(resolved)
-    if err != nil { panic(s"guidance: cannot read '${resolved}': ${err.Error()}") }
-    val text = string(body)
-    val digest = sha256Hex(body)
-    return GuidanceDoc(Slot = slot, Path = rawPath, Body = text, Sha256 = digest)
+    val bytes = fs.ReadFile(resolved) match {
+        case Success(b)   => b
+        case Failure(err) => panic(s"guidance: cannot read '${resolved}': ${err.Error()}")
+    }
+    val raw = bytes.ToGoSlice()
+    return GuidanceDoc(Slot = slot, Path = rawPath, Body = string(raw), Sha256 = sha256Hex(raw))
 })
 
 // sha256Hex returns the hex-encoded sha256 of `b`.
@@ -91,18 +84,13 @@ func sha256Hex(b []byte) string {
 // caller decides whether to surface them) so a single missing doc
 // doesn't sink the whole startup.
 func LoadAll(repoDir string, pairs Array[Tuple[string, string]]) Tuple[Guidance, Array[string]] {
-    var docs = EmptyArray[GuidanceDoc]()
-    var warnings = EmptyArray[string]()
-    var i = 0
-    val n = pairs.Size()
-    for i < n {
-        val pair = pairs.Get(i)
-        LoadDoc(repoDir, pair.V1, pair.V2) match {
-            case Success(d) => { docs = docs.Append(d) }
-            case Failure(err) => { warnings = warnings.Append(s"${pair.V1}: ${err.Error()}") }
+    val initial = (EmptyArray[GuidanceDoc](), EmptyArray[string]())
+    val (docs, warnings) = pairs.FoldLeft(initial, (acc, p) => {
+        return LoadDoc(repoDir, p.V1, p.V2) match {
+            case Success(d)   => (acc.V1.Append(d), acc.V2)
+            case Failure(err) => (acc.V1, acc.V2.Append(s"${p.V1}: ${err.Error()}"))
         }
-        i = i + 1
-    }
+    })
     return (Guidance(Docs = docs), warnings)
 }
 
@@ -128,44 +116,18 @@ func PromptBlock(g Guidance) string {
 // ApproxTokens returns a rough token-count estimate (chars/4). Used
 // by the startup warning when total guidance exceeds the 50k-token
 // budget DESIGN.md §5.7 mentions.
-func ApproxTokens(g Guidance) int {
-    var total = 0
-    var i = 0
-    val n = g.Docs.Size()
-    for i < n {
-        total = total + len(g.Docs.Get(i).Body)
-        i = i + 1
-    }
-    return total / 4
-}
+func ApproxTokens(g Guidance) int =
+    g.Docs.FoldLeft(0, (acc, d) => acc + len(d.Body)) / 4
 
 // titleCase upper-cases the first letter of each space-separated word
 // in `s`. Used to render slot names like "perf_guide" → "Perf Guide"
 // in the prompt block.
-func titleCase(s string) string {
-    val parts = strings.Split(s, " ")
-    var out = EmptyArray[string]()
-    var i = 0
-    val n = len(parts)
-    for i < n {
-        out = out.Append(capFirst(parts[i]))
-        i = i + 1
-    }
-    return out.MkString(" ")
-}
+func titleCase(s string) string =
+    strings.Join(strings.Split(s, " ").Map((p) => capFirst(p)), " ")
 
 // capFirst upper-cases the first rune of a single word, leaving the
 // rest unchanged. Empty word passes through.
 func capFirst(w string) string {
     if w == "" { return w }
-    val rs = ToRunes(w)
-    val first = strings.ToUpper(string(rs[0]))
-    var rest = EmptyArray[string]()
-    var i = 1
-    val n = len(rs)
-    for i < n {
-        rest = rest.Append(string(rs[i]))
-        i = i + 1
-    }
-    return first + rest.MkString("")
+    return strings.S(w).Capitalize().ToString()
 }

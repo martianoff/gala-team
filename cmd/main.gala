@@ -3,8 +3,9 @@ package main
 import (
     "os"
     "path/filepath"
-    "strings"
     . "github.com/martianoff/gala-tui"
+    "martianoff/gala/fs"
+    "martianoff/gala/strings"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/time_utils"
@@ -158,22 +159,25 @@ func die(msg string) {
 //   - the path doesn't exist                →  "FILE NOT FOUND" diagnostic
 //   - yaml: expected sequence, got mapping  →  hint to use `- ` list items
 func loadTeamConfig(path string) TeamConfig {
-    val info, statErr = os.Stat(path)
-    if statErr != nil {
-        if os.IsNotExist(statErr) {
-            die(s"--team: FILE NOT FOUND: '${path}'")
+    fs.Stat(path) match {
+        case Failure(err) => {
+            if !fs.Exists(path) {
+                die(s"--team: FILE NOT FOUND: '${path}'")
+            }
+            die(s"--team: cannot stat '${path}': ${err.Error()}")
         }
-        die(s"--team: cannot stat '${path}': ${statErr.Error()}")
+        case Success(info) => {
+            if info.IsDir {
+                die(s"--team: '${path}' is a directory, expected a yaml file")
+            }
+        }
     }
-    if info.IsDir() {
-        die(s"--team: '${path}' is a directory, expected a yaml file")
-    }
-    return Try(() => os.ReadFile(path)) match {
+    return fs.ReadFileString(path) match {
         case Failure(err) => {
             die(s"--team: cannot read '${path}': ${err.Error()}")
             sampleTeamConfig()  // unreachable — die() called os.Exit
         }
-        case Success(b)   => LoadFromString(string(b)) match {
+        case Success(text) => LoadFromString(text) match {
             case Failure(err) => {
                 die(s"--team: failed to parse '${path}'\n  ${err.Error()}\n  ${yamlHint(err.Error())}")
                 sampleTeamConfig()  // unreachable
@@ -371,18 +375,13 @@ func main() {
 func scanStaleWorktrees(proj Project, tm Team) {
     if !runtime.DebugEnabled() { return }
     val wtDir = filepath.Join(proj.Repo, ".gala_team", "worktrees")
-    val entries, readErr = os.ReadDir(wtDir)
-    if readErr != nil { return }
+    val entries = fs.ReadDir(wtDir).GetOrElse(EmptyArray[fs.FileInfo]())
     val memberNames = tm.Members.Map((m) => m.Name)
-    var i = 0
-    val n = len(entries)
-    for i < n {
-        val name = entries[i].Name()
-        if entries[i].IsDir() && !memberNames.Contains(name) {
-            runtime.LogStaleWorktree(name, filepath.Join(wtDir, name))
+    entries.ForEach((info) => {
+        if info.IsDir && !memberNames.Contains(info.Name) {
+            runtime.LogStaleWorktree(info.Name, filepath.Join(wtDir, info.Name))
         }
-        i = i + 1
-    }
+    })
 }
 
 // loadArchives reads .gala_team/sessions/archive/ at startup so the

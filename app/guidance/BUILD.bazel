@@ -6,7 +6,8 @@ gala_library(
     importpath = "github.com/martianoff/gala_team/app/guidance",
     deps = [
         "@gala//collection_immutable",
-        "@gala//go_interop",
+        "@gala//fs",
+        "@gala//strings",
     ],
     visibility = ["//visibility:public"],
 )

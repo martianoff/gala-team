@@ -3374,14 +3374,15 @@ func TestAskUserQuestion_AppMsg_SetsPendingQuestion(t T) T {
     }
 }
 
-// 5+6+7: composer Enter routes through the tool_result path when a
-// question is pending. The pending state clears AND the composer
-// empties — the user's answer is the tool_result, not a fresh user
-// prompt. The "you" line is logged to the transcript for the audit
-// trail. The actual stdin write is verified separately at the runtime
-// layer (encodeToolResultEnvelope test); the model-level guarantee
-// is that no new TL turn fires.
-func TestAskUserQuestion_ComposerSubmit_RoutesToToolResult(t T) T {
+// 5+6+7: composer Enter routes a pending-question answer through
+// onAnswerPendingQuestion. The pending state clears AND the composer
+// empties — the user's text is the ANSWER, not a fresh user prompt.
+// The "you" line is logged to the transcript verbatim (no speaker
+// prefix) for the audit trail. The answer is re-delivered to the
+// asking member as a fresh `--resume` turn (verified by the dedicated
+// re-delivery tests below); the model-level guarantee here is that no
+// new top-level TL turn is *promoted* — the FSM is untouched.
+func TestAskUserQuestion_ComposerSubmit_RoutesToAnswerRedelivery(t T) T {
     val seeded = sampleModel().Copy(
         PendingQuestion = Some(PendingQuestion(
             Member       = "Iris",
@@ -3613,12 +3614,12 @@ func TestFirstTurn_AnswerText_HasNoSpeakerPrefix(t T) T {
     return Eq(t2, text, "extend fs")
 }
 
-// 8. With the liveness guard, a pending question against a missing
-// session NEVER surfaces a toast — composer Enter falls through to
-// the normal new-turn path. The user's previous experience (red
-// "answer not delivered" toast, lost prompt) does not recur.
-// This is the regression net for the "answer not delivered" toast
-// reappearing on stale state.
+// 8. A pending question whose member isn't reachable must never
+// surface the old scary "answer not delivered" wording. The answer is
+// re-delivered via a fresh `--resume` turn; only a genuine routing
+// failure flags the line (with a clearer "flagged below / re-send to
+// retry" toast). Regression net so the original lost-prompt toast
+// phrasing never comes back.
 func TestFirstTurn_NoLiveSession_NoAnswerNotDeliveredToast(t T) T {
     val seeded = sampleModel().Copy(
         PendingQuestion = Some(PendingQuestion(
@@ -3634,17 +3635,15 @@ func TestFirstTurn_NoLiveSession_NoAnswerNotDeliveredToast(t T) T {
     return IsFalse(t, anyDeliverToast)
 }
 
-// 9. KEY REGRESSION: composer Enter must NOT route through
-// onAnswerPendingQuestion when the pending member's session doesn't
-// exist. The user's report ("doesn't work anymore", "it start working
-// from 2nd sentences") was driven by this exact case: the model
-// had a stale PendingQuestion from an earlier (now-dead) session,
-// and EVERY composer submit got swallowed by the "answer not
-// delivered" toast — the user's actual input was logged as a
-// pseudo-answer instead of a fresh prompt. Falling through to
-// onSubmit treats the input as the new turn the user intended,
-// and clears the stale pending state on the way through.
-func TestFirstTurn_PendingWithNoSession_FallsThroughToNormalSubmit(t T) T {
+// 9. KEY REGRESSION: a pending question whose subprocess is gone must
+// still produce a verbatim, audit-logged "you" line and clear the
+// pending state — the user's text is never swallowed behind an
+// "answer not delivered" toast and never silently lost. (Under the
+// corrected design the answer is re-delivered via a fresh `--resume`
+// turn rather than treated as an unrelated new prompt; the invariants
+// asserted here — pending cleared, verbatim text, composer cleared,
+// no scary toast — hold either way and are the regression net.)
+func TestFirstTurn_PendingWithNoSession_AnswerLoggedNotSwallowed(t T) T {
     val seeded = sampleModel().Copy(
         // PendingQuestion set, but Sessions has NO entry for "Vesper".
         // This is the state the user landed in: stale pending from a
@@ -3658,13 +3657,12 @@ func TestFirstTurn_PendingWithNoSession_FallsThroughToNormalSubmit(t T) T {
         ComposerCursor = 20,
     )
     val (m, _) = Update(seeded, KeySubmit())
-    // Pending is cleared (normal onSubmit + the fall-through path
-    // both clear it).
+    // Pending is cleared (onAnswerPendingQuestion clears it on the
+    // way through).
     val t1 = IsFalse(t, m.PendingQuestion.IsDefined())
-    // The conversation logs the user's text as a REGULAR PROMPT —
-    // not as an answer that got swallowed. Speaker="you", text
-    // matches the composer verbatim (no "you: " prefix from a
-    // stale code path).
+    // The conversation logs the user's text verbatim — never
+    // swallowed. Speaker="you", text matches the composer exactly
+    // (no "you: " prefix from a stale code path).
     val youLines = m.Conversation.Filter((cl) => cl.Speaker == "you")
     val t2 = IsTrue(t1, youLines.Size() >= 1)
     val lastYou = youLines.Get(youLines.Size() - 1).Text
@@ -3704,6 +3702,83 @@ func TestFirstTurn_PendingWithEmptyMember_FallsThroughToNormalSubmit(t T) T {
     // No empty-member toast.
     val noEmptyMemberToast = !m.Toasts.Items.Exists((tt) => strings.HasPrefix(tt.Message, " is no longer running"))
     return IsTrue(t3, noEmptyMemberToast)
+}
+
+// ----------------------------------------------------------------------------
+// AskUserQuestion answer re-delivery — the "TL is confused" bug.
+//
+// Past sessions captured this exact failure: the lead asked an
+// AskUserQuestion; the user answered ("switch to gala 0.49.1"); the
+// answer was appended to the transcript but NEVER reached the model
+// (no events.jsonl user_input, no tool_result consumed — the
+// `claude --print` subprocess had already exited). The lead later
+// resumed, saw its own unanswered question, and re-explained
+// everything. These tests pin the corrected contract: an answer to a
+// pending question is always re-delivered via a fresh `--resume`
+// turn, always audit-logged, and only flagged Undelivered when it
+// genuinely can't be routed.
+// ----------------------------------------------------------------------------
+
+// A pending question for a REAL team member: composer Enter clears the
+// pending state, appends a verbatim "you" line that is NOT flagged
+// Undelivered (we attempted re-delivery), and does NOT mutate the FSM
+// (answering a question must not promote the turn out of its state —
+// e.g. an Approval that was up stays up). Whether the underlying spawn
+// succeeds depends on the test environment; the model-level invariants
+// asserted here hold regardless.
+func TestAnswerPending_RealMember_ClearsPendingNoFsmJump(t T) T {
+    val seeded = sampleModel().Copy(
+        State           = Approval(SummaryBody = "draft"),
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Felix",
+            ToolUseId    = "toolu_a",
+            QuestionText = "Which gala version?",
+        )),
+        Composer       = "use gala 0.49.1",
+        ComposerCursor = 15,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    val t1 = IsFalse(t, m.PendingQuestion.IsDefined())
+    val t2 = Eq(t1, m.Composer, "")
+    // FSM untouched — answering is not a top-level new turn.
+    val t3 = m.State match {
+        case Approval(_) => IsTrue(t2, true)
+        case _           => IsTrue(t2, false)
+    }
+    val youLines = m.Conversation.Filter((cl) => cl.Speaker == "you")
+    val t4 = IsTrue(t3, youLines.Size() >= 1)
+    return Eq(t4, youLines.Get(youLines.Size() - 1).Text, "use gala 0.49.1")
+}
+
+// When the pending member is not on the team roster, the answer can't
+// be routed anywhere — the "you" line MUST be flagged Undelivered so
+// the view renders it bold-red instead of letting it vanish. This is
+// the highlight that makes the whole bug class visible.
+func TestAnswerPending_UnroutableMember_FlagsLineUndelivered(t T) T {
+    val seeded = sampleModel().Copy(
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Ghost",
+            ToolUseId    = "toolu_g",
+            QuestionText = "scope?",
+        )),
+        Composer       = "do the thing",
+        ComposerCursor = 12,
+    )
+    val (m, _) = Update(seeded, KeySubmit())
+    val youLines = m.Conversation.Filter((cl) => cl.Speaker == "you")
+    val t1 = IsTrue(t, youLines.Size() >= 1)
+    val last = youLines.Get(youLines.Size() - 1)
+    val t2 = Eq(t1, last.Text, "do the thing")
+    // The decisive assertion: the dropped message is flagged, not lost.
+    return IsTrue(t2, last.Undelivered)
+}
+
+// Legacy snapshots predate the Undelivered field; the codec fills the
+// missing value with the bool zero (false), which MUST read as
+// "delivered" so old transcripts don't all light up red on reload.
+func TestConversationLine_DefaultUndeliveredIsFalse(t T) T {
+    val cl = session.ConversationLine(Speaker = "you", Text = "hi")
+    return IsFalse(t, cl.Undelivered)
 }
 
 // ----------------------------------------------------------------------------

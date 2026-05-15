@@ -562,10 +562,12 @@ func activityBody(m AppModel) Widget {
     val keepCount = MinInt(n, viewportH * 2)
     val skip = n - keepCount
     val taken = convo.Drop(skip)
-    val rows = taken.Reverse().Map((cl session.ConversationLine) =>
-        TextStyled(s"  ${activityTimestamp(cl.At)}  ${activityGlyphFor(cl.Speaker)} ${cl.Speaker}  →  ${activityFirstLine(cl.Text)}",
-            speakerStyle(m.Team, cl.Speaker)),
-    )
+    val rows = taken.Reverse().Map((cl session.ConversationLine) => {
+        val rowStyle = if (cl.Undelivered) DefaultStyle().WithBold().WithFg(BrightRed())
+                       else                speakerStyle(m.Team, cl.Speaker)
+        val glyph = if (cl.Undelivered) "⚠" else activityGlyphFor(cl.Speaker)
+        return TextStyled(s"  ${activityTimestamp(cl.At)}  ${glyph} ${cl.Speaker}  →  ${activityFirstLine(cl.Text)}", rowStyle)
+    })
     val body = if (rows.IsEmpty())
         Column(ArrayOf[LayoutChild](
             Fixed(1, TextStyled("  (no activity yet)", DefaultStyle().WithDim())),
@@ -1509,7 +1511,15 @@ func conversationViewportHeight(m AppModel) int {
 // for sticky-bottom math; a Column widget hides those heights and
 // breaks scrollback.
 func renderConversationLine(m AppModel, cl session.ConversationLine, width int, isSelected bool) Array[ConversationEntry] {
-    val baseProseStyle = speakerStyle(m.Team, cl.Speaker)
+    // Undelivered lines override the speaker color with a bold-red
+    // warning style so a message that never reached its model is
+    // impossible to miss while scrolling — the whole rendered block
+    // (prose + any code) reads red, and the prefix carries an
+    // explicit "⚠ … (not delivered)" tag.
+    val baseProseStyle = if (cl.Undelivered)
+                             DefaultStyle().WithBold().WithFg(BrightRed())
+                         else
+                             speakerStyle(m.Team, cl.Speaker)
     val baseCodeStyle = DefaultStyle().WithFg(BrightCyan())
     val baseCodeBarStyle = DefaultStyle().WithFg(BrightCyan()).WithDim()
     // Selection highlight: every entry under the selected line gets
@@ -1518,7 +1528,10 @@ func renderConversationLine(m AppModel, cl session.ConversationLine, width int, 
     val proseStyle    = if (isSelected) baseProseStyle.WithReverse()    else baseProseStyle
     val codeStyle     = if (isSelected) baseCodeStyle.WithReverse()     else baseCodeStyle
     val codeBarStyle  = if (isSelected) baseCodeBarStyle.WithReverse()  else baseCodeBarStyle
-    val prefix = s"  ${cl.Speaker}: "
+    val prefix = if (cl.Undelivered)
+                     s"  ⚠ ${cl.Speaker} (not delivered): "
+                 else
+                     s"  ${cl.Speaker}: "
     // Render directive markers at display time — the conversation
     // log stores raw `@summary` / `@end` / `@dispatch` directives
     // so resume-time Approval recovery can parse them. The view

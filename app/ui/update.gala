@@ -1542,26 +1542,27 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return (m, NoCmd[AppMsg]())
     }
     // A pending AskUserQuestion takes precedence over starting a new
-    // turn ONLY when the originating member's subprocess is still
-    // alive. Without the liveness gate, a stale PendingQuestion (one
-    // whose subprocess crashed or finished its turn before the user
-    // typed an answer) would swallow every subsequent composer
-    // submit behind an "answer not delivered" toast and the user
-    // would lose every prompt they typed — that was the user-facing
-    // failure mode of the original wiring. When the session is gone,
-    // we drop the stale pending state and fall through to the normal
-    // new-turn path, treating the composer text as a fresh prompt
-    // for the lead. An empty `Member` (defensive guard against future
-    // refactors that might construct PendingQuestion without one) is
-    // treated identically to a missing session.
-    val pendingLive = m.PendingQuestion match {
-        case Some(p) if p.Member != "" && m.Sessions.Get(p.Member).IsDefined() => true
-        case _                                                                   => false
+    // turn whenever it carries a real member name. We no longer gate
+    // on "is the asking subprocess still alive" — that proxy was the
+    // root of a silent-answer-loss bug: `claude --print` exits after
+    // every turn (including the turn that asked the question — a
+    // forwarded/denied AskUserQuestion still ends the turn), so the
+    // asking session is essentially always gone by the time the user
+    // answers. The old gate therefore mis-routed real answers as
+    // brand-new prompts (or, when a stale Sessions entry lingered,
+    // wrote the answer as a tool_result to a dead pipe — lost with no
+    // log). onAnswerPendingQuestion now re-delivers robustly via a
+    // fresh `--resume` turn regardless of prior liveness, so the only
+    // case that still falls through to a normal new turn is a
+    // defensive empty-`Member` pending (which we can't spawn against).
+    val pendingAnswerable = m.PendingQuestion match {
+        case Some(p) if p.Member != "" => true
+        case _                         => false
     }
-    if pendingLive {
+    if pendingAnswerable {
         return onAnswerPendingQuestion(m, m.Composer)
     }
-    val droppedStalePending = m.PendingQuestion.IsDefined() && !pendingLive
+    val droppedStalePending = m.PendingQuestion.IsDefined() && !pendingAnswerable
     val mClean = if (droppedStalePending) m.Copy(PendingQuestion = None[PendingQuestion]()) else m
     val prompt = mClean.Composer
     LogUserInput(prompt)
@@ -1661,46 +1662,80 @@ func onAskUserQuestion(m AppModel, member string, toolUseId string, questionText
     ), NoCmd[AppMsg]())
 }
 
-// onAnswerPendingQuestion routes a composer submit into the
-// pending AskUserQuestion tool call: writes a tool_result envelope to
-// the originating member's stdin (so the model unblocks and finishes
-// its turn) and appends the user's answer to the transcript as a
-// regular "you" line for the audit trail.
+// onAnswerPendingQuestion delivers a composer submit as the answer to
+// a pending AskUserQuestion. It ALWAYS logs the answer to the audit
+// stream, appends a "you" transcript line, and re-delivers the answer
+// to the asking member as a fresh `--resume` turn whose prompt frames
+// the user's text as the answer to the question.
 //
-// The member's existing claude subprocess is reused — its session is
-// still alive, mid-turn, blocked on stdin waiting for the tool_result.
-// No new spawn, no fresh --resume turn — the model picks up exactly
-// where it left off and emits more output through the same read pump.
+// Why a fresh `--resume` turn and not an in-process tool_result:
+// `claude --print` exits after every turn, and a forwarded / denied
+// AskUserQuestion still ends the turn — so the asking subprocess is
+// essentially always gone by the time the user answers. The old code
+// wrote a tool_result envelope to that (dead) stdin; the write either
+// no-op'd or failed, the answer was lost with NO audit entry, and the
+// model later resumed seeing its own unanswered question and re-asked
+// (the "TL is confused" report). `--resume` reloads the full
+// conversation — the model sees its AskUserQuestion tool_use — and the
+// framed prompt carries the decision, so delivery is robust whether or
+// not the prior process is still alive. No FSM transition is fired
+// (mirrors spawnTLNudge): answering a question must not, on its own,
+// promote the turn out of whatever state it was in (e.g. Approval).
+//
+// The "you" line is flagged Undelivered ONLY when the answer genuinely
+// can't be routed — the member isn't on the team, or the respawn
+// fails. The view then renders it bold-red with a "(not delivered)"
+// tag so a lost message is impossible to miss instead of vanishing.
 func onAnswerPendingQuestion(m AppModel, answer string) Tuple[AppModel, Cmd[AppMsg]] = m.PendingQuestion match {
     case None() => (m, NoCmd[AppMsg]())
     case Some(pending) => {
-        val convo = m.Conversation.Append(
-            session.ConversationLine(Speaker = "you", Text = answer, At = time_utils.Now().UnixNanos()),
-        )
-        val withAnswer = m.Copy(
+        // Audit every answer. The dropped-answer bug took a whole
+        // session to diagnose precisely because answers never reached
+        // events.jsonl — this was the one user-input path that didn't
+        // LogUserInput.
+        LogUserInput(answer)
+        val at = time_utils.Now().UnixNanos()
+        val cleared = m.Copy(
             PendingQuestion    = None[PendingQuestion](),
             Composer           = "",
             ComposerCursor     = 0,
-            Conversation       = convo,
             ConversationSticky = true,
         )
-        val persisted = persistConversation(withAnswer, convo)
-        return persisted.Sessions.Get(pending.Member) match {
-            case None() => {
-                // Session crashed / was wiped between question and
-                // answer. Without it we can't satisfy the tool call;
-                // surface a hint so the user knows the answer didn't
-                // reach anyone instead of silently dropping it.
-                val toast = persisted.Toasts.PushError(
-                    s"${pending.Member} is no longer running — answer not delivered",
-                    time_utils.Now(),
-                    time_utils.Seconds(int64(6)),
-                )
-                return (persisted.Copy(Toasts = toast), NoCmd[AppMsg]())
-            }
-            case Some(s) => {
-                val sendCmd = runtimeFutureToCmd(SendToolResultFuture(s, pending.ToolUseId, answer))
-                return (persisted, sendCmd)
+        val flagged = (mm AppModel, note string) => {
+            val convo = mm.Conversation.Append(
+                session.ConversationLine(Speaker = "you", Text = answer, At = at, Undelivered = true),
+            )
+            val toast = mm.Toasts.PushError(note, time_utils.Now(), time_utils.Seconds(int64(7)))
+            val persisted = persistConversation(mm.Copy(Toasts = toast, Conversation = convo), convo)
+            return (persisted, NoCmd[AppMsg]())
+        }
+        return findMemberByName(cleared.Team.Members, pending.Member) match {
+            case None() => flagged(cleared, s"${pending.Member} is not on the team — answer flagged below")
+            case Some(mem) => {
+                val framed = if (pending.QuestionText != "")
+                                 s"[Answer to your question — ${pending.QuestionText}]\n\n${answer}"
+                             else
+                                 s"[Answer to your question]\n\n${answer}"
+                val mClosed = closeLiveSession(cleared, mem.Name)
+                return ensureSession(mClosed, mem) match {
+                    case Left(err) => {
+                        LogSpawnFailure(mem.Name, "answer", err)
+                        return flagged(
+                            mClosed.Copy(LastError = Some(s"answer ${mem.Name}: ${err}")),
+                            s"couldn't reach ${mem.Name} — answer flagged below, re-send to retry",
+                        )
+                    }
+                    case Right(m1) => {
+                        val convo = m1.Conversation.Append(
+                            session.ConversationLine(Speaker = "you", Text = answer, At = at),
+                        )
+                        val withConvo = persistConversation(
+                            m1.Copy(Conversation = convo, ConversationSticky = true), convo,
+                        )
+                        val withStatus = setStatus(withConvo, mem.Name, StWorking())
+                        return (withStatus, sendAndPumpCmd(withStatus, mem, framed))
+                    }
+                }
             }
         }
     }

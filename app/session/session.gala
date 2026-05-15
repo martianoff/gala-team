@@ -38,7 +38,15 @@ import (
 // to 0 so legacy snapshots (pre-timestamp) load cleanly; the activity
 // view treats zero as "no timestamp" and omits the prefix. New entries
 // stamped via `time_utils.Now().UnixNanos()` at append time.
-struct ConversationLine(Speaker string, Text string, At int64 = int64(0))
+//
+// `Undelivered` marks a line whose content never reached the model it
+// was meant for (e.g. an answer to an AskUserQuestion that couldn't be
+// re-delivered because the member's session was gone and the respawn
+// failed). Defaults to false so the codec's zero value on legacy
+// snapshots reads as "delivered" — only an explicit true means "this
+// was dropped". The view renders these with a warning highlight so a
+// silently-lost message is impossible to miss.
+struct ConversationLine(Speaker string, Text string, At int64 = int64(0), Undelivered bool = false)
 
 // SessionIdEntry pairs a member name with the persisted claude session
 // UUID. Stored as an array (not a HashMap) so the JSON codec handles

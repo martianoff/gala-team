@@ -1538,6 +1538,85 @@ func TestSessionFailed_MarksMemberFailedWithReason(t T) T {
     }
 }
 
+// Heartbeat-driven liveness regression: a member who goes silent
+// past AbandonAfterSeconds should be RESPAWNED (not buried) while
+// the retry budget allows. Previously the heartbeat fired
+// MemberAbandoned the moment LastChunkAt crossed the threshold,
+// permanently taking the silent member out of the FSM. Past
+// sessions caught a parallel @dispatch where one engineer hung
+// after a few file reads — the heartbeat dropped them and the TL
+// had to take over their entire scope from the lead worktree.
+//
+// With the respawn path: status flips to StRecovering, RetryCount
+// bumps, FSM stays in Delegating (member still pending). The fresh
+// claude subprocess --resumes the prior session id and a "Continue
+// your previous task." prompt picks up where the silent one stalled.
+func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    // staleTime sits 1 second after Unix epoch — many years before
+    // any real time_utils.Now(), so elapsed always exceeds
+    // AbandonAfterSeconds without depending on the test clock.
+    val staleTime = time_utils.FromUnixSeconds(int64(1))
+    val seed = sampleModel()
+    val seeded = seed.Copy(
+        State       = Delegating(Pending = pending),
+        Statuses    = seed.Statuses.Put("Felix", StWorking()),
+        LastChunkAt = seed.LastChunkAt.Put("Felix", staleTime),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    // Status should NOT be StFailed. ensureSession may have flipped
+    // back to StWorking (spawn succeeded) or stayed at StRecovering
+    // (spawn failed); both are acceptable outcomes of the respawn
+    // attempt — what matters is that the heartbeat didn't bury Felix.
+    val statusOk = m.Statuses.Get("Felix") match {
+        case Some(StRecovering(_, _)) => true
+        case Some(StWorking())        => true
+        case _                        => false
+    }
+    val t1 = IsTrue(t, statusOk)
+    // FSM still in Delegating with Felix pending — NOT advanced past.
+    val fsmOk = m.State match {
+        case Delegating(p) => p.Contains("Felix")
+        case _             => false
+    }
+    val t2 = IsTrue(t1, fsmOk)
+    // RetryCount for Felix should have been bumped to 1 by the
+    // respawn helper before delegating to ensureSession (so the
+    // increment holds even if the synchronous spawn failed).
+    return Eq(t2, m.RetryCount.Get("Felix").GetOrElse(0), 1)
+}
+
+// Once the respawn budget is exhausted (RetryCount == MaxRetries
+// at the moment the heartbeat fires), the next silence escalation
+// genuinely abandons the member: status flips to StFailed and the
+// FSM advances past them so the rest of the team can drain. Mirrors
+// the after-exhaustion semantics of the crash-recovery path
+// (TestSessionFailed_MarksMemberFailedWithReason). Felix was the
+// only Pending member, so Delegating drains all the way through to
+// TLReview.
+func TestOnTick_LivenessSilence_AfterMaxRetries_FiresMemberAbandoned(t T) T {
+    val hb = DefaultHeartbeat()
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val staleTime = time_utils.FromUnixSeconds(int64(1))
+    val seed = sampleModel()
+    val seeded = seed.Copy(
+        State       = Delegating(Pending = pending),
+        Statuses    = seed.Statuses.Put("Felix", StWorking()),
+        LastChunkAt = seed.LastChunkAt.Put("Felix", staleTime),
+        RetryCount  = seed.RetryCount.Put("Felix", hb.MaxRetries),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    val statusOk = m.Statuses.Get("Felix") match {
+        case Some(StFailed(_)) => true
+        case _                 => false
+    }
+    val t1 = IsTrue(t, statusOk)
+    return m.State match {
+        case TLReview() => IsTrue(t1, true)
+        case _          => IsTrue(t1, false)
+    }
+}
+
 func TestMerged_ResetsAllMembersToIdle(t T) T {
     // Seed every member as something other than Idle so reset has work
     // to do. Felix StFailed; Iris StWorking. After Merged, both Idle.

@@ -3,12 +3,12 @@ package session
 import (
     "os"
     "path/filepath"
-    "strings"
     "time"
+    "martianoff/gala/fs"
     "martianoff/gala/json"
+    "martianoff/gala/strings"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "martianoff/gala/go_interop"
 )
 
 // ============================================================================
@@ -120,10 +120,8 @@ func Save(
     val encoded = snapshotCodec().Encode(snap).Get()
     val path    = SessionPath(repoDir)
     val parent  = filepath.Dir(path)
-    val mkErr   = os.MkdirAll(parent, os.FileMode(0755))
-    if mkErr != nil { panic(s"session: mkdir ${parent}: ${mkErr.Error()}") }
-    val writeErr = os.WriteFile(path, ToBytes(encoded), os.FileMode(0644))
-    if writeErr != nil { panic(s"session: write ${path}: ${writeErr.Error()}") }
+    fs.MkdirAll(parent, 0o755).Get()
+    fs.WriteFileString(path, encoded, 0o644).Get()
     return true
 })
 
@@ -141,10 +139,9 @@ func Load(repoDir string) Option[Snapshot] = LoadOrError(repoDir) match {
 // LastError surface in the running TUI.
 func LoadOrError(repoDir string) Either[string, Snapshot] {
     val path = SessionPath(repoDir)
-    val readResult = Try(() => os.ReadFile(path))
-    return readResult match {
+    return fs.ReadFileString(path) match {
         case Failure(err) => Left[string, Snapshot](s"read: ${err.Error()}")
-        case Success(bytes) => snapshotCodec().Decode(string(bytes)) match {
+        case Success(text) => snapshotCodec().Decode(text) match {
             case Success(snap) => Right[string, Snapshot](snap)
             case Failure(err)  => Left[string, Snapshot](s"decode: ${err.Error()}")
         }
@@ -169,21 +166,17 @@ func LoadOrError(repoDir string) Either[string, Snapshot] {
 // present guard so we don't fight the user)."
 func EnsureGitignore(repoDir string) Try[bool] = Try(() => {
     val gitDir = filepath.Join(repoDir, ".git")
-    val gitInfo, gitErr = os.Stat(gitDir)
-    val _ = gitInfo
-    if gitErr != nil {
+    if !fs.Exists(gitDir) {
         return false
     }
     val path = filepath.Join(repoDir, ".gitignore")
-    val existing, readErr = os.ReadFile(path)
-    val current = if (readErr == nil) string(existing) else ""
+    val current = fs.ReadFileString(path).GetOrElse("")
     if hasGalaTeamLine(current) {
         return false
     }
     val sep = if (current == "" || strings.HasSuffix(current, "\n")) "" else "\n"
     val updated = current + sep + ".gala_team/\n"
-    val writeErr = os.WriteFile(path, ToBytes(updated), os.FileMode(0644))
-    if writeErr != nil { panic(s"session: write ${path}: ${writeErr.Error()}") }
+    fs.WriteFileString(path, updated, 0o644).Get()
     return true
 })
 
@@ -191,17 +184,8 @@ func EnsureGitignore(repoDir string) Try[bool] = Try(() => {
 // `.gala_team` path in some form — covers `.gala_team`,
 // `.gala_team/`, `.gala_team/*`, and any leading whitespace. Avoids
 // re-appending the line on every launch.
-func hasGalaTeamLine(body string) bool {
-    val lines = strings.Split(body, "\n")
-    var i = 0
-    val n = len(lines)
-    for i < n {
-        val t = strings.TrimSpace(lines[i])
-        if strings.HasPrefix(t, ".gala_team") { return true }
-        i = i + 1
-    }
-    return false
-}
+func hasGalaTeamLine(body string) bool =
+    strings.Split(body, "\n").Exists((ln) => strings.HasPrefix(strings.TrimSpace(ln), ".gala_team"))
 
 // AppendEvent appends one JSON line to the per-session events.jsonl
 // file under .gala_team/sessions/events.jsonl. Each event is a
@@ -217,8 +201,9 @@ func hasGalaTeamLine(body string) bool {
 func AppendEvent(repoDir string, eventJson string) Try[bool] = Try(() => {
     val path = filepath.Join(repoDir, ".gala_team", "sessions", "events.jsonl")
     val parent = filepath.Dir(path)
-    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
-    if mkErr != nil { panic(s"session: mkdir ${parent}: ${mkErr.Error()}") }
+    fs.MkdirAll(parent, 0o755).Get()
+    // O_APPEND open isn't surfaced by martianoff/gala/fs; keep the
+    // raw os.OpenFile call here so appends remain atomic per write.
     val f, openErr = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.FileMode(0644))
     if openErr != nil { panic(s"session: open ${path}: ${openErr.Error()}") }
     val _, writeErr = f.WriteString(eventJson + "\n")

@@ -1,15 +1,13 @@
 package session
 
 import (
-    "os"
     "path/filepath"
     "sort"
-    "strings"
     "time"
-    "martianoff/gala/json"
+    "martianoff/gala/fs"
+    "martianoff/gala/strings"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "martianoff/gala/go_interop"
 )
 
 // ============================================================================
@@ -65,16 +63,13 @@ func ArchiveDir(repoDir string) string =
 // Failure with a descriptive error rather than silently no-op'ing.
 func ArchiveLatest(repoDir string, label string) Try[string] = Try(() => {
     val src = SessionPath(repoDir)
-    val raw, err = os.ReadFile(src)
-    if err != nil { panic(s"archive: read ${src}: ${err.Error()}") }
+    val raw = fs.ReadFileString(src).Get()
     val savedAt = time.Now().UnixNano()
     val dir = ArchiveDir(repoDir)
-    val mkErr = os.MkdirAll(dir, os.FileMode(0755))
-    if mkErr != nil { panic(s"archive: mkdir ${dir}: ${mkErr.Error()}") }
+    fs.MkdirAll(dir, 0o755).Get()
     val safeLabel = sanitizeLabel(label)
     val dst = filepath.Join(dir, s"${safeLabel}-${savedAt}.json")
-    val writeErr = os.WriteFile(dst, raw, os.FileMode(0644))
-    if writeErr != nil { panic(s"archive: write ${dst}: ${writeErr.Error()}") }
+    fs.WriteFileString(dst, raw, 0o644).Get()
     return dst
 })
 
@@ -88,13 +83,15 @@ func ArchiveLatest(repoDir string, label string) Try[string] = Try(() => {
 // one corrupted file shouldn't hide the rest of the list.
 func ListArchives(repoDir string) Try[Array[SnapshotMeta]] = Try[Array[SnapshotMeta]](() => {
     val dir = ArchiveDir(repoDir)
-    val info, statErr = os.Stat(dir)
-    if statErr != nil || !info.IsDir() { return EmptyArray[SnapshotMeta]() }
-    val entries, readErr = os.ReadDir(dir)
-    if readErr != nil { panic(s"archive: read ${dir}: ${readErr.Error()}") }
-    val resolved = ArrayOf[os.DirEntry](entries...)
-        .Filter((e os.DirEntry) => !e.IsDir() && strings.HasSuffix(e.Name(), ".json"))
-        .Map((e os.DirEntry) => metaFromFile(filepath.Join(dir, e.Name())))
+    val isDir = fs.Stat(dir) match {
+        case Success(info) => info.IsDir
+        case Failure(_)    => false
+    }
+    if !isDir { return EmptyArray[SnapshotMeta]() }
+    val entries = fs.ReadDir(dir).Get()
+    val resolved = entries
+        .Filter((fi) => !fi.IsDir && strings.HasSuffix(fi.Name, ".json"))
+        .Map((fi) => metaFromFile(filepath.Join(dir, fi.Name)))
         .Collect({ case Success(m) => m })
     return sortNewestFirst(resolved)
 })
@@ -103,9 +100,8 @@ func ListArchives(repoDir string) Try[Array[SnapshotMeta]] = Try[Array[SnapshotM
 // Snapshot — used by the history view when the user picks one to
 // inspect.
 func LoadArchive(path string) Try[Snapshot] = Try(() => {
-    val raw, err = os.ReadFile(path)
-    if err != nil { panic(s"archive: read ${path}: ${err.Error()}") }
-    return snapshotCodec().Decode(string(raw)).Get()
+    val raw = fs.ReadFileString(path).Get()
+    return snapshotCodec().Decode(raw).Get()
 })
 
 // ----------------------------------------------------------------------------
@@ -117,9 +113,8 @@ func LoadArchive(path string) Try[Snapshot] = Try(() => {
 // Reuses the package-level snapshotCodec then projects — simpler than
 // writing a partial decoder for the list-only path.
 func metaFromFile(path string) Try[SnapshotMeta] = Try(() => {
-    val raw, err = os.ReadFile(path)
-    if err != nil { panic(s"meta: read ${path}: ${err.Error()}") }
-    val snap = snapshotCodec().Decode(string(raw)).Get()
+    val raw = fs.ReadFileString(path).Get()
+    val snap = snapshotCodec().Decode(raw).Get()
     return SnapshotMeta(
         Path        = path,
         Label       = labelFromFilename(filepath.Base(path)),
@@ -137,7 +132,7 @@ func labelFromFilename(base string) string {
     val noExt = strings.TrimSuffix(base, ".json")
     val idx = strings.LastIndex(noExt, "-")
     if idx < 0 { return noExt }
-    return string(SliceTo(ToRunes(noExt), idx))
+    return strings.S(noExt).Take(idx).ToString()
 }
 
 // sanitizeLabel makes a user-supplied label safe for embedding in a
@@ -146,8 +141,11 @@ func labelFromFilename(base string) string {
 func sanitizeLabel(label string) string {
     val trimmed = strings.TrimSpace(label)
     if trimmed == "" { return "manual" }
-    val replaced = strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(trimmed, "/", "-"), "\\", "-"), ".", "-")
-    return replaced
+    return strings.S(trimmed)
+        .ReplaceAll("/", "-")
+        .ReplaceAll("\\", "-")
+        .ReplaceAll(".", "-")
+        .ToString()
 }
 
 // sortNewestFirst delegates to Go's sort.Slice with a SavedAt-desc

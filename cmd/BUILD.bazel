@@ -26,6 +26,8 @@ gala_binary(
         "//app/testdriver",
         "//app/ui",
         "@gala//collection_immutable",
+        "@gala//fs",
+        "@gala//strings",
         "@gala//time_utils",
     ],
     x_defs = {

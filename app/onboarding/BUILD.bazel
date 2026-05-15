@@ -9,7 +9,8 @@ gala_library(
         "//app/project",
         "//app/team",
         "@gala//collection_immutable",
-        "@gala//go_interop",
+        "@gala//fs",
+        "@gala//strings",
     ],
     visibility = ["//visibility:public"],
 )
@@ -25,6 +26,8 @@ gala_go_test(
         "//app/project",
         "//app/team",
         "@gala//collection_immutable",
+        "@gala//fs",
         "@gala//go_interop",
+        "@gala//strings",
     ],
 )

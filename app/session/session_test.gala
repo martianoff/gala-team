@@ -1,22 +1,18 @@
 package session
 
 import (
-    "os"
     "path/filepath"
+    "martianoff/gala/fs"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "martianoff/gala/go_interop"
 )
 
 // mkTempDir creates a fresh empty directory for the duration of one test
 // case. Tests panic the test rather than skipping; the test framework
 // records the failure and moves on.
-func mkTempDir(label string) string {
-    val dir, err = os.MkdirTemp("", "gala_team_session_" + label)
-    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
-    return dir
-}
+func mkTempDir(label string) string =
+    fs.MkdirTemp("", "gala_team_session_" + label).Get()
 
 func TestSessionPath_PutsFileUnderGalaTeam(t T) T {
     val path = SessionPath("/tmp/proj")
@@ -83,10 +79,8 @@ func TestSave_OverwritesPriorSnapshot(t T) T {
 func TestLoad_CorruptedFileReturnsNone(t T) T {
     val dir = mkTempDir("corrupt")
     val parent = filepath.Dir(SessionPath(dir))
-    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
-    if mkErr != nil { panic(mkErr.Error()) }
-    val writeErr = os.WriteFile(SessionPath(dir), ToBytes("{not json"), os.FileMode(0644))
-    if writeErr != nil { panic(writeErr.Error()) }
+    fs.MkdirAll(parent, 0o755).Get()
+    fs.WriteFileString(SessionPath(dir), "{not json", 0o644).Get()
     return Load(dir) match {
         case None()  => IsTrue(t, true)
         case Some(_) => IsTrue(t, false)
@@ -248,10 +242,8 @@ func TestLoadOrError_OnMissingFile_LeftWithReadError(t T) T {
 func TestLoadOrError_OnCorrupted_LeftWithDecodeError(t T) T {
     val dir = mkTempDir("loaderr_bad")
     val parent = filepath.Dir(SessionPath(dir))
-    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
-    if mkErr != nil { panic(mkErr.Error()) }
-    val writeErr = os.WriteFile(SessionPath(dir), ToBytes("{not json"), os.FileMode(0644))
-    if writeErr != nil { panic(writeErr.Error()) }
+    fs.MkdirAll(parent, 0o755).Get()
+    fs.WriteFileString(SessionPath(dir), "{not json", 0o644).Get()
     return LoadOrError(dir) match {
         case Right(_)  => IsTrue(t, false)
         case Left(err) => IsTrue(t, len(err) > 0)
@@ -271,7 +263,7 @@ func TestLoadOrError_OnCorrupted_LeftWithDecodeError(t T) T {
 
 func TestSessionIds_RoundTrip(t T) T {
     val dir = mkTempDir("sids_rt")
-    defer os.RemoveAll(dir)
+    defer fs.RemoveAll(dir)
     val entries = ArrayOf(
         SessionIdEntry(Member = "Vesper", SessionId = "11111111-aaaa-bbbb-cccc-222222222222"),
         SessionIdEntry(Member = "Kael",   SessionId = "33333333-aaaa-bbbb-cccc-444444444444"),
@@ -304,15 +296,13 @@ func TestSessionIds_RoundTrip(t T) T {
 // the same as "no recovered ids" (first ensureSession spawns fresh).
 func TestSessionIds_LegacySnapshotLoadsAsEmptyArray(t T) T {
     val dir = mkTempDir("sids_legacy")
-    defer os.RemoveAll(dir)
+    defer fs.RemoveAll(dir)
     val parent = filepath.Dir(SessionPath(dir))
-    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
-    if mkErr != nil { panic(mkErr.Error()) }
+    fs.MkdirAll(parent, 0o755).Get()
     // Hand-rolled snapshot WITHOUT a session_ids key — what older
     // installs would have on disk.
     val legacy = "{\"project_name\":\"demo\",\"saved_at\":1700000000000000000,\"conversation\":[],\"active_members\":[]}"
-    val writeErr = os.WriteFile(SessionPath(dir), ToBytes(legacy), os.FileMode(0644))
-    if writeErr != nil { panic(writeErr.Error()) }
+    fs.WriteFileString(SessionPath(dir), legacy, 0o644).Get()
     return Load(dir) match {
         case None()       => IsTrue(t, false)
         case Some(snap)   => Eq(t, snap.SessionIds.Size(), 0)
@@ -324,7 +314,7 @@ func TestSessionIds_LegacySnapshotLoadsAsEmptyArray(t T) T {
 // decode of the next launch.
 func TestSessionIds_EmptyRoundTrip(t T) T {
     val dir = mkTempDir("sids_empty")
-    defer os.RemoveAll(dir)
+    defer fs.RemoveAll(dir)
     val saveRes = Save(
         dir,
         "demo",

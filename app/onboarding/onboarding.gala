@@ -1,12 +1,11 @@
 package onboarding
 
 import (
-    "os"
-    "strings"
     "path/filepath"
+    "martianoff/gala/fs"
+    "martianoff/gala/strings"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
-    . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
@@ -47,11 +46,11 @@ func Load(proj Project, paths Array[string]) Try[string] = Try(() => {
     return paths.FoldLeft(EmptyArray[string](), (acc, raw) => {
         val resolved = if (filepath.IsAbs(raw)) raw
                        else                     filepath.Join(proj.Repo, raw)
-        val bytes, err = os.ReadFile(resolved)
-        if err != nil {
-            panic(s"onboarding: cannot read '${resolved}': ${err.Error()}")
+        val text = fs.ReadFileString(resolved) match {
+            case Success(s)   => s
+            case Failure(err) => panic(s"onboarding: cannot read '${resolved}': ${err.Error()}")
         }
-        return acc.Append(s"--- ${raw} ---").Append(string(bytes))
+        return acc.Append(s"--- ${raw} ---").Append(text)
     }).MkString("\n\n")
 })
 
@@ -177,30 +176,24 @@ func leadBranchOf(proj Project) string = "gala_team/" + onbGitSlug(proj.Name) + 
 // we duplicate. If you touch one, touch the other.
 func onbGitSlug(s string) string {
     if s == "" { return "project" }
-    val lower = strings.ToLower(s)
-    val rs = ToRunes(lower)
-    var out = EmptyArray[string]()
-    var i = 0
-    val n = len(rs)
-    var lastWasDash = false
-    for i < n {
-        val c = rs[i]
-        val safe = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/'
-        if safe {
-            out = out.Append(string(c))
-            lastWasDash = false
-        } else {
-            if !lastWasDash {
-                out = out.Append("-")
-                lastWasDash = true
-            }
-        }
-        i = i + 1
-    }
-    val joined = strings.Trim(out.MkString(""), "-/.")
+    val runes = strings.S(strings.ToLower(s)).ToChars()
+    val mapped = runes.Map((c) => if (isSlugSafeRune(c)) c else '-')
+    // Collapse consecutive '-' runs.
+    val collapsed = mapped.FoldLeft(EmptyArray[rune](), (acc, c) => {
+        if (c == '-' && !acc.IsEmpty() && acc.Get(acc.Length() - 1) == '-') { return acc }
+        return acc.Append(c)
+    })
+    val joined = strings.Trim(string(collapsed.ToGoSlice()), "-/.")
     if joined == "" { return "project" }
     return joined
 }
+
+// isSlugSafeRune mirrors the safe-rune predicate from runtime.gitSlug:
+// lowercase ASCII letters, digits, plus the small set of path-safe
+// punctuation we keep verbatim instead of collapsing to a dash.
+func isSlugSafeRune(c rune) bool =
+    (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+    c == '-' || c == '_' || c == '.' || c == '/'
 
 func sharedWorkspaceSection(proj Project, isTL bool, cwd string) string {
     val header = "# Workspace layout\n\n"
@@ -271,17 +264,11 @@ func teamRosterSection(team Team, lead Member) string {
 // firstLine returns the first non-empty line of `s`, trimmed. Used
 // to compact a multi-line personality blurb into a single roster
 // row without dropping the most informative line.
-func firstLine(s string) string {
-    val parts = strings.Split(s, "\n")
-    var i = 0
-    val n = len(parts)
-    for i < n {
-        val ln = strings.TrimSpace(parts[i])
-        if ln != "" { return ln }
-        i = i + 1
-    }
-    return ""
-}
+func firstLine(s string) string =
+    strings.Split(s, "\n")
+        .Map((ln) => strings.TrimSpace(ln))
+        .Find((ln) => ln != "")
+        .GetOrElse("")
 
 // protocolSection teaches the directive vocabulary the orchestrator
 // listens for. Two flavours: the TL outbound directives, or the

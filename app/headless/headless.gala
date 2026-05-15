@@ -1,8 +1,8 @@
 package headless
 
 import (
-    "strings"
     "martianoff/gala/json"
+    "martianoff/gala/strings"
     "github.com/martianoff/gala_team/app/onboarding"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
@@ -85,10 +85,10 @@ func ExtractClaudeText(envelope string) string {
 func headlessExtractType(trimmed string) string {
     val needle = "\"type\":\""
     val parts = strings.SplitN(trimmed, needle, 2)
-    if len(parts) < 2 { return "" }
-    val tail = strings.SplitN(parts[1], "\"", 2)
-    if len(tail) < 2 { return "" }
-    return tail[0]
+    if parts.Length() < 2 { return "" }
+    val tail = strings.SplitN(parts.Get(1), "\"", 2)
+    if tail.Length() < 2 { return "" }
+    return tail.Get(0)
 }
 
 // extractHeadlessEnvelopes is the headless equivalent of

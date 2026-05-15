@@ -1,8 +1,8 @@
 package consult
 
 import (
-    "os"
     "martianoff/gala/concurrent"
+    "martianoff/gala/fs"
     "github.com/martianoff/gala_team/app/config"
     "github.com/martianoff/gala_team/app/headless"
     . "martianoff/gala/std"
@@ -85,9 +85,11 @@ func runHeadlessStep(entry ConsultEntry, proj Project, tm Team, body string) Con
 // Lives here rather than in app/config so the consult package owns
 // its own thin facade and config.LoadFromString stays string-only.
 func loadTeamFromFile(path string) Try[config.TeamConfig] = Try[config.TeamConfig](() => {
-    val raw, err = os.ReadFile(path)
-    if err != nil { panic(s"read ${path}: ${err.Error()}") }
-    return config.LoadFromString(string(raw)).Get()
+    val raw = fs.ReadFileString(path) match {
+        case Failure(err) => panic(s"read ${path}: ${err.Error()}")
+        case Success(s)   => s
+    }
+    return config.LoadFromString(raw).Get()
 })
 
 // RunConsultFuture wraps RunConsult in a Future so callers in the

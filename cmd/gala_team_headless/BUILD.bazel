@@ -16,6 +16,7 @@ gala_binary(
         "//app/team",
         "//app/version",
         "@gala//collection_immutable",
+        "@gala//fs",
     ],
     x_defs = {
         "github.com/martianoff/gala_team/app/buildinfo.Version": "{STABLE_GALA_TEAM_VERSION}",

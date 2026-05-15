@@ -9,7 +9,9 @@ gala_library(
     importpath = "github.com/martianoff/gala_team/app/project",
     deps = [
         "@gala//collection_immutable",
+        "@gala//fs",
         "@gala//go_interop",
+        "@gala//strings",
         "@gala//subprocess",
     ],
     visibility = ["//visibility:public"],
@@ -25,7 +27,9 @@ gala_go_test(
     ],
     deps = [
         "@gala//collection_immutable",
+        "@gala//fs",
         "@gala//go_interop",
+        "@gala//strings",
         "@gala//subprocess",
     ],
 )

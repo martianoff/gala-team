@@ -1,9 +1,9 @@
 package onboarding
 
 import (
-    "os"
     "path/filepath"
-    "strings"
+    "martianoff/gala/fs"
+    "martianoff/gala/strings"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -18,20 +18,12 @@ import (
 // stays around after the test for inspection on failure; tests are
 // cheap enough to not need teardown.
 func mkProj(label string, docs Array[Tuple[string, string]]) Project {
-    val dir, err = os.MkdirTemp("", "gala_team_onboarding_" + label)
-    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
-    var i = 0
-    val n = docs.Size()
-    for i < n {
-        val pair = docs.Get(i)
+    val dir = fs.MkdirTemp("", "gala_team_onboarding_" + label).Get()
+    docs.ForEach((pair) => {
         val full = filepath.Join(dir, pair.V1)
-        val parent = filepath.Dir(full)
-        val mkErr = os.MkdirAll(parent, os.FileMode(0755))
-        if mkErr != nil { panic(mkErr.Error()) }
-        val wErr = os.WriteFile(full, ToBytes(pair.V2), os.FileMode(0644))
-        if wErr != nil { panic(wErr.Error()) }
-        i = i + 1
-    }
+        fs.MkdirAll(filepath.Dir(full), 0o755).Get()
+        fs.WriteFileString(full, pair.V2, 0o644).Get()
+    })
     return Project(
         Name = "demo", Repo = dir,
         Github = None[string](),

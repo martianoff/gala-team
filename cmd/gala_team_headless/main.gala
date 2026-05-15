@@ -3,6 +3,7 @@ package main
 import (
     "os"
     "path/filepath"
+    "martianoff/gala/fs"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/config"
@@ -68,16 +69,14 @@ func main() {
     if prompt == "" {
         die("--prompt is required (the prompt to send to the team lead)")
     }
-    val info, statErr = os.Stat(teamPath)
-    val _ = info
-    if statErr != nil {
-        die(s"--team: cannot stat '${teamPath}': ${statErr.Error()}")
+    if !fs.Exists(teamPath) {
+        die(s"--team: cannot stat '${teamPath}': file does not exist")
     }
-    val raw, readErr = os.ReadFile(teamPath)
-    if readErr != nil {
-        die(s"--team: cannot read '${teamPath}': ${readErr.Error()}")
+    val rawTry = fs.ReadFileString(teamPath)
+    if rawTry.IsFailure() {
+        die(s"--team: cannot read '${teamPath}': ${rawTry.GetError().Error()}")
     }
-    val cfgTry = LoadFromString(string(raw))
+    val cfgTry = LoadFromString(rawTry.Get())
     if cfgTry.IsFailure() {
         die(s"--team: parse '${teamPath}': ${cfgTry.GetError().Error()}")
     }
@@ -129,16 +128,10 @@ func main() {
 func scanStaleWorktrees(proj Project, tm Team) {
     if !runtime.DebugEnabled() { return }
     val wtDir = filepath.Join(proj.Repo, ".gala_team", "worktrees")
-    val entries, readErr = os.ReadDir(wtDir)
-    if readErr != nil { return }
+    val entriesTry = fs.ReadDir(wtDir)
+    if entriesTry.IsFailure() { return }
     val memberNames = tm.Members.Map((mem) => mem.Name)
-    var i = 0
-    val n = len(entries)
-    for i < n {
-        val name = entries[i].Name()
-        if entries[i].IsDir() && !memberNames.Contains(name) {
-            runtime.LogStaleWorktree(name, filepath.Join(wtDir, name))
-        }
-        i = i + 1
-    }
+    entriesTry.Get()
+        .Filter((e) => e.IsDir && !memberNames.Contains(e.Name))
+        .ForEach((e) => runtime.LogStaleWorktree(e.Name, filepath.Join(wtDir, e.Name)))
 }

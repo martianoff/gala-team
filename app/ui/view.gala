@@ -108,11 +108,11 @@ func View(m AppModel) Widget {
     val base = Column(ArrayOf[LayoutChild](
         Fixed(headerHeight(m), header),
         Flex(1, body),
-        // Plan banner sits directly above the composer when a multi-
-        // PR plan is active, so the user can see "shipped → in
-        // progress → queued" status without scrolling the
-        // conversation log. Renders 0 rows when no plan is active.
-        planBanner(m),
+        // Plan panel sits below the chat log (above the composer)
+        // when a multi-PR plan is active: a bordered, one-row-per-
+        // step view of shipped → in progress → queued. Renders 0
+        // rows when no plan is active.
+        planPanel(m),
         Fixed(composerOuterHeight(m), composerPanel),
         Fixed(1, footer),
         // Error banner sits at the very bottom — visible without
@@ -1992,49 +1992,65 @@ func errorBanner(m AppModel) LayoutChild = m.LastError match {
     case Some(err) => Fixed(1, TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed())))
 }
 
-// planBanner renders the active multi-PR plan as a single status
-// line directly above the composer. Hidden (0 rows) when no plan is
-// active or the plan has fully drained. Format:
+// planPanel renders the active multi-PR plan as a BORDERED panel
+// (one row per step) directly below the chat log. Hidden (0 rows)
+// when no plan is active or the plan has fully drained.
 //
-//   📋 Plan 2/3:  ✓ ▶ ☐  — Webhook handler that uses the SDK
+//   ╭───────────────────────────────────────────────╮
+//   │  📋 Plan — step 2 of 4                          │
+//   │  ✓ 1. Remove the approve/reject hotkeys         │
+//   │  ▶ 2. Custom post-engineer prompt hook          │
+//   │  ☐ 3. FSM hardening — directive replay          │
+//   │  ☐ 4. FSM hardening — heartbeat races           │
+//   ╰───────────────────────────────────────────────╯
 //
-// Glyphs: ✓ shipped (PlanShipped count), ▶ the step currently in
-// progress (at index PlanShipped), ☐ queued steps after.
+// Each step is flattened to ONE line (whitespace collapsed) and
+// truncated to the pane width before rendering. The old single-line
+// banner crammed the whole in-progress step body — newlines and all —
+// into one row, so a multi-sentence plan item overflowed and visually
+// collided with the chat box border (the garbled overlap users saw).
+// A row per step + per-step truncation removes that failure mode and
+// makes "what's done / running / queued" scannable at a glance.
 //
-// The right side prints the in-progress step's body so the user has
-// a one-glance reminder of what's running. The numeric counter
-// "(N/M)" is "shipped+1 / total" — i.e. the 1-indexed position of
-// the in-progress step.
-func planBanner(m AppModel) LayoutChild {
+// Steps are windowed to keep a long plan from eating the screen: at
+// most planPanelMaxRows steps are shown, always including the
+// in-progress one, with "⋯ N earlier / N more" markers.
+val planPanelMaxRows = 8
+
+func planPanel(m AppModel) LayoutChild {
     if m.Plan.IsEmpty() { return Fixed(0, Empty()) }
-    val total = m.Plan.Size()
+    val total   = m.Plan.Size()
     val shipped = m.PlanShipped
     if shipped >= total { return Fixed(0, Empty()) }
     val (cols, _) = TermSize()
-    val glyphs = planProgressGlyphs(shipped, total)
-    val current = m.Plan.Get(shipped)
-    val maxBodyCols = cols - 30
-    val bodyMax = if (maxBodyCols < 12) 12 else maxBodyCols
-    val body = truncateTitle(current, bodyMax)
-    val text = s"  📋 Plan ${shipped + 1}/${total}:  ${glyphs}  — ${body}"
-    return Fixed(1, TextStyled(text, DefaultStyle().WithFg(BrightCyan())))
-}
-
-// planProgressGlyphs builds the per-step status string. Done steps
-// get ✓, the in-progress step gets ▶, queued steps get ☐. Spaces
-// between glyphs keep the line readable on dense terminals.
-func planProgressGlyphs(shipped int, total int) string {
-    var out = ""
-    var i = 0
-    for i < total {
-        val glyph = if (i < shipped) "✓"
-                    else if (i == shipped) "▶"
-                    else                     "☐"
-        if i > 0 { out = out + " " }
-        out = out + glyph
+    val bodyMax = MaxInt(20, cols - 16)
+    val titleRow = Fixed(1, TextStyled(
+        s"  📋 Plan — step ${shipped + 1} of ${total}",
+        DefaultStyle().WithBold().WithFg(BrightCyan())))
+    val startIdx = if (total <= planPanelMaxRows) 0
+                   else MinInt(MaxInt(0, shipped - 1), total - planPanelMaxRows)
+    val endIdx = MinInt(total, startIdx + planPanelMaxRows)
+    var rows = ArrayOf[LayoutChild](titleRow)
+    if startIdx > 0 {
+        rows = rows.Append(Fixed(1, TextStyled(
+            s"     ⋯ ${startIdx} earlier step(s)", DefaultStyle().WithDim())))
+    }
+    var i = startIdx
+    for i < endIdx {
+        val flat = strings.Join(strings.Fields(m.Plan.Get(i)), " ")
+        val glyph = if (i < shipped) "✓" else if (i == shipped) "▶" else "☐"
+        val st = if (i < shipped)       DefaultStyle().WithFg(BrightGreen())
+                 else if (i == shipped) DefaultStyle().WithBold().WithFg(BrightCyan())
+                 else                   DefaultStyle().WithDim()
+        rows = rows.Append(Fixed(1, TextStyled(
+            s"  ${glyph} ${i + 1}. ${truncateTitle(flat, bodyMax)}", st)))
         i = i + 1
     }
-    return out
+    if endIdx < total {
+        rows = rows.Append(Fixed(1, TextStyled(
+            s"     ⋯ ${total - endIdx} more step(s)", DefaultStyle().WithDim())))
+    }
+    return Fixed(rows.Size() + 2, BorderOf(Column(rows), RoundedBorder()))
 }
 
 // footerHints picks a context-appropriate key legend. After

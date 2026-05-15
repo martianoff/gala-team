@@ -165,9 +165,20 @@ struct AppModel(
     // the per-step status (✓ shipped / ▶ in progress / ☐ queued).
     //
     // Both fields are cleared on every user-issued KeySubmit so a
-    // fresh prompt overrides any pending plan.
+    // fresh prompt overrides any pending plan — EXCEPT when the
+    // submit is the orchestrator's own plan-step continuation (see
+    // PlanContinuing).
     Plan         Array[string],
     PlanShipped  int,
+    // PlanContinuing flags the one synthetic KeySubmit that
+    // onPrCreated fires to advance a multi-PR plan to its next step.
+    // onSubmit reads it to SKIP the blanket Plan/PlanShipped reset
+    // (a plan-continuation is not a fresh user prompt — it must keep
+    // the plan alive) and clears it on the way through. Without this
+    // the plan was wiped after the first hop, so a 4-PR plan only
+    // ever shipped 2 steps even under AutoApprove. Defaults false so
+    // legacy snapshots / .Copy() callers are unaffected.
+    PlanContinuing bool = false,
     // Anchor of a conversation-pane selection. Set on a mouse press
     // inside the pane; preserved across a drag. None = no selection.
     SelectedEntry Option[int],

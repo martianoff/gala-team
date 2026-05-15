@@ -1565,6 +1565,14 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     LogUserInput(prompt)
     val ctx = transitionContext(mClean)
     val nextState = transitionLogged(mClean.State, UserPrompted(), ctx)
+    // Plan survives ONLY when this submit is the orchestrator's own
+    // plan-step continuation (onPrCreated set PlanContinuing). A
+    // genuine user prompt still wipes the plan — typing something new
+    // overrides a pending multi-PR plan, as before. Either way the
+    // one-shot flag is consumed here.
+    val planContinuation = mClean.PlanContinuing
+    val nextPlan        = if (planContinuation) mClean.Plan        else EmptyArray[string]()
+    val nextPlanShipped = if (planContinuation) mClean.PlanShipped else 0
     val withState = mClean.Copy(
         State = nextState,
         Composer = "",
@@ -1580,11 +1588,12 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // The TL re-emits @base early in this turn if stacking is
         // wanted; otherwise the PR opens against the project default.
         ActiveBase    = None[string](),
-        // Reset @plan — a fresh user prompt overrides any pending
-        // multi-PR plan from a prior turn. The TL re-emits @plan
-        // in this turn if a multi-PR split is wanted again.
-        Plan          = EmptyArray[string](),
-        PlanShipped   = 0,
+        // Reset @plan on a genuine fresh prompt; preserve it across a
+        // plan-step continuation (planContinuation). PlanContinuing is
+        // a one-shot — always consumed here.
+        Plan           = nextPlan,
+        PlanShipped    = nextPlanShipped,
+        PlanContinuing = false,
         // Drop a stale conversation-entry selection — the entry index
         // a click recorded earlier may shift as we append the new
         // user line + member responses, and a highlight on the wrong
@@ -5027,9 +5036,18 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
     // is mid-typing an interjection — don't overwrite their text;
     // the plan stalls until they send their prompt (which also
     // clears Plan).
+    //
+    // NOT gated on AutoApprove. A multi-PR @plan must drain whether
+    // PRs are auto-approved or hand-approved in the dialog — under
+    // manual approval the previous gate left the plan frozen at
+    // step 1 ("nobody initiated the second step"). PrCreated only
+    // fires after a PR actually lands (auto OR manual), so by the
+    // time we're here the step is genuinely done either way. The
+    // synthetic submit carries PlanContinuing so onSubmit keeps the
+    // plan alive instead of resetting it.
     val nextShipped = m.PlanShipped + 1
     val planActive  = !m.Plan.IsEmpty()
-    val canContinue = m.AutoApprove && planActive && nextShipped < m.Plan.Size() && m.Composer == ""
+    val canContinue = planActive && nextShipped < m.Plan.Size() && m.Composer == ""
     val convoBase = m.Conversation
         .Append(session.ConversationLine(Speaker = "gh", Text = s"PR created: ${linkified}"))
     if canContinue {
@@ -5046,6 +5064,7 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
             ActivePrBranch = None[string](),
             PlanShipped    = nextShipped,
             Composer       = nextStep,
+            PlanContinuing = true,
             Toasts         = toast,
             Conversation   = convoWithPlan,
         ), MsgCmd[AppMsg](Msg = KeySubmit()))

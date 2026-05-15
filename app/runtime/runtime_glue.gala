@@ -2,9 +2,9 @@ package runtime
 
 import (
     "errors"
-    "os"
     "path/filepath"
-    "strings"
+    "martianoff/gala/fs"
+    "martianoff/gala/strings"
     "martianoff/gala/subprocess"
     "martianoff/gala/concurrent"
     "martianoff/gala/json"
@@ -161,27 +161,16 @@ func LeadBranchFor(proj Project) string = "gala_team/" + gitSlug(proj.Name) + "/
 // collapse runs, and trim. Empty input falls back to "project".
 func gitSlug(s string) string {
     if s == "" { return "project" }
-    val lower = strings.ToLower(s)
-    val rs = ToRunes(lower)
-    var out = EmptyArray[string]()
-    var i = 0
-    val n = len(rs)
-    var lastWasDash = false
-    for i < n {
-        val c = rs[i]
-        val safe = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '/'
-        if safe {
-            out = out.Append(string(c))
-            lastWasDash = false
-        } else {
-            if !lastWasDash {
-                out = out.Append("-")
-                lastWasDash = true
-            }
-        }
-        i = i + 1
-    }
-    val joined = strings.Trim(out.MkString(""), "-/.")
+    val acc = strings.S(strings.ToLower(s)).ToChars().FoldLeft(("", false), (state, c) => {
+        val (out, lastUnsafe) = state
+        val safe = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                   c == '-' || c == '_' || c == '.' || c == '/'
+        if (safe)            (out + string(c), false)
+        else if (lastUnsafe) state
+        else                 (out + "-", true)
+    })
+    val (built, _) = acc
+    val joined = strings.Trim(built, "-/.")
     if joined == "" { return "project" }
     return joined
 }
@@ -200,9 +189,15 @@ func LeadWorktreePath(proj Project) string =
 // in the main checkout). Cheap stat; no subprocess. Used to gate
 // worktree creation so non-git fixtures degrade cleanly instead of
 // failing every git op the orchestrator tries to run.
-func isGitRepoDir(dir string) bool {
-    val _, err = os.Stat(filepath.Join(dir, ".git"))
-    return err == nil
+func isGitRepoDir(dir string) bool = fs.Exists(filepath.Join(dir, ".git"))
+
+// leadWtPathIsLiveDir is the "exists AND is a directory" check used by
+// the worktree-prep paths to decide whether a defensive cleanup of a
+// stale leftover dir is needed. fs.Stat returns Failure on missing
+// paths; the Success arm narrows to IsDir.
+func leadWtPathIsLiveDir(path string) bool = fs.Stat(path) match {
+    case Success(info) => info.IsDir
+    case Failure(_)    => false
 }
 
 // EnsureLeadWorktree creates the team lead's worktree at
@@ -231,13 +226,14 @@ func EnsureLeadWorktree(proj Project) Try[string] = Try(() => {
         return wtPath
     }
     val parent = filepath.Dir(wtPath)
-    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
-    if mkErr != nil { panic(s"lead worktree mkdir ${parent}: ${mkErr.Error()}") }
-    val info, statErr = os.Stat(wtPath)
-    if statErr == nil && info.IsDir() {
+    fs.MkdirAll(parent, 0755) match {
+        case Failure(err) => panic(s"lead worktree mkdir ${parent}: ${err.Error()}")
+        case Success(_)   => {}
+    }
+    if leadWtPathIsLiveDir(wtPath) {
         // Same defensive cleanup as ensureWorktree: a leftover dir
         // from a prior interrupted run will block `git worktree add`.
-        // Try git's own remove first, then fall back to os.RemoveAll.
+        // Try git's own remove first, then fall back to fs.RemoveAll.
         val gitRm = subprocess.NewSpawnOpts(
             "git",
             ArrayOf("worktree", "remove", "--force", wtPath).ToGoSlice(),
@@ -248,9 +244,8 @@ func EnsureLeadWorktree(proj Project) Try[string] = Try(() => {
             case Success(p) => { val _ = p.Wait() }
             case Failure(_) => {}
         }
-        val info2, statErr2 = os.Stat(wtPath)
-        if statErr2 == nil && info2.IsDir() {
-            val _ = os.RemoveAll(wtPath)
+        if leadWtPathIsLiveDir(wtPath) {
+            val _ = fs.RemoveAll(wtPath)
         }
     }
     // Fork the lead worktree from the project's DEFAULT BRANCH so a
@@ -416,10 +411,11 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try(() => {
     // way, ensure parent exists and wipe whatever is at wtPath so the
     // fresh `git worktree add` doesn't trip over leftover content.
     val parent = filepath.Dir(wtPath)
-    val mkErr = os.MkdirAll(parent, os.FileMode(0755))
-    if mkErr != nil { panic(s"worktree mkdir ${parent}: ${mkErr.Error()}") }
-    val info, statErr = os.Stat(wtPath)
-    if statErr == nil && info.IsDir() {
+    fs.MkdirAll(parent, 0755) match {
+        case Failure(err) => panic(s"worktree mkdir ${parent}: ${err.Error()}")
+        case Success(_)   => {}
+    }
+    if leadWtPathIsLiveDir(wtPath) {
         // Try git's own cleanup first — `git worktree remove --force`
         // is worktree-aware and handles the case where some metadata
         // ghost still references this path (would block a plain
@@ -436,23 +432,16 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try(() => {
             case Failure(_) => {}
         }
         // Re-stat. If git's remove did the job we're done with this
-        // step. Otherwise fall through to os.RemoveAll.
-        val info2, statErr2 = os.Stat(wtPath)
-        if statErr2 == nil && info2.IsDir() {
-            val rmErr = os.RemoveAll(wtPath)
-            if rmErr != nil {
-                // Don't panic on "in use by another process" / lock
-                // failures. A stale claude.exe with cwd inside this
-                // dir, or a Windows file watcher (gopls / IDE indexer)
-                // holding handles, can keep the dir un-unlinkable for
-                // tens of seconds. The `git worktree add` below will
-                // either succeed (git can sometimes adopt a half-empty
-                // dir) or surface its own error via the idempotency
-                // fallback. Surface the rm failure as a soft warning
-                // path rather than a hard panic so the user isn't left
-                // with a dispatch that died at the cleanup step.
-                val _ = rmErr
-            }
+        // step. Otherwise fall through to fs.RemoveAll. Don't panic on
+        // "in use by another process" / lock failures. A stale
+        // claude.exe with cwd inside this dir, or a Windows file
+        // watcher (gopls / IDE indexer) holding handles, can keep the
+        // dir un-unlinkable for tens of seconds. The `git worktree
+        // add` below will either succeed (git can sometimes adopt a
+        // half-empty dir) or surface its own error via the
+        // idempotency fallback.
+        if leadWtPathIsLiveDir(wtPath) {
+            val _ = fs.RemoveAll(wtPath)
         }
     }
     // Fork the engineer's worktree from the project's DEFAULT BRANCH
@@ -548,8 +537,7 @@ func RemoveLeadWorktree(proj Project) Try[bool] = Try(() => {
 })
 
 func removeWorktreeAt(proj Project, wtPath string) bool {
-    val info, statErr = os.Stat(wtPath)
-    if statErr != nil || !info.IsDir() { return true }  // already gone
+    if !leadWtPathIsLiveDir(wtPath) { return true }  // already gone
     val opts = subprocess.NewSpawnOpts(
         "git",
         ArrayOf("worktree", "remove", "--force", wtPath).ToGoSlice(),
@@ -1219,17 +1207,11 @@ func GhTitle(body string) string {
 // non-whitespace content. Falls back to "Untitled" when every line
 // is empty (defensive — TL summaries should never be blank, but
 // avoid producing a literal empty PR title).
-func firstNonEmptyLine(body string) string {
-    val lines = strings.Split(body, "\n")
-    var i = 0
-    val n = len(lines)
-    for i < n {
-        val t = strings.TrimSpace(lines[i])
-        if t != "" { return t }
-        i = i + 1
-    }
-    return "Untitled"
-}
+func firstNonEmptyLine(body string) string =
+    strings.Split(body, "\n")
+        .Map((ln) => strings.TrimSpace(ln))
+        .Find((s) => s != "")
+        .GetOrElse("Untitled")
 
 // stripTitleMarkdown removes the markdown emphasis markers a
 // TL summary typically wraps its headline in: leading/trailing

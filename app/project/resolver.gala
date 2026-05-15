@@ -1,9 +1,9 @@
 package project
 
 import (
-    "os"
     "path/filepath"
-    "strings"
+    "martianoff/gala/fs"
+    "martianoff/gala/strings"
     "martianoff/gala/subprocess"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -76,16 +76,14 @@ func absoluteOrPanic(dir string) string {
 // requireGitRepo panics if `dir` doesn't exist or doesn't have a .git entry.
 // Accepts both real .git directories and worktree gitfiles.
 func requireGitRepo(dir string) {
-    val info, statErr = os.Stat(dir)
-    if statErr != nil {
-        panic(s"--project: '${dir}' does not exist or is not accessible: ${statErr.Error()}")
+    val statRes = fs.Stat(dir)
+    if statRes.IsFailure() {
+        panic(s"--project: '${dir}' does not exist or is not accessible: ${statRes.GetError().Error()}")
     }
-    if !info.IsDir() {
+    if !statRes.Get().IsDir {
         panic(s"--project: '${dir}' is not a directory")
     }
-    val gitPath = filepath.Join(dir, ".git")
-    val _, gitErr = os.Stat(gitPath)
-    if gitErr != nil {
+    if !fs.Exists(filepath.Join(dir, ".git")) {
         panic(s"--project: '${dir}' is not a git repository (no .git entry)")
     }
 }

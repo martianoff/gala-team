@@ -1,7 +1,7 @@
 package directive
 
 import (
-    "strings"
+    "martianoff/gala/strings"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
@@ -47,10 +47,10 @@ func parseImpl(msg string, requireClose bool) Array[Directive] {
     var out = EmptyArray[Directive]()
     val lines = strings.Split(msg, "\n")
     var i = 0
-    val n = len(lines)
+    val n = lines.Length()
     var done = false
     for !done && i < n {
-        val line = lines[i]
+        val line = lines.Get(i)
         parseOpeningTag(line) match {
             case Some(o) => {
                 val (kind, target, projectOverride, sameLineRest) = unpackOpening(o)
@@ -138,10 +138,10 @@ func parseBodyOnlyTag(kind string, afterTag string) Option[openingTag] {
 // the first ")" to separate the args from the same-line body.
 func parseDispatchOrConsult(kind string, afterOpen string) Option[openingTag] {
     val parts = strings.SplitN(afterOpen, ")", 2)
-    if len(parts) < 2 { return None[openingTag]() }
-    val (target, projectOverride) = parseArgList(parts[0])
+    if parts.Length() < 2 { return None[openingTag]() }
+    val (target, projectOverride) = parseArgList(parts.Get(0))
     if target == "" { return None[openingTag]() }
-    val rest = strings.TrimLeft(parts[1], " \t")
+    val rest = strings.TrimLeft(parts.Get(1), " \t")
     return Some[openingTag](openingTag{
         Kind:            kind,
         Target:          target,
@@ -152,17 +152,13 @@ func parseDispatchOrConsult(kind string, afterOpen string) Option[openingTag] {
 
 func parseArgList(args string) Tuple[string, Option[string]] {
     val parts = strings.Split(args, ",")
-    if len(parts) == 0 { return ("", None[string]()) }
-    val target = strings.TrimSpace(parts[0])
-    var projectOverride = None[string]()
-    var i = 1
-    for i < len(parts) {
-        val (key, value, ok) = splitKVPair(parts[i])
-        if ok && key == "project" {
-            projectOverride = Some[string](value)
-        }
-        i = i + 1
-    }
+    if parts.IsEmpty() { return ("", None[string]()) }
+    val target = strings.TrimSpace(parts.Get(0))
+    val projectOverride = parts.Tail().FoldLeft(None[string](), (acc, seg) => {
+        val (key, value, ok) = splitKVPair(seg)
+        if (ok && key == "project") Some[string](value)
+        else                        acc
+    })
     return (target, projectOverride)
 }
 
@@ -171,9 +167,9 @@ func parseArgList(args string) Tuple[string, Option[string]] {
 // the surrounding quotes via TrimPrefix/TrimSuffix.
 func splitKVPair(seg string) Tuple3[string, string, bool] {
     val parts = strings.SplitN(strings.TrimSpace(seg), "=", 2)
-    if len(parts) < 2 { return ("", "", false) }
-    val key = strings.TrimSpace(parts[0])
-    val rawVal = strings.TrimSpace(parts[1])
+    if parts.Length() < 2 { return ("", "", false) }
+    val key = strings.TrimSpace(parts.Get(0))
+    val rawVal = strings.TrimSpace(parts.Get(1))
     val unquoted = strings.TrimSuffix(strings.TrimPrefix(rawVal, "\""), "\"")
     return (key, unquoted, true)
 }
@@ -189,14 +185,14 @@ func splitKVPair(seg string) Tuple3[string, string, bool] {
 // arrive line-by-line — we don't want to fire a Blocked / Help /
 // Finished directive on the very first line before the body and @end
 // have arrived).
-func collectBody(lines []string, start int, n int, sameLineRest string) Tuple3[string, int, bool] {
+func collectBody(lines Array[string], start int, n int, sameLineRest string) Tuple3[string, int, bool] {
     var bodyParts = EmptyArray[string]()
     if sameLineRest != "" {
         bodyParts = bodyParts.Append(sameLineRest)
     }
     var i = start + 1
     for i < n {
-        val line = lines[i]
+        val line = lines.Get(i)
         val trimmed = strings.TrimSpace(line)
         if trimmed == "@end" {
             return (joinBody(bodyParts), i + 1, true)
@@ -246,7 +242,7 @@ func buildDirective(
         // the team into a weird base.
         val ref = strings.TrimSpace(body)
         if ref == "" { return None[Directive]() }
-        val firstTok = strings.SplitN(ref, "\n", 2)[0]
+        val firstTok = strings.SplitN(ref, "\n", 2).Get(0)
         return Some[Directive](Base(Ref = strings.TrimSpace(firstTok)))
     }
     if kind == "plan" {
@@ -262,20 +258,10 @@ func buildDirective(
     return None[Directive]()
 }
 
-func parsePlanItems(body string) Array[string] {
-    val lines = strings.Split(body, "\n")
-    var out = EmptyArray[string]()
-    var i = 0
-    val n = len(lines)
-    for i < n {
-        val cleaned = stripPlanBullet(strings.TrimSpace(lines[i]))
-        if cleaned != "" {
-            out = out.Append(cleaned)
-        }
-        i = i + 1
-    }
-    return out
-}
+func parsePlanItems(body string) Array[string] =
+    strings.Split(body, "\n")
+        .Map((ln) => stripPlanBullet(strings.TrimSpace(ln)))
+        .Filter((s) => s != "")
 
 // stripPlanBullet removes a leading list marker so the item body
 // matches the user-facing prompt the TL meant to send. Recognised:

@@ -223,8 +223,21 @@ func pruneToasts(q ToastQueue, now time_utils.Instant) ToastQueue = q.Prune(now)
 // updateLivenessStatuses walks `members` and maps each to a derived
 // status from LastChunkAt. On a band transition: (1) status flipped
 // in m.Statuses; (2) toast pushed; (3) FSM event emitted so
-// Delegating advances toward TLNudging (stuck) or past the dead
-// member (abandoned).
+// Delegating advances toward TLNudging (stuck) — or, on hitting the
+// abandon threshold, the heartbeat tries to revive the silent member
+// via the same respawn path the crash-recovery uses (closeLiveSession
+// + ensureSession + "Continue your previous task."). MemberAbandoned
+// only fires after the Heartbeat.MaxRetries budget is exhausted; the
+// retry counter auto-clears in onChunk on the next successful chunk,
+// so transient silence won't burn the budget permanently.
+//
+// Past sessions captured a member who got dispatched, did a few
+// reads, and then went silent — the orchestrator's heartbeat marked
+// them StFailed and immediately fired MemberAbandoned, burying half
+// the parallel scope and forcing the TL to take over from the lead
+// worktree. The respawn path lets a fresh subprocess pick up the
+// --resume conversation, which is what the manual "kill the member,
+// restart" recovery did anyway.
 //
 // CRITICAL: TL nudges are batched at the END of the walk, not fired
 // per-member. Without batching, when N engineers all hit the stuck
@@ -264,6 +277,12 @@ func updateLivenessStatuses(
         return derived match {
             case StStuck() => (withStatus, curCmds, curStuck.Append(name))
             case StFailed(_) => {
+                val maxRetries = maxAutoRetriesOf(curM)
+                val retries = curM.RetryCount.Get(name).GetOrElse(0)
+                if retries < maxRetries {
+                    val (m1, respawnCmd) = liveRespawnMember(withStatus, name, retries + 1, maxRetries)
+                    return (m1, curCmds.Append(respawnCmd), curStuck)
+                }
                 val nextState = transitionLogged(withStatus.State, MemberAbandoned(MemberName = name), transitionContext(withStatus))
                 return (withStatus.Copy(State = nextState), curCmds, curStuck)
             }
@@ -2873,6 +2892,45 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
     )
     val withStatus = setStatus(recovering, name, StRecovering(attempt, maxRetries))
     return respawnMember(withStatus, name)
+}
+
+// liveRespawnMember kicks a member that the heartbeat just escalated
+// to StFailed because LastChunkAt is older than AbandonAfterSeconds.
+// The subprocess is technically still alive (no SessionFailed has
+// arrived) but it's not producing chunks — the orchestrator can't
+// distinguish "model thinking" from "deadlocked claude" from "stuck
+// MCP handshake" without taking action. Acting: kill the silent
+// subprocess via closeLiveSession, bump RetryCount, flip status to
+// StRecovering, then run the same respawnMember path crash recovery
+// uses. The fresh subprocess gets `--resume <sid>` so the model
+// reloads the prior conversation and the "Continue your previous
+// task." prompt nudges it forward.
+//
+// Shares Heartbeat.MaxRetries with the crash path because both
+// reflect "consecutive attempts to keep this member alive without
+// progress" — onChunk clears RetryCount on the next successful
+// chunk, so a respawned member who comes back to life starts the
+// next silence window with a full budget again.
+//
+// Member missing from the team roster is the one case we can't
+// revive — fall through to the FSM MemberAbandoned transition so
+// the team still drains pending and the turn doesn't deadlock.
+func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppModel, Cmd[AppMsg]] {
+    return findMemberByName(m.Team.Members, name) match {
+        case None() => {
+            val nextState = transitionLogged(m.State, MemberAbandoned(MemberName = name), transitionContext(m))
+            return (m.Copy(State = nextState), NoCmd[AppMsg]())
+        }
+        case Some(_) => {
+            val mClosed = closeLiveSession(m, name)
+            val recovering = mClosed.Copy(
+                RetryCount = mClosed.RetryCount.Put(name, attempt),
+                LastError  = Some(s"${name}: silent past heartbeat — respawn ${attempt}/${max}"),
+            )
+            val withStatus = setStatus(recovering, name, StRecovering(attempt, max))
+            return respawnMember(withStatus, name)
+        }
+    }
 }
 
 // respawnMember performs the actual auto-respawn: looks up the Member

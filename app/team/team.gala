@@ -75,6 +75,12 @@ struct Workflow(
     QARequired         bool,
     ParallelEngineers  bool,
     RequireUserConfirm bool,
+    // PostEngineerPrompt — when non-empty, this exact prompt is re-sent to
+    // an engineer in their own claude session after they finish a task and
+    // their work is committed, before they drain toward QA. Empty disables
+    // the behaviour entirely. The string is the only knob; all sequencing
+    // lives in the orchestrator.
+    PostEngineerPrompt string,
 )
 
 // DefaultWorkflow — applied when team.yaml omits the `workflow:` block, or
@@ -83,6 +89,7 @@ func DefaultWorkflow() Workflow = Workflow(
     QARequired         = true,
     ParallelEngineers  = true,
     RequireUserConfirm = true,
+    PostEngineerPrompt = "",
 )
 
 // ----------------------------------------------------------------------------

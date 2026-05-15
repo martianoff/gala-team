@@ -320,6 +320,17 @@ struct AppModel(
     // sees the WHY when handling the failure. Cleared on the same
     // beats as MemberDoneBodies (after relay or new user turn).
     MemberBlockedReasons HashMap[string, string],
+    // Members that have already had their workflow.post_engineer_prompt
+    // re-sent for the CURRENT dispatch cycle. The post-prompt is a
+    // one-shot per engineer per dispatch: an engineer finishes + commits,
+    // gets the prompt re-sent in-session once, then on the second finish
+    // (post-prompt work also committed) drains to QA. Membership here is
+    // the loop guard that distinguishes "first finish, send the prompt"
+    // from "second finish, fall through to drain". Cleared per-member on
+    // a fresh @dispatch so a brand-new task gets its own post-prompt
+    // round; deliberately NOT cleared on crash/respawn/nudge so a
+    // respawn mid-post-prompt cannot re-fire it.
+    PostPromptSent HashSet[string],
     // Per-member counter of visible assistant chunks rendered in the
     // CURRENT turn. Used to deduplicate the result-event echo: when
     // claude streams text chunks AND emits a final `result.result`
@@ -556,6 +567,7 @@ func InitialModelWithTeams(
     MemberDirectivesFired = EmptyHashMap[string, int](),
     MemberDoneBodies      = EmptyHashMap[string, string](),
     MemberBlockedReasons  = EmptyHashMap[string, string](),
+    PostPromptSent        = EmptyHashSet[string](),
     TurnVisibleChunks     = EmptyHashMap[string, int](),
     HelpVisible           = false,
     ProjectInfoOpen       = false,

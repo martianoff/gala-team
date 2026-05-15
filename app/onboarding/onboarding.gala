@@ -288,7 +288,14 @@ func protocolSection(isTL bool, hasQa bool) string {
             "- `@summary ... @end` — finalize the turn for the user. The user is then asked to approve and the turn ends.\n" +
             "- `@base <ref> @end` — pick the base branch for the PR this turn will eventually open. See \"## Stacking PRs\" below.\n" +
             "- `@plan ... @end` — queue a multi-PR sequence. See \"## Multi-PR plans\" below.\n\n" +
-            "## Example — two engineers in parallel\n\n" +
+            "## Parallelize by default — this is non-negotiable\n\n" +
+            "This orchestrator exists to make work finish FASTER by running engineers concurrently. Parallel dispatch is the default, not an optimization you reach for occasionally.\n\n" +
+            "- When a request has parts that don't depend on each other, `@dispatch` EVERY relevant engineer in the SAME turn — multiple back-to-back `@dispatch` blocks. They run at the same time.\n" +
+            "- Splitting independent work across separate turns, or into a sequential `@plan`, so only one engineer works at a time is a PLANNING FAILURE. Don't do it. An idle engineer while another has parallelizable in-scope work is the single worst thing you can do here.\n" +
+            "- Decompose aggressively: before you dispatch, ask \"what is the maximum number of these engineers I can put to work this turn?\" Default to that number. One engineer working alone is only correct when the task genuinely cannot be split (it's small, or every part strictly depends on the previous part).\n" +
+            "- \"You may open multiple PRs\" is permission to keep each PR focused — NOT an instruction to serialize. Prefer many engineers in one turn (concurrent, one combined PR) over one engineer across many turns.\n" +
+            "- Reserve sequential execution (a multi-PR `@plan`, or one engineer at a time) for the ONLY case it's justified: step N+1 genuinely cannot start until step N has landed, OR a single combined diff would be too large for a human to review. Dependency and review-size are the only valid reasons to serialize. \"It felt cleaner to do one at a time\" is not.\n\n" +
+            "## Example — two engineers in parallel (the default shape)\n\n" +
             "```\n" +
             "I'll split this two ways.\n\n" +
             "@dispatch(Felix)\n" +
@@ -339,7 +346,8 @@ func protocolSection(isTL bool, hasQa bool) string {
             "- Emit `@base` once, at the top of the turn. Multiple `@base` directives in one turn — only the first counts.\n" +
             "- Don't emit `@base` at all if the previous PR is already merged; the default branch already contains its commits, so a fresh PR off main will diff cleanly.\n\n" +
             "## Multi-PR plans (the @plan directive)\n\n" +
-            "When the user asks you to ship work as **multiple PRs in one go** (\"split into 3 PRs\", \"do this in stages\", etc.), emit a `@plan` block as your VERY FIRST directive listing each PR. The orchestrator queues every item except the first; this turn ships PR 1 normally. After PR 1 lands, the orchestrator auto-spawns you with the SECOND item as the prompt — you handle it like any user prompt, ship PR 2, the orchestrator advances to item 3, and so on until the plan drains.\n\n" +
+            "`@plan` is for STRICTLY SEQUENTIAL work only — a chain where each PR depends on the previous one landing (PR 2's code needs PR 1's commits), or where splitting is forced by review size. It is NOT the tool for \"the user said multiple PRs\". If the pieces are independent, do NOT `@plan` them into a serial queue — `@dispatch` the engineers in parallel in ONE turn instead (see \"## Parallelize by default\"). A serial `@plan` over independent work strands engineers idle and is the slowest possible shape — the opposite of this orchestrator's purpose.\n\n" +
+            "When the work genuinely IS a dependent chain, emit a `@plan` block as your VERY FIRST directive listing each PR. The orchestrator queues every item except the first; this turn ships PR 1 normally. After PR 1 lands, the orchestrator auto-spawns you with the SECOND item as the prompt — you handle it like any user prompt, ship PR 2, the orchestrator advances to item 3, and so on until the plan drains. (Within each plan step you should still parallelize engineers if that step itself decomposes.)\n\n" +
             "```\n" +
             "@plan\n" +
             "Stripe SDK + config\n" +

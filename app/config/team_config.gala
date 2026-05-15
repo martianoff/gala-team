@@ -95,9 +95,10 @@ struct WireApproval(
 )
 
 struct WireWorkflow(
-    QARequired        bool,
-    ParallelEngineers bool,
-    Approval          WireApproval,
+    QARequired         bool,
+    ParallelEngineers  bool,
+    Approval           WireApproval,
+    PostEngineerPrompt string,
 )
 
 struct WireHook(
@@ -213,10 +214,12 @@ func convertWorkflow(ww WireWorkflow, yamlStr string) Workflow {
     val qa = if (hasIndentedKey(yamlStr, "qa_required")) ww.QARequired else defaults.QARequired
     val par = if (hasIndentedKey(yamlStr, "parallel_engineers")) ww.ParallelEngineers else defaults.ParallelEngineers
     val conf = if (hasIndentedKey(yamlStr, "require_user_confirm")) ww.Approval.RequireUserConfirm else defaults.RequireUserConfirm
+    val pep = if (hasIndentedKey(yamlStr, "post_engineer_prompt")) ww.PostEngineerPrompt else defaults.PostEngineerPrompt
     return Workflow(
         QARequired         = qa,
         ParallelEngineers  = par,
         RequireUserConfirm = conf,
+        PostEngineerPrompt = pep,
     )
 }
 

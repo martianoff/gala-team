@@ -158,6 +158,8 @@ workflow:
   parallel_engineers: true          # default true. When true, multiple @dispatch directives
                                     # in one TL message run engineers concurrently. When
                                     # false, the FSM serialises them one at a time.
+  post_engineer_prompt: "/simplify" # optional. Default "". Re-sent to each engineer in-session
+                                    # after they finish + commit, before QA.
   approval:
     require_user_confirm: true      # default true. Final @summary opens the Approval banner
                                     # and waits for Ctrl+A. Set false to auto-approve

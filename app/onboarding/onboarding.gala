@@ -201,7 +201,7 @@ func sharedWorkspaceSection(proj Project, isTL bool, cwd string) string {
         val leadBranch = leadBranchOf(proj)
         return header +
             s"Your cwd is your dedicated lead worktree at `${cwd}`. **You are checked out on branch `${leadBranch}`** — forked from `${proj.DefaultBranch}` (latest origin tip). " +
-            s"Commit your work here; the user opens a PR from it via Ctrl+A. Each fresh session hard-resets this branch back to `${proj.DefaultBranch}`, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
+            s"Commit your work here; the user opens a PR from it via the approval dialog. Each fresh session hard-resets this branch back to `${proj.DefaultBranch}`, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
             s"**Engineers and QAs run in the project root at `${proj.Repo}`** (shared mode). When inspecting their deliverables, read files from `${proj.Repo}`, not your own cwd."
     }
     return header +
@@ -217,7 +217,7 @@ func worktreeWorkspaceSection(proj Project, member Member, isTL bool, cwd string
         val leadBranch = leadBranchOf(proj)
         return header +
             s"Your cwd is your dedicated lead worktree at `${cwd}`. **You are checked out on branch `${leadBranch}`** — forked from `${proj.DefaultBranch}` (latest origin tip). The user's main repo lives at `${proj.Repo}` and is OFF LIMITS — never `cd` there, never `git checkout` / `git reset` / `git push` from there. Every git op you run stays inside your worktree.\n\n" +
-            s"Commit your work to this branch; the user opens a PR from it via Ctrl+A. Each fresh session removes this worktree, then re-creates it forked off `${proj.DefaultBranch}` again, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
+            s"Commit your work to this branch; the user opens a PR from it via the approval dialog. Each fresh session removes this worktree, then re-creates it forked off `${proj.DefaultBranch}` again, so don't expect prior turns' files to persist across `Start fresh`.\n\n" +
             s"**Engineers and QAs each run in their own isolated git worktree** at " +
             s"`${proj.Repo}/.gala_team/worktrees/<MemberName>` on branch `${branchPattern}`. " +
             "Their file edits live ONLY on that branch until merged — they are NOT visible from your cwd.\n\n" +

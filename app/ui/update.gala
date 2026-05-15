@@ -477,11 +477,11 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
         }
     }
     // Approval-modal interception: when the FSM is in Approval, Enter
-    // approves (default action) and Esc rejects. Gives keyboard
-    // fallbacks for terminals that eat Ctrl+A / Ctrl+R (Windows
-    // console intercepts Ctrl+A as Select-All; some SSH clients eat
-    // Ctrl+R as reverse-i-search). Click handlers on the modal's
-    // ButtonClick widgets cover the mouse path.
+    // fires the focused button (default = approve), Tab cycles, Esc
+    // rejects, and y/n are focus-independent shortcuts. The dialog is
+    // the only approval entry point — these keyboard fallbacks cover
+    // terminals where the mouse doesn't work; the modal's ButtonClick
+    // widgets cover the mouse path.
     val inApproval = m.State match {
         case Approval(_) => true
         case _           => false
@@ -584,7 +584,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
 // recoveryIntercept routes Tab → onRecoveryCycle and Enter →
 // onRecoveryConfirm when the §5.6 modal is up. Other keyboard input
 // is SWALLOWED so it can't leak to the composer or trigger orthogonal
-// shortcuts (Ctrl+A → Approve etc.) behind the modal — the regression
+// shortcuts (merge, palette, etc.) behind the modal — the regression
 // report "doesn't get any input" was exactly this leak: typed letters
 // landed in the locked-but-still-receptive composer, making the modal
 // look dead. The pass-through whitelist (Esc / click / non-key
@@ -631,19 +631,18 @@ func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
     case _ => None[Tuple[AppModel, Cmd[AppMsg]]]()
 }
 
-// approvalIntercept gives the user keyboard fallbacks when the
-// FSM is in Approval, on top of Ctrl+A / Ctrl+R from the keymap:
+// approvalIntercept gives the user the keyboard half of the approval
+// dialog when the FSM is in Approval (the dialog is the only approval
+// entry point — there is no global hotkey):
 //
 //   Enter          → fires whichever button is focused
 //   Tab            → cycles ApprovalFocus (Approve ↔ Reject)
 //   y / Y          → KeyApprove (focus-independent shortcut)
 //   n / N          → KeyReject  (focus-independent shortcut)
 //
-// The y/n keys cover the case where Ctrl combos are eaten by the
-// terminal / host (Windows Console intercepts Ctrl+A as Select-All
-// in some configurations; some SSH clients eat Ctrl+R as
-// reverse-i-search). The modal's ButtonClick widgets cover the
-// mouse path. Returns None for any other message so the regular
+// The y/n keys are focus-independent shortcuts for users who'd
+// otherwise have to Tab to the right button first. The modal's
+// ButtonClick widgets cover the mouse path. Returns None for any other message so the regular
 // dispatch still runs — composer typing in Approval is otherwise
 // allowed (rejection routes through the chat composer for the
 // next prompt).
@@ -1109,9 +1108,9 @@ func viewModeTag(v ViewMode) string = v match {
 func onToggleAutoApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val flipped = !m.AutoApprove
     val msg = if (flipped)
-        "auto-approve ON · @summary will auto-create PRs without Ctrl+A"
+        "auto-approve ON · @summary will auto-create PRs without manual approval"
     else
-        "auto-approve OFF · Ctrl+A required for each PR"
+        "auto-approve OFF · manual approval required for each PR"
     val toast = m.Toasts.PushInfo(msg, time_utils.Now(), time_utils.Seconds(int64(4)))
     return (m.Copy(AutoApprove = flipped, Toasts = toast), NoCmd[AppMsg]())
 }
@@ -1219,11 +1218,9 @@ func paletteActions(m AppModel) Array[PaletteAction[AppMsg]] {
         PaletteAction[AppMsg](Label = "Compact / wide left panel  (Ctrl+,)", Category = "View", Msg = KeyToggleCompactSidebar()),
         PaletteAction[AppMsg](Label = "Project info", Category = "Project", Msg = KeyToggleProjectInfo()),
         PaletteAction[AppMsg](Label = "Guidance docs", Category = "Project", Msg = KeyToggleGuidance()),
-        PaletteAction[AppMsg](Label = "Approve summary (Ctrl+A)", Category = "Approval", Msg = KeyApprove()),
-        PaletteAction[AppMsg](Label = "Reject summary (Ctrl+R)", Category = "Approval", Msg = KeyReject()),
         PaletteAction[AppMsg](Label = "Merge open PR (Ctrl+M)", Category = "Approval", Msg = KeyMerge()),
         PaletteAction[AppMsg](
-            Label = if (m.AutoApprove) "Auto-approve: turn OFF (F7)" else "Auto-approve: turn ON (F7) · batch PRs without Ctrl+A",
+            Label = if (m.AutoApprove) "Auto-approve: turn OFF (F7)" else "Auto-approve: turn ON (F7) · batch PRs without manual approval",
             Category = "Approval",
             Msg = KeyToggleAutoApprove(),
         ),
@@ -2823,7 +2820,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             // Pre-Approval gate: if the TL emitted @summary but the
             // lead branch has no commits ahead of master, the
             // resulting Approval modal would dead-end (the user
-            // would press Ctrl+A only to see "no commits — nothing
+            // would approve only to see "no commits — nothing
             // to PR"). Catch it here and nudge the TL EXPLICITLY
             // instead of advancing the FSM. The nudge spells out
             // *why* the @summary was rejected so the lead can
@@ -2861,13 +2858,13 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             // AutoApprove: when the TL's @summary lands cleanly (the
             // PR-readiness + body-quality gates above passed) and the
             // batch toggle is on, run the same approveAndKickHooks
-            // pipeline Ctrl+A would have triggered. Lands the FSM back
+            // pipeline a manual approve would have triggered. Lands the FSM back
             // in Idle ready for the next user prompt; the new PR
             // shows up in OpenPrs once gh pr create resolves. We
             // dispatch via the KeyApprove AppMsg rather than calling
             // approveAndKickHooks directly so the activity log
             // captures a synthetic approve event — matches how a
-            // human Ctrl+A is recorded.
+            // human approve is recorded.
             if withState.AutoApprove {
                 val nextIsApproval = nextState match {
                     case Approval(_) => true
@@ -4434,7 +4431,7 @@ func isCleanCloseError(err string) bool {
 }
 
 // onApprove is the Phase-1 approval flow: when the FSM is in Approval,
-// the user pressed Ctrl+A. We transition the FSM via ApprovalAccepted,
+// the user approved in the dialog. We transition the FSM via ApprovalAccepted,
 // log "/approve", and gate the PR-create on the team's pre-merge hooks
 // (Policy.PreMerge). On a clean hook run, PreMergeHooksPassed fires
 // onPreMergeHooksPassed which finally spawns `gh pr create`. On the
@@ -4538,7 +4535,7 @@ func resetAllStatuses(m AppModel) AppModel {
     return m.Copy(Statuses = statuses)
 }
 
-// approveAndKickHooks is the Ctrl+A handler. The PR-readiness check
+// approveAndKickHooks is the approve handler. The PR-readiness check
 // (refuses to launch gh pr create when the lead branch has no commits
 // ahead of master) used to run inline; it shells out to git rev-list
 // (and sometimes git rev-parse). Past audits caught those wedging on
@@ -4568,7 +4565,7 @@ func approvalReadyCmd(proj Project, body string) Cmd[AppMsg] =
 //
 // CRITICAL: when the check fails we MUST dismiss the modal too.
 // A past audit caught a session where the user was stuck on
-// Approval for 30 minutes — Ctrl+A reached onApprove, the check
+// Approval for 30 minutes — the approve action reached onApprove, the check
 // failed (lead branch had 0 commits ahead of master), and the
 // original code returned without changing State. Modal stayed up,
 // conversation log update was hidden behind it, the user pressed
@@ -4665,8 +4662,8 @@ func onSummaryReadyResult(m AppModel, member string, reason Option[string]) Tupl
     val nextState = transitionLogged(cleared.State, TLDone(Directives = dirs), transitionContext(cleared))
     val withState = setStatus(cleared.Copy(State = nextState), member, StIdle())
     // AutoApprove: when the @summary lands cleanly and the batch
-    // toggle is on, run the same approveAndKickHooks pipeline Ctrl+A
-    // would have triggered. Dispatched via KeyApprove so the activity
+    // toggle is on, run the same approveAndKickHooks pipeline a manual
+    // approve would have triggered. Dispatched via KeyApprove so the activity
     // log records a synthetic approve event.
     if withState.AutoApprove {
         val nextIsApproval = nextState match {
@@ -4704,7 +4701,7 @@ func onSummaryReadyResult(m AppModel, member string, reason Option[string]) Tupl
 //     ".gala_team paths", "I-give-up prose" for fresh @summary
 //     must run on resume too. Without this, a snapshot containing
 //     a bad @summary (escalation prose pasted as the body) would
-//     resume straight into Approval and the user's next Ctrl+A
+//     resume straight into Approval and the user's next approve
 //     would ship the bad body to GitHub.
 //
 // Recovery outcomes:

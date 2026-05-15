@@ -164,10 +164,10 @@ func TestView_Header_WideMode_BrandFlushWithApple(t T) T {
 // Approval banner
 // ---------------------------------------------------------------------------
 
-// Banner is hidden in Idle state — no Ctrl+A/Ctrl+R hint visible.
+// Banner is hidden in Idle state — no approval-dialog pointer visible.
 func TestView_ApprovalBanner_HiddenInIdle(t T) T {
     val out = render(mkModel(mkTeam("X", "")))
-    return IsFalse(t, strings.Contains(out, "Ctrl+A approve & open PR"))
+    return IsFalse(t, strings.Contains(out, "approve or reject in the dialog"))
 }
 
 // Banner shows in Approval state with the snippet.
@@ -331,24 +331,22 @@ func TestView_Footer_ShowsLastError(t T) T {
 }
 
 // Default hint legend (no PR yet). Footer compacted to fit the
-// addition of palette / paste / view-mode hints; we now only check
-// the load-bearing keybindings (send / approve / reject / palette).
+// addition of palette / paste / view-mode hints; approval is dialog-
+// only now, so the footer no longer advertises an approve/reject key.
 func TestView_Footer_DefaultLegend(t T) T {
     val out = render(mkModel(mkTeam("X", "")))
     val t1 = IsTrue(t,  strings.Contains(out, "Enter send"))
-    val t2 = IsTrue(t1, strings.Contains(out, "Ctrl+A approve"))
-    val t3 = IsTrue(t2, strings.Contains(out, "Ctrl+R reject"))
-    return IsTrue(t3, strings.Contains(out, "Ctrl+Q"))
+    val t2 = IsTrue(t1, strings.Contains(out, "Ctrl+P palette"))
+    return IsTrue(t2, strings.Contains(out, "Ctrl+Q"))
 }
 
 // After PrCreated, the legend swaps to the merge-prompt hints
-// (Ctrl+M merge / Ctrl+A re-approve). Tab/consults hints were
-// removed when palette/paste/view-mode hints were added.
+// (Ctrl+M merge). Approval is dialog-only, so there is no re-approve
+// key in the legend anymore.
 func TestView_Footer_PostPrCreated_ShowsMergeHint(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(OpenPrs = ArrayOf(samplePr("https://github.com/x/y/pull/1")))
     val out = render(m)
-    val t1 = IsTrue(t,  strings.Contains(out, "Ctrl+M merge"))
-    return IsTrue(t1, strings.Contains(out, "Ctrl+A re-approve"))
+    return IsTrue(t, strings.Contains(out, "Ctrl+M merge"))
 }
 
 // LastError now renders as a separate banner BELOW the footer — it
@@ -390,14 +388,14 @@ func TestView_Header_NoBadgeWhenManual(t T) T {
     return IsFalse(t, strings.Contains(out, "AUTO ("))
 }
 
-// AutoApprove suppresses Ctrl+A / Ctrl+R hints in the composer footer
-// — the gate is off, so those keys aren't load-bearing anymore.
+// AutoApprove footer surfaces the F7 auto:on indicator. Approval is
+// dialog-only and the gate is off, so the footer carries no approve/
+// reject prompt — only the auto-mode marker plus the usual nav keys.
 func TestView_Footer_AutoApprove_NoApproveHints(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(AutoApprove = true)
     val out = render(m)
-    val t1 = IsFalse(t,  strings.Contains(out, "Ctrl+A approve"))
-    val t2 = IsFalse(t1, strings.Contains(out, "Ctrl+R reject"))
-    return IsTrue(t2, strings.Contains(out, "F7 auto:on"))
+    val t1 = IsTrue(t,  strings.Contains(out, "F7 auto:on"))
+    return IsTrue(t1, strings.Contains(out, "Ctrl+P palette"))
 }
 
 // Active plan renders a banner above the composer with progress
@@ -1247,7 +1245,7 @@ func TestView_Footer_RangeSelection_ShowsRangeLabel(t T) T {
 }
 
 // Without selection, the footer falls back to the default
-// composer hints (Enter send · Ctrl+A approve · …). Pinning the
+// composer hints (Enter send · Ctrl+P palette · …). Pinning the
 // inverse so a future refactor doesn't leak the selection legend
 // into normal mode.
 func TestView_Footer_NoSelection_ShowsDefaultHints(t T) T {

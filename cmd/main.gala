@@ -138,7 +138,7 @@ func printUsage() {
         "  Tab        Toggle focus between composer and sidebar (Ctrl+L alias)\n" +
         "  Ctrl+T     Toggle the consult viewer modal\n" +
         "  Ctrl+H     Open the session-archive browser\n" +
-        "  Ctrl+A/R   Approve / reject in the approval state\n" +
+        "  (dialog)   Approve / reject via the on-screen dialog (Tab/Enter/Esc/click)\n" +
         "\n" +
         "See README.md for the full team.yaml schema and key bindings.\n"
     val _ = os.Stdout.WriteString(usage)

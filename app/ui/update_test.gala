@@ -288,7 +288,7 @@ func TestApprovalModal_EnterFiresApproveFocus(t T) T {
 // Enter with RejectFocus fires the rejection path: state → Idle, log
 // shows "/reject" + the system "type a prompt to redirect" hint. This
 // is the test that proves Tab+Enter is a real path to "no" — without
-// it, users were stuck with mouse / Ctrl+R / 'n'.
+// it, users were stuck with the mouse or the 'n' shortcut.
 func TestApprovalModal_EnterFiresRejectFocus(t T) T {
     val seed = sampleModel().Copy(
         State         = Approval(SummaryBody = "ship it"),
@@ -340,7 +340,7 @@ func TestApprovalModal_MouseClickNoRejectsEvenWhenFocusOnYes(t T) T {
 }
 
 // y/Y still routes to KeyApprove independent of focus — the
-// focus-bypass keyboard shortcut for terminals that eat Ctrl+A.
+// focus-bypass keyboard shortcut so the user needn't Tab first.
 func TestApprovalModal_YShortcutApprovesEvenWhenFocusOnNo(t T) T {
     val seed = sampleModel().Copy(
         State         = Approval(SummaryBody = "ship it"),
@@ -532,7 +532,7 @@ func resolveSummaryReady(seed AppModel, msg AppMsg) AppModel {
 }
 
 // resolveApprovalReady mirrors resolveSummaryReady but for the
-// Ctrl+A / KeyApprove path. seed must already be in Approval(body)
+// KeyApprove path. seed must already be in Approval(body)
 // — that's the precondition the production path enforces too.
 // Pulls body out of seed.State so we can rebuild the
 // ApprovalReadyResult after KeyApprove returns the off-thread
@@ -569,7 +569,7 @@ func emptyLeadBranchProject() Project {
 // Bug 1 regression: when the TL emits @summary but the lead branch
 // has zero commits ahead of master, the FSM must NOT enter Approval
 // — that would dead-end the user on a modal that can only be
-// dismissed (Ctrl+A → "no commits to PR"). Instead, the orchestrator
+// dismissed (approve → "no commits to PR"). Instead, the orchestrator
 // nudges the TL with the recovery-paths prompt and stays in the
 // prior FSM state.
 //
@@ -1002,6 +1002,60 @@ func TestRecoveryModal_KeyCharDoesNotLeakToComposer(t T) T {
     return Eq(t, m.Composer, "")
 }
 
+// Mouse click on the Resume button emits KeyRecoveryClick(ResumeFocus).
+// Empty conversation → ResumeFocus lands in Idle and the modal closes,
+// same as the existing Inspect / Start-fresh click tests.
+func TestRecoveryModal_ClickResumeClosesModal(t T) T {
+    val seed = resumedModel(sampleProject(), EmptyArray[session.ConversationLine]())
+    val (m, _) = Update(seed, KeyRecoveryClick(Choice = ResumeFocus()))
+    return IsFalse(t, m.Recovery.IsDefined())
+}
+
+// ----------------------------------------------------------------------------
+// Approval is dialog-only — the global Ctrl+A / Ctrl+R hotkeys were
+// removed. The command palette must NOT expose approve/reject as a
+// one-shot action; the approval dialog (its ButtonClick widgets + the
+// Tab/Enter/Esc/y/n keyboard fallbacks in approvalIntercept) is the
+// sole entry point.
+// ----------------------------------------------------------------------------
+
+// The palette no longer carries an approve/reject entry. Asserting on
+// the dispatched Msg (not just the label) so a future label tweak
+// can't silently re-expose the action. Built in Approval state — the
+// state where the temptation to offer a palette shortcut is highest.
+func TestPaletteActions_NoApproveRejectEntries(t T) T {
+    val actions = paletteActions(sampleModel().Copy(State = Approval(SummaryBody = "ship it")))
+    val hasApproveReject = actions.Exists((a) => a.Msg match {
+        case KeyApprove() => true
+        case KeyReject()  => true
+        case _            => false
+    })
+    val t1 = IsFalse(t, hasApproveReject)
+    val labelLeak = actions.Exists((a) =>
+        strings.Contains(a.Label, "Approve summary") || strings.Contains(a.Label, "Reject summary"))
+    return IsFalse(t1, labelLeak)
+}
+
+// modalCapturesMouse gates the base-layer interactive regions: while
+// the recovery modal or approval dialog is up, the conversation
+// pane's per-entry drag region and the sidebar/composer .OnClick
+// regions are dropped so a press lands on the modal's ButtonClick
+// widgets instead of being swallowed by the base — gala-tui resolves
+// drag regions before click regions on a fresh press, so a tiling
+// base drag region would otherwise shadow a centered modal's buttons.
+func TestModalCapturesMouse_FalseWhenNoModal(t T) T =
+    IsFalse(t, modalCapturesMouse(sampleModel()))
+
+func TestModalCapturesMouse_TrueWhenRecoveryOpen(t T) T {
+    val m = sampleModel().Copy(Recovery = Some(ResumeFocus()))
+    return IsTrue(t, modalCapturesMouse(m))
+}
+
+func TestModalCapturesMouse_TrueInApproval(t T) T {
+    val m = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))
+    return IsTrue(t, modalCapturesMouse(m))
+}
+
 // Resume into Approval when conversation ends with lead @summary
 // AND lead branch has commits ahead of master AND the body passes
 // the PR-quality gate. Fixture: branch off main and commit so
@@ -1029,7 +1083,7 @@ func TestResume_RecoversApprovalWhenSummaryAndCommitsExist(t T) T {
 // @summary fails the PR-quality gate. Without this guard, a stale
 // "I give up — please run git -C ...\.gala_team\..." escalation
 // body would resume straight into Approval and the user's next
-// Ctrl+A would ship it to GitHub. Instead, recovery spawns a TL
+// approve would ship it to GitHub. Instead, recovery spawns a TL
 // nudge so the lead rewrites @summary properly before Approval
 // re-engages.
 func TestResume_RecoveryRejectsBadSummaryAndStaysOutOfApproval(t T) T {
@@ -2172,7 +2226,7 @@ func TestMouseAt_FallthroughIsNoOp(t T) T {
 // KeySubmit while in Approval is allowed (the FSM keeps Approval state
 // since `_ => state` matches non-Accepted/Rejected events) — the prompt
 // is logged so the user has a record of what they tried to send. They
-// must Ctrl+R first to redirect the team.
+// must reject in the dialog first to redirect the team.
 func TestKeySubmit_InApproval_StaysInApprovalAndLogs(t T) T {
     val seed = sampleModel().Copy(
         Composer = "redirect please",
@@ -3135,7 +3189,7 @@ func TestPrCreated_PlanButComposerInUse_StallsPlan(t T) T {
 }
 
 // PrCreated with a plan but AutoApprove off does NOT auto-continue —
-// manual mode would dead-end on the Ctrl+M / Ctrl+A wait anyway.
+// manual mode would dead-end on the Ctrl+M merge / approval wait anyway.
 func TestPrCreated_PlanWithoutAutoApprove_DoesNotContinue(t T) T {
     val seed = sampleModel().Copy(
         AutoApprove = false,
@@ -4311,7 +4365,7 @@ func TestOnUncommittedCheckResult_CleanFinalises(t T) T {
 // returns the model UNCHANGED (no transition, no conversation log
 // entry, no toast). The transition fires when ApprovalReadyResult
 // lands. Crucial guarantee for the freeze fix — past audits caught a
-// 30-minute Approval freeze because Ctrl+A → checkPrReady wedged the
+// 30-minute Approval freeze because approve → checkPrReady wedged the
 // UI thread; now there's nothing on the hot path that can block.
 func TestApprove_ReturnsImmediatelyWithoutTransition(t T) T {
     val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship it"))

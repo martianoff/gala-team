@@ -58,16 +58,33 @@ import (
 // (SidebarRowClicked). No hand-rolled coordinate hit-testing — the
 // runtime uses the widgets' actually-rendered rectangles, so a
 // resize / scroll / fold doesn't desync clicks from visuals.
+//
+// Overlay caveat: while a mouse-capturing modal is up
+// (modalCapturesMouse) the base-layer interactive regions are
+// dropped — the sidebar / composer .OnClick wrappers here and the
+// conversation pane's per-entry drag region in conversationPanel.
+// gala-tui's HitRegistry DOES descend into Overlay layers, so the
+// modal's ButtonClick widgets are registered fine; the defect is
+// that its click resolver checks drag regions before click regions
+// on a fresh press (runtime.gala ResolveClickEventWithDrag). The
+// conversation pane registers a per-entry drag region that tiles the
+// whole centre pane, so a press on a centered modal button resolved
+// to a conversation drag and the button never fired. We can't change
+// drag-beats-click precedence without patching the external lib, so
+// the base regions are suppressed while a modal owns the mouse.
 func View(m AppModel) Widget {
     val header = headerWidget(m)
     val sidebar = sidebarWidget(m)
     val mainPanel = mainPanelWidget(m)
     val composer = composerWidget(m)
     val footer = footerWidget(m)
-    val sidebarPanel  = BorderOf(sidebar, panelBorder(m, FocusSidebar()))
-        .OnClick(FocusSidebarClicked())
-    val composerPanel = BorderOf(composer, panelBorder(m, FocusComposer()))
-        .OnClick(FocusComposerClicked())
+    val captureMouse = modalCapturesMouse(m)
+    val sidebarBase  = BorderOf(sidebar, panelBorder(m, FocusSidebar()))
+    val composerBase = BorderOf(composer, panelBorder(m, FocusComposer()))
+    val sidebarPanel  = if (captureMouse) sidebarBase
+                        else sidebarBase.OnClick(FocusSidebarClicked())
+    val composerPanel = if (captureMouse) composerBase
+                        else composerBase.OnClick(FocusComposerClicked())
     // Pick the body layout based on ViewMode. Default = sidebar +
     // conversation; Focus mode hides the sidebar (Frame M); Grid
     // replaces the conversation pane with a member-card grid (Frame
@@ -164,8 +181,6 @@ func helpRows() Array[string] = ArrayOf(
     "  Ctrl+H            session-history browser",
     "  Ctrl+Y            yank conversation to clipboard",
     "  Ctrl+V            paste from clipboard",
-    "  Ctrl+A            approve summary (open PR)",
-    "  Ctrl+R            reject summary (back to chat)",
     "  Ctrl+M            merge PR after creation",
     "  Ctrl+N            erase session (twice to confirm)",
     "  Ctrl+, / Ctrl+.   compact-left toggle (team panel)",
@@ -322,6 +337,29 @@ func isStartFreshFocus(c RecoveryChoice) bool = c match {
     case _                 => false
 }
 
+// modalCapturesMouse reports whether a modal overlay with its own
+// clickable controls is up. While true, View / conversationPanel
+// drop the base-layer interactive regions (sidebar + composer
+// .OnClick, and the conversation pane's per-entry drag region) so a
+// press lands on the modal's ButtonClick widgets instead of being
+// swallowed by the base.
+//
+// Needed because gala-tui's click resolver checks drag regions
+// before click regions on a fresh press: the conversation pane's
+// drag region tiles the whole centre pane and otherwise shadows a
+// centered modal's buttons. Scoped to the two modals that carry
+// clickable controls and own the keyboard while up — the recovery
+// modal (m.Recovery) and the approval dialog (State == Approval).
+// The read-only overlays (help / project-info / guidance / member
+// detail) close on Esc and don't act on clicks, so they're left out.
+func modalCapturesMouse(m AppModel) bool {
+    if m.Recovery.IsDefined() { return true }
+    return m.State match {
+        case Approval(_) => true
+        case _           => false
+    }
+}
+
 // approvalModalOverlay paints the §6.1 / Frame G approval dialog —
 // a centered modal with the summary preview + Branch / Base / Title
 // metadata + clickable [ Yes ] / [ No ] buttons. Mirrors the
@@ -346,7 +384,7 @@ func approvalModalOverlay(m AppModel, body string, base Widget) Widget {
     )
     val infoWidgets = info.Map((r) => Fixed(1, TextStyled(r, DefaultStyle().WithDim())))
     val buttonRow = approvalButtonRow(m)
-    val footer = TextStyled("  Tab cycles · Enter fires focused button · click either button · Esc / Ctrl+R rejects.",
+    val footer = TextStyled("  Tab cycles · Enter fires focused button · click either button · Esc rejects.",
         DefaultStyle().WithDim())
     val body2 = Column(ArrayOf[LayoutChild](
         Fixed(1, title),
@@ -359,11 +397,11 @@ func approvalModalOverlay(m AppModel, body string, base Widget) Widget {
 }
 
 // approvalButtonRow renders Yes/No as ButtonClick widgets so a
-// mouse click directly dispatches KeyApprove / KeyReject. Without
-// this, the modal had plain text buttons and the only way to act
-// on it was Ctrl+A / Ctrl+R from the keyboard — which on some
-// terminals (Windows console, certain SSH clients) gets eaten by
-// the host before reaching gala-tui.
+// mouse click directly dispatches KeyApprove / KeyReject. The modal
+// dialog (these buttons + the Tab/Enter/Esc/y/n keyboard fallbacks
+// in approvalIntercept) is the only approval entry point — there is
+// no global hotkey, so the buttons must always be reachable by both
+// mouse and keyboard.
 //
 // `focused` parameter drives reverse-bold styling on the active
 // button. The user Tab-cycles ApprovalFocus in the model; mouse
@@ -777,14 +815,14 @@ func mainPanelWidget(m AppModel) Widget {
     return conversationPanel(m)
 }
 
-// approvalBanner shows a Ctrl+A / Ctrl+R hint above the conversation
-// pane when the FSM is in Approval. Hidden in every other state by
-// returning a zero-height layout child.
+// approvalBanner points the user at the approval dialog above the
+// conversation pane when the FSM is in Approval. Hidden in every
+// other state by returning a zero-height layout child.
 func approvalBanner(m AppModel) LayoutChild = m.State match {
     case Approval(body) => Fixed(2, Column(ArrayOf[LayoutChild](
         Fixed(1, TextStyled(s"  ▶ Ready to ship: ${approvalSnippet(body)}",
             DefaultStyle().WithBold().WithFg(BrightYellow()))),
-        Fixed(1, TextStyled("    Ctrl+A approve & open PR · Ctrl+R reject (back to chat)",
+        Fixed(1, TextStyled("    Review the summary — approve or reject in the dialog below",
             DefaultStyle().WithDim())),
     )))
     case _ => Fixed(0, Empty())
@@ -1469,9 +1507,20 @@ func conversationPanel(m AppModel) Widget {
     )
     val viewportH = conversationViewportHeight(m)
     val mapSize = lineIdxByEntry.Size()
-    return Column(ArrayOf[LayoutChild](
-        Fixed(1, header),
-        Flex(1, ConversationLogViewDrag[AppMsg](log, viewportH, (logIdx, phase) => {
+    // While a mouse-capturing modal is up, render the log WITHOUT the
+    // per-entry drag region. gala-tui resolves a fresh press against
+    // drag regions before click regions, so a tiling conversation
+    // drag region would otherwise shadow the centered modal's
+    // ButtonClick widgets and the buttons would never fire. The
+    // non-drag view is visually identical (same layout builder); only
+    // the drag-to-select hit registration is dropped — and selecting
+    // conversation text while a modal owns input isn't reachable
+    // anyway. Restored automatically on the next frame once the modal
+    // closes.
+    val logWidget = if (modalCapturesMouse(m))
+        ConversationLogView(log, viewportH)
+    else
+        ConversationLogViewDrag[AppMsg](log, viewportH, (logIdx, phase) => {
             // Defensive clamp — gala-tui shouldn't dispatch an out-of-
             // range idx for a non-empty log, but a stale frame is
             // safer to ignore than to crash. Resolves the log-entry
@@ -1480,7 +1529,10 @@ func conversationPanel(m AppModel) Widget {
             val safe = if (logIdx < 0 || logIdx >= mapSize) -1
                        else lineIdxByEntry.Get(logIdx)
             return ConversationDragMsg(Idx = safe, Phase = phase)
-        })),
+        })
+    return Column(ArrayOf[LayoutChild](
+        Fixed(1, header),
+        Flex(1, logWidget),
     ))
 }
 
@@ -2018,16 +2070,16 @@ func footerHints(m AppModel) string {
         case FocusSidebar() => "  ↑↓ navigate · Space fold/unfold · Esc composer · F2/F3/F4/F5 views · F6 help · Ctrl+Q quit"
         case FocusComposer() => {
             if (m.AutoApprove) {
-                // AutoApprove suppresses Ctrl+A / Ctrl+R hints — the gate is
+                // AutoApprove drops the approval hints — the gate is
                 // off. Merge stays manual so Ctrl+M shows whenever any PR
                 // is open in the batch.
                 val mergeHint = if (m.OpenPrs.IsEmpty()) "" else " · Ctrl+M merge"
                 return s"  Enter send${mergeHint} · F7 auto:on · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
             }
             if (!m.OpenPrs.IsEmpty()) {
-                return "  Ctrl+M merge · Ctrl+A re-approve · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+                return "  Ctrl+M merge · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
             }
-            return "  Enter send · Ctrl+A approve · Ctrl+R reject · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+            return "  Enter send · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
         }
     }
 }

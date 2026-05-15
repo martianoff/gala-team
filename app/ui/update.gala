@@ -2164,13 +2164,26 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
         )
     }
     // Turn-end handling. With `--input-format stream-json` claude does
-    // NOT exit on its own; it idles waiting for more stdin. Once the
-    // turn's `result` event lands AND there's no pending question
-    // blocking the model, we close stdin so the subprocess wraps up.
-    // If a question IS pending, leave stdin open — the turn will
-    // resume after the user answers (claude will emit more chunks
-    // and another `result`).
-    val withCloseCmd = if (chunk.TurnEnded && withAsk.PendingQuestion.IsEmpty()) {
+    // NOT exit on its own; it idles waiting for more stdin. When the
+    // turn's `result` event lands we close stdin so the subprocess
+    // wraps up, the read pump gets EOF, and onSessionFailed parses the
+    // accumulated TurnBuffer → TLDone → the FSM advances.
+    //
+    // This MUST fire even when a question is pending. The harness
+    // denies AskUserQuestion (the orchestrator owns the dialog), so
+    // the model never truly blocks on it — it gets a denial
+    // tool_result, narrates "the question was declined, I'll make the
+    // call", emits its directives, and ends the turn. A `result`
+    // event is, by definition, the model done with this turn; it is
+    // not waiting for anything. The old `&& PendingQuestion.IsEmpty()`
+    // gate held stdin open in exactly that case: claude idled forever,
+    // no EOF, onSessionFailed never ran, the @dispatch sat unparsed in
+    // the TurnBuffer, and the FSM froze in TLThinking — a total
+    // deadlock the user saw as "stuck, no message for ~1h". The
+    // pending question survives this (see onSessionFailed) so the user
+    // can still answer it; finalizing the turn and keeping the
+    // question answerable are independent.
+    val withCloseCmd = if (chunk.TurnEnded) {
         withAsk.Sessions.Get(name) match {
             case Some(s) => runtimeFutureToCmd(CloseSendFuture(s))
             case None()  => NoCmd[AppMsg]()
@@ -2717,19 +2730,18 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
     if pending > 0 {
         return (m.Copy(PendingClosures = m.PendingClosures.Put(name, pending - 1)), NoCmd[AppMsg]())
     }
-    // Drop a stale PendingQuestion when the originating session
-    // exits — its subprocess is gone, no tool_result envelope can
-    // reach the model now. Without this, the composer stays stuck
-    // in answer-mode after a crash and the user has no obvious way
-    // to recover other than Esc.
-    val droppedPending = m.PendingQuestion match {
-        case Some(p) if p.Member == name => None[PendingQuestion]()
-        case other                       => other
-    }
-    val cleaned = m.Copy(
-        Sessions        = m.Sessions.Remove(name),
-        PendingQuestion = droppedPending,
-    )
+    // KEEP the PendingQuestion when the asking member's session
+    // exits. The session ALWAYS exits at turn-end (`claude --print`
+    // ends every turn, and a denied AskUserQuestion still ends the
+    // turn), so dropping it here meant the dialog vanished the instant
+    // the turn finalized — the user could never actually answer. The
+    // old "subprocess is gone, no tool_result can reach the model"
+    // rationale is obsolete: onAnswerPendingQuestion re-delivers the
+    // answer as a fresh `--resume` turn regardless of session
+    // liveness, so a dead session is no longer a reason to discard the
+    // question. The user dismisses it explicitly with Esc
+    // (onQuestionDismiss); it does not need to be auto-dropped here.
+    val cleaned = m.Copy(Sessions = m.Sessions.Remove(name))
     if isCleanCloseError(err) {
         // Clean turn end. Two shapes depending on who finished:
         //   - Team Lead → TLDone(directives parsed from the lead's

@@ -4626,3 +4626,122 @@ func TestGitFilesList_RunsAgainstRealRepo(t T) T {
     // Empty repo, no tracked files — IsEmpty() is the expected shape.
     return IsTrue(t, files.IsEmpty())
 }
+
+// ─── Unified respawn-cleanup contract (resetMemberState) ─────────────
+//
+// One pure helper now owns per-member scratch reset for all three
+// (re)spawn paths (fresh @dispatch, crash, heartbeat). These tests pin
+// the freshTask seam and the path-independent common contract. See
+// docs/FSM_HARDENING.md shapes 1 & 2.
+//
+// Common to EVERY path: the stream buffer, the raw-JSON reassembly
+// buffer, the directive-fired watermark, and the captured @done /
+// @blocked bodies are cleared; LastChunkAt is re-stamped off the dead
+// subprocess's stale timestamp; SessionIds is untouched.
+//
+// freshTask seam: a brand-new @dispatch clears PostPromptSent and
+// resets RetryCount to 0; a crash / heartbeat respawn PRESERVES
+// PostPromptSent and BUMPS RetryCount.
+
+// resetSeedScratch populates every per-member buffer / counter for
+// "Felix" with junk + a deep-past LastChunkAt so a successful reset is
+// observable on every field individually.
+func resetSeedScratch() AppModel {
+    val staleTime = time_utils.FromUnixSeconds(int64(1))
+    return sampleModel().Copy(
+        MemberBuffers         = EmptyHashMap[string, string]().Put("Felix", "stale @done\n@end"),
+        MemberJsonBuf         = EmptyHashMap[string, string]().Put("Felix", "{\"partial\":"),
+        MemberDirectivesFired = EmptyHashMap[string, int]().Put("Felix", 3),
+        MemberDoneBodies      = EmptyHashMap[string, string]().Put("Felix", "old done body"),
+        MemberBlockedReasons  = EmptyHashMap[string, string]().Put("Felix", "old blocked reason"),
+        PostPromptSent        = arrayToHashSet(ArrayOf("Felix")),
+        RetryCount            = EmptyHashMap[string, int]().Put("Felix", 2),
+        SessionIds            = EmptyHashMap[string, string]().Put("Felix", "sid-felix-123"),
+        LastChunkAt           = EmptyHashMap[string, time_utils.Instant]().Put("Felix", staleTime),
+    )
+}
+
+// resetCommonContract asserts the path-independent half: every stream /
+// JSON / watermark / @done / @blocked buffer for `name` is empty,
+// LastChunkAt advanced past the deep-past seed, and SessionIds is
+// preserved (--resume must thread the same conversation).
+func resetCommonContract(t T, m AppModel, name string) T {
+    val t1 = IsTrue(t,  m.MemberBuffers.Get(name).GetOrElse("") == "")
+    val t2 = IsTrue(t1, m.MemberJsonBuf.Get(name).GetOrElse("") == "")
+    val t3 = Eq(t2, m.MemberDirectivesFired.Get(name).GetOrElse(0), 0)
+    val t4 = IsTrue(t3, m.MemberDoneBodies.Get(name).GetOrElse("") == "")
+    val t5 = IsTrue(t4, m.MemberBlockedReasons.Get(name).GetOrElse("") == "")
+    val lca = m.LastChunkAt.Get(name).GetOrElse(time_utils.UnixEpoch())
+    val t6 = IsTrue(t5, lca.UnixNanos() > time_utils.FromUnixSeconds(int64(1)).UnixNanos())
+    return Eq(t6, m.SessionIds.Get(name).GetOrElse(""), "sid-felix-123")
+}
+
+// Fresh @dispatch: common contract holds, PLUS the post-prompt guard
+// is cleared (a brand-new task earns its own one-shot round) and the
+// crash budget resets to 0 (full budget for the new task).
+func TestResetMemberState_FreshDispatch_ClearsPostPromptSentAndResetsRetry(t T) T {
+    val m = resetMemberForFreshDispatch(resetSeedScratch(), "Felix")
+    val t1 = resetCommonContract(t, m, "Felix")
+    val t2 = IsFalse(t1, m.PostPromptSent.Contains("Felix"))
+    return Eq(t2, m.RetryCount.Get("Felix").GetOrElse(0), 0)
+}
+
+// Crash / heartbeat respawn: common contract holds, PLUS the
+// post-prompt guard is PRESERVED (a respawn mid-post-prompt must not
+// re-fire the prompt — invariant carried forward from the in-session
+// post-prompt work) and the crash budget is BUMPED (2 -> 3), not
+// reset.
+func TestResetMemberState_Respawn_PreservesPostPromptSentAndBumpsRetry(t T) T {
+    val m = resetMemberForRespawn(resetSeedScratch(), "Felix")
+    val t1 = resetCommonContract(t, m, "Felix")
+    val t2 = IsTrue(t1, m.PostPromptSent.Contains("Felix"))
+    return Eq(t2, m.RetryCount.Get("Felix").GetOrElse(0), 3)
+}
+
+// Respawn bump is current+1 even when the member has no prior retry
+// entry (absent -> 1). Matches the heartbeat call site, which passes
+// attempt = retries + 1 with retries == 0.
+func TestResetMemberState_Respawn_BumpsFromAbsentToOne(t T) T {
+    val m = resetMemberForRespawn(sampleModel(), "Felix")
+    return Eq(t, m.RetryCount.Get("Felix").GetOrElse(0), 1)
+}
+
+// End-to-end crash path: a non-clean SessionFailed below MaxRetries
+// must route through the unified respawn reset — stale buffers gone so
+// the --resume turn parses clean, post-prompt guard preserved, crash
+// budget escalated 0 -> 1.
+func TestOnSessionFailed_CrashRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
+    val seed = resetSeedScratch().Copy(
+        State      = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        RetryCount = EmptyHashMap[string, int](),
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Felix", ErrText = "stream closed"))
+    val t1 = IsTrue(t,  m.PostPromptSent.Contains("Felix"))
+    val t2 = IsTrue(t1, m.MemberBuffers.Get("Felix").GetOrElse("") == "")
+    val t3 = IsTrue(t2, m.MemberJsonBuf.Get("Felix").GetOrElse("") == "")
+    val t4 = Eq(t3, m.MemberDirectivesFired.Get("Felix").GetOrElse(0), 0)
+    return Eq(t4, m.RetryCount.Get("Felix").GetOrElse(0), 1)
+}
+
+// End-to-end heartbeat path: a member silent past the abandon
+// threshold (below MaxRetries) is respawned through the same unified
+// reset — buffers cleared, post-prompt guard preserved, budget
+// escalated, and LastChunkAt re-stamped off the stale epoch so the
+// heartbeat does not instantly re-mark the fresh subprocess stuck.
+func TestOnTick_HeartbeatRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
+    val staleTime = time_utils.FromUnixSeconds(int64(1))
+    val base = resetSeedScratch()
+    val seed = base.Copy(
+        State       = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        Statuses    = base.Statuses.Put("Felix", StWorking()),
+        RetryCount  = EmptyHashMap[string, int](),
+        LastChunkAt = EmptyHashMap[string, time_utils.Instant]().Put("Felix", staleTime),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    val t1 = IsTrue(t,  m.PostPromptSent.Contains("Felix"))
+    val t2 = IsTrue(t1, m.MemberBuffers.Get("Felix").GetOrElse("") == "")
+    val t3 = Eq(t2, m.MemberDirectivesFired.Get("Felix").GetOrElse(0), 0)
+    val t4 = Eq(t3, m.RetryCount.Get("Felix").GetOrElse(0), 1)
+    val lca = m.LastChunkAt.Get("Felix").GetOrElse(time_utils.UnixEpoch())
+    return IsTrue(t4, lca.UnixNanos() > staleTime.UnixNanos())
+}

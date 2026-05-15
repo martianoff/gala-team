@@ -3782,6 +3782,79 @@ func TestConversationLine_DefaultUndeliveredIsFalse(t T) T {
 }
 
 // ----------------------------------------------------------------------------
+// Turn-end-with-pending-question deadlock.
+//
+// Past sessions captured a total freeze: the lead called
+// AskUserQuestion (the harness denies it — the orchestrator owns the
+// dialog), the model got the denial, said "the question was declined,
+// I'll make the call", emitted `@dispatch` + `@end`, and the turn
+// completed. But the old code only closed claude's stdin on turn-end
+// when NO question was pending — so stdin stayed open, claude
+// (stream-json) idled forever, no EOF reached onSessionFailed, the
+// `@dispatch` sat unparsed in the TurnBuffer, and the FSM froze in
+// TLThinking. The user saw nothing for ~1h.
+//
+// Contract now: a turn that ends with a pending question still
+// finalizes (onSessionFailed parses the buffer → FSM advances) AND
+// the pending question survives so the user can still answer it
+// (delivered via a fresh `--resume` turn; Esc dismisses).
+// ----------------------------------------------------------------------------
+
+// The deadlock repro: FSM TLThinking, a pending question for the
+// lead, and a `@dispatch` sitting in the TurnBuffer. The clean EOF
+// that follows the (now unconditional) stdin close must finalize the
+// turn — FSM advances to Delegating — and must NOT drop the pending.
+func TestTurnEnd_WithPendingQuestion_FinalizesAndKeepsAnswerable(t T) T {
+    val seeded = sampleModel().Copy(
+        State           = TLThinking(),
+        TurnBuffer      = "@dispatch(Felix)\nbuild the thing\n@end",
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Iris",
+            ToolUseId    = "toolu_q",
+            QuestionText = "which approach?",
+        )),
+    )
+    val (m, _) = Update(seeded, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    // Turn finalized — the @dispatch was parsed, FSM is no longer
+    // frozen in TLThinking.
+    val t1 = m.State match {
+        case Delegating(p) => IsTrue(t, p.Contains("Felix"))
+        case _             => IsTrue(t, false)
+    }
+    // The pending question survived turn-end — the user can still
+    // answer it instead of it vanishing the instant the turn closed.
+    return m.PendingQuestion match {
+        case Some(p) => Eq(t1, p.ToolUseId, "toolu_q")
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+// Variant: the lead asked a question and ended the turn WITHOUT any
+// directive (it was genuinely waiting on the user). The turn must
+// still finalize — FSM lands in Idle, not frozen in TLThinking — and
+// the question stays answerable.
+func TestTurnEnd_PendingNoDirectives_LandsIdleNotFrozen(t T) T {
+    val seeded = sampleModel().Copy(
+        State           = TLThinking(),
+        TurnBuffer      = "I need a decision before I can proceed.",
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Iris",
+            ToolUseId    = "toolu_w",
+            QuestionText = "scope?",
+        )),
+    )
+    val (m, _) = Update(seeded, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val t1 = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    return m.PendingQuestion match {
+        case Some(_) => IsTrue(t1, true)
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+// ----------------------------------------------------------------------------
 // Orchestrator dispatch bugs uncovered in the 0.49.0-migration audit log
 // (gala_team .gala_team/sessions/debug/events.jsonl, 04:55–05:37 UTC):
 //   - Duplicate MemberDone fired twice for Lyra within 54 ms.

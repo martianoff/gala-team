@@ -2409,12 +2409,86 @@ func uncommittedCheckCmd(cwd string, name string, body string) Cmd[AppMsg] =
 // onUncommittedCheckResult is the back-channel for the engineer
 // commit-gate. Dirty → nudge the engineer to commit before QA sees
 // the work. Clean → finalise as if the check passed inline.
+//
+// This handler is ONLY reached for engineers: onMemberDone routes
+// non-engineers straight to finaliseMemberDone before any uncommitted
+// check is scheduled. So the optional post-engineer-prompt round below
+// is naturally engineer-scoped — QA and the team lead never enter here.
+//
+// When workflow.post_engineer_prompt is set and this engineer has not
+// yet had it re-sent for the current dispatch cycle (tracked in
+// PostPromptSent), the clean branch re-resumes the engineer's own
+// claude session and re-sends that exact prompt verbatim, then returns
+// WITHOUT finalising — the FSM MemberDone event does not fire, so the
+// member stays in Delegating.Pending. The engineer's follow-up turn
+// flows back through onMemberDone → uncommitted check → here again;
+// this time PostPromptSent already contains them, so we fall through to
+// finaliseMemberDone and the FSM drains to QAGate as normal. Because
+// each engineer's MemberDone is deferred independently, parallel
+// engineers each run their own one-shot round and QAGate is reached
+// only after every engineer's post-prompt round has completed. The
+// dirty path is left untouched: if the post-prompt work is uncommitted
+// on the second pass it correctly re-nudges to commit first.
 func onUncommittedCheckResult(m AppModel, name string, body string, dirty bool) Tuple[AppModel, Cmd[AppMsg]] {
     if dirty {
         val mem = findMemberByName(m.Team.Members, name).GetOrElse(m.Team.Lead)
         return nudgeEngineerToCommit(m, name, mem)
     }
+    if postPromptDue(m, name) {
+        return findMemberByName(m.Team.Members, name) match {
+            // No team member by that name — nothing to resume. Fall
+            // through to the normal finalise so a misrouted name can't
+            // strand the turn.
+            case None()    => finaliseMemberDone(m, name, body)
+            case Some(mem) => sendPostEngineerPrompt(m, mem, m.Workflow.PostEngineerPrompt)
+        }
+    }
     return finaliseMemberDone(m, name, body)
+}
+
+// postPromptDue is the pure one-shot guard: true exactly when a
+// post-engineer prompt is configured AND this member has not yet had
+// it re-sent for the current dispatch cycle. Membership in
+// PostPromptSent is per-member, so for parallel engineers each one is
+// evaluated independently — engineer A being mid-post-prompt does not
+// suppress engineer B's own round, and an engineer that already had
+// its round (in PostPromptSent) falls through to drain. Pure so the
+// guard / parallel-engineer behaviour is testable without spawning.
+func postPromptDue(m AppModel, name string) bool =
+    m.Workflow.PostEngineerPrompt != "" && !m.PostPromptSent.Contains(name)
+
+// sendPostEngineerPrompt re-resumes the engineer's own claude session
+// and re-sends workflow.post_engineer_prompt verbatim — the prompt
+// author owns its content, so no system/orchestration framing is
+// injected around it (unlike the commit nudge or help relay). Mirrors
+// the same-session --resume precedent in onAnswerPendingQuestion:
+// closeLiveSession → ensureSession → sendAndPumpCmd, with the engineer
+// marked in PostPromptSent FIRST so the loop guard holds even if the
+// follow-up turn lands before this returns. No WrapPromptSafe /
+// onboarding wrap: this is a continuation of an existing session, not
+// a first dispatch. Status goes back to Working and the FSM is left
+// alone, so MemberDone has not fired and the member stays in
+// Delegating.Pending until the follow-up turn finalises.
+func sendPostEngineerPrompt(m AppModel, mem Member, prompt string) Tuple[AppModel, Cmd[AppMsg]] {
+    val marked = m.Copy(PostPromptSent = m.PostPromptSent.Add(mem.Name))
+    val closed = closeLiveSession(marked, mem.Name)
+    return ensureSession(closed, mem) match {
+        case Left(err) => {
+            LogSpawnFailure(mem.Name, "post_engineer_prompt", err)
+            // Couldn't re-resume — don't strand the turn. Fall through
+            // to the normal finalise so the engineer still drains to
+            // QA. The guard already marked them, so a respawn won't
+            // re-fire the prompt.
+            return finaliseMemberDone(
+                closed.Copy(LastError = Some(s"post-prompt ${mem.Name}: ${err}")),
+                mem.Name, "",
+            )
+        }
+        case Right(m1) => {
+            val withStatus = setStatus(m1, mem.Name, StWorking())
+            return (withStatus, sendAndPumpCmd(withStatus, mem, prompt))
+        }
+    }
 }
 
 // finaliseMemberDone runs the rest of @finished processing once the
@@ -3066,10 +3140,14 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
         // new dispatch starts with a clean slate — a re-dispatched
         // member's NEW @done shouldn't be skipped just because the
         // last turn's @done already incremented the fired counter.
+        // Dropping the member from PostPromptSent here (and ONLY here,
+        // not on crash/respawn) means a brand-new task gets its own
+        // one-shot post-engineer prompt round.
         val mClosed = closeLiveSession(curM, name).Copy(
             MemberBuffers         = curM.MemberBuffers.Remove(name),
             MemberDirectivesFired = curM.MemberDirectivesFired.Remove(name),
             MemberDoneBodies      = curM.MemberDoneBodies.Remove(name),
+            PostPromptSent        = curM.PostPromptSent.Remove(name),
         )
         return findMemberByName(mClosed.Team.Members, name) match {
             case None() => (mClosed, curCmds)

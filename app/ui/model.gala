@@ -125,7 +125,7 @@ struct AppModel(
     // recent entry. With AutoApprove on, the list grows across multiple
     // user prompts so the user can review the batch in GitHub when
     // ready. With AutoApprove off (default), the list will hold at
-    // most one entry between Ctrl+A and Ctrl+M — same shape as the
+    // most one entry between approve and Ctrl+M merge — same shape as the
     // previous LastPrUrl Option[string] it replaces.
     OpenPrs      Array[BatchPr],
     // AutoApprove turns the per-PR approval gate off — see the policy
@@ -752,7 +752,7 @@ sealed type AppMsg {
     case KeyToggleHelp
     // Toggles AutoApprove (the batch-PR mode). Bound to F7 + a palette
     // entry. When on, an @summary that passes the readiness + body
-    // gates skips the Ctrl+A wait and runs approveAndKickHooks
+    // gates skips the manual-approve wait and runs approveAndKickHooks
     // directly; each PR accumulates in OpenPrs. See Policy.AutoApprove
     // for the full semantics.
     case KeyToggleAutoApprove
@@ -824,7 +824,7 @@ sealed type AppMsg {
     // checkPrReady answer (None = ready, Some(reason) = blocked).
     // Replaces the inline checkPrReady() call inside
     // approveAndKickHooks — that one fired git rev-list + maybe
-    // git rev-parse on every Ctrl+A.
+    // git rev-parse on every approve.
     case ApprovalReadyResult(Body string, Reason Option[string])
     // SummaryReadyResult carries the parsed TL turn's directives
     // back after the off-thread PR-readiness probe completes.

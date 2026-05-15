@@ -96,9 +96,9 @@ struct TransitionContext(
 // rescues the user from any state the orchestrator landed in but
 // can't drain on its own — e.g. QAGate(Pending = {Theo}) when no QA
 // session was actually spawned, or TLReview after a directive parse
-// hiccup. Approval is the one exception: the user must Ctrl+A / Ctrl+R
-// to leave it, otherwise a stray Enter would silently discard a
-// pending PR commit.
+// hiccup. Approval is the one exception: the user must approve or
+// reject in the dialog to leave it, otherwise a stray Enter would
+// silently discard a pending PR commit.
 //
 // Nested match (state → event) instead of a tuple-pattern match: GALA's
 // tuple destructuring treats identifiers as bindings even when they name

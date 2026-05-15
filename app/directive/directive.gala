@@ -76,7 +76,7 @@ sealed type Directive {
     // after a PR lands. The current turn ships the FIRST item; the
     // rest are queued in AppModel.Plan and auto-spawned via KeySubmit
     // as PR after PR completes (only meaningful while AutoApprove is
-    // on — manual-approve mode would block on Ctrl+A anyway). Empty
+    // on — manual-approve mode would block on the approval dialog anyway). Empty
     // bodies are dropped by the parser. (TL → orchestrator)
     case Plan(Items Array[string])
 }

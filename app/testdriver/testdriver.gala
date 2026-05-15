@@ -45,7 +45,8 @@ import (
 // Driver commands (one per line on stdin):
 //   {"type":"key","key":"Enter"}
 //   {"type":"key","char":"h"}
-//   {"type":"key","key":"Backspace"} | "CtrlL" | "CtrlA" | "CtrlR" | "CtrlQ"
+//   {"type":"key","key":"Backspace"} | "CtrlL" | "CtrlQ"
+//   {"type":"key","key":"ApproveDialog"} | "RejectDialog"  // drive the approval dialog
 //   {"type":"tick"}
 //   {"type":"msg","name":"ChunkArrived","member":"Iris","line":"hi"}
 //   {"type":"msg","name":"SessionFailed","member":"Felix","err":"EOF"}
@@ -223,8 +224,11 @@ func decodeKey(d *json.JsonDecoderImpl) Option[AppMsg] {
     if keyName == "Enter"     { return Some[AppMsg](KeySubmit()) }
     if keyName == "Backspace" { return Some[AppMsg](KeyBackspace()) }
     if keyName == "Esc"       { return Some[AppMsg](HistoryDeselect()) }
-    if keyName == "CtrlA"     { return Some[AppMsg](KeyApprove()) }
-    if keyName == "CtrlR"     { return Some[AppMsg](KeyReject()) }
+    // Approval is dialog-only — there is no global hotkey. These two
+    // tokens emit the same messages the dialog's Yes/No buttons fire,
+    // so e2e can still drive approve/reject without a key binding.
+    if keyName == "ApproveDialog" { return Some[AppMsg](KeyApprove()) }
+    if keyName == "RejectDialog"  { return Some[AppMsg](KeyReject()) }
     if keyName == "CtrlL"     { return Some[AppMsg](KeyToggleFocus()) }
     if keyName == "CtrlQ"     { return Some[AppMsg](QuitMsg()) }
     if keyName == "CtrlN"     { return Some[AppMsg](KeyEraseSession()) }

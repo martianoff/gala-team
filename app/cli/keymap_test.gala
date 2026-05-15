@@ -19,8 +19,6 @@ import (
 // never reaches the keymap. Ctrl+Q is the graceful path; the app's
 // own QuitMsg handler implements the two-press confirmation.
 func TestKeyToAppMsg_CtrlQ_Quit(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('q'))), "QuitMsg")
-func TestKeyToAppMsg_CtrlA_Approve(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('a'))), "KeyApprove")
-func TestKeyToAppMsg_CtrlR_Reject(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('r'))), "KeyReject")
 func TestKeyToAppMsg_CtrlM_Merge(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('m'))), "KeyMerge")
 func TestKeyToAppMsg_CtrlH_ToggleHistory(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('h'))), "KeyToggleHistory")
 func TestKeyToAppMsg_CtrlL_ToggleFocus(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('l'))), "KeyToggleFocus")

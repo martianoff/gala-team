@@ -11,7 +11,7 @@ import (
 // `main()` wrapper and the keyboard / mouse routing is unit-testable
 // without spawning the runtime.
 //
-// Every binding is keyed off either KeyMatchesAny ("ctrl+a", "tab", …)
+// Every binding is keyed off either KeyMatchesAny ("ctrl+m", "tab", …)
 // or the structural KeyEvent.Key sealed-type (Backspace, Enter, Char,
 // Up, Down, Esc, Space). Adding a new shortcut is a one-line edit
 // here plus a test in keymap_test.gala.
@@ -46,8 +46,6 @@ func mouseToAppMsg(me MouseEvent) AppMsg = me.Btn match {
 //
 // Keys:
 //   - Ctrl+C / Ctrl+Q  →  QuitMsg              (graceful, with confirmation)
-//   - Ctrl+A           →  KeyApprove           (approval pipeline)
-//   - Ctrl+R           →  KeyReject            (back to chat)
 //   - Ctrl+M           →  KeyMerge             (merge after PrCreated)
 //   - Ctrl+H           →  KeyToggleHistory     (history browser)
 //   - Ctrl+T           →  KeyToggleConsultViewer (consult overlay)
@@ -79,14 +77,12 @@ func mouseToAppMsg(me MouseEvent) AppMsg = me.Btn match {
 // dedicated KeySidebarToggleGroup case in update.gala.
 //
 // Ctrl-modified keys are checked first (and consume the event before
-// falling through to the structural key match) so that a `Char('a')`
+// falling through to the structural key match) so that a `Char('m')`
 // arriving with the Ctrl modifier set doesn't end up appended to the
 // composer — KeyMatchesAny resolves the modifier semantics
 // consistently for us.
 func KeyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+c", "ctrl+q")) { return QuitMsg() }
-    if (KeyMatchesAny(ev, "ctrl+a"))           { return KeyApprove() }
-    if (KeyMatchesAny(ev, "ctrl+r"))           { return KeyReject() }
     if (KeyMatchesAny(ev, "ctrl+m"))           { return KeyMerge() }
     if (KeyMatchesAny(ev, "ctrl+h"))           { return KeyToggleHistory() }
     if (KeyMatchesAny(ev, "ctrl+t"))           { return KeyToggleConsultViewer() }

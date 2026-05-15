@@ -3188,15 +3188,41 @@ func TestPrCreated_PlanButComposerInUse_StallsPlan(t T) T {
     return Eq(t1, m.PlanShipped, 1)
 }
 
-// PrCreated with a plan but AutoApprove off does NOT auto-continue —
-// manual mode would dead-end on the Ctrl+M merge / approval wait anyway.
-func TestPrCreated_PlanWithoutAutoApprove_DoesNotContinue(t T) T {
+// REGRESSION: a multi-PR @plan must drain under MANUAL approval too,
+// not just AutoApprove. Past sessions froze here — the plan engine
+// was gated on AutoApprove, so a hand-approved PR 1 left the plan
+// stuck ("nobody initiated the second step"). PrCreated only fires
+// after a PR actually lands (auto OR manual), so the next step is
+// always staged + flagged PlanContinuing regardless of AutoApprove.
+func TestPrCreated_PlanWithoutAutoApprove_StillContinues(t T) T {
     val seed = sampleModel().Copy(
         AutoApprove = false,
-        Plan        = ArrayOf("step1", "step2"),
+        Plan        = ArrayOf("step1", "step2", "step3"),
     )
     val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
-    return Eq(t, m.Composer, "")
+    val t1 = Eq(t,  m.Composer, "step2")
+    val t2 = Eq(t1, m.PlanShipped, 1)
+    val t3 = IsTrue(t2, m.PlanContinuing)
+    return Eq(t3, m.Plan.Size(), 3)
+}
+
+// REGRESSION: the synthetic plan-continuation KeySubmit must NOT wipe
+// the plan. onSubmit clears Plan/PlanShipped for a genuine fresh
+// prompt, but a continuation (PlanContinuing set by onPrCreated) has
+// to keep the plan alive — otherwise a 4-PR plan only ever shipped
+// 2 steps. The one-shot flag is consumed on the way through.
+func TestKeySubmit_PlanContinuation_PreservesPlan(t T) T {
+    val seed = sampleModel().Copy(
+        Composer       = "step2",
+        Plan           = ArrayOf("step1", "step2", "step3"),
+        PlanShipped    = 1,
+        PlanContinuing = true,
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    val t1 = Eq(t,  m.Plan.Size(), 3)
+    val t2 = Eq(t1, m.PlanShipped, 1)
+    val t3 = IsFalse(t2, m.PlanContinuing)
+    return Eq(t3, m.Composer, "")
 }
 
 // User-issued KeySubmit clears any pending Plan + PlanShipped —
@@ -3212,13 +3238,12 @@ func TestKeySubmit_ClearsPlanAndShipped(t T) T {
     return Eq(t1, m.PlanShipped, 0)
 }
 
-// planProgressGlyphs renders ✓/▶/☐ per step.
-func TestPlanProgressGlyphs(t T) T {
-    val t1 = Eq(t,  planProgressGlyphs(0, 3), "▶ ☐ ☐")
-    val t2 = Eq(t1, planProgressGlyphs(1, 3), "✓ ▶ ☐")
-    val t3 = Eq(t2, planProgressGlyphs(2, 3), "✓ ✓ ▶")
-    return Eq(t3, planProgressGlyphs(3, 3), "✓ ✓ ✓")
-}
+// (TestPlanProgressGlyphs removed: the single-line banner's
+// glyph-string helper was replaced by the bordered planPanel, which
+// builds per-step rows inline. Plan correctness is covered by the
+// PlanContinuing lifecycle tests above; the panel widget itself
+// follows the codebase convention of not string-asserting view
+// output.)
 
 // pendingPrTitle pulls the most recent user prompt out of the
 // conversation log so each batch entry has a human-readable handle.

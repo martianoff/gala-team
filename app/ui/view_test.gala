@@ -398,35 +398,38 @@ func TestView_Footer_AutoApprove_NoApproveHints(t T) T {
     return IsTrue(t1, strings.Contains(out, "Ctrl+P palette"))
 }
 
-// Active plan renders a banner above the composer with progress
-// glyphs and the in-progress step body. The rendered glyphs are
-// checked individually (✓ for shipped, ▶ for in-progress, ☐ for
-// queued) rather than as a fixed-spacing sequence — terminal cell-
-// width handling pads emoji-adjacent characters in ways that
-// depend on the font's reported east-asian-width.
-func TestView_PlanBanner_ShowsProgressAndCurrentStep(t T) T {
+// Active plan renders the bordered plan panel below the chat log:
+// a "Plan — step N of M" title plus one row per step. Every step's
+// text is present (not just the in-progress one — the panel lists
+// all of them) and the per-step glyphs ✓/▶/☐ render. Glyphs are
+// checked individually rather than as a fixed-spacing sequence —
+// terminal cell-width handling pads emoji-adjacent characters in
+// ways that depend on the font's reported east-asian-width.
+func TestView_PlanPanel_ShowsAllStepsAndProgress(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(
         AutoApprove = true,
         Plan        = ArrayOf("Stripe SDK", "Webhook handler", "Refund flow"),
         PlanShipped = 1,
     )
     val out = render(m)
-    val t1 = IsTrue(t,  strings.Contains(out, "Plan 2/3"))
-    val t2 = IsTrue(t1, strings.Contains(out, "Webhook handler"))
-    val t3 = IsTrue(t2, strings.Contains(out, "✓"))
-    val t4 = IsTrue(t3, strings.Contains(out, "▶"))
-    return IsTrue(t4, strings.Contains(out, "☐"))
+    val t1 = IsTrue(t,  strings.Contains(out, "Plan — step 2 of 3"))
+    val t2 = IsTrue(t1, strings.Contains(out, "Stripe SDK"))
+    val t3 = IsTrue(t2, strings.Contains(out, "Webhook handler"))
+    val t4 = IsTrue(t3, strings.Contains(out, "Refund flow"))
+    val t5 = IsTrue(t4, strings.Contains(out, "✓"))
+    val t6 = IsTrue(t5, strings.Contains(out, "▶"))
+    return IsTrue(t6, strings.Contains(out, "☐"))
 }
 
-// Empty Plan → no banner (zero-row spacer).
-func TestView_PlanBanner_HiddenWhenNoPlan(t T) T {
+// Empty Plan → no panel (zero-row spacer).
+func TestView_PlanPanel_HiddenWhenNoPlan(t T) T {
     val out = render(mkModel(mkTeam("X", "")))
     return IsFalse(t, strings.Contains(out, "📋 Plan"))
 }
 
-// Plan exhausted (PlanShipped == Plan.Size()) → banner hides; the
+// Plan exhausted (PlanShipped == Plan.Size()) → panel hides; the
 // completion message is in the conversation log instead.
-func TestView_PlanBanner_HiddenWhenComplete(t T) T {
+func TestView_PlanPanel_HiddenWhenComplete(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(
         AutoApprove = true,
         Plan        = ArrayOf("a", "b"),

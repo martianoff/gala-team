@@ -8,6 +8,7 @@ gala_library(
         "streaming.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/consult",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/config",
         "//app/headless",
@@ -22,18 +23,17 @@ gala_library(
         "@gala//go_interop",
         "@gala//yaml",
     ],
-    visibility = ["//visibility:public"],
 )
 
 gala_go_test(
     name = "registry_test",
     srcs = ["registry_test.gala"],
-    pkg = "consult",
     lib_srcs = [
         "registry.gala",
         "runner.gala",
         "streaming.gala",
     ],
+    pkg = "consult",
     deps = [
         "//app/config",
         "//app/headless",
@@ -53,12 +53,12 @@ gala_go_test(
 gala_go_test(
     name = "runner_test",
     srcs = ["runner_test.gala"],
-    pkg = "consult",
     lib_srcs = [
         "registry.gala",
         "runner.gala",
         "streaming.gala",
     ],
+    pkg = "consult",
     deps = [
         "//app/config",
         "//app/headless",
@@ -78,12 +78,12 @@ gala_go_test(
 gala_go_test(
     name = "dispatch_test",
     srcs = ["dispatch_test.gala"],
-    pkg = "consult",
     lib_srcs = [
         "registry.gala",
         "runner.gala",
         "streaming.gala",
     ],
+    pkg = "consult",
     deps = [
         "//app/config",
         "//app/headless",

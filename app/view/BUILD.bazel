@@ -6,15 +6,15 @@ gala_library(
         "pipeline_view.gala",
         "team_panel.gala",
     ],
-    importpath = "github.com/martianoff/gala_team/app/view",
     gala_deps = [
         "@gala_tui//:gala_tui",
     ],
+    importpath = "github.com/martianoff/gala_team/app/view",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/team",
         "@gala//collection_immutable",
     ],
-    visibility = ["//visibility:public"],
 )
 
 gala_go_test(
@@ -23,14 +23,14 @@ gala_go_test(
         "pipeline_view_test.gala",
         "team_panel_test.gala",
     ],
-    pkg = "view",
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
     lib_srcs = [
         "pipeline_view.gala",
         "team_panel.gala",
     ],
-    gala_deps = [
-        "@gala_tui//:gala_tui",
-    ],
+    pkg = "view",
     deps = [
         ":view",
         "//app/team",

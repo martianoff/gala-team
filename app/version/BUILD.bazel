@@ -4,8 +4,8 @@ gala_library(
     name = "version",
     srcs = ["version.gala"],
     importpath = "github.com/martianoff/gala_team/app/version",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/buildinfo",
     ],
-    visibility = ["//visibility:public"],
 )

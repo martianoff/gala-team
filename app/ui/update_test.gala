@@ -4311,6 +4311,51 @@ func TestApplyQAPromptReady_DroppedWhenNotInQAGate(t T) T {
     return IsFalse(t, m.Statuses.Get("Sable").IsDefined())
 }
 
+// REGRESSION: a QA reviewer that goes stuck WHILE the FSM is parked
+// in QAGate must be re-prompted DIRECTLY (same session, FSM stays
+// QAGate) — never bounced to a TL nudge. Past sessions hung ~8h in
+// QAGate after the reviewer stalled mid-review: the only QAGate
+// recovery was the full abandon threshold, and a stuck nudge (when
+// it fired) went to the lead, which has no QA context and would just
+// re-dispatch or redo a review it never ran. The fix wakes the
+// reviewer where it stalled and leaves the lead untouched.
+func TestQaGateStuck_RepromptsReviewer_NotTL(t T) T {
+    val proj = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    val sable = Member(
+        Name = "Sable", Role = QA(),
+        Personality = "rigorous",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
+    // now = 10000s; Sable's last chunk 200s ago → the StStuck band
+    // (StuckAfterSeconds=120 <= 200 < AbandonAfterSeconds=300), so
+    // the heartbeat escalates Sable to stuck (not failed).
+    val now   = time_utils.FromUnixSeconds(int64(10000))
+    val stale = time_utils.FromUnixSeconds(int64(9800))
+    val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
+    val seed  = base.Copy(
+        State       = QAGate(Pending = EmptyHashSet[string]().Add("Sable")),
+        Statuses    = base.Statuses.Put("Sable", StWorking()),
+        LastChunkAt = base.LastChunkAt.Put("Sable", stale),
+    )
+    val (m, _) = updateLivenessStatuses(seed, team.Members, now)
+    // FSM still parked in QAGate — NOT bounced to TLNudging.
+    val t1 = m.State match {
+        case QAGate(_) => IsTrue(t, true)
+        case _         => IsTrue(t, false)
+    }
+    // The lead was never woken. The old path (spawnAggregatedStuck-
+    // Nudge → spawnTLNudge) flipped the lead to StWorking; the
+    // QA-direct path must leave the lead alone.
+    val leadUntouched = m.Statuses.Get(team.Lead.Name).GetOrElse(StIdle()) match {
+        case StWorking() => false
+        case _           => true
+    }
+    return IsTrue(t1, leadUntouched)
+}
+
 // onPasteClipboard's UI-thread half: Ctrl+V returns immediately
 // with the model unchanged. The actual insert / toast / LastError
 // updates fire when ClipboardPasted / ClipboardFailed lands.

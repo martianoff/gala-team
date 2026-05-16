@@ -290,7 +290,65 @@ func updateLivenessStatuses(
         }
     })
     if stuckNames.IsEmpty() { return (m1, cmds) }
+    // In QAGate a stuck QA reviewer is re-prompted DIRECTLY to finish
+    // its review — NOT bounced to a TL nudge. The TL never did the QA
+    // work; asking it to "decide what to do about stuck QA" just makes
+    // it redo or re-dispatch a review it has no context for, and the
+    // FSM is still parked in QAGate waiting on that same reviewer. The
+    // correct recovery is to wake the reviewer back up where it
+    // stalled. Any non-QA stuck member (or a QA member stuck outside
+    // QAGate) still goes to the TL via the aggregated nudge.
+    val inQaGate = m1.State match {
+        case QAGate(_) => true
+        case _         => false
+    }
+    if inQaGate {
+        val seed2 = (m1, cmds, EmptyArray[string]())
+        val (m2, cmds2, nonQaStuck) = stuckNames.FoldLeft(seed2, (acc, name) => {
+            val (curM, curCmds, curOther) = acc
+            return findMemberByName(curM.Team.Members, name) match {
+                case Some(mem) if SameRole(mem.Role, QA()) => {
+                    val (m3, c) = nudgeStuckQaReviewer(curM, mem, now)
+                    return (m3, curCmds.Append(c), curOther)
+                }
+                case _ => (curM, curCmds, curOther.Append(name))
+            }
+        })
+        if nonQaStuck.IsEmpty() { return (m2, cmds2) }
+        return spawnAggregatedStuckNudge(m2, nonQaStuck, cmds2, now)
+    }
     return spawnAggregatedStuckNudge(m1, stuckNames, cmds, now)
+}
+
+// nudgeStuckQaReviewer wakes a QA reviewer that went silent mid-
+// review back up — directly, in the SAME session, with the FSM left
+// in QAGate. No MemberStuck FSM event (onQAGate ignores it anyway)
+// and crucially no TL nudge: the lead has no QA context and bouncing
+// it there strands the gate. The prompt tells the reviewer exactly
+// how to close the turn so the gate drains; with the parser now
+// accepting @finished/@review (alongside @done/@blocked) that sign-
+// off actually parses.
+func nudgeStuckQaReviewer(m AppModel, mem Member, now time_utils.Instant) Tuple[AppModel, Cmd[AppMsg]] {
+    val elapsed = m.LastChunkAt.Get(mem.Name) match {
+        case None()   => int64(0)
+        case Some(at) => elapsedSeconds(now, at)
+    }
+    val prompt = s"System: you've been silent for ${elapsed}s mid-review and the orchestrator is parked in QA waiting on you. Finish the review now and CLOSE THE TURN with a sign-off block on its own lines: `@review APPROVE` / `@review REJECT` (or `@finished` if it passes / `@blocked` if it can't), the body with your findings, then `@end` on its own line. Until that block lands, the pipeline cannot advance."
+    // Kill the hung subprocess first (same shape as liveRespawnMember):
+    // a silent-stuck reviewer's old process may still be alive but
+    // wedged; without closing it the fresh --resume turn races the
+    // corpse and PendingClosures can't disambiguate the stale EOF.
+    val mClosed = closeLiveSession(m, mem.Name)
+    return ensureSession(mClosed, mem) match {
+        case Left(err)  => {
+            LogSpawnFailure(mem.Name, "qa_stuck_nudge", err)
+            return (mClosed.Copy(LastError = Some(s"qa-nudge ${mem.Name}: ${err}")), NoCmd[AppMsg]())
+        }
+        case Right(m1)  => {
+            val withStatus = setStatus(m1, mem.Name, StWorking())
+            return (withStatus, sendAndPumpCmd(withStatus, mem, prompt))
+        }
+    }
 }
 
 // spawnAggregatedStuckNudge fires a single TL nudge covering every

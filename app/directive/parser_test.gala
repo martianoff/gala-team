@@ -261,6 +261,35 @@ func TestDone_SameLineBodyAndEmptyBody(t T) T {
     }
 }
 
+// REGRESSION: @finished and @review are aliases for @done. Every
+// member/QA-facing protocol surface (onboarding protocol, QA review
+// dispatch body, malformed-report nudge) tells members to sign off
+// with @finished / @review, but the parser historically only
+// recognized @done — so a QA reviewer following the documented
+// vocabulary emitted `@finished … @end`, Parse returned nothing, no
+// MemberDone fired, and the FSM hung in QAGate. All three tokens must
+// now produce the same Finished directive.
+func TestFinishedReview_AliasForDone(t T) T {
+    val tDone = first(t, "@done\nverdict body\n@end") match {
+        case Finished(b) => Eq(t, b, "verdict body")
+        case _           => IsTrue(t, false)
+    }
+    val tFin = first(tDone, "@finished\nverdict body\n@end") match {
+        case Finished(b) => Eq(tDone, b, "verdict body")
+        case _           => IsTrue(tDone, false)
+    }
+    val tRev = first(tFin, "@review\nverdict body\n@end") match {
+        case Finished(b) => Eq(tFin, b, "verdict body")
+        case _           => IsTrue(tFin, false)
+    }
+    // Same-line form (e.g. `@review APPROVE …`) must alias too — that
+    // is exactly the QA verdict shape the protocol advertises.
+    return first(tRev, "@review APPROVE — ships clean\n@end") match {
+        case Finished(b) => Eq(tRev, b, "APPROVE — ships clean")
+        case _           => IsTrue(tRev, false)
+    }
+}
+
 // @help carries a clarification question. Question is the full body —
 // orchestrator splices it into the TL clarification turn verbatim.
 func TestHelp_QuestionBody(t T) T {

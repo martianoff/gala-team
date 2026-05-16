@@ -105,6 +105,23 @@ func parseOpeningTag(line string) Option[openingTag] {
     if strings.HasPrefix(trimmed, "@done") {
         return parseBodyOnlyTag("done", strings.TrimPrefix(trimmed, "@done"))
     }
+    // @finished and @review are aliases for @done (the member /
+    // QA completion directive). Every member- and QA-facing
+    // protocol surface — the onboarding protocol, the QA review
+    // dispatch body, the malformed-report nudge — instructs members
+    // to sign off with `@finished` (and QA with `@review`), but the
+    // parser historically only recognized `@done`. A QA member
+    // following the documented vocabulary emitted `@finished … @end`,
+    // Parse returned nothing, no MemberDone fired, and the FSM hung
+    // in QAGate until the user manually intervened. Accept the words
+    // the protocol actually advertises rather than relying on the
+    // model to reverse-engineer the parser.
+    if strings.HasPrefix(trimmed, "@finished") {
+        return parseBodyOnlyTag("done", strings.TrimPrefix(trimmed, "@finished"))
+    }
+    if strings.HasPrefix(trimmed, "@review") {
+        return parseBodyOnlyTag("done", strings.TrimPrefix(trimmed, "@review"))
+    }
     if strings.HasPrefix(trimmed, "@help") {
         return parseBodyOnlyTag("help", strings.TrimPrefix(trimmed, "@help"))
     }

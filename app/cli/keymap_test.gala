@@ -278,6 +278,7 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case UncommittedCheckResult(_, _, _) => "UncommittedCheckResult"
     case ApprovalReadyResult(_, _)   => "ApprovalReadyResult"
     case SummaryReadyResult(_, _)    => "SummaryReadyResult"
+    case RecoveryApprovalReadyResult(_, _) => "RecoveryApprovalReadyResult"
     case TickMsg()                   => "TickMsg"
     case QuitMsg()                   => "QuitMsg"
     case NoOp()                      => "NoOp"

@@ -7,10 +7,11 @@ gala_library(
         "update.gala",
         "view.gala",
     ],
-    importpath = "github.com/martianoff/gala_team/app/ui",
     gala_deps = [
         "@gala_tui//:gala_tui",
     ],
+    importpath = "github.com/martianoff/gala_team/app/ui",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/consult",
         "//app/directive",
@@ -32,21 +33,25 @@ gala_library(
         "@gala//subprocess",
         "@gala//time_utils",
     ],
-    visibility = ["//visibility:public"],
 )
 
 gala_go_test(
     name = "update_test",
     srcs = ["update_test.gala"],
-    pkg = "ui",
+    # The blocking-IO gate (TestNoBlockingIoOnUiThread) reads
+    # update.gala as text at runtime; bundle it as a runfile so the
+    # bazel sandbox can find it. `gala test` reads it from the package
+    # dir directly.
+    data = ["update.gala"],
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
     lib_srcs = [
         "model.gala",
         "update.gala",
         "view.gala",
     ],
-    gala_deps = [
-        "@gala_tui//:gala_tui",
-    ],
+    pkg = "ui",
     deps = [
         "//app/consult",
         "//app/directive",
@@ -65,6 +70,7 @@ gala_go_test(
         "@gala//concurrent",
         "@gala//go_interop",
         "@gala//json",
+        "@gala//strings",
         "@gala//subprocess",
         "@gala//time_utils",
     ],
@@ -73,15 +79,15 @@ gala_go_test(
 gala_go_test(
     name = "view_test",
     srcs = ["view_test.gala"],
-    pkg = "ui",
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
     lib_srcs = [
         "model.gala",
         "update.gala",
         "view.gala",
     ],
-    gala_deps = [
-        "@gala_tui//:gala_tui",
-    ],
+    pkg = "ui",
     deps = [
         "//app/consult",
         "//app/directive",

@@ -69,3 +69,80 @@ jobs:
         # rejected. All test files now use the internal pattern.
         run: gala test
 
+  # Whole-graph Bazel gate. `gala build` / `gala test` (the job above)
+  # never invoke Bazel, so a stale BUILD `srcs`/`deps`, a missing
+  # internal-test target shape, or a wrong-`package` test file can sit
+  # on master undetected. This job builds AND tests every Bazel target
+  # and fails if the BUILD files have drifted from the source tree.
+  bazel:
+    name: bazel-graph
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout gala_team
+        uses: actions/checkout@v4
+        with:
+          path: gala_team
+
+      - name: Add swap space
+        # The whole-graph Bazel build transpiles gala-tui + gala_team
+        # (180+ .gala files) to Go and links them — the same memory
+        # cliff `gala build` hits; swap keeps the 16-GB runner from
+        # being OOM-killed.
+        uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c
+        with:
+          swap-size-gb: 10
+
+      - name: Checkout gala (sibling for local_path_override)
+        # MODULE.bazel resolves `gala` / `gala_tui` via local_path_override
+        # to `../gala_simple` / `../gala_tui` — siblings of the checkout,
+        # exactly as the README's install section describes for local
+        # dev. Their Bazel files are committed in those repos, so a
+        # plain clone is enough; no generation step.
+        uses: actions/checkout@v4
+        with:
+          repository: martianoff/gala
+          path: gala_simple
+
+      - name: Checkout gala_tui (sibling for local_path_override)
+        uses: actions/checkout@v4
+        with:
+          repository: martianoff/gala-tui
+          path: gala_tui
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+
+      - name: Setup Bazelisk
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Cache Bazel
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazel
+          key: bazel-${{ runner.os }}-${{ hashFiles('gala_team/MODULE.bazel', 'gala_team/**/BUILD.bazel') }}
+          restore-keys: |
+            bazel-${{ runner.os }}-
+
+      - name: Gazelle — BUILD files must match the source tree
+        # `-mode=diff` prints a unified diff of what gazelle WOULD
+        # change. Any non-empty output means the committed BUILD files
+        # are stale: fix locally with `bazel run //:gazelle` and
+        # commit. The explicit emptiness check fails the gate even on a
+        # gazelle build that keeps exit code 0 with a non-empty diff.
+        working-directory: gala_team
+        run: |
+          set -o pipefail
+          bazel run //:gazelle -- -mode=diff | tee gazelle.diff
+          if [ -s gazelle.diff ]; then
+            echo "::error::Bazel BUILD files are stale — run 'bazel run //:gazelle' and commit."
+            exit 1
+          fi
+
+      - name: Bazel build + test (whole graph)
+        working-directory: gala_team
+        run: |
+          bazel build //...
+          bazel test //... --test_output=errors
+

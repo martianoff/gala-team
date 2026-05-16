@@ -4,6 +4,7 @@ gala_library(
     name = "headless",
     srcs = ["headless.gala"],
     importpath = "github.com/martianoff/gala_team/app/headless",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/directive",
         "//app/onboarding",
@@ -17,5 +18,4 @@ gala_library(
         "@gala//json",
         "@gala//strings",
     ],
-    visibility = ["//visibility:public"],
 )

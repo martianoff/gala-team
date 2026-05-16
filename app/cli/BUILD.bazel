@@ -6,30 +6,30 @@ gala_library(
         "keymap.gala",
         "picker.gala",
     ],
-    importpath = "github.com/martianoff/gala_team/app/cli",
     gala_deps = [
         "@gala_tui//:gala_tui",
     ],
+    importpath = "github.com/martianoff/gala_team/app/cli",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/config",
         "//app/team",
         "//app/ui",
         "@gala//collection_immutable",
     ],
-    visibility = ["//visibility:public"],
 )
 
 gala_go_test(
     name = "keymap_test",
     srcs = ["keymap_test.gala"],
-    pkg = "cli",
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
     lib_srcs = [
         "keymap.gala",
         "picker.gala",
     ],
-    gala_deps = [
-        "@gala_tui//:gala_tui",
-    ],
+    pkg = "cli",
     deps = [
         "//app/config",
         "//app/session",
@@ -42,14 +42,14 @@ gala_go_test(
 gala_go_test(
     name = "picker_test",
     srcs = ["picker_test.gala"],
-    pkg = "cli",
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
     lib_srcs = [
         "keymap.gala",
         "picker.gala",
     ],
-    gala_deps = [
-        "@gala_tui//:gala_tui",
-    ],
+    pkg = "cli",
     deps = [
         "//app/config",
         "//app/policy",

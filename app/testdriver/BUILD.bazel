@@ -1,12 +1,13 @@
-load("@gala//:gala.bzl", "gala_library")
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
 
 gala_library(
     name = "testdriver",
     srcs = ["testdriver.gala"],
-    importpath = "github.com/martianoff/gala_team/app/testdriver",
     gala_deps = [
         "@gala_tui//:gala_tui",
     ],
+    importpath = "github.com/martianoff/gala_team/app/testdriver",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/fsm",
         "//app/session",
@@ -16,5 +17,26 @@ gala_library(
         "@gala//go_interop",
         "@gala//json",
     ],
-    visibility = ["//visibility:public"],
+)
+
+# Internal test (package testdriver) so it can reach the unexported
+# readType / decodeAppMsg decoder. Per CLAUDE.md the internal-package
+# shape needs pkg= + lib_srcs= listing every source file from the lib.
+gala_go_test(
+    name = "testdriver_roundtrip_test",
+    srcs = ["testdriver_roundtrip_test.gala"],
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    lib_srcs = ["testdriver.gala"],
+    pkg = "testdriver",
+    deps = [
+        "//app/fsm",
+        "//app/session",
+        "//app/team",
+        "//app/ui",
+        "@gala//collection_immutable",
+        "@gala//go_interop",
+        "@gala//json",
+    ],
 )

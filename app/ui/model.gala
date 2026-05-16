@@ -849,6 +849,13 @@ sealed type AppMsg {
     // chunk path — that one fired on every Iris @summary turn and
     // could freeze the UI mid-stream.
     case SummaryReadyResult(Member string, Reason Option[string])
+    // RecoveryApprovalReadyResult carries the recovered @summary body
+    // plus the checkPrReady answer for the post-recovery resume path.
+    // Replaces the inline checkPrReady() call inside
+    // recoverApprovalIfReady — that one fired git rev-list (+ maybe
+    // git rev-parse) on the UI thread straight from the resume
+    // handler, freezing the event loop until git returned.
+    case RecoveryApprovalReadyResult(Body string, Reason Option[string])
     // Lifecycle
     case TickMsg
     case QuitMsg

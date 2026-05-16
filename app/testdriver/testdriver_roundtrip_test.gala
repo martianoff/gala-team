@@ -1,0 +1,119 @@
+package testdriver
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    "martianoff/gala/json"
+    . "github.com/martianoff/gala_team/app/ui"
+)
+
+// ============================================================================
+// testdriver round-trip — every driver-decoded command must reconstruct
+// its AppMsg field-for-field.
+//
+// `gala build`/`gala test` and `bazel build //...` catch a struct field
+// that becomes REQUIRED (constructor-arity error at the decoder's
+// `MouseAt(X = ..., Y = ...)` call site). They do NOT catch a field that
+// ships with a default: the decoder still compiles, silently emits the
+// zero value, and the JSON payload's real value is dropped — invisible
+// until an e2e script mysteriously stops seeing the field.
+//
+// This suite is the belt-and-suspenders for that gap:
+//   * belt (compile-time): every field-bearing variant is destructured
+//     with a FULL positional pattern, so adding a field is an arity
+//     error HERE even when the decoder's named-arg constructor swallows
+//     it as a default.
+//   * suspenders (run-time): the whole decoded Option[AppMsg] is
+//     compared by structural equality against a hand-built expected
+//     value, so a field that is read but mapped wrong also fails.
+//
+// driverDecode runs the EXACT path applyOneCommand uses (readType then
+// decodeAppMsg), minus the discarded Update, so a pass here means the
+// real harness round-trips too.
+// ============================================================================
+
+func driverDecode(raw string) Option[AppMsg] {
+    val d = json.NewJsonDecoder(raw)
+    val (kind, ok) = readType(d)
+    if !ok { return None[AppMsg]() }
+    return decodeAppMsg(kind, d)
+}
+
+// ----- mouse: 4 fields, the densest silent-default surface ---------------
+
+func TestRoundTrip_Mouse_AllFieldsForwarded(t T) T =
+    driverDecode("{\"type\":\"mouse\",\"x\":12,\"y\":7,\"pressed\":true,\"motion\":false}") match {
+        case Some(MouseAt(x, y, pressed, motion)) => {
+            val a1 = Eq(t, x, 12)
+            val a2 = Eq(a1, y, 7)
+            val a3 = IsTrue(a2, pressed)
+            IsFalse(a3, motion)
+        }
+        case _ => Fail(t, "mouse command did not round-trip to MouseAt")
+    }
+
+// Inverse polarity so every bool field is pinned in both states — a
+// decoder that hard-codes one of them can't pass both this and the
+// test above.
+func TestRoundTrip_Mouse_BoolsInverse(t T) T =
+    Eq(t,
+       driverDecode("{\"type\":\"mouse\",\"x\":0,\"y\":0,\"pressed\":false,\"motion\":true}"),
+       Some[AppMsg](MouseAt(X = 0, Y = 0, Pressed = false, Motion = true)))
+
+// ----- named messages: shared decoder, distinct variants ----------------
+
+func TestRoundTrip_ChunkArrived(t T) T =
+    driverDecode("{\"type\":\"msg\",\"name\":\"ChunkArrived\",\"member\":\"Iris\",\"line\":\"hello world\"}") match {
+        case Some(ChunkArrived(member, line)) => {
+            val a1 = Eq(t, member, "Iris")
+            Eq(a1, line, "hello world")
+        }
+        case _ => Fail(t, "ChunkArrived did not round-trip")
+    }
+
+func TestRoundTrip_SessionFailed(t T) T =
+    driverDecode("{\"type\":\"msg\",\"name\":\"SessionFailed\",\"member\":\"Felix\",\"err\":\"EOF\"}") match {
+        case Some(SessionFailed(member, errText)) => {
+            val a1 = Eq(t, member, "Felix")
+            Eq(a1, errText, "EOF")
+        }
+        case _ => Fail(t, "SessionFailed did not round-trip")
+    }
+
+func TestRoundTrip_WriteSent(t T) T =
+    Eq(t,
+       driverDecode("{\"type\":\"msg\",\"name\":\"WriteSent\",\"member\":\"Theo\"}"),
+       Some[AppMsg](WriteSent(Member = "Theo")))
+
+// ----- key payloads ------------------------------------------------------
+
+func TestRoundTrip_KeyChar(t T) T =
+    driverDecode("{\"type\":\"key\",\"char\":\"h\"}") match {
+        case Some(KeyChar(c)) => Eq(t, c, 'h')
+        case _                => Fail(t, "char command did not round-trip to KeyChar")
+    }
+
+func TestRoundTrip_KeySetViewMode(t T) T =
+    Eq(t,
+       driverDecode("{\"type\":\"key\",\"key\":\"FKey3\"}"),
+       Some[AppMsg](KeySetViewMode(Mode = ViewGrid())))
+
+// ----- dialog tokens: approval is dialog-only, so these tokens are the
+// only way e2e drives approve/reject; pin the mapping so a rename of
+// the testdriver token can't silently break every approval e2e. -------
+
+func TestRoundTrip_ApproveDialogToken(t T) T =
+    Eq(t,
+       driverDecode("{\"type\":\"key\",\"key\":\"ApproveDialog\"}"),
+       Some[AppMsg](KeyApprove()))
+
+func TestRoundTrip_RejectDialogToken(t T) T =
+    Eq(t,
+       driverDecode("{\"type\":\"key\",\"key\":\"RejectDialog\"}"),
+       Some[AppMsg](KeyReject()))
+
+// Unknown commands must decode to None, not a defaulted message —
+// otherwise a typo'd driver script would silently drive the wrong
+// AppMsg instead of surfacing an error frame.
+func TestRoundTrip_UnknownTypeIsNone(t T) T =
+    IsNone(t, driverDecode("{\"type\":\"nope\"}"))

@@ -1,3 +1,8 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/martianoff/gala_team
+gazelle(name = "gazelle")
+
 exports_files(
     ["go.mod"],
     visibility = ["//visibility:public"],

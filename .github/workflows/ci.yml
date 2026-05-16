@@ -107,7 +107,7 @@ jobs:
       - name: Checkout gala_tui (sibling for local_path_override)
         uses: actions/checkout@v4
         with:
-          repository: martianoff/gala_tui
+          repository: martianoff/gala-tui
           path: gala_tui
 
       - uses: actions/setup-go@v5

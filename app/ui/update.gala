@@ -633,6 +633,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case UncommittedCheckResult(n, b, d)    => onUncommittedCheckResult(m, n, b, d)
     case ApprovalReadyResult(body, reason)  => onApprovalReadyResult(m, body, reason)
     case SummaryReadyResult(member, reason) => onSummaryReadyResult(m, member, reason)
+    case RecoveryApprovalReadyResult(body, reason) => onRecoveryApprovalReadyResult(m, body, reason)
     case TickMsg()                   => onTick(m)
     case QuitMsg()                   => onQuit(m)
     case NoOp()                      => (m, NoCmd[AppMsg]())
@@ -4916,41 +4917,45 @@ func onSummaryReadyResult(m AppModel, member string, reason Option[string]) Tupl
 }
 
 // recoverApprovalIfReady scans `m.Conversation` in reverse for the
-// last lead-spoken summary and, if the lead branch is currently
-// PR-ready, sets State = Approval(body) so resume drops the user
-// back where they were.
+// last lead-spoken summary. The scan is pure; the PR-readiness probe
+// is NOT — checkPrReady spawns `git rev-list` (and maybe
+// `git rev-parse`), which freezes the gala-tui event loop if run
+// inline. So this only does the cheap scan and hands the blocking
+// probe to a worker Future (mirrors approvalReadyCmd / summaryReadyCmd);
+// onRecoveryApprovalReadyResult finishes the decision once the probe
+// resolves.
 //
 // Looks for two forms:
 //   1. Raw directive: `@summary ... @end` (early-session text the
 //      pipeline saved before formatDirectiveMarkers ran)
 //   2. Rendered form: line trimmed exactly to "Summary:" followed
 //      by body lines (formatDirectiveMarkers's transformation —
-//      what's actually in latest.json after a turn)
+//      what's actually in the persisted snapshot after a turn)
 //
-// Three guards prevent surprise re-entry into Approval:
+// Three guards prevent surprise re-entry into Approval. They are
+// unchanged from the prior inline implementation — only the order
+// moved: the conversation scan stays here, the readiness +
+// body-quality guards moved into onRecoveryApprovalReadyResult so
+// the git probe runs off the UI thread.
 //   - Only the LATEST lead summary counts (the conversation may
 //     contain older summaries from prior turns the user already
 //     rejected — those shouldn't reactivate)
-//   - checkPrReady must succeed (lead has commits past master);
-//     otherwise resume into Approval would dead-end on the same
-//     "no commits to PR" block the workflow already covers
-//   - validatePrBody must pass against the recovered body. The
-//     same gate that catches "no sections", "mentions members",
-//     ".gala_team paths", "I-give-up prose" for fresh @summary
-//     must run on resume too. Without this, a snapshot containing
-//     a bad @summary (escalation prose pasted as the body) would
-//     resume straight into Approval and the user's next approve
-//     would ship the bad body to GitHub.
+//   - checkPrReady must succeed (lead has commits past the default
+//     branch); otherwise resume into Approval would dead-end on the
+//     same "no commits to PR" block the workflow already covers
+//   - validatePrBody must pass against the recovered body — the same
+//     gate that catches missing sections, member mentions,
+//     internal-path leaks and give-up prose for a fresh @summary
+//     must run on resume too, or a snapshot holding a bad @summary
+//     would resume straight into Approval and the next approve would
+//     ship the bad body.
 //
-// Recovery outcomes:
-//   - No summary / not PR-ready → return (m, NoCmd). User lands
-//     in Idle and re-prompts the TL.
-//   - Summary present, branch ready, body fails quality gate →
-//     return (m, nudgeCmd) where the nudge respawns the TL with
-//     the same buildBadSummaryBodyNudge prompt the live path uses.
-//     The TL fixes the body and re-emits @summary, the next gate
-//     run accepts it. Identical UX to the live-path rejection.
-//   - All three guards pass → return (m with State=Approval, NoCmd).
+// Recovery outcomes (realised in onRecoveryApprovalReadyResult):
+//   - No summary → return (m, NoCmd) immediately. User lands in
+//     Idle and re-prompts the TL.
+//   - Summary present → return (m, recoveryApprovalReadyCmd). The
+//     Future resolves into RecoveryApprovalReadyResult; the handler
+//     then applies the readiness + body-quality guards.
 func recoverApprovalIfReady(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val leadName = m.Team.Lead.Name
     val convo = m.Conversation
@@ -4969,21 +4974,40 @@ func recoverApprovalIfReady(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         i = i - 1
     }
     if !found { return (m, NoCmd[AppMsg]()) }
-    val readiness = checkPrReady(m.Project)
-    if readiness.IsDefined() { return (m, NoCmd[AppMsg]()) }
-    val bodyIssue = validatePrBody(foundBody, m.Team)
+    return (m, recoveryApprovalReadyCmd(m.Project, foundBody))
+}
+
+// recoveryApprovalReadyCmd lifts checkPrReady into a worker Future
+// for the post-recovery resume path. The recovered summary body
+// rides along in the result message so onRecoveryApprovalReadyResult
+// can run validatePrBody and decide without re-scanning the model.
+// Capturing `proj` by value is fine — it's an immutable struct.
+func recoveryApprovalReadyCmd(proj Project, body string) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+        RecoveryApprovalReadyResult(Body = body, Reason = checkPrReady(proj))))
+
+// onRecoveryApprovalReadyResult finishes recoverApprovalIfReady once
+// the off-thread readiness probe completes. Same guard logic as the
+// prior inline implementation — only checkPrReady moved out of band:
+//   - probe blocked (Some reason) → user lands in Idle and
+//     re-prompts the TL (matches the old `readiness.IsDefined()`
+//     early return).
+//   - body fails the quality gate → respawn the TL with the same
+//     buildBadSummaryBodyNudge prompt the live path uses, so the
+//     user sees the orchestrator actively fixing the recovered
+//     state instead of silently dropping back to Idle.
+//   - all guards pass → State = Approval(body); resume drops the
+//     user back where they were.
+func onRecoveryApprovalReadyResult(m AppModel, body string, reason Option[string]) Tuple[AppModel, Cmd[AppMsg]] {
+    if reason.IsDefined() { return (m, NoCmd[AppMsg]()) }
+    val bodyIssue = validatePrBody(body, m.Team)
     if bodyIssue.IsDefined() {
-        // Spawn the TL with the same bad-body nudge the live path
-        // uses, so the user sees the orchestrator actively fixing
-        // the recovered state instead of silently dropping back to
-        // Idle. The TL respawns, reads the nudge, rewrites @summary,
-        // and the next gate run accepts it.
         val issue = bodyIssue.GetOrElse("")
         val (m1, cmds) = spawnTLNudge(m, "recovery-bad-summary",
-            buildBadSummaryBodyNudge(issue, foundBody))
+            buildBadSummaryBodyNudge(issue, body))
         return (m1, batchAll(cmds))
     }
-    return (m.Copy(State = Approval(SummaryBody = foundBody)), NoCmd[AppMsg]())
+    return (m.Copy(State = Approval(SummaryBody = body)), NoCmd[AppMsg]())
 }
 
 // extractSummaryFromText finds a summary body inside `text`,

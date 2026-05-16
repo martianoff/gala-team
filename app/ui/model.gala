@@ -121,12 +121,10 @@ struct AppModel(
     Tick         int,                              // monotonic tick counter (drives spinners)
     LastError    Option[string],                   // most recent runtime error, footer
     // Open PRs accumulated this session (oldest first). Each successful
-    // gh pr create appends a BatchPr; manual Ctrl+M consumes the most
-    // recent entry. With AutoApprove on, the list grows across multiple
-    // user prompts so the user can review the batch in GitHub when
-    // ready. With AutoApprove off (default), the list will hold at
-    // most one entry between approve and Ctrl+M merge — same shape as the
-    // previous LastPrUrl Option[string] it replaces.
+    // gh pr create appends a BatchPr. The list only grows — merging is
+    // done by the user on GitHub, never by the app, so entries are
+    // never consumed here. Surfaced so the user can review the batch
+    // in GitHub when ready.
     OpenPrs      Array[BatchPr],
     // AutoApprove turns the per-PR approval gate off — see the policy
     // doc on Policy.AutoApprove. Seeded from policy.auto_approve at
@@ -631,15 +629,11 @@ sealed type AppMsg {
     // the Cmd, dispatches OpenBrowser, and the Update branch
     // shells the OS launcher.
     case OpenBrowser(Url string)
-    // Merge pipeline. KeyMerge fires `gh pr merge --<rule>` against
-    // the most-recent OpenPrs entry, then runs Policy.PostMerge hooks.
-    // Merged carries the URL so the conversation log can echo a
-    // confirmation; MergeFailed surfaces the gh exit error.
-    case KeyMerge
-    case Merged(Url string)
-    case MergeFailed(ErrText string)
-    case PostMergeHooksPassed(Url string)
-    case PostMergeHooksFailed(ErrText string)
+    // Merge is intentionally NOT an app action. After a PR is opened
+    // the user reviews and merges it on GitHub; the app's lifecycle
+    // ends at "PR created". There is no KeyMerge / Merged /
+    // post-merge-hook message — the orchestrator never runs
+    // `gh pr merge`.
     // Cross-team consult outcomes. Dispatched when the TL emits a
     // `@consult(name) … @end` block; the runtime spawns a child
     // gala_team session and feeds the result back into the TL once

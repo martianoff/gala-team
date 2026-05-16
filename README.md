@@ -33,7 +33,7 @@ You need:
 - [Bazelisk](https://github.com/bazelbuild/bazelisk) (a wrapper around `bazel`)
 - Go 1.25+ (Bazel will use the SDK declared in `MODULE.bazel`)
 - `claude` CLI on `PATH` (this is what gala_team spawns)
-- `gh` CLI on `PATH` (for `gh pr create` / `gh pr merge`)
+- `gh` CLI on `PATH` (for `gh pr create`; merging is done by you on GitHub)
 - A clone of [`martianoff/gala`](https://github.com/martianoff/gala) and
   [`martianoff/gala_tui`](https://github.com/martianoff/gala_tui) as siblings of
   this repo, or the modules pinned in `MODULE.bazel`.
@@ -79,8 +79,9 @@ The binary lands at `bazel-bin/cmd/gala_team_/gala_team`.
 
 3. **Type a prompt**, press `Enter`. Watch the team work.
 
-4. When the lead emits `@summary`, the banner switches to **approval mode**.
-   Press `Ctrl+A` to fire `gh pr create`, then `Ctrl+M` to merge.
+4. When the lead emits `@summary`, the approval dialog opens. Approve it to
+   fire `gh pr create`. **Review and merge the PR on GitHub** — the app
+   never merges; it stops at "PR created".
 
 ---
 
@@ -181,9 +182,11 @@ policy:
                                     # gh pr create) targets that worktree, never the user's
                                     # main checkout.
 
-  merge_rule: squash                # default `squash`. Possible values:
-                                    #   squash | rebase | merge
-                                    # Translates to `gh pr merge --<rule> --delete-branch`.
+  merge_rule: squash                # default `squash`. squash | rebase | merge.
+                                    # Informational only: the app never runs
+                                    # `gh pr merge`. Surfaced in the PR-created
+                                    # log line so you know which strategy to
+                                    # pick when you merge on GitHub.
 
   pre_merge:                        # default `[]`. List of hooks that must succeed before
                                     # `gh pr create` runs. Each hook spawns a subprocess in
@@ -195,9 +198,11 @@ policy:
       cmd: go
       args: [test, ./...]
 
-  post_merge:                       # default `[]`. Same shape as pre_merge. Run AFTER a
-                                    # successful `gh pr merge`. Failure surfaces in the
-                                    # footer as a warning but doesn't roll back the merge.
+  post_merge:                       # default `[]`. Parsed but INERT: the app no
+                                    # longer merges (merging is done by you on
+                                    # GitHub), so there is no merge event to run
+                                    # these after. Kept for forward-compat /
+                                    # documentation; runs nothing today.
     - name: notify
       cmd: scripts/notify-slack.sh
       args: []
@@ -265,7 +270,6 @@ the in-project entry wins.
 | `Ctrl+T` | Toggle the consult viewer modal (live tail of every active consult). |
 | `Ctrl+A` | Approve the lead's `@summary` → run pre-merge hooks → `gh pr create`. |
 | `Ctrl+R` | Reject the summary → back to live conversation. |
-| `Ctrl+M` | After `PR created` lands: `gh pr merge` with the configured rule. |
 | `Ctrl+N` | Erase current session (two-press confirmation). |
 | `Ctrl+H` | Toggle history browser. |
 | `F2` / `F3` / `F4` | Switch the layout: Focus mode (no sidebar) / Grid (member cards) / Pipeline (full-screen org chart). Same key again returns to the default split. |
@@ -342,16 +346,17 @@ teams:
 
 ## Session history (Ctrl+H)
 
-Every successful `gh pr merge` archives the conversation log to
-`.gala_team/sessions/archive/merged-<savedAt>.json`. Press `Ctrl+H` to
-browse:
+Every PR opened (`gh pr create`) archives the conversation log to
+`.gala_team/sessions/archive/pr-created-<savedAt>.json` — PR creation is
+the app's completion point (merging happens later, by you, on GitHub).
+Press `Ctrl+H` to browse:
 
 ```
   History  ·  ↑↓ navigate · Enter open · Ctrl+H close
 
-  ▶ 2026-04-28 14:32  ·  merged  ·  myproject  (47 lines)
-    2026-04-26 09:11  ·  merged  ·  myproject  (62 lines)
-    2026-04-25 16:48  ·  merged  ·  myproject  (38 lines)
+  ▶ 2026-04-28 14:32  ·  pr-created  ·  myproject  (47 lines)
+    2026-04-26 09:11  ·  pr-created  ·  myproject  (62 lines)
+    2026-04-25 16:48  ·  pr-created  ·  myproject  (38 lines)
 ```
 
 `Enter` loads the selected archive in read-only view; `Esc` returns to the
@@ -373,8 +378,8 @@ index.
 **The team lead is special: it ALWAYS runs in
 `<repo>/.gala_team/worktrees/_lead` on branch `gala_team/<project>/lead`,
 regardless of `workspace_mode`.** Every orchestrator git op
-(lead-branch reset on Start fresh, per-PR snapshot push, `gh pr create`,
-`gh pr merge`) targets that dedicated worktree — the user's main
+(lead-branch reset on Start fresh, per-PR snapshot push, `gh pr create`)
+targets that dedicated worktree — the user's main
 checkout is never mutated by orchestrator code. `workspace_mode`
 controls only the engineer/QA isolation story, not the TL's safety.
 
@@ -406,7 +411,7 @@ non-fatal errors. Used internally by the `@consult` registry path.
     ├── sessions/
     │   ├── latest.json                    # current session — restored on launch
     │   └── archive/
-    │       └── merged-<savedAt>.json      # one per successful merge
+    │       └── pr-created-<savedAt>.json  # one per PR opened
     └── worktrees/
         ├── _lead/                          # team lead's worktree (always; per-project branch)
         ├── Felix/                          # only when workspace_mode = worktree-per-engineer

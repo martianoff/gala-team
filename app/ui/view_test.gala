@@ -340,25 +340,26 @@ func TestView_Footer_DefaultLegend(t T) T {
     return IsTrue(t2, strings.Contains(out, "Ctrl+Q"))
 }
 
-// After PrCreated, the legend swaps to the merge-prompt hints
-// (Ctrl+M merge). Approval is dialog-only, so there is no re-approve
-// key in the legend anymore.
-func TestView_Footer_PostPrCreated_ShowsMergeHint(t T) T {
+// An open PR does NOT change the footer legend — merge is done on
+// GitHub, never from the app, so there is no "Ctrl+M merge" hint in
+// any state. The default send/palette legend stays.
+func TestView_Footer_OpenPr_NoMergeHint(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(OpenPrs = ArrayOf(samplePr("https://github.com/x/y/pull/1")))
     val out = render(m)
-    return IsTrue(t, strings.Contains(out, "Ctrl+M merge"))
+    val t1 = IsFalse(t, strings.Contains(out, "Ctrl+M"))
+    return IsTrue(t1, strings.Contains(out, "Enter send"))
 }
 
 // LastError now renders as a separate banner BELOW the footer — it
 // no longer hides the keybind legend. Both must be visible at once.
 func TestView_Footer_LastErrorBeatsLegend(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(
-        LastError = Some("gh pr merge: auth required"),
+        LastError = Some("gh pr create: auth required"),
         OpenPrs   = ArrayOf(samplePr("https://x/y/pull/1")),
     )
     val out = render(m)
     val t1 = IsTrue(t,  strings.Contains(out, "auth required"))
-    return IsTrue(t1, strings.Contains(out, "Ctrl+M merge"))
+    return IsTrue(t1, strings.Contains(out, "Ctrl+Q quit"))
 }
 
 // samplePr builds a stub BatchPr for footer / banner / list-render
@@ -1117,11 +1118,13 @@ func TestFlow_ChunkArrived_RendersInConversation(t T) T {
     return IsTrue(t, strings.Contains(render(m), "thinking out loud"))
 }
 
-// PrCreated swaps the footer hint to mention Ctrl+M.
-func TestFlow_PrCreated_FooterShowsMergeHint(t T) T {
+// PrCreated does NOT add a merge hint to the footer — merge is a
+// GitHub action; the PR-merge guidance is in the conversation log,
+// not the keybind legend.
+func TestFlow_PrCreated_FooterHasNoMergeHint(t T) T {
     val seed = mkModel(mkTeam("X", ""))
     val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
-    return IsTrue(t, strings.Contains(render(m), "Ctrl+M merge"))
+    return IsFalse(t, strings.Contains(render(m), "Ctrl+M"))
 }
 
 // SessionFailed surfaces in the footer as ⚠ <member>: <err>.

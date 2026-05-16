@@ -19,7 +19,16 @@ import (
 // never reaches the keymap. Ctrl+Q is the graceful path; the app's
 // own QuitMsg handler implements the two-press confirmation.
 func TestKeyToAppMsg_CtrlQ_Quit(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('q'))), "QuitMsg")
-func TestKeyToAppMsg_CtrlM_Merge(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('m'))), "KeyMerge")
+// Ctrl+M is intentionally NOT bound to merge — merge is done on
+// GitHub after approval, never from the app. With the binding gone
+// the event falls through the ctrl-prefix table to the plain-key
+// path (real terminals send Ctrl+M as CR → Enter; the synthetic
+// Ctrl(Char('m')) here lands on the Char fallthrough). The only
+// guarantee that matters: it is no longer KeyMerge.
+func TestKeyToAppMsg_CtrlM_NotMerge(t T) T {
+    val variant = appMsgVariant(KeyToAppMsg(Ctrl(Char('m'))))
+    return IsFalse(t, variant == "KeyMerge")
+}
 func TestKeyToAppMsg_CtrlH_ToggleHistory(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('h'))), "KeyToggleHistory")
 func TestKeyToAppMsg_CtrlL_ToggleFocus(t T) T = expectMsg(t, KeyToAppMsg(Ctrl(Char('l'))), "KeyToggleFocus")
 func TestKeyToAppMsg_CtrlT_ToggleConsultViewer(t T) T =
@@ -209,7 +218,6 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case KeySubmit()                 => "KeySubmit"
     case KeyApprove()                => "KeyApprove"
     case KeyReject()                 => "KeyReject"
-    case KeyMerge()                  => "KeyMerge"
     case KeyToggleHistory()          => "KeyToggleHistory"
     case KeyToggleConsultViewer()    => "KeyToggleConsultViewer"
     case HistoryCursorUp()           => "HistoryCursorUp"
@@ -227,10 +235,6 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case PrFailed(_)                 => "PrFailed"
     case OpenBrowser(_)              => "OpenBrowser"
     case WorktreesWiped()            => "WorktreesWiped"
-    case Merged(_)                   => "Merged"
-    case MergeFailed(_)              => "MergeFailed"
-    case PostMergeHooksPassed(_)     => "PostMergeHooksPassed"
-    case PostMergeHooksFailed(_)     => "PostMergeHooksFailed"
     case ConsultCompleted(_, _)      => "ConsultCompleted"
     case ConsultFailed(_, _)         => "ConsultFailed"
     case ConsultChunkArrived(_, _)   => "ConsultChunkArrived"

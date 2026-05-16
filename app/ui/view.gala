@@ -2021,12 +2021,25 @@ func planPanel(m AppModel) LayoutChild {
     if m.Plan.IsEmpty() { return Fixed(0, Empty()) }
     val total   = m.Plan.Size()
     val shipped = m.PlanShipped
-    if shipped >= total { return Fixed(0, Empty()) }
+    // shipped >= total is NOT "no plan" — it's "plan finished". The
+    // panel must NOT vanish here: for steps 1..N-1 finishing a PR
+    // visibly advances the panel to the next step, so for the LAST
+    // step it has to advance to a terminal "all shipped" state, not
+    // disappear. Vanishing at the finish line removed the one
+    // persistent confirmation that every step landed. The completed
+    // panel sticks around until m.Plan is cleared by the next genuine
+    // user prompt (onSubmit, non-continuation) — the right lifetime.
+    val complete = shipped >= total
     val (cols, _) = TermSize()
     val bodyMax = MaxInt(20, cols - 16)
-    val titleRow = Fixed(1, TextStyled(
-        s"  📋 Plan — step ${shipped + 1} of ${total}",
-        DefaultStyle().WithBold().WithFg(BrightCyan())))
+    val titleRow = if (complete)
+        Fixed(1, TextStyled(
+            s"  📋 Plan complete — ${total}/${total} PRs shipped",
+            DefaultStyle().WithBold().WithFg(BrightGreen())))
+    else
+        Fixed(1, TextStyled(
+            s"  📋 Plan — step ${shipped + 1} of ${total}",
+            DefaultStyle().WithBold().WithFg(BrightCyan())))
     val startIdx = if (total <= planPanelMaxRows) 0
                    else MinInt(MaxInt(0, shipped - 1), total - planPanelMaxRows)
     val endIdx = MinInt(total, startIdx + planPanelMaxRows)

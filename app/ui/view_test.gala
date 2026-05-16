@@ -427,16 +427,26 @@ func TestView_PlanPanel_HiddenWhenNoPlan(t T) T {
     return IsFalse(t, strings.Contains(out, "📋 Plan"))
 }
 
-// Plan exhausted (PlanShipped == Plan.Size()) → panel hides; the
-// completion message is in the conversation log instead.
-func TestView_PlanPanel_HiddenWhenComplete(t T) T {
+// Plan exhausted (PlanShipped == Plan.Size()) → panel stays visible
+// in a terminal "complete" state (all steps ✓), NOT hidden. Hiding
+// it here was the "panel disappears on the last step" bug: finishing
+// steps 1..N-1 advances the panel, so finishing the last step must
+// land on a done-state, not vanish. It only goes away once Plan is
+// cleared (next genuine user prompt) — covered by HiddenWhenNoPlan.
+func TestView_PlanPanel_CompleteShowsDoneState(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(
         AutoApprove = true,
-        Plan        = ArrayOf("a", "b"),
+        Plan        = ArrayOf("step one", "step two"),
         PlanShipped = 2,
     )
     val out = render(m)
-    return IsFalse(t, strings.Contains(out, "📋 Plan"))
+    val t1 = IsTrue(t,  strings.Contains(out, "Plan complete"))
+    val t2 = IsTrue(t1, strings.Contains(out, "2/2 PRs shipped"))
+    // Every step rendered as done (✓), none queued (☐).
+    val t3 = IsTrue(t2, strings.Contains(out, "step one"))
+    val t4 = IsTrue(t3, strings.Contains(out, "step two"))
+    val t5 = IsTrue(t4, strings.Contains(out, "✓"))
+    return IsFalse(t5, strings.Contains(out, "☐"))
 }
 
 // Header AUTO badge surfaces the plan progress so a user looking at

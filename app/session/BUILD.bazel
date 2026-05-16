@@ -7,23 +7,23 @@ gala_library(
         "session.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/session",
+    visibility = ["//visibility:public"],
     deps = [
         "@gala//collection_immutable",
         "@gala//fs",
         "@gala//json",
         "@gala//strings",
     ],
-    visibility = ["//visibility:public"],
 )
 
 gala_go_test(
     name = "session_test",
     srcs = ["session_test.gala"],
-    pkg = "session",
     lib_srcs = [
         "history.gala",
         "session.gala",
     ],
+    pkg = "session",
     deps = [
         ":session",
         "@gala//collection_immutable",

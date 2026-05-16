@@ -2418,12 +2418,86 @@ func uncommittedCheckCmd(cwd string, name string, body string) Cmd[AppMsg] =
 // onUncommittedCheckResult is the back-channel for the engineer
 // commit-gate. Dirty → nudge the engineer to commit before QA sees
 // the work. Clean → finalise as if the check passed inline.
+//
+// This handler is ONLY reached for engineers: onMemberDone routes
+// non-engineers straight to finaliseMemberDone before any uncommitted
+// check is scheduled. So the optional post-engineer-prompt round below
+// is naturally engineer-scoped — QA and the team lead never enter here.
+//
+// When workflow.post_engineer_prompt is set and this engineer has not
+// yet had it re-sent for the current dispatch cycle (tracked in
+// PostPromptSent), the clean branch re-resumes the engineer's own
+// claude session and re-sends that exact prompt verbatim, then returns
+// WITHOUT finalising — the FSM MemberDone event does not fire, so the
+// member stays in Delegating.Pending. The engineer's follow-up turn
+// flows back through onMemberDone → uncommitted check → here again;
+// this time PostPromptSent already contains them, so we fall through to
+// finaliseMemberDone and the FSM drains to QAGate as normal. Because
+// each engineer's MemberDone is deferred independently, parallel
+// engineers each run their own one-shot round and QAGate is reached
+// only after every engineer's post-prompt round has completed. The
+// dirty path is left untouched: if the post-prompt work is uncommitted
+// on the second pass it correctly re-nudges to commit first.
 func onUncommittedCheckResult(m AppModel, name string, body string, dirty bool) Tuple[AppModel, Cmd[AppMsg]] {
     if dirty {
         val mem = findMemberByName(m.Team.Members, name).GetOrElse(m.Team.Lead)
         return nudgeEngineerToCommit(m, name, mem)
     }
+    if postPromptDue(m, name) {
+        return findMemberByName(m.Team.Members, name) match {
+            // No team member by that name — nothing to resume. Fall
+            // through to the normal finalise so a misrouted name can't
+            // strand the turn.
+            case None()    => finaliseMemberDone(m, name, body)
+            case Some(mem) => sendPostEngineerPrompt(m, mem, m.Workflow.PostEngineerPrompt)
+        }
+    }
     return finaliseMemberDone(m, name, body)
+}
+
+// postPromptDue is the pure one-shot guard: true exactly when a
+// post-engineer prompt is configured AND this member has not yet had
+// it re-sent for the current dispatch cycle. Membership in
+// PostPromptSent is per-member, so for parallel engineers each one is
+// evaluated independently — engineer A being mid-post-prompt does not
+// suppress engineer B's own round, and an engineer that already had
+// its round (in PostPromptSent) falls through to drain. Pure so the
+// guard / parallel-engineer behaviour is testable without spawning.
+func postPromptDue(m AppModel, name string) bool =
+    m.Workflow.PostEngineerPrompt != "" && !m.PostPromptSent.Contains(name)
+
+// sendPostEngineerPrompt re-resumes the engineer's own claude session
+// and re-sends workflow.post_engineer_prompt verbatim — the prompt
+// author owns its content, so no system/orchestration framing is
+// injected around it (unlike the commit nudge or help relay). Mirrors
+// the same-session --resume precedent in onAnswerPendingQuestion:
+// closeLiveSession → ensureSession → sendAndPumpCmd, with the engineer
+// marked in PostPromptSent FIRST so the loop guard holds even if the
+// follow-up turn lands before this returns. No WrapPromptSafe /
+// onboarding wrap: this is a continuation of an existing session, not
+// a first dispatch. Status goes back to Working and the FSM is left
+// alone, so MemberDone has not fired and the member stays in
+// Delegating.Pending until the follow-up turn finalises.
+func sendPostEngineerPrompt(m AppModel, mem Member, prompt string) Tuple[AppModel, Cmd[AppMsg]] {
+    val marked = m.Copy(PostPromptSent = m.PostPromptSent.Add(mem.Name))
+    val closed = closeLiveSession(marked, mem.Name)
+    return ensureSession(closed, mem) match {
+        case Left(err) => {
+            LogSpawnFailure(mem.Name, "post_engineer_prompt", err)
+            // Couldn't re-resume — don't strand the turn. Fall through
+            // to the normal finalise so the engineer still drains to
+            // QA. The guard already marked them, so a respawn won't
+            // re-fire the prompt.
+            return finaliseMemberDone(
+                closed.Copy(LastError = Some(s"post-prompt ${mem.Name}: ${err}")),
+                mem.Name, "",
+            )
+        }
+        case Right(m1) => {
+            val withStatus = setStatus(m1, mem.Name, StWorking())
+            return (withStatus, sendAndPumpCmd(withStatus, mem, prompt))
+        }
+    }
 }
 
 // finaliseMemberDone runs the rest of @finished processing once the
@@ -2939,9 +3013,15 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         return (withFailure, NoCmd[AppMsg]())
     }
     val attempt = retries + 1
-    val recovering = cleaned.Copy(
-        RetryCount = cleaned.RetryCount.Put(name, attempt),
-        LastError  = Some(s"${name}: ${err} — retry ${attempt}/${maxRetries}"),
+    // Unified respawn reset (freshTask = false): clears the stream /
+    // JSON / watermark / @done / @blocked buffers so the --resume turn
+    // parses clean, resets LastChunkAt to now, PRESERVES PostPromptSent
+    // (a crash mid-post-prompt must not re-fire it), and BUMPS
+    // RetryCount from `retries` to `retries + 1` == `attempt`. We keep
+    // `attempt` only for the human-facing message + StRecovering.
+    val reset = resetMemberForRespawn(cleaned, name)
+    val recovering = reset.Copy(
+        LastError = Some(s"${name}: ${err} — retry ${attempt}/${maxRetries}"),
     )
     val withStatus = setStatus(recovering, name, StRecovering(attempt, maxRetries))
     return respawnMember(withStatus, name)
@@ -2976,15 +3056,104 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
         }
         case Some(_) => {
             val mClosed = closeLiveSession(m, name)
-            val recovering = mClosed.Copy(
-                RetryCount = mClosed.RetryCount.Put(name, attempt),
-                LastError  = Some(s"${name}: silent past heartbeat — respawn ${attempt}/${max}"),
+            // Same unified respawn reset as the crash path
+            // (freshTask = false): buffers cleared, LastChunkAt reset
+            // to now (so the heartbeat does not instantly re-mark the
+            // fresh subprocess stuck against the silent one's stale
+            // timestamp), PostPromptSent preserved, RetryCount bumped
+            // from `retries` to `retries + 1` == the `attempt` the
+            // caller computed. `attempt` is kept for the message +
+            // StRecovering only.
+            val reset = resetMemberForRespawn(mClosed, name)
+            val recovering = reset.Copy(
+                LastError = Some(s"${name}: silent past heartbeat — respawn ${attempt}/${max}"),
             )
             val withStatus = setStatus(recovering, name, StRecovering(attempt, max))
             return respawnMember(withStatus, name)
         }
     }
 }
+
+// resetMemberState is the SINGLE place that prepares a member's
+// per-member scratch state for a freshly (re)spawned subprocess. It
+// replaces the hand-rolled cleanup that used to live independently in
+// the fresh-dispatch path, the crash path, and the heartbeat path —
+// three copies that each had to separately remember every buffer /
+// watermark / timestamp, so a path that forgot one reintroduced a
+// fixed bug. See docs/FSM_HARDENING.md (shapes 1 and 2).
+//
+// Common to EVERY path (the buffer-carry-forward invariant): the
+// stream buffer, the raw-JSON envelope-reassembly buffer, the
+// directive-fired watermark, and the captured @done / @blocked bodies
+// belong to exactly one subprocess lifetime. A resumed turn must parse
+// from an empty buffer — a surviving half-envelope or a stale @done
+// re-fires directives that already fired (dispatch storm / doubled
+// member-done). LastChunkAt resets to `now` so the heartbeat measures
+// silence from the respawn instant, never against the dead
+// subprocess's last-spoke timestamp (an old timestamp made the
+// heartbeat mark the brand-new subprocess stuck within milliseconds —
+// a real past defect).
+//
+// The `freshTask` flag is the ONLY legitimate difference between the
+// paths, encoded explicitly rather than by which call site you are in:
+//
+//   freshTask = true  — a brand-new @dispatch. The member starts a new
+//     unit of work: clear PostPromptSent (the new task earns its own
+//     one-shot post-engineer-prompt round) and reset RetryCount to 0
+//     (a new task starts with a full crash budget).
+//
+//   freshTask = false — a crash / heartbeat respawn of an in-flight
+//     task. PRESERVE PostPromptSent (a respawn that lands mid-post-
+//     prompt must NOT re-fire the prompt) and BUMP RetryCount
+//     (consecutive recovery attempts escalate toward maxRetries;
+//     onChunk clears it again on the next live chunk).
+//
+// SessionIds is deliberately untouched on every path: --resume must
+// thread the same conversation across a respawn. The one case that
+// needs a fresh --session-id (claude reports the resume id is stale)
+// is handled upstream in the chunk / stderr path, which drops the id
+// BEFORE the respawn runs — so preserving whatever is in SessionIds is
+// correct here for every path.
+//
+// Pure (AppModel -> AppModel): unit-testable without spawning. Session
+// kill / PendingClosures stay with closeLiveSession (the crash path
+// must NOT bump PendingClosures — there is no live process to kill —
+// while the heartbeat and fresh paths must), so that distinction is
+// kept out of this helper on purpose.
+func resetMemberState(m AppModel, name string, freshTask bool) AppModel {
+    val cleared = m.Copy(
+        MemberBuffers         = m.MemberBuffers.Remove(name),
+        MemberJsonBuf         = m.MemberJsonBuf.Remove(name),
+        MemberDirectivesFired = m.MemberDirectivesFired.Remove(name),
+        MemberDoneBodies      = m.MemberDoneBodies.Remove(name),
+        MemberBlockedReasons  = m.MemberBlockedReasons.Remove(name),
+        LastChunkAt           = m.LastChunkAt.Put(name, time_utils.Now()),
+    )
+    return if (freshTask) {
+        cleared.Copy(
+            PostPromptSent = cleared.PostPromptSent.Remove(name),
+            RetryCount     = cleared.RetryCount.Remove(name),
+        )
+    } else {
+        val bumped = cleared.RetryCount.Get(name).GetOrElse(0) + 1
+        cleared.Copy(RetryCount = cleared.RetryCount.Put(name, bumped))
+    }
+}
+
+// resetMemberForFreshDispatch — wrapper for the fresh-@dispatch path:
+// the member is starting brand-new work, so PostPromptSent clears and
+// RetryCount resets to 0.
+func resetMemberForFreshDispatch(m AppModel, name string) AppModel =
+    resetMemberState(m, name, true)
+
+// resetMemberForRespawn — wrapper for the crash / heartbeat respawn
+// paths: the member is resuming an interrupted task, so PostPromptSent
+// is preserved and RetryCount is bumped. The bumped count equals the
+// caller's `attempt` (attempt is always currentRetries + 1, and the
+// helper bumps currentRetries by one), so the human-facing
+// "retry N/max" message and the stored counter stay in agreement.
+func resetMemberForRespawn(m AppModel, name string) AppModel =
+    resetMemberState(m, name, false)
 
 // respawnMember performs the actual auto-respawn: looks up the Member
 // record by name, calls ensureSession (which creates a fresh subprocess
@@ -3071,15 +3240,17 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
         // as stale and skipped. Same shape as onSubmit's lead-side
         // close.
         //
-        // Also reset the directive-parser watermark + buffer so the
-        // new dispatch starts with a clean slate — a re-dispatched
-        // member's NEW @done shouldn't be skipped just because the
-        // last turn's @done already incremented the fired counter.
-        val mClosed = closeLiveSession(curM, name).Copy(
-            MemberBuffers         = curM.MemberBuffers.Remove(name),
-            MemberDirectivesFired = curM.MemberDirectivesFired.Remove(name),
-            MemberDoneBodies      = curM.MemberDoneBodies.Remove(name),
-        )
+        // Then run the unified fresh-dispatch reset on the closed
+        // model: clears the stream / JSON / watermark / @done / @blocked
+        // buffers (a re-dispatched member's NEW @done must not be
+        // skipped because the last turn's @done already moved the fired
+        // counter), clears PostPromptSent so a brand-new task earns its
+        // own one-shot post-engineer-prompt round, and resets RetryCount
+        // to 0 so the new task starts with a full crash budget. The
+        // PostPromptSent / RetryCount reset happens HERE and ONLY here
+        // (the freshTask seam) — the crash / heartbeat paths preserve
+        // PostPromptSent and bump RetryCount instead.
+        val mClosed = resetMemberForFreshDispatch(closeLiveSession(curM, name), name)
         return findMemberByName(mClosed.Team.Members, name) match {
             case None() => (mClosed, curCmds)
             case Some(mem) => ensureSession(mClosed, mem) match {

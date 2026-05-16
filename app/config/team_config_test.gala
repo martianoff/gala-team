@@ -71,7 +71,8 @@ func TestLoadValidTeam(t T) T {
     val t4 = Eq(t3, cfg.Team.Lead.Name, "Iris")
     val t5 = IsTrue(t4, cfg.Workflow.QARequired)
     val t6 = IsTrue(t5, cfg.Workflow.ParallelEngineers)
-    return IsTrue(t6, cfg.Workflow.RequireUserConfirm)
+    val t7 = IsTrue(t6, cfg.Workflow.RequireUserConfirm)
+    return Eq(t7, cfg.Workflow.PostEngineerPrompt, "")  // default: disabled
 }
 
 func TestLoadNoQa_AllowedWhenQaNotRequired(t T) T {
@@ -303,7 +304,28 @@ func TestLoadWorkflow_OmittedKeysDefault(t T) T {
     val w = res.Get().Workflow
     val t2 = IsFalse(t1, w.QARequired)        // explicit
     val t3 = IsTrue(t2, w.ParallelEngineers)  // default true
-    return IsTrue(t3, w.RequireUserConfirm)   // default true
+    val t4 = IsTrue(t3, w.RequireUserConfirm) // default true
+    return Eq(t4, w.PostEngineerPrompt, "")   // default empty
+}
+
+// post_engineer_prompt is a top-level workflow key (sibling of
+// qa_required), not nested under approval. When set it parses through
+// verbatim; when absent it stays empty.
+val postEngineerPromptYaml = "teams:\n" +
+    "  - key: main\n" +
+    "    name: \"X\"\n" +
+    "    members:\n" +
+    "      - role: team_lead\n        name: \"Iris\"\n        personality: \"calm\"\n" +
+    "      - role: engineer\n        name: \"Felix\"\n        personality: \"terse\"\n" +
+    "workflow:\n" +
+    "  qa_required: false\n" +
+    "  post_engineer_prompt: \"/simplify\"\n"
+
+func TestLoadWorkflow_PostEngineerPromptParsed(t T) T {
+    val res = LoadFromString(postEngineerPromptYaml)
+    val t1 = IsSuccess(t, res)
+    val w = res.Get().Workflow
+    return Eq(t1, w.PostEngineerPrompt, "/simplify")
 }
 
 // Two-engineer team — the validate() lead-uniqueness check is keyed on

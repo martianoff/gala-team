@@ -11,7 +11,7 @@ import (
 // `main()` wrapper and the keyboard / mouse routing is unit-testable
 // without spawning the runtime.
 //
-// Every binding is keyed off either KeyMatchesAny ("ctrl+m", "tab", …)
+// Every binding is keyed off either KeyMatchesAny ("ctrl+q", "tab", …)
 // or the structural KeyEvent.Key sealed-type (Backspace, Enter, Char,
 // Up, Down, Esc, Space). Adding a new shortcut is a one-line edit
 // here plus a test in keymap_test.gala.
@@ -46,7 +46,6 @@ func mouseToAppMsg(me MouseEvent) AppMsg = me.Btn match {
 //
 // Keys:
 //   - Ctrl+C / Ctrl+Q  →  QuitMsg              (graceful, with confirmation)
-//   - Ctrl+M           →  KeyMerge             (merge after PrCreated)
 //   - Ctrl+H           →  KeyToggleHistory     (history browser)
 //   - Ctrl+T           →  KeyToggleConsultViewer (consult overlay)
 //   - Tab / Ctrl+L     →  KeyToggleFocus       (composer ↔ sidebar)
@@ -83,7 +82,6 @@ func mouseToAppMsg(me MouseEvent) AppMsg = me.Btn match {
 // consistently for us.
 func KeyToAppMsg(ev KeyEvent) AppMsg {
     if (KeyMatchesAny(ev, "ctrl+c", "ctrl+q")) { return QuitMsg() }
-    if (KeyMatchesAny(ev, "ctrl+m"))           { return KeyMerge() }
     if (KeyMatchesAny(ev, "ctrl+h"))           { return KeyToggleHistory() }
     if (KeyMatchesAny(ev, "ctrl+t"))           { return KeyToggleConsultViewer() }
     if (KeyMatchesAny(ev, "ctrl+l", "tab"))    { return KeyToggleFocus() }

@@ -1206,9 +1206,9 @@ func TestResume_IgnoresSummaryFromNonLead(t T) T {
     }
 }
 
-// onPrCreated also appends a "Press Ctrl+M to merge" hint line, so
-// the conversation has 2 entries — TestPrCreated_AppendsBothLogLines
-// covers the count; this one focuses on the URL line itself.
+// onPrCreated also appends a GitHub-merge hint line, so the
+// conversation has 2 entries — TestPrCreated_HintPointsAtGitHubNotCtrlM
+// covers the count + wording; this one focuses on the URL line itself.
 // The PR-created log line embeds an OSC 8 escape so terminals that
 // support it render the URL as a clickable hyperlink. Tests check for
 // the URL substring rather than equality so the escape wrapping
@@ -1284,7 +1284,10 @@ func TestPreMergeHooksFailed_StopsPipelineWithError(t T) T {
 }
 
 // ---------------------------------------------------------------------------
-// Merge flow — Ctrl+M after PrCreated
+// PR creation — the app's completion point. Merge is done on GitHub
+// after approval, never from the app: there is no KeyMerge / Merged /
+// post-merge path. onPrCreated records the PR and points the user at
+// GitHub (with the configured merge strategy for reference).
 // ---------------------------------------------------------------------------
 
 func TestPrCreated_AppendsToOpenPrs(t T) T {
@@ -1293,78 +1296,26 @@ func TestPrCreated_AppendsToOpenPrs(t T) T {
     return Eq(t1, m.OpenPrs.Get(0).Url, "https://x/y/pull/7")
 }
 
-func TestPrCreated_AppendsBothLogLines(t T) T {
+// Two log lines: the PR link, then a GitHub-merge hint that names the
+// configured strategy (default squash) — NEVER a Ctrl+M hint.
+func TestPrCreated_HintPointsAtGitHubNotCtrlM(t T) T {
     val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7", Branch = "gala_team/x/pr/def7"))
     val t1 = Eq(t, m.Conversation.Size(), 2)
     val t2 = IsTrue(t1, strings.Contains(m.Conversation.Get(0).Text, "https://x/y/pull/7"))
-    return IsTrue(t2, m.Conversation.Get(1).Text == "Press Ctrl+M to merge with --squash.")
+    val hint = m.Conversation.Get(1).Text
+    val t3 = IsTrue(t2, strings.Contains(hint, "merge it on GitHub"))
+    val t4 = IsTrue(t3, strings.Contains(hint, "squash"))
+    return IsFalse(t4, strings.Contains(hint, "Ctrl+M"))
 }
 
-func TestKeyMerge_WithoutPriorPr_NoOp(t T) T {
-    val seed = sampleModel()  // OpenPrs is empty
-    val (m, _) = Update(seed, KeyMerge())
-    val t1 = Eq(t, m.Conversation.Size(), 0)
-    return IsTrue(t1, m.OpenPrs.IsEmpty())
-}
-
-func TestKeyMerge_WithOpenPr_LogsMergeIntent(t T) T {
-    val seed = sampleModel().Copy(OpenPrs = ArrayOf(sampleBatchPr("https://x/y/pull/7")))
-    val (m, _) = Update(seed, KeyMerge())
-    val t1 = Eq(t, m.Conversation.Size(), 1)
-    return Eq(t1, m.Conversation.Get(0).Text, "/merge")
-}
-
-func TestMerged_DropsMatchingPrAndLogs(t T) T {
-    val seed = sampleModel().Copy(OpenPrs = ArrayOf(sampleBatchPr("https://x/y/pull/7")))
-    val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/7"))
-    val t1 = IsTrue(t, m.OpenPrs.IsEmpty())
-    val t2 = Eq(t1, m.Conversation.Size(), 1)
-    return Eq(t2, m.Conversation.Get(0).Text, "merged: https://x/y/pull/7")
-}
-
-func TestMerged_BatchMode_OnlyDropsMatchingEntry(t T) T {
-    val seed = sampleModel().Copy(OpenPrs = ArrayOf(
-        sampleBatchPr("https://x/y/pull/7"),
-        sampleBatchPr("https://x/y/pull/8"),
-    ))
-    val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/8"))
-    val t1 = Eq(t, m.OpenPrs.Size(), 1)
-    return Eq(t1, m.OpenPrs.Get(0).Url, "https://x/y/pull/7")
-}
-
-func TestMerged_WithPostMergeHooks_LogsBanner(t T) T {
-    val pol = DefaultPolicy().Copy(PostMerge = ArrayOf(
-        Hook(Name = "notify", Cmd = "echo", Args = ArrayOf("done")),
-    ))
-    val seed = InitialModel(sampleProject(), sampleTeam(), DefaultWorkflow(), pol)
-        .Copy(OpenPrs = ArrayOf(sampleBatchPr("https://x/y/pull/7")))
-    val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/7"))
-    val t1 = Eq(t, m.Conversation.Size(), 2)
-    val t2 = Eq(t1, m.Conversation.Get(0).Speaker, "gh")
-    return Eq(t2, m.Conversation.Get(1).Text, "running 1 post-merge hook(s)…")
-}
-
-func TestPostMergeHooksPassed_LogsConfirmation(t T) T {
-    val (m, _) = Update(sampleModel(), PostMergeHooksPassed(Url = "https://x/y/pull/7"))
-    val t1 = Eq(t, m.Conversation.Size(), 1)
-    val t2 = Eq(t1, m.Conversation.Get(0).Speaker, "policy")
-    return IsTrue(t2, m.Conversation.Get(0).Text == "post-merge hooks: ✓ all green (https://x/y/pull/7)")
-}
-
-func TestMergeFailed_SetsLastErrorWithGhPrefix(t T) T {
-    val (m, _) = Update(sampleModel(), MergeFailed(ErrText = "merge conflict"))
-    return m.LastError match {
-        case Some(s) => Eq(t, s, "gh pr merge: merge conflict")
-        case None()  => IsTrue(t, false)
-    }
-}
-
-func TestPostMergeHooksFailed_SetsLastError(t T) T {
-    val (m, _) = Update(sampleModel(), PostMergeHooksFailed(ErrText = "notify exited 1"))
-    return m.LastError match {
-        case Some(s) => Eq(t, s, "post-merge hooks: notify exited 1")
-        case None()  => IsTrue(t, false)
-    }
+// OpenPrs only grows — the app never consumes an entry (no in-app
+// merge to drop it). A second PR accumulates alongside the first.
+func TestPrCreated_OpenPrsOnlyGrows(t T) T {
+    val (m1, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7", Branch = "b7"))
+    val (m2, _) = Update(m1,            PrCreated(Url = "https://x/y/pull/8", Branch = "b8"))
+    val t1 = Eq(t, m2.OpenPrs.Size(), 2)
+    val t2 = Eq(t1, m2.OpenPrs.Get(0).Url, "https://x/y/pull/7")
+    return Eq(t2, m2.OpenPrs.Get(1).Url, "https://x/y/pull/8")
 }
 
 // ---------------------------------------------------------------------------
@@ -1671,26 +1622,9 @@ func TestOnTick_LivenessSilence_AfterMaxRetries_FiresMemberAbandoned(t T) T {
     }
 }
 
-func TestMerged_ResetsAllMembersToIdle(t T) T {
-    // Seed every member as something other than Idle so reset has work
-    // to do. Felix StFailed; Iris StWorking. After Merged, both Idle.
-    val seedStatuses = EmptyHashMap[string, Status]()
-        .Put("Iris",  StWorking())
-        .Put("Felix", StFailed(Reason = "boom"))
-    val seed = sampleModel().Copy(
-        OpenPrs  = ArrayOf(sampleBatchPr("https://x/y/pull/9")),
-        Statuses = seedStatuses,
-    )
-    val (m, _) = Update(seed, Merged(Url = "https://x/y/pull/9"))
-    val t1 = m.Statuses.Get("Iris") match {
-        case Some(StIdle()) => IsTrue(t, true)
-        case _              => IsTrue(t, false)
-    }
-    return m.Statuses.Get("Felix") match {
-        case Some(StIdle()) => IsTrue(t1, true)
-        case _              => IsTrue(t1, false)
-    }
-}
+// (TestMerged_ResetsAllMembersToIdle removed: merge is no longer an
+// app action, so there is no merge event to reset statuses on. Status
+// reset on a fresh user prompt is covered elsewhere.)
 
 // Subsequent ChunkArrived from a different speaker doesn't downgrade
 // the original speaker — only the new sender's status is touched.
@@ -2255,15 +2189,9 @@ func TestKeySubmit_InTLThinking_StaysInTLThinking(t T) T {
     }
 }
 
-// KeyMerge with no open PR is a strict no-op even if PrFailed has
-// already populated LastError — we never let Ctrl+M re-fire after a
-// failed PR-create attempt.
-func TestKeyMerge_AfterPrFailed_NoOp(t T) T {
-    val seed = sampleModel().Copy(LastError = Some("gh pr create: auth required"))
-    val (m, _) = Update(seed, KeyMerge())
-    val t1 = Eq(t, m.Conversation.Size(), 0)
-    return IsTrue(t1, m.OpenPrs.IsEmpty())
-}
+// (TestKeyMerge_AfterPrFailed_NoOp removed: there is no KeyMerge —
+// merge is done on GitHub, not in the app. Ctrl+M is unbound; see
+// keymap_test TestKeyToAppMsg_CtrlM_NotMerge.)
 
 // KeyApprove from each non-Approval state must stay in that state and
 // emit no conversation entry.
@@ -2979,10 +2907,10 @@ func TestInitialModel_SeedsAutoApproveFromPolicy(t T) T {
     return IsTrue(t, m.AutoApprove)
 }
 
-// In auto-approve mode the second log line invites batch-review in
-// GitHub instead of suggesting Ctrl+M, so the user knows the next
-// prompt won't block on a manual merge.
-func TestPrCreated_AutoApprove_SkipsCtrlMHint(t T) T {
+// In auto-approve (batch) mode the second log line invites
+// batch-review-and-merge in GitHub — never a Ctrl+M hint (merge is
+// not an app action in any mode).
+func TestPrCreated_AutoApprove_GitHubBatchHint_NoCtrlM(t T) T {
     val seed = sampleModel().Copy(AutoApprove = true)
     val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/7", Branch = "gala_team/x/pr/def7"))
     val t1 = Eq(t, m.Conversation.Size(), 2)
@@ -2990,16 +2918,16 @@ func TestPrCreated_AutoApprove_SkipsCtrlMHint(t T) T {
     val second = m.Conversation.Get(1).Text
     val t2 = IsTrue(t1, strings.Contains(first, "https://x/y/pull/7"))
     val t3 = IsTrue(t2, strings.Contains(second, "queued in batch"))
-    return IsFalse(t3, strings.Contains(second, "Ctrl+M"))
+    val t4 = IsTrue(t3, strings.Contains(second, "GitHub"))
+    return IsFalse(t4, strings.Contains(second, "Ctrl+M"))
 }
 
-// Manual-approve mode (default) still surfaces the Ctrl+M hint — this
-// guards against the AutoApprove branch accidentally swallowing the
-// non-auto path.
-func TestPrCreated_ManualApprove_KeepsCtrlMHint(t T) T {
+// Manual-approve mode (default) also points at GitHub, never Ctrl+M.
+func TestPrCreated_ManualApprove_GitHubHint_NoCtrlM(t T) T {
     val (m, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7", Branch = "gala_team/x/pr/def7"))
     val second = m.Conversation.Get(1).Text
-    return IsTrue(t, strings.Contains(second, "Ctrl+M"))
+    val t1 = IsTrue(t, strings.Contains(second, "merge it on GitHub"))
+    return IsFalse(t1, strings.Contains(second, "Ctrl+M"))
 }
 
 // AutoApprove accumulates: each PrCreated grows OpenPrs without

@@ -572,11 +572,6 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case WorktreesWiped()            => onWorktreesWiped(m)
     case PrFailed(err)               => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
     case OpenBrowser(url)            => onOpenBrowser(m, url)
-    case KeyMerge()                  => onMerge(m)
-    case Merged(url)                 => onMerged(m, url)
-    case MergeFailed(err)            => (m.Copy(LastError = Some(s"gh pr merge: ${err}")), NoCmd[AppMsg]())
-    case PostMergeHooksPassed(url)   => onPostMergeHooksPassed(m, url)
-    case PostMergeHooksFailed(err)   => (m.Copy(LastError = Some(s"post-merge hooks: ${err}")), NoCmd[AppMsg]())
     case ConsultCompleted(name, sum) => onConsultCompleted(m, name, sum)
     case ConsultFailed(name, err)    => onConsultFailed(m, name, err)
     case ConsultChunkArrived(n, ln)  => onConsultChunkArrived(m, n, ln)
@@ -671,7 +666,6 @@ func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
     case KeyComposerEnd()         => Some((m, NoCmd[AppMsg]()))
     case KeyApprove()             => Some((m, NoCmd[AppMsg]()))
     case KeyReject()              => Some((m, NoCmd[AppMsg]()))
-    case KeyMerge()                => Some((m, NoCmd[AppMsg]()))
     case KeyEraseSession()         => Some((m, NoCmd[AppMsg]()))
     case KeyToggleHistory()        => Some((m, NoCmd[AppMsg]()))
     case KeyToggleConsultViewer()  => Some((m, NoCmd[AppMsg]()))
@@ -1276,7 +1270,6 @@ func paletteActions(m AppModel) Array[PaletteAction[AppMsg]] {
         PaletteAction[AppMsg](Label = "Compact / wide left panel  (Ctrl+,)", Category = "View", Msg = KeyToggleCompactSidebar()),
         PaletteAction[AppMsg](Label = "Project info", Category = "Project", Msg = KeyToggleProjectInfo()),
         PaletteAction[AppMsg](Label = "Guidance docs", Category = "Project", Msg = KeyToggleGuidance()),
-        PaletteAction[AppMsg](Label = "Merge open PR (Ctrl+M)", Category = "Approval", Msg = KeyMerge()),
         PaletteAction[AppMsg](
             Label = if (m.AutoApprove) "Auto-approve: turn OFF (F7)" else "Auto-approve: turn ON (F7) · batch PRs without manual approval",
             Category = "Approval",
@@ -5232,12 +5225,12 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 }
 
 // onPrCreated appends the new PR to OpenPrs + the conversation log so
-// the user has a copy-paste-friendly link. In manual-approve mode
-// (the default) the model holds at most one entry, so the existing
-// "Press Ctrl+M to merge" hint stays accurate. In AutoApprove mode
-// the list grows across prompts; the merge hint is replaced with a
-// "queued in batch" line and the user reviews the batch in GitHub
-// when they're done.
+// the user has a copy-paste-friendly link, and snapshots the session
+// into the archive (Ctrl+H history). PR creation is the app's
+// completion point: merging is done by the user on GitHub, never by
+// the app, so the hint always points there. The conversation line
+// shows the project's configured merge strategy so the user knows
+// what to pick on GitHub.
 //
 // Returns a Cmd that opens the URL in the OS default browser — Cmd,
 // not direct call, so unit tests (which call Update directly with
@@ -5255,6 +5248,11 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
         Title    = pendingPrTitle(m),
         OpenedAt = time_utils.Now(),
     )
+    // Snapshot the session for the Ctrl+H history browser. The app no
+    // longer merges (that's done on GitHub), so PR creation — not a
+    // never-arriving "merged" event — is the completion point that
+    // archives the conversation. Best-effort; failure is silent.
+    session.ArchiveLatest(m.Project.Repo, "pr-created")
     // Plan auto-continuation. Account this PR as one shipped step
     // (regardless of whether a plan is active — `nextShipped` is a
     // no-op for a non-plan PR because Plan is empty). If a plan is
@@ -5310,12 +5308,12 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
     } else if (m.AutoApprove) {
         convoBase.Append(session.ConversationLine(
             Speaker = "gh",
-            Text    = s"queued in batch (${m.OpenPrs.Size() + 1} open) — review in GitHub when ready",
+            Text    = s"queued in batch (${m.OpenPrs.Size() + 1} open) — review & merge on GitHub (configured: --${policy.MergeRuleName(m.Policy.MergeRule)})",
         ))
     } else {
         convoBase.Append(session.ConversationLine(
             Speaker = "gh",
-            Text    = s"Press Ctrl+M to merge with --${policy.MergeRuleName(m.Policy.MergeRule)}.",
+            Text    = s"PR ready — review & merge it on GitHub (configured: --${policy.MergeRuleName(m.Policy.MergeRule)})",
         ))
     }
     // Clear ActiveBase now that the PR has been opened — the next
@@ -5397,78 +5395,13 @@ func prOscClose() string {
     return s"${esc}]8;;${esc}\\"
 }
 
-// onMerge fires when the user presses Ctrl+M after a PrCreated. Only
-// acts when OpenPrs has at least one entry; outside that, the key is
-// a no-op (the user can't merge what hasn't been opened). Merges the
-// most-recently-opened PR — in AutoApprove mode the rest of the batch
-// stays in OpenPrs for the user to handle in GitHub.
-func onMerge(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
-    if m.OpenPrs.IsEmpty() { return (m, NoCmd[AppMsg]()) }
-    val url = m.OpenPrs.Last().Url
-    return mergeAndKickPostMerge(m, url)
-}
-
-func mergeAndKickPostMerge(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
-    val withLog = m.Copy(
-        Conversation = m.Conversation.Append(
-            session.ConversationLine(Speaker = "you", Text = "/merge"),
-        ),
-    )
-    return (withLog, runtimeFutureToCmd(GhPrMergeFuture(m.Project, url, m.Policy.MergeRule)))
-}
-
-// onMerged echoes the URL into the conversation, drops the matching
-// entry from OpenPrs (the same PR can't be merged twice), resets every
-// member's status to Idle (the pipeline is done — next prompt starts
-// fresh), kicks any PostMerge hooks, and snapshots the now-immutable
-// conversation log into .gala_team/sessions/archive/ so future
-// `Ctrl+H` runs can pull it back up. On a clean hook run,
-// PostMergeHooksPassed appends the final "✓ all green" line.
-func onMerged(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
-    val _ = session.ArchiveLatest(m.Project.Repo, "merged")  // best-effort; failure is silent
-    // Clear ActivePrBranch when the merged URL matches the active
-    // PR — the next approval starts a fresh PR identity. In
-    // AutoApprove batch mode, OpenPrs may hold multiple PRs and
-    // ActivePrBranch tracks the most recent one; clearing
-    // unconditionally on any merge is harmless because a subsequent
-    // approval will repopulate it.
-    val withMerge = resetAllStatuses(m.Copy(
-        OpenPrs        = m.OpenPrs.Filter((p) => p.Url != url),
-        ActivePrBranch = None[string](),
-        Conversation   = m.Conversation.Append(
-            session.ConversationLine(Speaker = "gh", Text = s"merged: ${url}"),
-        ),
-    ))
-    if m.Policy.PostMerge.IsEmpty() {
-        return (withMerge, NoCmd[AppMsg]())
-    }
-    val noted = withMerge.Copy(
-        Conversation = withMerge.Conversation.Append(
-            session.ConversationLine(Speaker = "policy", Text = s"running ${m.Policy.PostMerge.Size()} post-merge hook(s)…"),
-        ),
-    )
-    // Post-merge hooks run AFTER `gh pr merge` has landed the change
-    // on origin/<defaultBranch>. The user's main checkout is the
-    // natural cwd here — these hooks are typically notify / deploy
-    // scripts that operate against the project repo, not the lead
-    // worktree (which by this point has been (or is about to be)
-    // wiped by the start-fresh path).
-    return (noted, postMergeHooksFutureCmd(m.Project.Repo, m.Policy.PostMerge, url))
-}
-
-func postMergeHooksFutureCmd(cwd string, hooks Array[policy.Hook], url string) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = policy.RunHooksFuture(cwd, hooks).Map((res Try[bool]) => res match {
-        case Success(_)   => PostMergeHooksPassed(Url = url)
-        case Failure(err) => PostMergeHooksFailed(ErrText = err.Error())
-    }))
-
-func onPostMergeHooksPassed(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
-    return (m.Copy(
-        Conversation = m.Conversation.Append(
-            session.ConversationLine(Speaker = "policy", Text = s"post-merge hooks: ✓ all green (${url})"),
-        ),
-    ), NoCmd[AppMsg]())
-}
+// Merge is intentionally not an app action. After a PR is opened the
+// user reviews and merges it on GitHub; the orchestrator never runs
+// `gh pr merge`. There is therefore no onMerge / onMerged / post-merge
+// hook path here — the lifecycle ends at PrCreated (which archives the
+// session for Ctrl+H). policy.merge_rule / policy.post_merge are still
+// parsed (declarative config) but the app no longer acts on a merge it
+// did not perform.
 
 // onConsultChunkArrived appends one streamed line from the child team
 // to the conversation log under a `consult/<name>` speaker, and
@@ -5603,8 +5536,6 @@ func runtimeToAppMsg(rm Msg) AppMsg = rm match {
     case RtStderrEnded(name)        => StderrEnded(Member = name)
     case RtPrCreated(url, branch)   => PrCreated(Url = url, Branch = branch)
     case RtPrFailed(err)            => PrFailed(ErrText = err.Error())
-    case RtMerged(url)              => Merged(Url = url)
-    case RtMergeFailed(err)         => MergeFailed(ErrText = err.Error())
     case RtWorktreesWiped()         => WorktreesWiped()
 }
 

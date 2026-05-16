@@ -181,7 +181,6 @@ func helpRows() Array[string] = ArrayOf(
     "  Ctrl+H            session-history browser",
     "  Ctrl+Y            yank conversation to clipboard",
     "  Ctrl+V            paste from clipboard",
-    "  Ctrl+M            merge PR after creation",
     "  Ctrl+N            erase session (twice to confirm)",
     "  Ctrl+, / Ctrl+.   compact-left toggle (team panel)",
     "  F1 / F2 / F3      Default split / Focus / Grid",
@@ -2066,8 +2065,9 @@ func planPanel(m AppModel) LayoutChild {
     return Fixed(rows.Size() + 2, BorderOf(Column(rows), RoundedBorder()))
 }
 
-// footerHints picks a context-appropriate key legend. After
-// PrCreated, surface Ctrl+M; otherwise show the default legend.
+// footerHints picks a context-appropriate key legend. There is no
+// merge hint — merging is done on GitHub after approval, never from
+// the app, so an open PR doesn't change the legend.
 // Quit is bound to Ctrl+Q (with two-press confirmation); Ctrl+C
 // is gala-tui's hard-kill backstop and isn't advertised. Quit
 // comes first so it survives narrow-terminal clipping; new users
@@ -2100,13 +2100,8 @@ func footerHints(m AppModel) string {
         case FocusComposer() => {
             if (m.AutoApprove) {
                 // AutoApprove drops the approval hints — the gate is
-                // off. Merge stays manual so Ctrl+M shows whenever any PR
-                // is open in the batch.
-                val mergeHint = if (m.OpenPrs.IsEmpty()) "" else " · Ctrl+M merge"
-                return s"  Enter send${mergeHint} · F7 auto:on · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
-            }
-            if (!m.OpenPrs.IsEmpty()) {
-                return "  Ctrl+M merge · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
+                // off. No merge hint: open PRs are merged on GitHub.
+                return "  Enter send · F7 auto:on · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
             }
             return "  Enter send · Ctrl+P palette · F1-F5 views · F6 help · Ctrl+Q quit"
         }

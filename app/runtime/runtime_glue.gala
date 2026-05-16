@@ -46,8 +46,6 @@ sealed type Msg {
     case RtStderrEnded(Member string)
     case RtPrCreated(Url string, Branch string)
     case RtPrFailed(Err error)
-    case RtMerged(Url string)
-    case RtMergeFailed(Err error)
     case RtWorktreesWiped()
 }
 
@@ -835,8 +833,6 @@ func MsgMember(msg Msg) string = msg match {
     case RtStderrEnded(name)        => name
     case RtPrCreated(_, _)          => ""
     case RtPrFailed(_)              => ""
-    case RtMerged(_)                => ""
-    case RtMergeFailed(_)           => ""
     case RtWorktreesWiped()         => ""
 }
 
@@ -1132,54 +1128,11 @@ func stderrMentionsExistingPr(stderr string) bool {
     return strings.Contains(lower, "pull request") && strings.Contains(lower, "already exists")
 }
 
-// GhPrMergeFuture spawns `gh pr merge <url> --<rule>` from the lead
-// worktree. The `rule` argument decides which merge strategy flag is
-// passed: SquashMerge → --squash, RebaseMerge → --rebase, PlainMerge →
-// --merge. We pass `--delete-branch` so the engineer worktrees stay
-// clean after a successful merge.
-//
-// Returns RtMerged(url) on success, RtMergeFailed(err) on any failure.
-// Unlike GhPrCreate, no URL parsing is needed — gh prints assorted
-// progress and we just need the exit code.
-func GhPrMergeFuture(proj Project, url string, rule MergeRule) concurrent.Future[Msg] {
-    val args = ArrayOf("pr", "merge", url, mergeFlag(rule), "--delete-branch")
-    val leadWtPath = LeadWorktreePath(proj)
-    return concurrent.FutureApply[Msg](() => {
-        val opts = subprocess.NewSpawnOpts(
-            "gh",
-            args.ToGoSlice(),
-            SliceEmpty[string](),
-            leadWtPath,
-        )
-        return subprocess.Spawn(opts) match {
-            case Failure(err) => RtMergeFailed(Err = err)
-            case Success(p)   => awaitMergeExit(p, url)
-        }
-    })
-}
-
-func mergeFlag(rule MergeRule) string = rule match {
-    case SquashMerge() => "--squash"
-    case RebaseMerge() => "--rebase"
-    case PlainMerge()  => "--merge"
-}
-
-// awaitMergeExit drains the gh stream and inspects the exit code.
-// Stdout / stderr are read but discarded — gh's user-facing messages
-// don't carry a structured success indicator other than the exit
-// code, so checking the code is enough.
-func awaitMergeExit(p subprocess.Process, url string) Msg {
-    for {
-        val line = p.ReadLine()
-        if line.IsFailure() { break }
-    }
-    return p.Wait() match {
-        case Failure(err)  => RtMergeFailed(Err = err)
-        case Success(code) =>
-            if (code == 0) RtMerged(Url = url)
-            else           RtMergeFailed(Err = errors.New(s"gh pr merge exited with code ${code}"))
-    }
-}
+// Merge is intentionally not performed by the app. After `gh pr
+// create` opens the PR, the user reviews and merges it on GitHub —
+// the orchestrator never shells `gh pr merge`. (No GhPrMergeFuture /
+// mergeFlag / awaitMergeExit; policy.merge_rule stays declarative for
+// documentation only.)
 
 // ghTitle picks the first non-empty line of `body` and clamps it to 70
 // chars (with an ellipsis when truncated) for use as the PR title.

@@ -232,7 +232,6 @@ func decodeKey(d *json.JsonDecoderImpl) Option[AppMsg] {
     if keyName == "CtrlL"     { return Some[AppMsg](KeyToggleFocus()) }
     if keyName == "CtrlQ"     { return Some[AppMsg](QuitMsg()) }
     if keyName == "CtrlN"     { return Some[AppMsg](KeyEraseSession()) }
-    if keyName == "CtrlM"     { return Some[AppMsg](KeyMerge()) }
     if keyName == "CtrlH"     { return Some[AppMsg](KeyToggleHistory()) }
     if keyName == "CtrlT"     { return Some[AppMsg](KeyToggleConsultViewer()) }
     if keyName == "CtrlP"     { return Some[AppMsg](KeyTogglePalette()) }

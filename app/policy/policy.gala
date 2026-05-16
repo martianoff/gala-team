@@ -18,8 +18,10 @@ import (
 //      points (pre-merge, post-merge). Lint, test, bench, etc.
 //      Sequential by design — the first failure short-circuits.
 //
-//   3. Merge rule — squash / rebase / plain merge. Shapes the final
-//      `gh pr merge` invocation when the team lead approves.
+//   3. Merge rule — squash / rebase / plain merge. Informational
+//      only: the app never runs `gh pr merge` (merging is done by
+//      the user on GitHub). Surfaced in the PR-created log line so
+//      the user knows which strategy the project expects.
 //
 // `DefaultPolicy()` returns the most permissive shape (shared workspace,
 // no hooks, squash merge) so projects that don't declare a `policy:`
@@ -33,7 +35,10 @@ sealed type WorkspaceMode {
     case WorktreePerEngineer
 }
 
-// MergeRule decides how the final merge happens after approval.
+// MergeRule documents the merge strategy the project expects on
+// GitHub. The app does NOT merge — it only surfaces this in the
+// PR-created log line so the user picks the right strategy when
+// they merge the PR themselves.
 //   - SquashMerge: squash the engineer's commits into one with the PR
 //     title as message; what most teams use day-to-day.
 //   - RebaseMerge: rebase the engineer's commits onto base, preserving

@@ -150,10 +150,10 @@ plus a result-message handler:
    (`app/runtime/runtime_glue.gala:237`, `:258`) and for engineers runs the
    per-engineer worktree subprocess (`app/runtime/runtime_glue.gala:100`),
    then `SpawnSession` — all on the UI thread, inside the handler. It is
-   called **directly (no `Future`)** from at least eleven handler paths:
-   `app/ui/update.gala:342, 424, 1686, 1784, 2542, 2620, 3225, 3314, 3680,
-   4016`, plus the user-submit path. This is the deepest residual freeze
-   risk and remains open.
+   called **directly (no `Future`)** from ten handler paths
+   (`app/ui/update.gala:342, 424, 1686, 1784, 2542, 2620, 3225, 3314, 3680,
+   4016` — `:1686` is the user-submit path). This is the deepest residual
+   freeze risk and remains open.
 
 2. **A still-live site the sweep missed —
    `recoverApprovalIfReady`.** `recoverApprovalIfReady`

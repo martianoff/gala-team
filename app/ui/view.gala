@@ -2115,7 +2115,7 @@ func stateLabel(s AppState) string = s match {
     case Delegating(_)    => "state: delegating"
     case QAGate(_)        => "state: QA gate"
     case TLReview()       => "state: TL review"
-    case TLNudging(why)   => s"state: TL nudging (${why})"
+    case TLNudging(why, _) => s"state: TL nudging (${why})"
     case Approval(_)      => "state: approval"
 }
 

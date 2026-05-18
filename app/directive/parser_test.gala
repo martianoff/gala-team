@@ -453,3 +453,94 @@ func TestParse_PlanThenDispatch_PreservesOrder(t T) T {
         case _              => IsTrue(t2, false)
     }
 }
+
+// ----------------------------------------------------------------------------
+// MemberTerminal — end-anchored member sign-off extraction
+//
+// Repro of the "stuck in Delegating until the user types continue"
+// freeze: a gala_team deliverable QUOTES directive syntax (audits /
+// PRs about the orchestrator are full of @done / @finished /
+// @dispatch( / @end as documented examples). The greedy front-to-back
+// parser let an earlier quoted opener swallow the member's real
+// sign-off as its body, so MemberDone never fired. MemberTerminal
+// anchors on the LAST bare @end + nearest preceding member-terminal
+// opener, ignoring every quoted example before it.
+// ----------------------------------------------------------------------------
+
+// A fully-formed QUOTED @done…@end example precedes the member's real
+// @finished sign-off. Front-to-back Parse would fire the quoted one
+// first; MemberTerminal returns the REAL deliverable.
+func TestMemberTerminal_IgnoresQuotedBlockBeforeRealSignoff(t T) T {
+    val msg = "@done\n" +
+        "(quoted protocol example inside the audit doc)\n" +
+        "@end\n" +
+        "Then the real sign-off:\n" +
+        "@finished\n" +
+        "Real deliverable: docs/audit/x.md committed as 1b90e42.\n" +
+        "@end"
+    return MemberTerminal(msg) match {
+        case Some(d) => d match {
+            case Finished(body) => Eq(t, body, "Real deliverable: docs/audit/x.md committed as 1b90e42.")
+            case _              => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+// An UNCLOSED pseudo-opener (a line that starts with @finished but is
+// really prose with no matching bare @end) precedes the real @done.
+// The old front-to-back ParseClosed bailed at the pseudo-opener and
+// never reached the real terminal (the exact 27-min freeze).
+func TestMemberTerminal_SkipsUnclosedPseudoOpener(t T) T {
+    val msg = "@finished\n" +
+        "the protocol says emit @finished then close with @end on its own line\n" +
+        "... more audit prose, no bare end line for the above ...\n" +
+        "@done\n" +
+        "Real summary.\n" +
+        "@end"
+    return MemberTerminal(msg) match {
+        case Some(d) => d match {
+            case Finished(body) => Eq(t, body, "Real summary.")
+            case _              => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+// @blocked is a member terminal too — quoted @done earlier must not
+// shadow a real @blocked sign-off.
+func TestMemberTerminal_RealBlockedAfterQuotedDone(t T) T {
+    val msg = "@done\n" +
+        "quoted example\n" +
+        "@end\n" +
+        "@blocked\n" +
+        "Recommendation: escalate to user. CI is down.\n" +
+        "@end"
+    return MemberTerminal(msg) match {
+        case Some(d) => d match {
+            case Blocked(reason) => Eq(t, reason, "Recommendation: escalate to user. CI is down.")
+            case _               => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+// No closed terminal block yet (still streaming) → None, so the
+// streaming caller simply waits — same as the old ParseClosed gate.
+func TestMemberTerminal_NoneWhileStreaming(t T) T {
+    val msg = "@finished\nworking on it, deliverable not done"
+    return MemberTerminal(msg) match {
+        case None()  => IsTrue(t, true)
+        case Some(_) => IsTrue(t, false)
+    }
+}
+
+// A quoted TL-only @dispatch( block is NOT a member terminal and must
+// never anchor MemberTerminal.
+func TestMemberTerminal_QuotedDispatchIsNotTerminal(t T) T {
+    val msg = "@dispatch(Felix)\nexample of a dispatch in the audit\n@end"
+    return MemberTerminal(msg) match {
+        case None()  => IsTrue(t, true)
+        case Some(_) => IsTrue(t, false)
+    }
+}

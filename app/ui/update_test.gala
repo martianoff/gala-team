@@ -4773,3 +4773,68 @@ func TestIdleParkedStatus_PendingButFresh_StaysIdle(t T) T {
         case _        => IsTrue(t, false)
     }
 }
+
+// ----------------------------------------------------------------------------
+// prBranchOverrideFor — iterate-on-existing-PR vs new-PR routing
+//
+// Regression: with auto_approve on, every corrective "CI fails → fix
+// → re-@summary" cut a brand-new PR because prBranchOverrideFor
+// short-circuited to None whenever AutoApprove was set, ignoring a
+// correctly-populated ActivePrBranch. Reuse must NOT be gated on
+// auto-approve — only on @base (stacked) / no prior PR.
+// ----------------------------------------------------------------------------
+
+// Auto-approve ON + a prior PR + no @base → reuse that PR's branch
+// (force-push updates the SAME PR). This is the bug fix.
+func TestPrBranchOverride_AutoApproveReusesActivePr(t T) T {
+    val m = sampleModel().Copy(
+        AutoApprove    = true,
+        ActiveBase     = None[string](),
+        ActivePrBranch = Some("gala_team/x/pr/abc123"),
+    )
+    return prBranchOverrideFor(m) match {
+        case Some(b) => Eq(t, b, "gala_team/x/pr/abc123")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// @base set (stacked PR) → no override even with a prior PR: the
+// stacked PR gets its own head branch, never clobbers the prior one.
+func TestPrBranchOverride_BaseSuppressesReuse(t T) T {
+    val m = sampleModel().Copy(
+        AutoApprove    = true,
+        ActiveBase     = Some("previous-branch"),
+        ActivePrBranch = Some("gala_team/x/pr/abc123"),
+    )
+    return prBranchOverrideFor(m) match {
+        case None()  => IsTrue(t, true)
+        case Some(_) => IsTrue(t, false)
+    }
+}
+
+// No prior PR (plan-step boundary cleared it / first PR of a cycle)
+// → no override, a fresh PR is cut.
+func TestPrBranchOverride_NoActivePrNoOverride(t T) T {
+    val m = sampleModel().Copy(
+        AutoApprove    = true,
+        ActiveBase     = None[string](),
+        ActivePrBranch = None[string](),
+    )
+    return prBranchOverrideFor(m) match {
+        case None()  => IsTrue(t, true)
+        case Some(_) => IsTrue(t, false)
+    }
+}
+
+// Manual-approve path (auto_approve off) still reuses, unchanged.
+func TestPrBranchOverride_ManualApproveReusesActivePr(t T) T {
+    val m = sampleModel().Copy(
+        AutoApprove    = false,
+        ActiveBase     = None[string](),
+        ActivePrBranch = Some("gala_team/x/pr/def456"),
+    )
+    return prBranchOverrideFor(m) match {
+        case Some(b) => Eq(t, b, "gala_team/x/pr/def456")
+        case None()  => IsTrue(t, false)
+    }
+}

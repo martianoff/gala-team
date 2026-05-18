@@ -5210,25 +5210,28 @@ func onPreMergeHooksFailed(m AppModel, err string) Tuple[AppModel, Cmd[AppMsg]] 
 // prBranchOverrideFor decides whether the next `gh pr create` should
 // reuse the active PR's branch (force-push → updates the existing PR)
 // or cut a fresh branch (creates a new PR). Reuse is the iteration
-// path the user explicitly asked for — TL emits @summary, user
-// approves, gets PR1; user types feedback, TL fixes, user approves
-// again → push lands on PR1's branch, GitHub auto-updates it.
+// path: TL emits @summary, PR1 opens; user types corrective feedback
+// ("CI fails", "fix the conflict"), TL fixes, re-@summary → the push
+// lands on PR1's branch and GitHub auto-updates the SAME PR instead
+// of opening yet another one.
 //
-// Reuse is suppressed in two cases where the next PR is intentionally
-// distinct:
-//   - AutoApprove batch mode: each user prompt produces a separate
-//     PR (the explicit "ship many in one sitting" affordance). We
-//     don't collapse them onto the same branch.
-//   - `@base <ref>` (stacked PRs): the TL is signalling "build this
-//     PR on top of <ref>", so the new PR has its own head branch.
-//     Force-pushing to the prior PR's branch would clobber it.
+// Reuse is suppressed ONLY when the next PR is genuinely distinct:
+//   - `@base <ref>` (stacked PRs): the TL signalled "build this PR on
+//     top of <ref>", so it gets its own head branch — force-pushing
+//     onto the prior PR's branch would clobber it.
+//   - `@plan` auto-continuation: onPrCreated clears ActivePrBranch at
+//     each step boundary, so a queued plan step arrives here with no
+//     override and correctly opens its own PR.
 //
-// `@plan` auto-continuation is handled separately in onPrCreated by
-// clearing ActivePrBranch at the step boundary, so by the time the
-// next plan step's @summary lands here we're already in "no override"
-// territory regardless of these gates.
+// NOT gated on AutoApprove. Auto-approve is enabled for hands-off
+// plan draining / skipping the manual dialog — it does NOT mean
+// "every prompt is a new PR". Gating reuse on it made every
+// corrective "CI fails → fix → re-@summary" cut a brand-new PR while
+// ActivePrBranch sat correctly populated and ignored — the exact
+// "keeps opening new PRs instead of fixing the old one" complaint.
+// Deliberate multi-PR batches are expressed with @plan, not by
+// blind auto-approve.
 func prBranchOverrideFor(m AppModel) Option[string] {
-    if m.AutoApprove { return None[string]() }
     if m.ActiveBase.IsDefined() { return None[string]() }
     return m.ActivePrBranch
 }

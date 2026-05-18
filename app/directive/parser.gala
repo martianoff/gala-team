@@ -53,8 +53,8 @@ func ParseClosed(msg string) Array[Directive] = parseImpl(msg, true)
 // `@finished`, `@dispatch(`, `@end` as documented examples), and
 // collectBody's greedy first-`@end`-wins lets an earlier quoted
 // opener swallow the real terminal as its body — so no MemberDone
-// ever fires and the FSM hangs in Delegating until the user types
-// "continue".
+// ever fires and the FSM stays parked in Delegating waiting on a
+// member that already finished.
 //
 // Anchoring on the LAST bare `@end` and the nearest preceding
 // member-terminal opener ignores every quoted example before the real

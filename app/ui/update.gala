@@ -2347,17 +2347,12 @@ func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[
     }
     val priorBuffer = m.MemberBuffers.Get(speaker).GetOrElse("")
     val nextBuffer = if (priorBuffer == "") line else priorBuffer + "\n" + line
-    // MemberTerminal anchors on the LAST `@end` + nearest preceding
-    // member-terminal opener, so a deliverable that quotes directive
-    // syntax (every gala_team audit / PR does) can't make an earlier
-    // quoted `@done`/`@finished`/`@dispatch(` swallow the real
-    // sign-off — which froze the FSM in Delegating until the user
-    // typed "continue". Returns None until the closing `@end` has
-    // streamed in (same wait-for-close behaviour the old ParseClosed
-    // gate provided). A member emits exactly one terminal directive;
-    // MemberDirectivesFired is the 0/1 fire-once guard (reset to 0 by
-    // a re-dispatch's MemberDirectivesFired.Remove so the next turn
-    // can sign off again).
+    // MemberTerminal (see its doc) returns the member's real sign-off
+    // robustly against quoted directive syntax in the body, or None
+    // until the closing `@end` has streamed in. A member emits exactly
+    // one terminal directive; MemberDirectivesFired is the 0/1
+    // fire-once guard — a re-dispatch's MemberDirectivesFired.Remove
+    // resets it so the next turn can sign off again.
     val withBuffer = m.Copy(MemberBuffers = m.MemberBuffers.Put(speaker, nextBuffer))
     val alreadyFired = m.MemberDirectivesFired.Get(speaker).GetOrElse(0) > 0
     return MemberTerminal(nextBuffer) match {

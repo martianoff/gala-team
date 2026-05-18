@@ -489,13 +489,11 @@ func idleParkedStatus(m AppModel, name string, now time_utils.Instant) Status {
     if !memberIsFsmPending(m.State, name) { return StIdle() }
     return m.LastChunkAt.Get(name) match {
         case None()   => StIdle()
-        case Some(at) => {
-            val secs = elapsedSeconds(now, at)
-            if secs >= m.Policy.Heartbeat.AbandonAfterSeconds {
-                return StFailed(Reason = s"parked: pending but idle past ${m.Policy.Heartbeat.AbandonAfterSeconds}s")
-            }
-            return StIdle()
-        }
+        case Some(at) =>
+            if (elapsedSeconds(now, at) >= m.Policy.Heartbeat.AbandonAfterSeconds)
+                StFailed(Reason = s"parked: pending but idle past ${m.Policy.Heartbeat.AbandonAfterSeconds}s")
+            else
+                StIdle()
     }
 }
 

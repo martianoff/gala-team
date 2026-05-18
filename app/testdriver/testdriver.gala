@@ -394,6 +394,6 @@ func stateName(m AppModel) string = m.State match {
     case Delegating(_)  => "Delegating"
     case QAGate(_)      => "QAGate"
     case TLReview()     => "TLReview"
-    case TLNudging(_)   => "TLNudging"
+    case TLNudging(_, _) => "TLNudging"
     case Approval(_)    => "Approval"
 }

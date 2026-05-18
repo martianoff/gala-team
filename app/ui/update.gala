@@ -194,7 +194,7 @@ func stateTag(s AppState) string = s match {
     case Delegating(_)  => "Delegating"
     case QAGate(_)      => "QAGate"
     case TLReview()     => "TLReview"
-    case TLNudging(_)   => "TLNudging"
+    case TLNudging(_, _) => "TLNudging"
     case Approval(_)    => "Approval"
 }
 
@@ -466,7 +466,46 @@ func livenessStatus(m AppModel, name string, current Status, now time_utils.Inst
     case StWorking() => escalateByElapsed(m, name, now, StWorking())
     case StSlow()    => escalateByElapsed(m, name, now, StSlow())
     case StStuck()   => escalateByElapsed(m, name, now, StStuck())
+    // Safety net for a parked run: kept a TINY one-call arm on
+    // purpose — inlining the nested match/if here perturbs gala's
+    // name resolver enough to mis-bind a bare `Parse` elsewhere in
+    // this file to `time_utils.Parse` (the documented resolver
+    // order-sensitivity; see applyMemberDirective). The logic lives
+    // in idleParkedStatus.
+    case StIdle()    => idleParkedStatus(m, name, now)
     case _           => current
+}
+
+// idleParkedStatus reaps a member the FSM is still BLOCKED on (it is
+// in the Delegating / QAGate / TLNudging pending set) that has gone
+// StIdle — its turn clean-ended without a parsed completion, so no
+// MemberDone fired and the pipeline can't advance. Past the abandon
+// threshold it returns StFailed so the existing respawn /
+// MemberAbandoned branch reaps it and the FSM drains on its own
+// (instead of the user having to type "continue"). A member that is
+// StIdle but NOT pending (genuinely between turns) is left untouched
+// — the pending-set gate is what makes this safe.
+func idleParkedStatus(m AppModel, name string, now time_utils.Instant) Status {
+    if !memberIsFsmPending(m.State, name) { return StIdle() }
+    return m.LastChunkAt.Get(name) match {
+        case None()   => StIdle()
+        case Some(at) =>
+            if (elapsedSeconds(now, at) >= m.Policy.Heartbeat.AbandonAfterSeconds)
+                StFailed(Reason = s"parked: pending but idle past ${m.Policy.Heartbeat.AbandonAfterSeconds}s")
+            else
+                StIdle()
+    }
+}
+
+// memberIsFsmPending: is `name` in the FSM's still-waiting-on set.
+// Empty in any non-member-waiting state (Idle / TLThinking /
+// TLReview / Approval), so idleParkedStatus can never mis-fire on a
+// member legitimately idle between turns.
+func memberIsFsmPending(s AppState, name string) bool = s match {
+    case Delegating(p)   => p.Contains(name)
+    case QAGate(p)       => p.Contains(name)
+    case TLNudging(_, p) => p.Contains(name)
+    case _               => false
 }
 
 // escalateByElapsed returns Failed/Stuck/Slow when the member has been
@@ -2306,27 +2345,27 @@ func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[
     }
     val priorBuffer = m.MemberBuffers.Get(speaker).GetOrElse("")
     val nextBuffer = if (priorBuffer == "") line else priorBuffer + "\n" + line
-    // ParseClosed: don't fire member-side directives until @end is seen.
-    // Streamed chunks arrive line-by-line; firing on the bare opening
-    // tag would emit a Blocked/Help/Finished with empty body before the
-    // user's actual reason / question / deliverable text arrived.
-    val dirs = ParseClosed(nextBuffer)
-    val total = dirs.Size()
-    val fired = m.MemberDirectivesFired.Get(speaker).GetOrElse(0)
-    val withBuffer = m.Copy(
-        MemberBuffers         = m.MemberBuffers.Put(speaker, nextBuffer),
-        MemberDirectivesFired = m.MemberDirectivesFired.Put(speaker, total),
-    )
-    if total <= fired {
-        return (withBuffer, EmptyArray[Cmd[AppMsg]]())
+    // MemberTerminal (see its doc) returns the member's real sign-off
+    // robustly against quoted directive syntax in the body, or None
+    // until the closing `@end` has streamed in. A member emits exactly
+    // one terminal directive; MemberDirectivesFired is the 0/1
+    // fire-once guard — a re-dispatch's MemberDirectivesFired.Remove
+    // resets it so the next turn can sign off again.
+    val withBuffer = m.Copy(MemberBuffers = m.MemberBuffers.Put(speaker, nextBuffer))
+    val alreadyFired = m.MemberDirectivesFired.Get(speaker).GetOrElse(0) > 0
+    return MemberTerminal(nextBuffer) match {
+        case None()  => (withBuffer, EmptyArray[Cmd[AppMsg]]())
+        case Some(d) => {
+            if alreadyFired {
+                return (withBuffer, EmptyArray[Cmd[AppMsg]]())
+            }
+            val withFired = withBuffer.Copy(
+                MemberDirectivesFired = m.MemberDirectivesFired.Put(speaker, 1),
+            )
+            val (m1, cmd) = applyMemberDirective(withFired, speaker, d)
+            return (m1, ArrayOf[Cmd[AppMsg]](cmd))
+        }
     }
-    return dirs.Drop(fired).FoldLeft(
-        (withBuffer, EmptyArray[Cmd[AppMsg]]()),
-        (acc, d) => {
-            val (m1, cmd) = applyMemberDirective(acc.V1, speaker, d)
-            return (m1, acc.V2.Append(cmd))
-        },
-    )
 }
 
 // applyMemberDirective handles one parsed member directive. @consult

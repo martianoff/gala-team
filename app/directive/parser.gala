@@ -43,6 +43,73 @@ func Parse(msg string) Array[Directive] = parseImpl(msg, false)
 // block before its body has arrived.
 func ParseClosed(msg string) Array[Directive] = parseImpl(msg, true)
 
+// MemberTerminal extracts a member's operative sign-off by anchoring
+// on the END of the buffer, not the start. A member works, then emits
+// exactly one terminal directive (@done / @finished / @review /
+// @blocked / @help) as the LAST block, closed by `@end` on its own
+// line. The general front-to-back parser is fragile for member
+// completion: a gala_team deliverable legitimately QUOTES directive
+// syntax (audits / PRs about the orchestrator are full of `@done`,
+// `@finished`, `@dispatch(`, `@end` as documented examples), and
+// collectBody's greedy first-`@end`-wins lets an earlier quoted
+// opener swallow the real terminal as its body — so no MemberDone
+// ever fires and the FSM stays parked in Delegating waiting on a
+// member that already finished.
+//
+// Anchoring on the LAST bare `@end` and the nearest preceding
+// member-terminal opener ignores every quoted example before the real
+// sign-off. Returns None when there is no closed terminal block yet
+// (still streaming / member never signed off) — the streaming caller
+// then simply waits, exactly as ParseClosed returning nothing.
+func MemberTerminal(msg string) Option[Directive] {
+    val lines = strings.Split(msg, "\n")
+    val n = lines.Length()
+    var endIdx = -1
+    var k = n - 1
+    for endIdx < 0 && k >= 0 {
+        if strings.TrimSpace(lines.Get(k)) == "@end" { endIdx = k }
+        k = k - 1
+    }
+    if endIdx < 0 { return None[Directive]() }
+    var opener = None[openingTag]()
+    var openIdx = -1
+    var j = endIdx - 1
+    for openIdx < 0 && j >= 0 {
+        val tag = parseOpeningTag(lines.Get(j))
+        tag match {
+            case Some(o) => {
+                if isMemberTerminalKind(o.Kind) {
+                    opener = tag
+                    openIdx = j
+                }
+            }
+            case None() => {}
+        }
+        j = j - 1
+    }
+    return opener match {
+        case None()    => None[Directive]()
+        case Some(o)   => {
+            var parts = EmptyArray[string]()
+            if o.SameLineRest != "" { parts = parts.Append(o.SameLineRest) }
+            var b = openIdx + 1
+            for b < endIdx {
+                parts = parts.Append(lines.Get(b))
+                b = b + 1
+            }
+            return buildDirective(o.Kind, o.Target, o.ProjectOverride, joinBody(parts))
+        }
+    }
+}
+
+// isMemberTerminalKind: the directive kinds a downstream member may
+// use to close its turn. @summary / @dispatch / @consult / @base /
+// @plan are TL-only and never a member's sign-off, so they must NOT
+// anchor MemberTerminal (a member quoting `@dispatch(` in an audit
+// must not be mistaken for a completion).
+func isMemberTerminalKind(kind string) bool =
+    kind == "done" || kind == "help" || kind == "blocked"
+
 func parseImpl(msg string, requireClose bool) Array[Directive] {
     var out = EmptyArray[Directive]()
     val lines = strings.Split(msg, "\n")

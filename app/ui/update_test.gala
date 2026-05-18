@@ -4718,3 +4718,58 @@ func TestOnTick_HeartbeatRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
     val lca = m.LastChunkAt.Get("Felix").GetOrElse(time_utils.UnixEpoch())
     return IsTrue(t4, lca.UnixNanos() > staleTime.UnixNanos())
 }
+
+// ----------------------------------------------------------------------------
+// idleParkedStatus — heartbeat safety net for a parked run
+//
+// A member the FSM is still BLOCKED on (in the Delegating / QAGate /
+// TLNudging pending set) whose turn clean-ended without a parsed
+// completion goes StIdle; livenessStatus' old `case _ => current`
+// never re-escalated it, so the only recovery was the user typing
+// "continue". idleParkedStatus reaps it past the abandon threshold.
+// ----------------------------------------------------------------------------
+
+// Pending + StIdle + stale past AbandonAfterSeconds → StFailed (so the
+// existing respawn / MemberAbandoned branch drains the FSM).
+func TestIdleParkedStatus_PendingAndStale_Reaps(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val seed = sampleModel().Copy(
+        State       = Delegating(Pending = pending),
+        LastChunkAt = sampleModel().LastChunkAt.Put("Felix", time_utils.FromUnixSeconds(int64(1))),
+    )
+    val now = time_utils.FromUnixSeconds(int64(100000000))
+    return idleParkedStatus(seed, "Felix", now) match {
+        case StFailed(_) => IsTrue(t, true)
+        case _           => IsTrue(t, false)
+    }
+}
+
+// StIdle but NOT in any pending set (genuinely idle between turns) →
+// left untouched. The pending-set gate is what makes the net safe.
+func TestIdleParkedStatus_NotPending_StaysIdle(t T) T {
+    val seed = sampleModel().Copy(
+        State       = Idle(),
+        LastChunkAt = sampleModel().LastChunkAt.Put("Felix", time_utils.FromUnixSeconds(int64(1))),
+    )
+    val now = time_utils.FromUnixSeconds(int64(100000000))
+    return idleParkedStatus(seed, "Felix", now) match {
+        case StIdle() => IsTrue(t, true)
+        case _        => IsTrue(t, false)
+    }
+}
+
+// Pending but NOT yet past the abandon threshold → still StIdle (no
+// premature reap of a member whose turn just ended).
+func TestIdleParkedStatus_PendingButFresh_StaysIdle(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val at  = time_utils.FromUnixSeconds(int64(100000000))
+    val now = time_utils.FromUnixSeconds(int64(100000005))   // 5s later, well under 300s
+    val seed = sampleModel().Copy(
+        State       = Delegating(Pending = pending),
+        LastChunkAt = sampleModel().LastChunkAt.Put("Felix", at),
+    )
+    return idleParkedStatus(seed, "Felix", now) match {
+        case StIdle() => IsTrue(t, true)
+        case _        => IsTrue(t, false)
+    }
+}

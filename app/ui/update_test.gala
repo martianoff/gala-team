@@ -1316,6 +1316,35 @@ func uiSourcePath() string {
         }
         i = i + 1
     }
+    if out == "" {
+        // `gala test` transpiles into a nested gen workspace
+        // (gala-build-workspace/gen/app/ui) and runs the test binary
+        // there, so the fixed relative candidates above never reach
+        // the real source. Walk UP from the working dir: an ancestor
+        // is the repo root, which holds app/ui/update.gala. The
+        // recoverApprovalIfReady anchor guards against a stray match.
+        val cwd, werr = os.Getwd()
+        if werr == nil {
+            var dir = cwd
+            var walking = true
+            for walking && out == "" {
+                val p = dir + "/app/ui/update.gala"
+                val b, err = os.ReadFile(p)
+                if err == nil {
+                    val s = string(b)
+                    if strings.Contains(s, "func recoverApprovalIfReady(") {
+                        out = s
+                    }
+                }
+                val parent = filepath.Dir(dir)
+                if parent == dir {
+                    walking = false
+                } else {
+                    dir = parent
+                }
+            }
+        }
+    }
     return out
 }
 

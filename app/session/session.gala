@@ -20,11 +20,14 @@ import (
 // AppModel's Conversation field so the user sees their prior context
 // without re-prompting.
 //
-// Scope is deliberately narrow: only the conversation log + project name
-// + saved-at timestamp. We do NOT serialize:
-//   - subprocess sessions (live OS handles, not portable)
+// Serialized: the conversation log, project name, saved-at timestamp,
+// per-member claude session ids, and the orchestration state (FSM
+// position, @plan queue, open PRs, pending AskUserQuestion). Resuming
+// mid-flight is no longer "start Idle and hope" — app/ui rebuilds the
+// exact AppState and auto-respawns any in-flight members against their
+// persisted claude session. We still do NOT serialize:
+//   - live subprocess handles (not portable; members are respawned)
 //   - workflow / team config (re-read from team.yaml on every launch)
-//   - FSM state (resuming mid-flight is brittle; prefer to start Idle)
 //
 // ConversationLine lives here rather than in app/ui so app/ui can depend
 // on session (and not the other way around) — saves the type from being
@@ -56,6 +59,17 @@ struct ConversationLine(Speaker string, Text string, At int64 = int64(0), Undeli
 // hand.
 struct SessionIdEntry(Member string, SessionId string)
 
+// SnapPr is the on-disk shape of one AppModel.OpenPrs entry. BatchPr
+// carries an `Instant` (OpenedAt) which isn't a codec-stable scalar,
+// so it's flattened to unix-nanos here and rebuilt on load — the same
+// "flatten for codec round-tripping" rationale as SessionIdEntry.
+struct SnapPr(
+    Url           string,
+    Branch        string,
+    Title         string,
+    OpenedAtNanos int64,
+)
+
 // Snapshot is the on-disk shape. ProjectName is informational (lets us
 // detect cross-project mismatches later); SavedAt is unix nanos at the
 // moment Save was called.
@@ -81,12 +95,40 @@ struct SessionIdEntry(Member string, SessionId string)
 // existed) decode cleanly — gala's codec fills missing fields with
 // their type zero, and the empty-array path through ensureSession is
 // the same as a first-launch behaviour.
+// The orchestration block below makes Resume restore the *run*, not
+// just the transcript. All fields are defaulted so a legacy snapshot
+// (written before these existed) decodes with the codec's type-zero
+// values: an empty StateTag is the "no persisted orchestration state"
+// sentinel — recovery then falls back to the conversation-scan
+// heuristic exactly as it did before this field block.
+//
+//   StateTag/StatePending/StateReason/StateSummaryBody — the AppState
+//     sealed value flattened to scalars (tag + the per-variant
+//     payload). Rebuilt by app/ui on resume.
+//   Plan/PlanShipped/PlanContinuing — the in-flight @plan queue.
+//   ActiveBase/ActivePrBranch — empty string == None.
+//   OpenPrs — PRs opened this session (for @base/stacking + the UI
+//     open-PR list).
+//   PendingQ* — an unanswered AskUserQuestion (empty Member == none).
 struct Snapshot(
     ProjectName    string,
     SavedAt        int64,
     Conversation   Array[ConversationLine],
     ActiveMembers  Array[string],
     SessionIds     Array[SessionIdEntry] = EmptyArray[SessionIdEntry](),
+    StateTag         string = "",
+    StatePending     Array[string] = EmptyArray[string](),
+    StateReason      string = "",
+    StateSummaryBody string = "",
+    Plan             Array[string] = EmptyArray[string](),
+    PlanShipped      int = 0,
+    PlanContinuing   bool = false,
+    ActiveBase       string = "",
+    ActivePrBranch   string = "",
+    OpenPrs          Array[SnapPr] = EmptyArray[SnapPr](),
+    PendingQMember   string = "",
+    PendingQToolUse  string = "",
+    PendingQText     string = "",
 )
 
 // SessionPath returns the canonical save path for a given project repo.
@@ -111,19 +153,78 @@ func SessionPath(repoDir string) string =
 // Constructing per call is cheap (the codec is just metadata).
 func snapshotCodec() json.JsonEncoder[Snapshot] = json.Codec[Snapshot](json.SnakeCase())
 
+// Orchestration is the caller-facing bundle of run state. Kept as one
+// defaulted struct so Save's signature stays readable and a caller
+// that doesn't care (or a legacy path) just omits it — the all-zero
+// value round-trips to the same "no persisted state" snapshot a
+// pre-PR-B build wrote. The fields are mapped onto Snapshot's flat
+// columns (the codec has a proven encoding for scalars + Array[T];
+// a single nested struct field is deliberately avoided).
+struct Orchestration(
+    StateTag         string = "",
+    StatePending     Array[string] = EmptyArray[string](),
+    StateReason      string = "",
+    StateSummaryBody string = "",
+    Plan             Array[string] = EmptyArray[string](),
+    PlanShipped      int = 0,
+    PlanContinuing   bool = false,
+    ActiveBase       string = "",
+    ActivePrBranch   string = "",
+    OpenPrs          Array[SnapPr] = EmptyArray[SnapPr](),
+    PendingQMember   string = "",
+    PendingQToolUse  string = "",
+    PendingQText     string = "",
+)
+
+// noOrchestration is the "no persisted run state" value. It exists as
+// a function (not a bare `Orchestration()` default) on purpose: gala
+// lowers a zero-arg struct constructor to a Go *type conversion*
+// (`Orchestration()` — "missing argument"), whereas a named-field
+// construction lowers to a struct literal correctly. Used as Save's
+// default so callers/tests that don't carry run state still compile.
+func noOrchestration() Orchestration = Orchestration(
+    StateTag         = "",
+    StatePending     = EmptyArray[string](),
+    StateReason      = "",
+    StateSummaryBody = "",
+    Plan             = EmptyArray[string](),
+    PlanShipped      = 0,
+    PlanContinuing   = false,
+    ActiveBase       = "",
+    ActivePrBranch   = "",
+    OpenPrs          = EmptyArray[SnapPr](),
+    PendingQMember   = "",
+    PendingQToolUse  = "",
+    PendingQText     = "",
+)
+
 func Save(
     repoDir string,
     projectName string,
     conversation Array[ConversationLine],
     activeMembers Array[string],
     sessionIds Array[SessionIdEntry] = EmptyArray[SessionIdEntry](),
+    orch Orchestration = noOrchestration(),
 ) Try[bool] = Try(() => {
     val snap = Snapshot(
-        ProjectName   = projectName,
-        SavedAt       = time.Now().UnixNano(),
-        Conversation  = conversation,
-        ActiveMembers = activeMembers,
-        SessionIds    = sessionIds,
+        ProjectName      = projectName,
+        SavedAt          = time.Now().UnixNano(),
+        Conversation     = conversation,
+        ActiveMembers    = activeMembers,
+        SessionIds       = sessionIds,
+        StateTag         = orch.StateTag,
+        StatePending     = orch.StatePending,
+        StateReason      = orch.StateReason,
+        StateSummaryBody = orch.StateSummaryBody,
+        Plan             = orch.Plan,
+        PlanShipped      = orch.PlanShipped,
+        PlanContinuing   = orch.PlanContinuing,
+        ActiveBase       = orch.ActiveBase,
+        ActivePrBranch   = orch.ActivePrBranch,
+        OpenPrs          = orch.OpenPrs,
+        PendingQMember   = orch.PendingQMember,
+        PendingQToolUse  = orch.PendingQToolUse,
+        PendingQText     = orch.PendingQText,
     )
     val encoded = snapshotCodec().Encode(snap).Get()
     val path    = SessionPath(repoDir)

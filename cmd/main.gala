@@ -424,10 +424,10 @@ func loadGuidance(proj Project, pairs Array[GuidancePair]) Tuple[Guidance, Array
 func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match {
     case None()       => m
     case Some(snap)   => {
-        if snap.Conversation.IsEmpty() && snap.ActiveMembers.IsEmpty() {
+        if snap.Conversation.IsEmpty() && snap.ActiveMembers.IsEmpty() && snap.StateTag == "" {
             return m
         }
-        return m.Copy(
+        val primed = m.Copy(
             Conversation          = snap.Conversation,
             // Pin the conversation pane to the bottom on resume so the
             // user lands on the most recent messages — not partway up
@@ -452,6 +452,11 @@ func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match
             RecoveryBannerVisible = true,
             Recovery              = Some(ResumeFocus()),
         )
+        // Restore the FSM position / @plan queue / open PRs / pending
+        // question on top of the conversation prime. No-op for legacy
+        // snapshots (empty StateTag) — they resume conversation-only
+        // exactly as before.
+        return RehydrateOrchestration(primed, snap)
     }
 }
 

@@ -328,3 +328,59 @@ func TestSessionIds_EmptyRoundTrip(t T) T {
         case Some(snap)   => Eq(t1, snap.SessionIds.Size(), 0)
     }
 }
+
+// PR B: the orchestration block round-trips through the codec so
+// Resume can rebuild the run, not just the transcript.
+func TestSaveThenLoad_RoundTripsOrchestration(t T) T {
+    val dir = mkTempDir("orch")
+    val orch = Orchestration(
+        StateTag         = "Delegating",
+        StatePending     = ArrayOf("Kael", "Lyra"),
+        Plan             = ArrayOf("port", "harness", "tests"),
+        PlanShipped      = 1,
+        PlanContinuing   = true,
+        ActiveBase       = "gala_team/x/pr/abc",
+        ActivePrBranch   = "gala_team/x/pr/def",
+        OpenPrs          = ArrayOf(SnapPr(
+            Url = "https://pr/1", Branch = "b1", Title = "PR 1",
+            OpenedAtNanos = int64(1700000000000000000))),
+        PendingQMember   = "Vesper",
+        PendingQToolUse  = "toolu_z",
+        PendingQText     = "Which approach?",
+    )
+    val saved = Save(dir, "demo", EmptyArray[ConversationLine](),
+        EmptyArray[string](), EmptyArray[SessionIdEntry](), orch)
+    val t1 = IsTrue(t, saved.IsSuccess())
+    return Load(dir) match {
+        case None()     => IsTrue(t1, false)
+        case Some(snap) => {
+            val t2 = Eq(t1, snap.StateTag, "Delegating")
+            val t3 = Eq(t2, snap.StatePending.Size(), 2)
+            val t4 = Eq(t3, snap.Plan.Size(), 3)
+            val t5 = Eq(t4, snap.PlanShipped, 1)
+            val t6 = IsTrue(t5, snap.PlanContinuing)
+            val t7 = Eq(t6, snap.ActiveBase, "gala_team/x/pr/abc")
+            val t8 = Eq(t7, snap.OpenPrs.Size(), 1)
+            val t9 = Eq(t8, snap.OpenPrs.Get(0).Title, "PR 1")
+            return Eq(t9, snap.PendingQText, "Which approach?")
+        }
+    }
+}
+
+// A snapshot written the old way (no orchestration arg) decodes with
+// an empty StateTag — the "no persisted run state" sentinel that keeps
+// legacy snapshots resuming conversation-only.
+func TestSaveThenLoad_LegacySnapshotHasEmptyStateTag(t T) T {
+    val dir = mkTempDir("legacy")
+    val saved = Save(dir, "demo",
+        ArrayOf(ConversationLine(Speaker = "you", Text = "hi")),
+        EmptyArray[string]())
+    val t1 = IsTrue(t, saved.IsSuccess())
+    return Load(dir) match {
+        case None()     => IsTrue(t1, false)
+        case Some(snap) => {
+            val t2 = Eq(t1, snap.StateTag, "")
+            return Eq(t2, snap.PlanShipped, 0)
+        }
+    }
+}

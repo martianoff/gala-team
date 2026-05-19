@@ -4889,3 +4889,77 @@ func TestPrBranchOverride_ManualApproveReusesActivePr(t T) T {
         case None()  => IsTrue(t, false)
     }
 }
+
+// ----------------------------------------------------------------------------
+// PR B: durable FSM / orchestration recovery.
+// ----------------------------------------------------------------------------
+
+// stateTag (+ payload) and stateFromSnap are inverses for the variant
+// that carries a pending set — the round-trip must preserve it.
+func TestStateRoundTrip_DelegatingPreservesPending(t T) T {
+    val pset = EmptyHashSet[string]().Add("Kael").Add("Lyra")
+    val st = Delegating(Pending = pset)
+    val back = stateFromSnap(stateTag(st), statePendingList(st), stateReasonOf(st), stateSummaryOf(st))
+    return back match {
+        case Delegating(p) => {
+            val t1 = IsTrue(t, p.Contains("Kael"))
+            return IsTrue(t1, p.Contains("Lyra"))
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+// Approval's summary body must survive the flatten/rebuild.
+func TestStateRoundTrip_ApprovalPreservesSummary(t T) T {
+    val st = Approval(SummaryBody = "## What\nshipped")
+    val back = stateFromSnap(stateTag(st), statePendingList(st), stateReasonOf(st), stateSummaryOf(st))
+    return back match {
+        case Approval(b) => Eq(t, b, "## What\nshipped")
+        case _           => IsTrue(t, false)
+    }
+}
+
+// RehydrateOrchestration rebuilds State + plan counters from a snapshot.
+func TestRehydrateOrchestration_RestoresStateAndPlan(t T) T {
+    val snap = session.Snapshot(
+        ProjectName      = "demo",
+        SavedAt          = int64(0),
+        Conversation     = EmptyArray[session.ConversationLine](),
+        ActiveMembers    = EmptyArray[string](),
+        StateTag         = "Approval",
+        StateSummaryBody = "ship",
+        Plan             = ArrayOf("a", "b"),
+        PlanShipped      = 1,
+    )
+    val m = RehydrateOrchestration(sampleModel().Copy(State = Idle()), snap)
+    val t1 = m.State match {
+        case Approval(b) => Eq(t, b, "ship")
+        case _           => IsTrue(t, false)
+    }
+    return Eq(t1, m.PlanShipped, 1)
+}
+
+// A legacy snapshot (empty StateTag) must NOT touch the model — old
+// sessions still resume conversation-only.
+func TestRehydrateOrchestration_LegacyEmptyTagIsNoOp(t T) T {
+    val snap = session.Snapshot(
+        ProjectName   = "demo",
+        SavedAt       = int64(0),
+        Conversation  = EmptyArray[session.ConversationLine](),
+        ActiveMembers = EmptyArray[string](),
+    )
+    val m = RehydrateOrchestration(sampleModel().Copy(State = Idle()), snap)
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
+// resumeTargets: pending workers for Delegating, nobody for Idle.
+func TestResumeTargets_DelegatingVsIdle(t T) T {
+    val pset = EmptyHashSet[string]().Add("Kael")
+    val mDel = sampleModel().Copy(State = Delegating(Pending = pset))
+    val t1 = Eq(t, resumeTargets(mDel).Size(), 1)
+    val mIdle = sampleModel().Copy(State = Idle())
+    return IsTrue(t1, resumeTargets(mIdle).IsEmpty())
+}

@@ -198,6 +198,172 @@ func stateTag(s AppState) string = s match {
     case Approval(_)    => "Approval"
 }
 
+// ----------------------------------------------------------------------------
+// Orchestration-state persistence (durable Resume).
+//
+// The on-disk Snapshot carries the FSM position + @plan queue + open
+// PRs + pending question so Resume restores the *run*, not just the
+// transcript. AppState is flattened to (tag, pending, reason, summary)
+// — the codec has no encoding for a sealed type, the same reason
+// SessionIds is flattened to an array. stateTag (above) is the single
+// source of truth for the tag strings; stateFromSnap is its inverse.
+// ----------------------------------------------------------------------------
+
+func setToArray(p HashSet[string]) Array[string] =
+    p.FoldLeft(EmptyArray[string](), (a, x) => a.Append(x))
+
+func statePendingList(s AppState) Array[string] = s match {
+    case Delegating(p)   => setToArray(p)
+    case QAGate(p)       => setToArray(p)
+    case TLNudging(_, p) => setToArray(p)
+    case _               => EmptyArray[string]()
+}
+
+func stateReasonOf(s AppState) string = s match {
+    case TLNudging(r, _) => r
+    case _               => ""
+}
+
+func stateSummaryOf(s AppState) string = s match {
+    case Approval(b) => b
+    case _           => ""
+}
+
+// stateFromSnap is the inverse of stateTag (+ payload). An unknown or
+// empty tag — including a legacy snapshot with no persisted state —
+// rebuilds as Idle, so old snapshots resume exactly as before.
+func stateFromSnap(tag string, pending Array[string], reason string, summary string) AppState {
+    val pset = pending.FoldLeft(EmptyHashSet[string](), (acc, n) => acc.Add(n))
+    return tag match {
+        case "TLThinking" => TLThinking()
+        case "Delegating" => Delegating(Pending = pset)
+        case "QAGate"     => QAGate(Pending = pset)
+        case "TLReview"   => TLReview()
+        case "TLNudging"  => TLNudging(Reason = reason, Pending = pset)
+        case "Approval"   => Approval(SummaryBody = summary)
+        case _            => Idle()
+    }
+}
+
+// orchestrationOf snapshots the model's run state into the codec-safe
+// shape session.Save persists. Called on every conversation write, so
+// the durable snapshot tracks the FSM/plan/PR position continuously —
+// no separate save-on-transition plumbing needed.
+func orchestrationOf(m AppModel) session.Orchestration {
+    val (pqM, pqT, pqX) = m.PendingQuestion match {
+        case Some(pq) => (pq.Member, pq.ToolUseId, pq.QuestionText)
+        case None()   => ("", "", "")
+    }
+    return session.Orchestration(
+        StateTag         = stateTag(m.State),
+        StatePending     = statePendingList(m.State),
+        StateReason      = stateReasonOf(m.State),
+        StateSummaryBody = stateSummaryOf(m.State),
+        Plan             = m.Plan,
+        PlanShipped      = m.PlanShipped,
+        PlanContinuing   = m.PlanContinuing,
+        ActiveBase       = m.ActiveBase.GetOrElse(""),
+        ActivePrBranch   = m.ActivePrBranch.GetOrElse(""),
+        OpenPrs          = m.OpenPrs.Map((bp) => session.SnapPr(
+            Url           = bp.Url,
+            Branch        = bp.Branch,
+            Title         = bp.Title,
+            OpenedAtNanos = bp.OpenedAt.UnixNanos(),
+        )),
+        PendingQMember   = pqM,
+        PendingQToolUse  = pqT,
+        PendingQText     = pqX,
+    )
+}
+
+func optFromStr(s string) Option[string] =
+    if (s == "") None[string]() else Some(s)
+
+func pendingQFromSnap(snap session.Snapshot) Option[PendingQuestion] =
+    if (snap.PendingQMember == "") None[PendingQuestion]()
+    else Some(PendingQuestion(
+        Member       = snap.PendingQMember,
+        ToolUseId    = snap.PendingQToolUse,
+        QuestionText = snap.PendingQText,
+    ))
+
+// RehydrateOrchestration restores the persisted run state onto a
+// freshly-primed model. Exported so cmd/main.gala's primeFromSnapshot
+// can apply it (AppState construction lives in this package). A legacy
+// snapshot has an empty StateTag → no-op, so old sessions resume as
+// conversation-only exactly as before. The OpenedAt instant is rebuilt
+// at second precision (the field only drives a relative "PR ready Nm
+// ago" label, so sub-second fidelity is irrelevant).
+func RehydrateOrchestration(m AppModel, snap session.Snapshot) AppModel {
+    if snap.StateTag == "" { return m }
+    return m.Copy(
+        State          = stateFromSnap(snap.StateTag, snap.StatePending, snap.StateReason, snap.StateSummaryBody),
+        Plan           = snap.Plan,
+        PlanShipped    = snap.PlanShipped,
+        PlanContinuing = snap.PlanContinuing,
+        ActiveBase     = optFromStr(snap.ActiveBase),
+        ActivePrBranch = optFromStr(snap.ActivePrBranch),
+        OpenPrs        = snap.OpenPrs.Map((sp) => BatchPr(
+            Url      = sp.Url,
+            Branch   = sp.Branch,
+            Title    = sp.Title,
+            OpenedAt = time_utils.FromUnixSeconds(sp.OpenedAtNanos / int64(1000000000)),
+        )),
+        PendingQuestion = pendingQFromSnap(snap),
+    )
+}
+
+// resumeContinuationPrompt is the generic "pick up where you left off"
+// nudge sent to every member auto-respawned on Resume. It deliberately
+// names no task specifics — claude --resume reloads the member's full
+// prior conversation, so the member already knows what it was doing;
+// this only tells it the interruption is over and to finish normally.
+func resumeContinuationPrompt() string =
+    "[Session resumed] You were interrupted mid-task; your prior conversation context has been reloaded. Continue exactly where you left off and finish the task. When done, use the normal directives (team lead: @dispatch / @summary; engineers / QA: @finished / @help / @blocked)."
+
+// resumeTargets is who must be respawned to make the restored FSM
+// state live again. Delegating/QAGate/TLNudging carry the in-flight
+// worker set; a pure lead turn (TLThinking/TLReview) means the lead
+// itself was mid-turn. Approval/Idle have nobody running by design.
+func resumeTargets(m AppModel) Array[string] = m.State match {
+    case Delegating(p)   => setToArray(p)
+    case QAGate(p)       => setToArray(p)
+    case TLNudging(_, p) => setToArray(p)
+    case TLThinking()    => ArrayOf(m.Team.Lead.Name)
+    case TLReview()      => ArrayOf(m.Team.Lead.Name)
+    case _               => EmptyArray[string]()
+}
+
+// resumeInFlight is the Resume action: if the restored state had
+// members mid-flight, respawn each against their persisted claude
+// session (--resume reloads their context) with the continuation
+// nudge, keeping the exact FSM state so the run picks up where it
+// stopped. With nothing in flight it falls back to the legacy
+// conversation-scan Approval recovery (harmless when there's no
+// summary), preserving prior behaviour for Idle/Approval and legacy
+// snapshots.
+func resumeInFlight(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    val targets = resumeTargets(m)
+    if targets.IsEmpty() {
+        return recoverApprovalIfReady(m)
+    }
+    val seed = (m, EmptyArray[Cmd[AppMsg]]())
+    val (after, cmds) = targets.FoldLeft(seed, (acc, name) => {
+        val (curM, curCmds) = acc
+        return findMemberByName(curM.Team.Members, name) match {
+            case None()    => (curM, curCmds)
+            case Some(mem) => ensureSession(curM, mem) match {
+                case Left(err) => (curM.Copy(LastError = Some(s"resume ${name}: ${err}")), curCmds)
+                case Right(m1) => {
+                    val m2 = setStatus(m1, name, StWorking())
+                    return (m2, curCmds.Append(sendAndPumpCmd(m2, mem, resumeContinuationPrompt())))
+                }
+            }
+        }
+    })
+    return (after, batchAll(cmds))
+}
+
 // Heartbeat thresholds are now driven by m.Policy.Heartbeat (#29).
 // The bandFor / livenessStatus helpers below take the typed Heartbeat
 // argument so threshold tweaks per-team take effect on the next tick.
@@ -803,12 +969,14 @@ func onRecoveryConfirm(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Recovery mat
     case None()      => (m, NoCmd[AppMsg]())
     case Some(focus) => focus match {
         case ResumeFocus() => {
-            // Recover Approval state if the prior session left an
-            // unconfirmed @summary on the lead's pen and the lead
-            // branch is still PR-ready. Without this, the user
-            // resumes into Idle and has to re-prompt the TL to
-            // re-summarize before they can ship.
-            val (recovered, recoveryCmd) = recoverApprovalIfReady(m)
+            // Restore the run, not just the transcript: if the
+            // persisted FSM state had members mid-flight, respawn
+            // them against their --resume'd claude sessions so the
+            // orchestration continues from where it stopped. With
+            // nothing in flight this falls back to the prior
+            // conversation-scan Approval recovery (so a stranded
+            // @summary still becomes an Approval the user can ship).
+            val (recovered, recoveryCmd) = resumeInFlight(m)
             return (recovered.Copy(
                 Recovery              = None[RecoveryChoice](),
                 RecoveryBannerVisible = false,
@@ -2876,6 +3044,7 @@ func activeMemberNames(m AppModel) Array[string] =
 // worktree" amnesia symptom.
 func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) AppModel = session.Save(
     m.Project.Repo, m.Project.Name, nextConvo, activeMemberNames(m), serialiseSessionIds(m),
+    orchestrationOf(m),
 ) match {
     case Success(_)   => m.Copy(Conversation = nextConvo)
     case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some(s"session save: ${err.Error()}"))

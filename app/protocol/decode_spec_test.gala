@@ -12,72 +12,31 @@ import (
 //
 // This file is the executable proof that `Decode` SUBSUMES every text-stream
 // hack the old front-to-back directive parser + UI watermarks defend against.
-// It is the shared contract for the implementation (owned in parallel) and
-// for QA: both verify against the expected Message sets asserted here.
+// It is the shared contract the implementation and QA both verify against.
 //
-// Shared contract this corpus codes to (do not redefine here — owned by the
-// package implementation):
+// `DecodeContext` carries a `LeadView` discriminator that selects the parse
+// strategy, so every case must be decoded under the view matching who
+// produced the buffer:
+//   - lead turn  → `tl(epoch)`  (front-to-back @dispatch / @consult / @summary)
+//   - member turn → `mem(name, epoch)` (end-anchored @finished/@help/@blocked
+//                    only — a member buffer that quotes `@dispatch(` in an
+//                    audit must NOT be parsed as a real dispatch; that
+//                    discriminator is exactly what makes category (2) below
+//                    implementable).
 //
-//   sealed type MessageKind {
-//       case Dispatch(); case Finished(); case HelpRequested(); case Blocked()
-//       case Nudge(); case Ack(); case Summary(); case Consult()
-//   }
-//   struct Message(Id string, Sender string, Recipient string,
-//                  Kind MessageKind, Body string, Attempt int,
-//                  InReplyTo Option[string], Epoch int)
-//   func NewMessage(sender, recipient string, kind MessageKind,
-//                   body string, epoch int) Message
-//   func Decode(buffer string, ctx DecodeContext) Array[Message]
+// `tl` / `mem` are the package's shared decode-context helpers (defined
+// alongside the structural decode tests) — reused here, not redefined.
+// `KindTag` is the package's public kind→tag function — reused for kind
+// assertions rather than carrying a parallel local taxonomy.
 //
-// ASSUMED DecodeContext shape — the implementation MUST match this so the
-// corpus compiles and the contract is honoured:
-//
-//   struct DecodeContext(Sender string, Recipient string, Epoch int)
-//
-// Every case below uses the zero/default context (all fields empty/0); no
-// case needs sender/recipient seeding because the asserted properties are
-// directive-derived (Recipient of a Dispatch is the @dispatch target, not a
-// ctx value) and identity-derived (Id is a stable content hash). If a future
-// case needs seeding, extend this comment so the implementation stays in sync.
-//
-// ASSUMED decode mapping the cases rely on (the behavioral contract):
-//   - `@dispatch(<n>) <b> @end`               → Message(Kind=Dispatch,
-//                                                 Recipient=<n>, Body=<b>)
-//   - `@finished|@review|@done <b> @end`       → Message(Kind=Finished, Body=<b>)
-//   - `@consult(<n>) <b> @end`                 → Message(Kind=Consult,
-//                                                 Recipient=<n>, Body=<b>)
-//   - prose with no closed directive block     → no Message
-//   - a directive opener with no bare `@end`   → no Message until `@end` lands
-//   - `Id` is a stable hash of the message's content, so byte-identical
-//     content ⇒ identical `Id` (decode is idempotent and prefix-stable as a
-//     buffer grows across streamed chunks).
-//
-// NOTE: this file intentionally does not fully compile until the package
-// implementation lands — it is written correct against the contract above.
+// The asserted intent of every case is view-independent: identity is the
+// content hash, so idempotency and regrowth hold regardless of which view
+// decoded the buffer. Only the per-case context selects the right parser.
 // ============================================================================
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// The zero/default decode context. Isolated in one place so a shape tweak is
-// a one-line change rather than a file-wide edit.
-func defaultCtx() DecodeContext = DecodeContext(Sender = "", Recipient = "", Epoch = 0)
-
-func decodeAll(buffer string) Array[Message] = Decode(buffer, defaultCtx())
-
-// One-kind predicates matched on the sealed type directly (the repo's
-// established test idiom) — no parallel string taxonomy that could silently
-// drift from the MessageKind cases.
-func isDispatch(m Message) bool = m.Kind match {
-    case Dispatch() => true
-    case _          => false
-}
-
-func isFinished(m Message) bool = m.Kind match {
-    case Finished() => true
-    case _          => false
-}
 
 func idList(ms Array[Message]) Array[string] = ms.Map((m) => m.Id)
 
@@ -100,11 +59,12 @@ func distinctCount(ids Array[string]) int = ids.Distinct().Length()
 // ---------------------------------------------------------------------------
 
 func TestDecode_DuplicateChunkIsIdempotent(t T) T {
-    return RunCases[string, int](t,
-        (sub T, input string, expected int) => {
-            val a   = decodeAll(input)
-            val dup = input + "\n" + input
-            val b   = decodeAll(dup)
+    return RunCases[Tuple[string, DecodeContext], int](t,
+        (sub T, input Tuple[string, DecodeContext], expected int) => {
+            val buf = input.V1
+            val ctx = input.V2
+            val a   = Decode(buf, ctx)
+            val b   = Decode(buf + "\n" + buf, ctx)
             val ia  = idList(a)
             val ib  = idList(b)
             val t1 = Eq(sub, a.Length(), expected)
@@ -118,22 +78,22 @@ func TestDecode_DuplicateChunkIsIdempotent(t T) T {
             return Eq(t3, ia.MkString("|"), ib.MkString("|"))
         },
         // one TL dispatch, re-flushed → still one Dispatch (no double-spawn).
-        Case[string, int](
+        Case[Tuple[string, DecodeContext], int](
             Name = "single-dispatch",
-            Input = "@dispatch(Felix) Implement the parser.\n@end",
+            Input = ("@dispatch(Felix) Implement the parser.\n@end", tl(0)),
             Expected = 1,
         ),
         // a member sign-off, re-flushed → still one Finished (terminalFingerprint
         // no longer needed to tell the replay apart from a fresh sign-off).
-        Case[string, int](
+        Case[Tuple[string, DecodeContext], int](
             Name = "single-finished",
-            Input = "@finished\nParser landed; tests green.\n@end",
+            Input = ("@finished\nParser landed; tests green.\n@end", mem("Sable", 0)),
             Expected = 1,
         ),
         // a multi-target TL turn, re-flushed → still N, not 2N (dedupTargetsByName's job).
-        Case[string, int](
+        Case[Tuple[string, DecodeContext], int](
             Name = "multi-dispatch",
-            Input = "@dispatch(Felix) A.\n@end\n\n@dispatch(Mira) B.\n@end",
+            Input = ("@dispatch(Felix) A.\n@end\n\n@dispatch(Mira) B.\n@end", tl(0)),
             Expected = 2,
         ),
     )
@@ -157,9 +117,9 @@ func TestDecode_DuplicateChunkIsIdempotent(t T) T {
 func TestDecode_QuotedDirectivesDoNotCollideWithRealSignoff(t T) T {
     return RunCases[string, string](t,
         (sub T, input string, expected string) => {
-            val ms  = decodeAll(input)
-            val fin = ms.Filter((m) => isFinished(m))
-            val dsp = ms.Filter((m) => isDispatch(m))
+            val ms  = Decode(input, mem("Sable", 0))
+            val fin = ms.Filter((m) => KindTag(m.Kind) == "finished")
+            val dsp = ms.Filter((m) => KindTag(m.Kind) == "dispatch")
             val t1 = Eq(sub, fin.Length(), 1)        // exactly the real sign-off
             val t2 = Eq(t1, dsp.Length(), 0)         // quoted @dispatch( is inert
             return Eq(t2, fin.Get(0).Body, expected) // real body, not the quoted opener's
@@ -218,9 +178,9 @@ func TestDecode_QuotedDirectivesDoNotCollideWithRealSignoff(t T) T {
 func TestDecode_FinishedAliasesAreAccepted(t T) T {
     return RunCases[string, string](t,
         (sub T, input string, expected string) => {
-            val ms = decodeAll(input)
+            val ms = Decode(input, mem("Sable", 0))
             val t1 = Eq(sub, ms.Length(), 1)
-            val t2 = IsTrue(t1, isFinished(ms.Get(0)))
+            val t2 = Eq(t1, KindTag(ms.Get(0).Kind), "finished")
             return Eq(t2, ms.Get(0).Body, expected)
         },
         Case[string, string](
@@ -262,11 +222,13 @@ func TestDecode_FinishedAliasesAreAccepted(t T) T {
 func TestDecode_UnclosedTerminalIsStreamingSafe(t T) T {
     return RunCases[string, int](t,
         (sub T, input string, expected int) => {
-            val ms = decodeAll(input)
+            val ms = Decode(input, tl(0))
             val t1 = Eq(sub, ms.Length(), expected)
             // when it DOES emit, it must be the dispatch we expected — not a
-            // truncated/garbled body.
-            return if (expected > 0) { IsTrue(t1, isDispatch(ms.Get(0))) } else { t1 }
+            // truncated/garbled body. Guard on the actual length so a decode
+            // regression fails the count assertion cleanly instead of
+            // panicking on an out-of-bounds Get.
+            return if (ms.Length() > 0) { Eq(t1, KindTag(ms.Get(0).Kind), "dispatch") } else { t1 }
         },
         // mid-stream: opener seen, body partially streamed, no @end yet → nothing.
         Case[string, int](
@@ -304,7 +266,7 @@ func TestDecode_UnclosedTerminalIsStreamingSafe(t T) T {
 func TestDecode_MultipleBackToBackDispatch(t T) T {
     return RunCases[string, string](t,
         (sub T, input string, expected string) => {
-            val dsp    = decodeAll(input).Filter((m) => isDispatch(m))
+            val dsp    = Decode(input, tl(0)).Filter((m) => KindTag(m.Kind) == "dispatch")
             val joined = dsp.Map((m) => m.Recipient + "::" + m.Body).MkString("|")
             val t1 = Eq(sub, dsp.Length(), 3)
             return Eq(t1, joined, expected)
@@ -339,7 +301,7 @@ func TestDecode_MultipleBackToBackDispatch(t T) T {
 
 func TestDecode_ProseOnlyTurnYieldsNothing(t T) T {
     return RunCases[string, int](t,
-        (sub T, input string, expected int) => Eq(sub, decodeAll(input).Length(), expected),
+        (sub T, input string, expected int) => Eq(sub, Decode(input, mem("Sable", 0)).Length(), expected),
         Case[string, int](
             Name = "plain-chatter",
             Input = "Looking into this now. I'll split the work and report back shortly.",
@@ -379,8 +341,8 @@ func TestDecode_ProseOnlyTurnYieldsNothing(t T) T {
 func TestDecode_RegrowthIsIdentityStableAppendOnly(t T) T {
     return RunCases[Tuple[string, string], Tuple[int, string]](t,
         (sub T, input Tuple[string, string], expected Tuple[int, string]) => {
-            val a    = decodeAll(input.V1)
-            val b    = decodeAll(input.V2)
+            val a    = Decode(input.V1, tl(0))
+            val b    = Decode(input.V2, tl(0))
             val ia   = idList(a)
             val ib   = idList(b)
             val tail = b.Drop(a.Length())

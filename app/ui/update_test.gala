@@ -4963,3 +4963,61 @@ func TestResumeTargets_DelegatingVsIdle(t T) T {
     val mIdle = sampleModel().Copy(State = Idle())
     return IsTrue(t1, resumeTargets(mIdle).IsEmpty())
 }
+
+// ----------------------------------------------------------------------------
+// QA sign-off fire-once-guard defeat — the "QA approved but the TL
+// never picked up" regression.
+//
+// A QA reviewer's first chunk legitimately QUOTES the deliverables /
+// the directive protocol it must review, so an early streamed buffer
+// transiently contains only a quoted `@finished … @end`. The old 0/1
+// MemberDirectivesFired latch fired on that and then dropped the
+// member's REAL later sign-off — no MemberDone, FSM hung in QAGate.
+// Content-fingerprint dedupe must let a genuinely different later
+// terminal through.
+// ----------------------------------------------------------------------------
+
+func feedDirectiveLines(m AppModel, who string, lines Array[string]) Tuple[AppModel, int] {
+    var cur = m
+    var lastSize = 0
+    var i = 0
+    for i < lines.Size() {
+        val (m2, cmds) = maybeHandleMemberDirectives(cur, who, lines.Get(i))
+        cur = m2
+        lastSize = cmds.Size()
+        i = i + 1
+    }
+    return (cur, lastSize)
+}
+
+func TestMemberDirectives_QuotedThenRealSignoffStillFires(t T) T {
+    // Phase 1: an early QUOTED terminal — what a reviewer's first
+    // chunk contains while discussing how members sign off.
+    val quoted = ArrayOf[string](
+        "Reviewing the protocol. Engineers sign off like:",
+        "@finished",
+        "quoted example body",
+        "@end",
+    )
+    val (m1, firedEarly) = feedDirectiveLines(sampleModel(), "Felix", quoted)
+    val t1 = IsTrue(t, firedEarly > 0)
+    // Phase 2: more prose, then the member's REAL sign-off with a
+    // DIFFERENT body. The boolean latch dropped this; the fingerprint
+    // dedupe must let it through.
+    val real = ArrayOf[string](
+        "Verdict: PASS. Everything builds and tests green.",
+        "@finished",
+        "the genuine multi-line sign-off body that differs",
+        "@end",
+    )
+    val (_, firedReal) = feedDirectiveLines(m1, "Felix", real)
+    return IsTrue(t1, firedReal > 0)
+}
+
+func TestTerminalFingerprint_DistinguishesAndDedupes(t T) T {
+    val a = terminalFingerprint(Finished("quoted example body"))
+    val b = terminalFingerprint(Finished("the genuine multi-line sign-off body that differs"))
+    val c = terminalFingerprint(Finished("quoted example body"))
+    val t1 = IsTrue(t, a != b)
+    return IsTrue(t1, a == c)
+}

@@ -1,0 +1,425 @@
+package protocol
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// decode_spec_test.gala — the authoritative DECODE behavioral spec corpus
+// for app/protocol.
+//
+// This file is the executable proof that `Decode` SUBSUMES every text-stream
+// hack the old front-to-back directive parser + UI watermarks defend against.
+// It is the shared contract for the implementation (owned in parallel) and
+// for QA: both verify against the expected Message sets asserted here.
+//
+// Shared contract this corpus codes to (do not redefine here — owned by the
+// package implementation):
+//
+//   sealed type MessageKind {
+//       case Dispatch(); case Finished(); case HelpRequested(); case Blocked()
+//       case Nudge(); case Ack(); case Summary(); case Consult()
+//   }
+//   struct Message(Id string, Sender string, Recipient string,
+//                  Kind MessageKind, Body string, Attempt int,
+//                  InReplyTo Option[string], Epoch int)
+//   func NewMessage(sender, recipient string, kind MessageKind,
+//                   body string, epoch int) Message
+//   func Decode(buffer string, ctx DecodeContext) Array[Message]
+//
+// ASSUMED DecodeContext shape — the implementation MUST match this so the
+// corpus compiles and the contract is honoured:
+//
+//   struct DecodeContext(Sender string, Recipient string, Epoch int)
+//
+// Every case below uses the zero/default context (all fields empty/0); no
+// case needs sender/recipient seeding because the asserted properties are
+// directive-derived (Recipient of a Dispatch is the @dispatch target, not a
+// ctx value) and identity-derived (Id is a stable content hash). If a future
+// case needs seeding, extend this comment so the implementation stays in sync.
+//
+// ASSUMED decode mapping the cases rely on (the behavioral contract):
+//   - `@dispatch(<n>) <b> @end`               → Message(Kind=Dispatch,
+//                                                 Recipient=<n>, Body=<b>)
+//   - `@finished|@review|@done <b> @end`       → Message(Kind=Finished, Body=<b>)
+//   - `@consult(<n>) <b> @end`                 → Message(Kind=Consult,
+//                                                 Recipient=<n>, Body=<b>)
+//   - prose with no closed directive block     → no Message
+//   - a directive opener with no bare `@end`   → no Message until `@end` lands
+//   - `Id` is a stable hash of the message's content, so byte-identical
+//     content ⇒ identical `Id` (decode is idempotent and prefix-stable as a
+//     buffer grows across streamed chunks).
+//
+// NOTE: this file intentionally does not fully compile until the package
+// implementation lands — it is written correct against the contract above.
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+// The zero/default decode context. Isolated in one place so a shape tweak is
+// a one-line change rather than a file-wide edit.
+func defaultCtx() DecodeContext = DecodeContext(Sender = "", Recipient = "", Epoch = 0)
+
+func decodeAll(buffer string) Array[Message] = Decode(buffer, defaultCtx())
+
+// kindTag flattens a MessageKind to a stable string so cases can assert on
+// kind without re-deriving the sealed match everywhere. Exhaustive over the
+// sealed type — the transpiler enforces it, no `case _` needed.
+func kindTag(k MessageKind) string = k match {
+    case Dispatch()      => "dispatch"
+    case Finished()      => "finished"
+    case HelpRequested() => "help"
+    case Blocked()       => "blocked"
+    case Nudge()         => "nudge"
+    case Ack()           => "ack"
+    case Summary()       => "summary"
+    case Consult()       => "consult"
+}
+
+func idList(ms Array[Message]) Array[string] = ms.Map((m) => m.Id)
+
+func joinIds(ms Array[Message]) string = idList(ms).MkString("|")
+
+func ofKind(ms Array[Message], tag string) Array[Message] =
+    ms.Filter((m) => kindTag(m.Kind) == tag)
+
+// distinctCount counts unique ids without leaning on a HashMap.Size — fold a
+// (seen, count) accumulator so the corpus depends on nothing beyond the
+// immutable-collection basics.
+func distinctCount(ids Array[string]) int {
+    val seed = (EmptyHashMap[string, bool](), 0)
+    val (_, n) = ids.FoldLeft(seed, (acc, id) => {
+        val (seen, c) = acc
+        if (seen.Get(id).IsDefined()) { (seen, c) } else { (seen.Put(id, true), c + 1) }
+    })
+    return n
+}
+
+// ---------------------------------------------------------------------------
+// (1) Duplicate-chunk idempotency
+//
+// Replacement-proof for: dedupTargetsByName + terminalFingerprint.
+// Bug it defends against: a claude assistant stream can re-flush a
+// byte-identical chunk (buffer flush, --resume mid-envelope, pump retry).
+// The front-to-back parser then saw the SAME `@dispatch` block twice and
+// the fanout spawned every target twice; the second --resume raced a
+// session id the first spawn had not yet registered and crashed with a
+// "no conversation found" lookup. dedupTargetsByName collapsed (name, body)
+// duplicates and terminalFingerprint hashed terminal bodies to tell two
+// sign-offs apart — both become unnecessary once Decode keys identity on a
+// content hash: appending a byte-identical chunk yields the SAME Message
+// set (same Ids, same count, no doubles).
+// ---------------------------------------------------------------------------
+
+func TestDecode_DuplicateChunkIsIdempotent(t T) T {
+    return RunCases[string, int](t,
+        (sub T, input string, expected int) => {
+            val a   = decodeAll(input)
+            val dup = input + "\n" + input               // same chunk, re-flushed
+            val b   = decodeAll(dup)
+            val t1 = Eq(sub, a.Length(), expected)        // single decode count
+            val t2 = Eq(t1, b.Length(), expected)         // no double-emit on replay
+            val t3 = Eq(t2, distinctCount(idList(b)), expected) // no new ids appeared
+            return Eq(t3, joinIds(a), joinIds(b))         // identical id set + order
+        },
+        // one TL dispatch, re-flushed → still one Dispatch (no double-spawn).
+        Case[string, int](
+            Name = "single-dispatch",
+            Input = "@dispatch(Felix) Implement the parser.\n@end",
+            Expected = 1,
+        ),
+        // a member sign-off, re-flushed → still one Finished (terminalFingerprint
+        // no longer needed to tell the replay apart from a fresh sign-off).
+        Case[string, int](
+            Name = "single-finished",
+            Input = "@finished\nParser landed; tests green.\n@end",
+            Expected = 1,
+        ),
+        // a multi-target TL turn, re-flushed → still N, not 2N (dedupTargetsByName's job).
+        Case[string, int](
+            Name = "multi-dispatch",
+            Input = "@dispatch(Felix) A.\n@end\n\n@dispatch(Mira) B.\n@end",
+            Expected = 2,
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// (2) Quoted-directive collision
+//
+// Replacement-proof for: MemberTerminal's last-`@end` backward-scan (and the
+// reason collectBody's greedy first-`@end`-wins is unsafe for member turns).
+// Bug it defends against: a deliverable about the orchestrator legitimately
+// QUOTES directive syntax as documented examples (`@dispatch(...) @end`,
+// `@finished ... @end`). Greedy front-to-back parsing let an earlier quoted
+// opener swallow the member's REAL terminal as its body, so no completion
+// ever fired and the FSM parked waiting on a member that had already
+// finished. Decode must anchor on the operative sign-off: exactly one
+// Finished, the real one — and the quoted `@dispatch(` example must NOT
+// surface as a Dispatch message.
+// ---------------------------------------------------------------------------
+
+func TestDecode_QuotedDirectivesDoNotCollideWithRealSignoff(t T) T {
+    return RunCases[string, string](t,
+        (sub T, input string, expected string) => {
+            val ms  = decodeAll(input)
+            val fin = ofKind(ms, "finished")
+            val dsp = ofKind(ms, "dispatch")
+            val t1 = Eq(sub, fin.Length(), 1)        // exactly the real sign-off
+            val t2 = Eq(t1, dsp.Length(), 0)         // quoted @dispatch( is inert
+            return Eq(t2, fin.Get(0).Body, expected) // real body, not the quoted opener's
+        },
+        // Fully-formed quoted example block (a quoted @dispatch and a quoted
+        // @finished, each with their own @end) precedes the real @finished.
+        // The greedy parser would fire the quoted ones first; Decode anchors
+        // on the LAST bare @end and its nearest member-terminal opener.
+        Case[string, string](
+            Name = "quoted-example-then-real-finished",
+            Input = "Reviewed the protocol doc. It documents, verbatim:\n" +
+                "\n" +
+                "    @dispatch(Felix) example task body\n" +
+                "    @end\n" +
+                "\n" +
+                "    @finished\n" +
+                "    example sign-off body\n" +
+                "    @end\n" +
+                "\n" +
+                "That all checks out. My real sign-off:\n" +
+                "@finished\n" +
+                "Audited the protocol doc; corpus committed.\n" +
+                "@end",
+            Expected = "Audited the protocol doc; corpus committed.",
+        ),
+        // An UNCLOSED pseudo-opener (a prose line that starts with @finished
+        // but never gets its own bare @end) precedes the real @done. The old
+        // close-required front-to-back scan bailed at the pseudo-opener and
+        // never reached the real terminal.
+        Case[string, string](
+            Name = "unclosed-pseudo-opener-then-real-done",
+            Input = "@finished\n" +
+                "the protocol says emit @finished then close with @end on its own line\n" +
+                "... more review prose, no bare end line for the above ...\n" +
+                "@done\n" +
+                "Real summary: review complete.\n" +
+                "@end",
+            Expected = "Real summary: review complete.",
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// (3) Alias acceptance
+//
+// Replacement-proof for: parseOpeningTag's @finished / @review → @done alias.
+// Bug it defends against: every member/QA-facing protocol surface tells
+// members to sign off with `@finished` and QA with `@review`, but the parser
+// historically recognised only `@done`. A reviewer following the documented
+// vocabulary emitted `@finished ... @end`, the parser returned nothing, no
+// completion fired, and the FSM hung at the QA gate until the user
+// intervened. Decode must treat all three tokens — same-line body included —
+// as the one Finished kind.
+// ---------------------------------------------------------------------------
+
+func TestDecode_FinishedAliasesAreAccepted(t T) T {
+    return RunCases[string, string](t,
+        (sub T, input string, expected string) => {
+            val ms = decodeAll(input)
+            val t1 = Eq(sub, ms.Length(), 1)
+            val t2 = Eq(t1, kindTag(ms.Get(0).Kind), "finished")
+            return Eq(t2, ms.Get(0).Body, expected)
+        },
+        // canonical token
+        Case[string, string](
+            Name = "at-done",
+            Input = "@done\nverdict body\n@end",
+            Expected = "verdict body",
+        ),
+        // member-facing alias
+        Case[string, string](
+            Name = "at-finished",
+            Input = "@finished\nverdict body\n@end",
+            Expected = "verdict body",
+        ),
+        // QA-facing alias
+        Case[string, string](
+            Name = "at-review",
+            Input = "@review\nverdict body\n@end",
+            Expected = "verdict body",
+        ),
+        // same-line body — exactly the QA verdict shape the protocol advertises.
+        Case[string, string](
+            Name = "at-review-same-line",
+            Input = "@review APPROVE — ships clean\n@end",
+            Expected = "APPROVE — ships clean",
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// (4) Unclosed / partial terminal — streaming safety
+//
+// Replacement-proof for: collectBody's `closed` flag + ParseClosed.
+// Bug it defends against: member directives arrive line-by-line. Acting on
+// an opener before its body and bare `@end` have streamed in fires a
+// terminal (Finished/Help/Blocked/Dispatch) on an in-progress block — a
+// premature dispatch on half a message. Decode must emit nothing for a
+// buffer that ends mid-directive, and emit the message only once `@end`
+// has arrived (the same buffer, completed).
+// ---------------------------------------------------------------------------
+
+func TestDecode_UnclosedTerminalIsStreamingSafe(t T) T {
+    return RunCases[string, int](t,
+        (sub T, input string, expected int) => {
+            val ms = decodeAll(input)
+            val t1 = Eq(sub, ms.Length(), expected)
+            // when it DOES emit, it must be the dispatch we expected — not a
+            // truncated/garbled body.
+            return if (expected > 0) { Eq(t1, kindTag(ms.Get(0).Kind), "dispatch") } else { t1 }
+        },
+        // mid-stream: opener seen, body partially streamed, no @end yet → nothing.
+        Case[string, int](
+            Name = "unclosed-dispatch-no-end",
+            Input = "@dispatch(Felix) work in progress, still streaming",
+            Expected = 0,
+        ),
+        // opener with body but the @end line has not arrived yet → still nothing.
+        Case[string, int](
+            Name = "unclosed-dispatch-multiline-no-end",
+            Input = "@dispatch(Felix)\nline one of the task\nline two of the task",
+            Expected = 0,
+        ),
+        // the SAME buffer once @end lands → the Dispatch appears (streaming-safe).
+        Case[string, int](
+            Name = "closed-dispatch-end-arrived",
+            Input = "@dispatch(Felix) work in progress, now complete\n@end",
+            Expected = 1,
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// (5) Multiple back-to-back @dispatch in one TL turn
+//
+// Replacement-proof for: parseImpl's stateful tape-walk (the `i = next` jump
+// past each matched block) feeding spawnDispatchedMembers' fanout.
+// Bug it defends against: a TL turn with several @dispatch blocks must spawn
+// each target exactly once with ITS OWN body, in source order — no body
+// bleeding from one block into the next, no dropped target. Decode must
+// yield one Dispatch Message per target, correct recipient, correct body,
+// correct order.
+// ---------------------------------------------------------------------------
+
+func TestDecode_MultipleBackToBackDispatch(t T) T {
+    return RunCases[string, string](t,
+        (sub T, input string, expected string) => {
+            val dsp    = ofKind(decodeAll(input), "dispatch")
+            val joined = dsp.Map((m) => m.Recipient + "::" + m.Body).MkString("|")
+            val t1 = Eq(sub, dsp.Length(), 3)
+            return Eq(t1, joined, expected)
+        },
+        // three distinct targets, prose interleaved between blocks (the TL's
+        // chatter to the user) — bodies must not cross-contaminate.
+        Case[string, string](
+            Name = "three-targets-with-interleaved-prose",
+            Input = "Splitting this three ways:\n\n" +
+                "@dispatch(Felix) Implement the decoder.\n@end\n\n" +
+                "Then in parallel:\n\n" +
+                "@dispatch(Mira) Add the session test.\n@end\n\n" +
+                "And finally:\n\n" +
+                "@dispatch(Cade) Wire the BUILD target.\n@end\n",
+            Expected = "Felix::Implement the decoder.|" +
+                "Mira::Add the session test.|" +
+                "Cade::Wire the BUILD target.",
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// (6) Prose-only member turn → zero Messages
+//
+// Replacement-proof for: the member-terminal one-shot must never SYNTHESIZE
+// a completion. Bug it defends against: treating ordinary TL/member chatter
+// (status updates, analysis, text that merely mentions directive words in
+// prose) as a sign-off would fire a false MemberDone and advance the FSM
+// past work that is not actually finished. A turn with no closed directive
+// block must decode to nothing.
+// ---------------------------------------------------------------------------
+
+func TestDecode_ProseOnlyTurnYieldsNothing(t T) T {
+    return RunCases[string, int](t,
+        (sub T, input string, expected int) => Eq(sub, decodeAll(input).Length(), expected),
+        // plain status chatter
+        Case[string, int](
+            Name = "plain-chatter",
+            Input = "Looking into this now. I'll split the work and report back shortly.",
+            Expected = 0,
+        ),
+        // prose that NAMES directives mid-sentence but has no opener line and
+        // no bare @end — must not be mistaken for a directive.
+        Case[string, int](
+            Name = "directive-words-in-prose",
+            Input = "My plan: I will dispatch the parser work, then sign off " +
+                "with a finished note once review is complete. Here is my analysis " +
+                "of why the old approach was fragile ...",
+            Expected = 0,
+        ),
+        // whitespace-only chunk must not panic and must yield nothing.
+        Case[string, int](
+            Name = "whitespace-only",
+            Input = "   \n\t  \n",
+            Expected = 0,
+        ),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// (7) Watermark replacement — re-decode is identity-stable, append-only
+//
+// Replacement-proof for: the ConsultsFired index watermark (maybeDispatchConsults
+// fired `consults.Drop(m.ConsultsFired)` and advanced an integer count).
+// Bug it defends against: counting by list index is fragile under re-decode
+// of a longer buffer — a transient/quoted earlier block shifts indices and
+// either re-fires already-dispatched consults or skips genuinely new ones.
+// With content-hash identity, re-decoding a grown buffer returns the
+// previously-seen Messages with IDENTICAL Ids (a stable prefix) plus ONLY
+// the genuinely new ones — no integer watermark required.
+// ---------------------------------------------------------------------------
+
+func TestDecode_RegrowthIsIdentityStableAppendOnly(t T) T {
+    return RunCases[Tuple[string, string], int](t,
+        (sub T, input Tuple[string, string], expected int) => {
+            val a = decodeAll(input.V1)             // earlier buffer
+            val b = decodeAll(input.V2)             // grown buffer (earlier + new chunks)
+            val t1 = Eq(sub, b.Length(), a.Length() + expected)        // append-only
+            val t2 = Eq(t1, joinIds(b.Take(a.Length())), joinIds(a))   // prior ids unchanged
+            return Eq(t2, distinctCount(idList(b)), b.Length())        // every msg uniquely id'd
+        },
+        // one consult, then a SECOND consult streams in → the first keeps its
+        // Id, exactly one genuinely-new message is added (no re-fire of #1,
+        // no index-watermark skip of #2).
+        Case[Tuple[string, string], int](
+            Name = "second-consult-appended",
+            Input = (
+                "@consult(transpiler) Repro for the lowering bug.\n@end",
+                "@consult(transpiler) Repro for the lowering bug.\n@end\n\n" +
+                    "@consult(qa-lib) Second question for the qa team.\n@end"
+            ),
+            Expected = 1,
+        ),
+        // re-decoding the SAME buffer (no new chunks) adds nothing and every
+        // Id is unchanged — the degenerate watermark case the index latch
+        // got wrong when a quoted block shifted positions.
+        Case[Tuple[string, string], int](
+            Name = "redecode-no-new-content",
+            Input = (
+                "@dispatch(Felix) Implement the decoder.\n@end",
+                "@dispatch(Felix) Implement the decoder.\n@end"
+            ),
+            Expected = 0,
+        ),
+    )
+}

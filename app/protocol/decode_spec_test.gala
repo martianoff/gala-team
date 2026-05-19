@@ -66,38 +66,22 @@ func defaultCtx() DecodeContext = DecodeContext(Sender = "", Recipient = "", Epo
 
 func decodeAll(buffer string) Array[Message] = Decode(buffer, defaultCtx())
 
-// kindTag flattens a MessageKind to a stable string so cases can assert on
-// kind without re-deriving the sealed match everywhere. Exhaustive over the
-// sealed type — the transpiler enforces it, no `case _` needed.
-func kindTag(k MessageKind) string = k match {
-    case Dispatch()      => "dispatch"
-    case Finished()      => "finished"
-    case HelpRequested() => "help"
-    case Blocked()       => "blocked"
-    case Nudge()         => "nudge"
-    case Ack()           => "ack"
-    case Summary()       => "summary"
-    case Consult()       => "consult"
+// One-kind predicates matched on the sealed type directly (the repo's
+// established test idiom) — no parallel string taxonomy that could silently
+// drift from the MessageKind cases.
+func isDispatch(m Message) bool = m.Kind match {
+    case Dispatch() => true
+    case _          => false
+}
+
+func isFinished(m Message) bool = m.Kind match {
+    case Finished() => true
+    case _          => false
 }
 
 func idList(ms Array[Message]) Array[string] = ms.Map((m) => m.Id)
 
-func joinIds(ms Array[Message]) string = idList(ms).MkString("|")
-
-func ofKind(ms Array[Message], tag string) Array[Message] =
-    ms.Filter((m) => kindTag(m.Kind) == tag)
-
-// distinctCount counts unique ids without leaning on a HashMap.Size — fold a
-// (seen, count) accumulator so the corpus depends on nothing beyond the
-// immutable-collection basics.
-func distinctCount(ids Array[string]) int {
-    val seed = (EmptyHashMap[string, bool](), 0)
-    val (_, n) = ids.FoldLeft(seed, (acc, id) => {
-        val (seen, c) = acc
-        if (seen.Get(id).IsDefined()) { (seen, c) } else { (seen.Put(id, true), c + 1) }
-    })
-    return n
-}
+func distinctCount(ids Array[string]) int = ids.Distinct().Length()
 
 // ---------------------------------------------------------------------------
 // (1) Duplicate-chunk idempotency
@@ -119,12 +103,19 @@ func TestDecode_DuplicateChunkIsIdempotent(t T) T {
     return RunCases[string, int](t,
         (sub T, input string, expected int) => {
             val a   = decodeAll(input)
-            val dup = input + "\n" + input               // same chunk, re-flushed
+            val dup = input + "\n" + input
             val b   = decodeAll(dup)
-            val t1 = Eq(sub, a.Length(), expected)        // single decode count
-            val t2 = Eq(t1, b.Length(), expected)         // no double-emit on replay
-            val t3 = Eq(t2, distinctCount(idList(b)), expected) // no new ids appeared
-            return Eq(t3, joinIds(a), joinIds(b))         // identical id set + order
+            val ia  = idList(a)
+            val ib  = idList(b)
+            val t1 = Eq(sub, a.Length(), expected)
+            val t2 = Eq(t1, b.Length(), expected)
+            // The only assertion that catches decode minting a duplicate id
+            // (the same message emitted twice within one buffer) — distinct
+            // count must equal the message count.
+            val t3 = Eq(t2, distinctCount(ib), expected)
+            // Idempotency proper: re-flushing a byte-identical chunk yields
+            // the same id sequence, in the same order.
+            return Eq(t3, ia.MkString("|"), ib.MkString("|"))
         },
         // one TL dispatch, re-flushed → still one Dispatch (no double-spawn).
         Case[string, int](
@@ -167,8 +158,8 @@ func TestDecode_QuotedDirectivesDoNotCollideWithRealSignoff(t T) T {
     return RunCases[string, string](t,
         (sub T, input string, expected string) => {
             val ms  = decodeAll(input)
-            val fin = ofKind(ms, "finished")
-            val dsp = ofKind(ms, "dispatch")
+            val fin = ms.Filter((m) => isFinished(m))
+            val dsp = ms.Filter((m) => isDispatch(m))
             val t1 = Eq(sub, fin.Length(), 1)        // exactly the real sign-off
             val t2 = Eq(t1, dsp.Length(), 0)         // quoted @dispatch( is inert
             return Eq(t2, fin.Get(0).Body, expected) // real body, not the quoted opener's
@@ -229,22 +220,19 @@ func TestDecode_FinishedAliasesAreAccepted(t T) T {
         (sub T, input string, expected string) => {
             val ms = decodeAll(input)
             val t1 = Eq(sub, ms.Length(), 1)
-            val t2 = Eq(t1, kindTag(ms.Get(0).Kind), "finished")
+            val t2 = IsTrue(t1, isFinished(ms.Get(0)))
             return Eq(t2, ms.Get(0).Body, expected)
         },
-        // canonical token
         Case[string, string](
             Name = "at-done",
             Input = "@done\nverdict body\n@end",
             Expected = "verdict body",
         ),
-        // member-facing alias
         Case[string, string](
             Name = "at-finished",
             Input = "@finished\nverdict body\n@end",
             Expected = "verdict body",
         ),
-        // QA-facing alias
         Case[string, string](
             Name = "at-review",
             Input = "@review\nverdict body\n@end",
@@ -278,7 +266,7 @@ func TestDecode_UnclosedTerminalIsStreamingSafe(t T) T {
             val t1 = Eq(sub, ms.Length(), expected)
             // when it DOES emit, it must be the dispatch we expected — not a
             // truncated/garbled body.
-            return if (expected > 0) { Eq(t1, kindTag(ms.Get(0).Kind), "dispatch") } else { t1 }
+            return if (expected > 0) { IsTrue(t1, isDispatch(ms.Get(0))) } else { t1 }
         },
         // mid-stream: opener seen, body partially streamed, no @end yet → nothing.
         Case[string, int](
@@ -316,7 +304,7 @@ func TestDecode_UnclosedTerminalIsStreamingSafe(t T) T {
 func TestDecode_MultipleBackToBackDispatch(t T) T {
     return RunCases[string, string](t,
         (sub T, input string, expected string) => {
-            val dsp    = ofKind(decodeAll(input), "dispatch")
+            val dsp    = decodeAll(input).Filter((m) => isDispatch(m))
             val joined = dsp.Map((m) => m.Recipient + "::" + m.Body).MkString("|")
             val t1 = Eq(sub, dsp.Length(), 3)
             return Eq(t1, joined, expected)
@@ -352,7 +340,6 @@ func TestDecode_MultipleBackToBackDispatch(t T) T {
 func TestDecode_ProseOnlyTurnYieldsNothing(t T) T {
     return RunCases[string, int](t,
         (sub T, input string, expected int) => Eq(sub, decodeAll(input).Length(), expected),
-        // plain status chatter
         Case[string, int](
             Name = "plain-chatter",
             Input = "Looking into this now. I'll split the work and report back shortly.",
@@ -390,36 +377,45 @@ func TestDecode_ProseOnlyTurnYieldsNothing(t T) T {
 // ---------------------------------------------------------------------------
 
 func TestDecode_RegrowthIsIdentityStableAppendOnly(t T) T {
-    return RunCases[Tuple[string, string], int](t,
-        (sub T, input Tuple[string, string], expected int) => {
-            val a = decodeAll(input.V1)             // earlier buffer
-            val b = decodeAll(input.V2)             // grown buffer (earlier + new chunks)
-            val t1 = Eq(sub, b.Length(), a.Length() + expected)        // append-only
-            val t2 = Eq(t1, joinIds(b.Take(a.Length())), joinIds(a))   // prior ids unchanged
-            return Eq(t2, distinctCount(idList(b)), b.Length())        // every msg uniquely id'd
+    return RunCases[Tuple[string, string], Tuple[int, string]](t,
+        (sub T, input Tuple[string, string], expected Tuple[int, string]) => {
+            val a    = decodeAll(input.V1)
+            val b    = decodeAll(input.V2)
+            val ia   = idList(a)
+            val ib   = idList(b)
+            val tail = b.Drop(a.Length())
+            val t1 = Eq(sub, b.Length(), a.Length() + expected.V1)
+            // prior messages keep identical ids — the grown decode's prefix
+            // is the earlier decode, byte for byte.
+            val t2 = Eq(t1, ib.Take(a.Length()).MkString("|"), ia.MkString("|"))
+            // every message uniquely identified (no re-fire of a prior one).
+            val t3 = Eq(t2, distinctCount(ib), b.Length())
+            // and the appended tail is the genuinely-new message(s) with the
+            // right content — not an id-stable decode that corrupted bodies.
+            return Eq(t3, tail.Map((m) => m.Recipient + "::" + m.Body).MkString("|"), expected.V2)
         },
         // one consult, then a SECOND consult streams in → the first keeps its
         // Id, exactly one genuinely-new message is added (no re-fire of #1,
         // no index-watermark skip of #2).
-        Case[Tuple[string, string], int](
+        Case[Tuple[string, string], Tuple[int, string]](
             Name = "second-consult-appended",
             Input = (
                 "@consult(transpiler) Repro for the lowering bug.\n@end",
                 "@consult(transpiler) Repro for the lowering bug.\n@end\n\n" +
                     "@consult(qa-lib) Second question for the qa team.\n@end"
             ),
-            Expected = 1,
+            Expected = (1, "qa-lib::Second question for the qa team."),
         ),
         // re-decoding the SAME buffer (no new chunks) adds nothing and every
         // Id is unchanged — the degenerate watermark case the index latch
         // got wrong when a quoted block shifted positions.
-        Case[Tuple[string, string], int](
+        Case[Tuple[string, string], Tuple[int, string]](
             Name = "redecode-no-new-content",
             Input = (
                 "@dispatch(Felix) Implement the decoder.\n@end",
                 "@dispatch(Felix) Implement the decoder.\n@end"
             ),
-            Expected = 0,
+            Expected = (0, ""),
         ),
     )
 }

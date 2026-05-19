@@ -218,10 +218,11 @@ func TestFsNukeUntilGone_RemovesPopulatedDir(t T) T {
     if err != nil { return IsTrue(t, false) }
     defer os.RemoveAll(dir)
     // Non-empty: a nested dir mimics an engineer's leftover work.
-    val _child, cerr = os.MkdirTemp(dir, "child_")
+    val child, cerr = os.MkdirTemp(dir, "child_")
     if cerr != nil { return IsTrue(t, false) }
+    val t0 = IsTrue(t, leadWtPathIsLiveDir(child))
     val gone = fsNukeUntilGone(dir, 3)
-    val t1 = IsTrue(t, gone)
+    val t1 = IsTrue(t0, gone)
     // Idempotent: a second call on the now-gone path returns true.
     return IsTrue(t1, fsNukeUntilGone(dir, 3))
 }

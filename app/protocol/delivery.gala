@@ -1,0 +1,238 @@
+package protocol
+
+import (
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// delivery.gala — the delivery / ack / retry / nudge state machine.
+//
+// PURE: a function of (state, event, clock, policy). No subprocess, no
+// Now(), no IO — every transition is testable in isolation. This is the
+// reliability core: it folds three scattered liveness hacks into one
+// total FSM —
+//
+//   liveRespawnMember          auto-retry a silent member (bounded by
+//                              the Heartbeat MaxRetries budget).
+//   the bandFor / livenessStatus heartbeat ladder
+//                              Slow → Stuck → Abandoned escalation.
+//   spawnAggregatedStuckNudge  collapse N simultaneously-silent members
+//                              into ONE TL nudge (the pile-on fix).
+//
+// Thresholds are NOT new tunables — PolicyFromHeartbeat maps the
+// existing policy.Heartbeat fields (slow / stuck / abandon seconds +
+// MaxRetries) in, converting seconds to the nanosecond clock Tick runs
+// on. The UI passes its already-loaded Heartbeat values straight
+// through; this package never imports app/policy (keeps the protocol
+// layer dependency-light and the adapter genuinely thin).
+// ============================================================================
+
+// DeliveryState is where one (sender→recipient) delivery sits.
+//
+//   Sent      — handed off; no proof of life yet. AtNanos is the clock
+//               at hand-off; Attempt mirrors the Message attempt.
+//   Working   — at least one chunk arrived. LastSeenNanos is the most
+//               recent proof of life; the silence clock runs from here.
+//   Silent    — silent past the stuck threshold and already nudged (the
+//               nudge fires once, on entry, not every tick). SinceNanos
+//               is when silence was declared.
+//   Acked     — the recipient signed off (terminal, success).
+//   Abandoned — silent past the abandon horizon with the retry budget
+//               spent (terminal, failure).
+sealed type DeliveryState {
+    case Sent(AtNanos int, Attempt int)
+    case Working(LastSeenNanos int)
+    case Silent(SinceNanos int, Attempt int)
+    case Acked()
+    case Abandoned()
+}
+
+// DeliveryAction is what the orchestrator should DO as a result of a
+// Tick. The FSM only decides; the impure caller carries it out.
+//
+//   NoOp          — nothing to do this tick.
+//   Redeliver     — re-send M (Attempt already bumped). Subsumes
+//                    liveRespawnMember's bounded auto-retry.
+//   IssueNudge    — poke about Member with Text. Tick emits this once
+//                    when retries are spent but the abandon horizon is
+//                    not yet reached; AggregateNudges emits ONE of these
+//                    for a whole batch of silent members.
+//   Escalate      — hand Member's stall to the TL/human. Part of the
+//                    action vocabulary the integration layer drives;
+//                    Tick's core ladder prefers Redeliver → IssueNudge →
+//                    MarkAbandoned, but a caller can escalate a single
+//                    member instead of waiting for the batch.
+//   MarkAbandoned — give up on Member (terminal).
+sealed type DeliveryAction {
+    case NoOp()
+    case Redeliver(M Message)
+    case IssueNudge(Member string, Text string)
+    case Escalate(Member string)
+    case MarkAbandoned(Member string)
+}
+
+// DeliveryPolicy is the silence ladder in nanoseconds + the retry
+// budget. Built ONLY via PolicyFromHeartbeat — there are no protocol-
+// specific tunables, just the existing Heartbeat values re-expressed on
+// Tick's nanosecond clock.
+struct DeliveryPolicy(
+    SlowNanos    int,
+    StuckNanos   int,
+    AbandonNanos int,
+    MaxRetries   int,
+)
+
+// PolicyFromHeartbeat is the thin adapter the UI uses to feed its
+// already-loaded policy.Heartbeat in. It takes the four Heartbeat
+// fields by value (seconds + count) so app/protocol need not depend on
+// app/policy. Seconds → nanos here, once, at the boundary.
+func PolicyFromHeartbeat(
+    slowSeconds int64,
+    stuckSeconds int64,
+    abandonSeconds int64,
+    maxRetries int,
+) DeliveryPolicy = DeliveryPolicy(
+    SlowNanos    = secondsToNanos(slowSeconds),
+    StuckNanos   = secondsToNanos(stuckSeconds),
+    AbandonNanos = secondsToNanos(abandonSeconds),
+    MaxRetries   = maxRetries,
+)
+
+// DefaultDeliveryPolicy mirrors policy.DefaultHeartbeat's documented
+// 30 / 120 / 300 / 2 design defaults without importing app/policy, so
+// the two stay in lockstep by construction. Convenience for tests and
+// callers that have no team.yaml override.
+func DefaultDeliveryPolicy() DeliveryPolicy =
+    PolicyFromHeartbeat(int64(30), int64(120), int64(300), 2)
+
+func secondsToNanos(seconds int64) int = int(seconds) * 1000000000
+
+// OnChunk: any chunk is proof of life. A streaming member is healthy
+// regardless of how silent it was — this is the single rule that
+// subsumes "onChunk clears RetryCount", so transient silence never
+// permanently burns the retry budget. Terminal states (Acked /
+// Abandoned) are sticky: a stray late chunk does not resurrect a
+// signed-off or abandoned delivery.
+func OnChunk(s DeliveryState, nowNanos int) DeliveryState = s match {
+    case Acked()     => Acked()
+    case Abandoned() => Abandoned()
+    case _           => Working(LastSeenNanos = nowNanos)
+}
+
+// OnTerminal: the recipient signed off (decoded a Finished / a sign-off
+// terminal). Success is sticky; an Abandoned delivery stays abandoned
+// (a sign-off that arrives only AFTER we already gave up is too late to
+// un-abandon the run — the FSM already drained around it).
+func OnTerminal(s DeliveryState) DeliveryState = s match {
+    case Abandoned() => Abandoned()
+    case _           => Acked()
+}
+
+// Tick advances the silence ladder. The clock is `nowNanos`; the
+// silence origin is per state (hand-off for Sent, last chunk for
+// Working, declared-silent for Silent). m carries the authoritative
+// Attempt — Redeliver returns it bumped so the caller re-sends with the
+// next attempt number.
+//
+// Ladder, once silence crosses the stuck threshold:
+//   - retry budget left  → Redeliver(m+1), clock restarts (Sent).
+//   - budget spent        → IssueNudge ONCE (state → Silent; later
+//                            ticks before the abandon horizon are NoOp,
+//                            so the nudge does not pile on every tick).
+//   - past abandon horizon → MarkAbandoned (terminal).
+// Below the stuck threshold (the slow / working band) → NoOp.
+func Tick(
+    s DeliveryState,
+    m Message,
+    nowNanos int,
+    p DeliveryPolicy,
+) Tuple[DeliveryState, DeliveryAction] = s match {
+    case Acked()     => (Acked(), NoOp())
+    case Abandoned() => (Abandoned(), NoOp())
+    case Sent(at, _)        => escalate(s, m, nowNanos - at, nowNanos, p, true)
+    case Working(lastSeen)  => escalate(s, m, nowNanos - lastSeen, nowNanos, p, true)
+    case Silent(since, _)   => escalate(s, m, nowNanos - since, nowNanos, p, false)
+}
+
+// escalate is the shared ladder. `firstCross` is true when we are
+// entering the silent band from a healthy state (Sent / Working) — that
+// is the single edge on which IssueNudge fires, so it cannot pile on.
+// An already-Silent state re-ticking only acts at the abandon horizon.
+func escalate(
+    s DeliveryState,
+    m Message,
+    elapsed int,
+    nowNanos int,
+    p DeliveryPolicy,
+    firstCross bool,
+) Tuple[DeliveryState, DeliveryAction] {
+    if (elapsed >= p.AbandonNanos) {
+        return (Abandoned(), MarkAbandoned(Member = m.Recipient))
+    }
+    if (elapsed < p.StuckNanos) {
+        return (s, NoOp())
+    }
+    // In the [stuck, abandon) band.
+    if (m.Attempt <= p.MaxRetries) {
+        val bumped = WithAttempt(m, m.Attempt + 1)
+        return (Sent(AtNanos = nowNanos, Attempt = bumped.Attempt), Redeliver(M = bumped))
+    }
+    if (firstCross) {
+        return (
+            Silent(SinceNanos = nowNanos, Attempt = m.Attempt),
+            IssueNudge(Member = m.Recipient, Text = nudgeText(m.Recipient, elapsed)),
+        )
+    }
+    return (s, NoOp())
+}
+
+func nudgeText(member string, elapsed int) string {
+    val secs = elapsed / 1000000000
+    return s"System: ${member} has been silent for ${secs}s with the retry budget spent. Decide: re-prompt with new guidance, reassign the work, or @summary surfacing the failure."
+}
+
+// AggregateNudges folds every currently-Silent member into AT MOST ONE
+// batched IssueNudge — the pile-on fix. When N engineers all cross the
+// stuck threshold in the same tick (a parallel fan-out the user walked
+// away from), firing one nudge per member spawns N back-to-back TL
+// turns and a confusing pipeline pile-on. One nudge that NAMES every
+// silent member replaces the lot. None when nobody is silent.
+func AggregateNudges(
+    states Array[Tuple[string, DeliveryState]],
+    nowNanos int,
+    p DeliveryPolicy,
+) Option[DeliveryAction] {
+    val silent = states.FoldLeft(EmptyArray[string](), (acc, pair) => {
+        val (name, st) = pair
+        return st match {
+            case Silent(_, _) => acc.Append(name)
+            case _            => acc
+        }
+    })
+    if (silent.IsEmpty()) { return None[DeliveryAction]() }
+    val list = silent.MkString(", ")
+    val text = s"System: ${silent.Size()} members silent past the stuck threshold: ${list}. Re-prompt ONLY these members, reassign their work, or @summary the turn surfacing the failures — do NOT re-dispatch anyone not named here."
+    return Some[DeliveryAction](IssueNudge(Member = list, Text = text))
+}
+
+// ----------------------------------------------------------------------------
+// Stable string projections for UI / log surfaces (mirrors the
+// statusTag / ViolationName idiom elsewhere in the tree).
+// ----------------------------------------------------------------------------
+
+func StateName(s DeliveryState) string = s match {
+    case Sent(_, _)    => "sent"
+    case Working(_)    => "working"
+    case Silent(_, _)  => "silent"
+    case Acked()       => "acked"
+    case Abandoned()   => "abandoned"
+}
+
+func ActionName(a DeliveryAction) string = a match {
+    case NoOp()             => "noop"
+    case Redeliver(_)       => "redeliver"
+    case IssueNudge(_, _)   => "nudge"
+    case Escalate(_)        => "escalate"
+    case MarkAbandoned(_)   => "abandon"
+}

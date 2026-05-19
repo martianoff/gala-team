@@ -1,0 +1,87 @@
+package protocol
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+)
+
+// ----- content-hash identity ------------------------------------------------
+
+// Re-deriving a Message from byte-identical inputs yields the SAME Id.
+// This is the property the idempotent decoder and the Ledger rest on.
+func TestNewMessage_DeterministicId(t T) T {
+    val a = NewMessage("_lead", "Felix", Dispatch(), "build the parser", 0)
+    val b = NewMessage("_lead", "Felix", Dispatch(), "build the parser", 0)
+    return Eq(t, a.Id, b.Id)
+}
+
+// Each identity field participates in the hash: perturbing any one of
+// (Sender, Recipient, Kind, Body, Epoch) changes the Id.
+func TestNewMessage_EveryFieldAffectsId(t T) T {
+    val base = NewMessage("_lead", "Felix", Dispatch(), "body", 0)
+    val t1 = NotEq(t,  base.Id, NewMessage("_user", "Felix", Dispatch(), "body", 0).Id)
+    val t2 = NotEq(t1, base.Id, NewMessage("_lead", "Mira",  Dispatch(), "body", 0).Id)
+    val t3 = NotEq(t2, base.Id, NewMessage("_lead", "Felix", Consult(),  "body", 0).Id)
+    val t4 = NotEq(t3, base.Id, NewMessage("_lead", "Felix", Dispatch(), "body2", 0).Id)
+    return    NotEq(t4, base.Id, NewMessage("_lead", "Felix", Dispatch(), "body", 1).Id)
+}
+
+// Field-boundary disambiguation: ("a","bc") must not collide with
+// ("ab","c"). Per-field hashing makes this hold without delimiters.
+func TestNewMessage_NoFieldBoundaryCollision(t T) T {
+    val x = NewMessage("a", "bc", Dispatch(), "", 0)
+    val y = NewMessage("ab", "c", Dispatch(), "", 0)
+    return NotEq(t, x.Id, y.Id)
+}
+
+// The Id is a fixed-width 16-hex-digit string (two 32-bit words).
+func TestNewMessage_IdShape(t T) T {
+    val m = NewMessage("_lead", "Felix", Dispatch(), "body", 0)
+    return Eq(t, m.Id.Length(), 16)
+}
+
+// Defaults: fresh message is attempt 1, no causal parent.
+func TestNewMessage_Defaults(t T) T {
+    val m = NewMessage("_lead", "Felix", Dispatch(), "body", 0)
+    val t1 = Eq(t, m.Attempt, 1)
+    return IsNone(t1, m.InReplyTo)
+}
+
+// Metadata (causal link, attempt) is NOT identity — threading a reply
+// or bumping the attempt must keep the Id stable so the Ledger collapses
+// a redelivered message to one admitted entry.
+func TestWithReplyTo_PreservesId(t T) T {
+    val m = NewMessage("Felix", "_lead", Finished(), "done", 0)
+    val r = WithReplyTo(m, "parent-id")
+    val t1 = Eq(t, r.Id, m.Id)
+    return IsSome(t1, r.InReplyTo)
+}
+
+func TestWithAttempt_PreservesId(t T) T {
+    val m = NewMessage("_lead", "Felix", Dispatch(), "body", 0)
+    val r = WithAttempt(m, 3)
+    val t1 = Eq(t, r.Id, m.Id)
+    return Eq(t1, r.Attempt, 3)
+}
+
+// Epoch is the stale-redelivery defence: the same logical dispatch in a
+// later epoch is a DIFFERENT message, so a late duplicate of the
+// previous turn cannot be mistaken for the live one.
+func TestEpoch_DistinguishesRedispatch(t T) T {
+    val e0 = NewMessage("_lead", "Felix", Dispatch(), "same task", 0)
+    val e1 = NewMessage("_lead", "Felix", Dispatch(), "same task", 1)
+    return NotEq(t, e0.Id, e1.Id)
+}
+
+// ----- KindTag --------------------------------------------------------------
+
+func TestKindTag_AllVariants(t T) T {
+    val t1 = Eq(t,  KindTag(Dispatch()),      "dispatch")
+    val t2 = Eq(t1, KindTag(Finished()),      "finished")
+    val t3 = Eq(t2, KindTag(HelpRequested()), "help")
+    val t4 = Eq(t3, KindTag(Blocked()),       "blocked")
+    val t5 = Eq(t4, KindTag(Nudge()),         "nudge")
+    val t6 = Eq(t5, KindTag(Ack()),           "ack")
+    val t7 = Eq(t6, KindTag(Summary()),       "summary")
+    return    Eq(t7, KindTag(Consult()),      "consult")
+}

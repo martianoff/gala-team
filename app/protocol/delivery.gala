@@ -1,6 +1,7 @@
 package protocol
 
 import (
+    "martianoff/gala/time_utils"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
 )
@@ -106,7 +107,11 @@ func PolicyFromHeartbeat(
 func DefaultDeliveryPolicy() DeliveryPolicy =
     PolicyFromHeartbeat(int64(30), int64(120), int64(300), 2)
 
-func secondsToNanos(seconds int64) int = int(seconds) * 1000000000
+// Seconds → nanos via the repo-standard pure duration math (no raw
+// 1e9 literal, same convention as the rest of the tree). time_utils
+// Duration arithmetic is pure value math — it does not break the
+// package's no-IO contract (only Now()/Sleep() are impure, unused here).
+func secondsToNanos(seconds int64) int = int(time_utils.Seconds(seconds).ToNanos())
 
 // OnChunk: any chunk is proof of life. A streaming member is healthy
 // regardless of how silent it was — this is the single rule that
@@ -188,7 +193,7 @@ func escalate(
 }
 
 func nudgeText(member string, elapsed int) string {
-    val secs = elapsed / 1000000000
+    val secs = time_utils.Nanoseconds(int64(elapsed)).ToSeconds()
     return s"System: ${member} has been silent for ${secs}s with the retry budget spent. Decide: re-prompt with new guidance, reassign the work, or @summary surfacing the failure."
 }
 

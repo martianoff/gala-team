@@ -11,6 +11,7 @@ gala_library(
     deps = [
         "@gala//collection_immutable",
         "@gala//strings",
+        "@gala//time_utils",
     ],
     visibility = ["//visibility:public"],
 )
@@ -35,5 +36,6 @@ gala_go_test(
         "@gala//collection_immutable",
         "@gala//go_interop",
         "@gala//strings",
+        "@gala//time_utils",
     ],
 )

@@ -1829,12 +1829,34 @@ func onAnswerPendingQuestion(m AppModel, answer string) Tuple[AppModel, Cmd[AppM
                             m1.Copy(Conversation = convo, ConversationSticky = true), convo,
                         )
                         val withStatus = setStatus(withConvo, mem.Name, StWorking())
-                        return (withStatus, sendAndPumpCmd(withStatus, mem, framed))
+                        val promoted = promoteIfStuckLead(withStatus, mem.Name)
+                        return (promoted, sendAndPumpCmd(promoted, mem, framed))
                     }
                 }
             }
         }
     }
+}
+
+// promoteIfStuckLead handles the one case where answering a pending
+// question must also advance the FSM: the Team Lead asked an
+// AskUserQuestion, that turn ended with no routable directive (FSM
+// parked in Idle), and the user's answer is functionally a fresh TL
+// prompt — the TL replies with @plan / @dispatch. Without promoting
+// Idle -> TLThinking here, that reply's TLDone lands in Idle, onIdle
+// discards every directive, and members never spawn (observed as
+// "the plan was created but nobody started the work").
+//
+// Scope is deliberately narrow: ONLY (member is the Lead) AND (state
+// is Idle). A non-Lead answer (a member's clarification answered
+// mid-Delegating) and every non-Idle state (Approval, Delegating,
+// QAGate, TLNudging, TLReview) keep the no-transition behavior, so an
+// answer can never abandon still-pending members or a pending PR
+// approval — the invariant onAnswerPendingQuestion was built to hold.
+func promoteIfStuckLead(m AppModel, memName string) AppModel = m.State match {
+    case Idle() if m.Team.Lead.Name == memName =>
+        m.Copy(State = transitionLogged(m.State, UserPrompted(), transitionContext(m)))
+    case _ => m
 }
 
 // onQuestionDismiss drops the pending question without sending an

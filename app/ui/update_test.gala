@@ -3780,6 +3780,57 @@ func TestAnswerPending_UnroutableMember_FlagsLineUndelivered(t T) T {
     return IsTrue(t2, last.Undelivered)
 }
 
+// ----------------------------------------------------------------------------
+// promoteIfStuckLead — the "plan created but nobody started" regression.
+//
+// Past sessions captured this: the lead asked an AskUserQuestion, that
+// turn ended with no routable directive (FSM → Idle), the user typed
+// the decision ("do all 3"), and the answer was re-delivered to the
+// lead — but onAnswerPendingQuestion fired no FSM transition, so the
+// lead's resulting @plan/@dispatch reply produced a TLDone while the
+// FSM was still Idle. onIdle discards every directive, so no member
+// ever spawned. promoteIfStuckLead repairs exactly that case and
+// nothing wider: only (member is the Lead) AND (state is Idle).
+// ----------------------------------------------------------------------------
+
+// The repair: lead's own question answered while parked in Idle must
+// promote Idle → TLThinking so the lead's directive-bearing reply
+// routes instead of being swallowed by onIdle.
+func TestPromoteIfStuckLead_LeadInIdle_PromotesToTLThinking(t T) T {
+    val m = sampleModel().Copy(State = Idle())
+    val out = promoteIfStuckLead(m, "Iris")
+    return out.State match {
+        case TLThinking() => IsTrue(t, true)
+        case _            => IsTrue(t, false)
+    }
+}
+
+// A non-lead member's clarification (e.g. an engineer's AskUserQuestion
+// answered mid-flight) must NOT move the FSM — that would abandon the
+// rest of an in-flight delegation. Idle + non-lead stays Idle.
+func TestPromoteIfStuckLead_NonLeadInIdle_NoPromotion(t T) T {
+    val m = sampleModel().Copy(State = Idle())
+    val out = promoteIfStuckLead(m, "Felix")
+    return out.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
+// The protected invariant: even the lead's own answer must NOT promote
+// out of a non-Idle state. Approval is the canonical one — a stray
+// promotion there would discard a pending PR awaiting the user's
+// accept/reject. Delegating/QAGate/TLNudging are likewise left intact
+// (they can already process a later TLDone or have pending members).
+func TestPromoteIfStuckLead_LeadButApproval_NoPromotion(t T) T {
+    val m = sampleModel().Copy(State = Approval(SummaryBody = "draft"))
+    val out = promoteIfStuckLead(m, "Iris")
+    return out.State match {
+        case Approval(_) => IsTrue(t, true)
+        case _           => IsTrue(t, false)
+    }
+}
+
 // Legacy snapshots predate the Undelivered field; the codec fills the
 // missing value with the bool zero (false), which MUST read as
 // "delivered" so old transcripts don't all light up red on reload.

@@ -1,0 +1,13 @@
+load("@gala//:gala.bzl", "gala_library")
+
+gala_library(
+    name = "agent",
+    srcs = ["agent.gala"],
+    importpath = "github.com/martianoff/gala_team/app/agent",
+    deps = [
+        "//app/team",
+        "@gala//collection_immutable",
+        "@gala//concurrent",
+    ],
+    visibility = ["//visibility:public"],
+)

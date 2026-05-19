@@ -1,0 +1,96 @@
+package runtime
+
+import (
+    "errors"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "github.com/martianoff/gala_team/app/agent"
+)
+
+// Lock in the `claude` adapter's event mapping and the AgentEvent →
+// Msg boundary.
+
+// A stdout line becomes an output chunk.
+func TestClassifyClaudeRead_LineIsChunk(t T) T {
+    return classifyClaudeRead(Success("hello world")) match {
+        case AgentChunk(text) => Eq(t, text, "hello world")
+        case _                => IsTrue(t, false)
+    }
+}
+
+// A clean end ("EOF" failure) is AgentTurnEnded, not AgentFailed.
+func TestClassifyClaudeRead_EofIsTurnEnded(t T) T {
+    return classifyClaudeRead(Failure[string](errors.New("EOF"))) match {
+        case AgentTurnEnded() => IsTrue(t, true)
+        case _                => IsTrue(t, false)
+    }
+}
+
+// Any other read failure is AgentFailed carrying the cause.
+func TestClassifyClaudeRead_RealErrorIsFailed(t T) T {
+    return classifyClaudeRead(Failure[string](errors.New("broken stream"))) match {
+        case AgentFailed(err) => Eq(t, err.Error(), "broken stream")
+        case _                => IsTrue(t, false)
+    }
+}
+
+// A stderr line becomes a diagnostic.
+func TestClassifyClaudeDiagnostic_LineIsDiagnostic(t T) T {
+    return classifyClaudeDiagnostic(Success("auth required")) match {
+        case AgentDiagnostic(text) => Eq(t, text, "auth required")
+        case _                     => IsTrue(t, false)
+    }
+}
+
+// The diagnostic stream terminates on any read failure.
+func TestClassifyClaudeDiagnostic_EofIsTurnEnded(t T) T {
+    return classifyClaudeDiagnostic(Failure[string](errors.New("EOF"))) match {
+        case AgentTurnEnded() => IsTrue(t, true)
+        case _                => IsTrue(t, false)
+    }
+}
+
+func TestAgentEventToMsg_ChunkIsRtChunkArrived(t T) T {
+    return agentEventToMsg("Felix", AgentChunk(Text = "line")) match {
+        case RtChunkArrived(name, line) => {
+            val t1 = Eq(t, name, "Felix")
+            return Eq(t1, line, "line")
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+// Turn-end maps to RtSessionFailed whose Err.Error() == "EOF" — the
+// wire contract downstream (headless / ui / consult) detects end on.
+func TestAgentEventToMsg_TurnEndedIsEofSessionFailed(t T) T {
+    return agentEventToMsg("Iris", AgentTurnEnded()) match {
+        case RtSessionFailed(name, err) => {
+            val t1 = Eq(t, name, "Iris")
+            return Eq(t1, err.Error(), "EOF")
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+// A real failure carries the underlying error through unchanged.
+func TestAgentEventToMsg_FailedKeepsError(t T) T {
+    return agentEventToMsg("Theo", AgentFailed(Err = errors.New("spawn lost"))) match {
+        case RtSessionFailed(_, err) => Eq(t, err.Error(), "spawn lost")
+        case _                       => IsTrue(t, false)
+    }
+}
+
+// Diagnostic stream: a line is RtStderrArrived; any terminal event
+// ends the pump as RtStderrEnded.
+func TestAgentDiagnosticToMsg_Mapping(t T) T {
+    val arrived = agentDiagnosticToMsg("Felix", AgentDiagnostic(Text = "warn")) match {
+        case RtStderrArrived(name, line) => name == "Felix" && line == "warn"
+        case _                           => false
+    }
+    val ended = agentDiagnosticToMsg("Felix", AgentTurnEnded()) match {
+        case RtStderrEnded(name) => name == "Felix"
+        case _                   => false
+    }
+    val t1 = IsTrue(t, arrived)
+    return IsTrue(t1, ended)
+}

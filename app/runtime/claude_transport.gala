@@ -1,0 +1,215 @@
+package runtime
+
+import (
+    "martianoff/gala/subprocess"
+    "martianoff/gala/concurrent"
+    "martianoff/gala/json"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/agent"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/runtime/claude_transport — the local `claude` CLI adapter for the
+// transport-neutral agent port (app/agent).
+//
+// Everything that knows the agent is a local `claude` subprocess lives
+// here: the "claude" command, its argv, the stream-json wire envelopes,
+// and the IO ↔ AgentEvent mapping. The mapping is behaviour-preserving
+// — identical Msgs to the prior direct-subprocess code.
+// ============================================================================
+
+// ClaudeProcessTransport opens sessions backed by a local `claude` CLI
+// subprocess. The default AgentTransport.
+type ClaudeProcessTransport struct {}
+
+func NewClaudeProcessTransport() AgentTransport = ClaudeProcessTransport{}
+
+// Open spawns `claude` for `spec` behind the AgentSession port. The
+// prompt is delivered via stdin (see Send), not argv: Windows caps
+// argv around 32 KB and the onboarding pack alone can exceed that on
+// the first turn.
+func (t ClaudeProcessTransport) Open(spec AgentSpec) Try[AgentSession] {
+    val opts = subprocess.NewSpawnOpts(
+        "claude",
+        claudeArgs(spec.Member, spec.DangerouslySkipPermissions, spec.SessionId, spec.IsNewSession).ToGoSlice(),
+        SliceEmpty[string](),
+        spec.Workspace,
+    )
+    return subprocess.Spawn(opts) match {
+        case Failure(e) => Failure[AgentSession](e)
+        case Success(p) => {
+            val sess AgentSession = ClaudeProcessSession(Proc = p)
+            return Success[AgentSession](sess)
+        }
+    }
+}
+
+// ClaudeProcessSession adapts one live `claude` subprocess to the
+// AgentSession port. Value-type handle (subprocess.Process is itself a
+// value handle over shared mutable state); copies drive the same child.
+struct ClaudeProcessSession(
+    Proc subprocess.Process,
+)
+
+// Send writes one input envelope to the child's stdin. The stream-json
+// input format keeps stdin open across writes so a tool_result can be
+// delivered mid-turn (AskUserQuestion). A failed write usually means
+// the child already exited; the Try carries the cause.
+func (s ClaudeProcessSession) Send(in AgentInput) Try[bool] = in match {
+    case PromptInput(text)           => s.Proc.WriteLine(encodeUserPromptEnvelope(text))
+    case ToolResultInput(id, answer) => s.Proc.WriteLine(encodeToolResultEnvelope(id, answer))
+}
+
+// EndTurn closes the child's stdin so it can wrap up the turn. Dispatched
+// once the turn's `result` event lands (no more inputs coming).
+func (s ClaudeProcessSession) EndTurn() Try[bool] = s.Proc.CloseStdin()
+
+func (s ClaudeProcessSession) NextEvent() concurrent.Future[AgentEvent] =
+    concurrent.FutureApply[AgentEvent](() => classifyClaudeRead(s.Proc.ReadLine()))
+
+func (s ClaudeProcessSession) Close() Try[bool] =
+    s.Proc.Kill().FlatMap((_) => s.Proc.Wait()).Map((_) => true)
+
+// NextDiagnosticFuture is the Claude-specific stderr stream, surfaced as
+// AgentDiagnostic events. It is intentionally NOT on the AgentSession
+// interface: stderr is a local-process concept; a remote transport has
+// no separate diagnostic channel and would interleave AgentDiagnostic
+// on NextEvent instead. runtime_glue's stderr pump narrows to this type
+// and falls back to a clean end for any non-Claude session.
+func (s ClaudeProcessSession) NextDiagnosticFuture() concurrent.Future[AgentEvent] =
+    concurrent.FutureApply[AgentEvent](() => classifyClaudeDiagnostic(s.Proc.ReadStderrLine()))
+
+// classifyReadFailure maps a read failure to a terminal AgentEvent: a
+// clean end (subprocess reports it as Failure(io.EOF)) is AgentTurnEnded,
+// anything else is AgentFailed.
+func classifyReadFailure(e error) AgentEvent =
+    if (e.Error() == "EOF") AgentTurnEnded() else AgentFailed(Err = e)
+
+// classifyClaudeRead / classifyClaudeDiagnostic map one stdout / stderr
+// read to an AgentEvent. Pure — unit-tested directly.
+func classifyClaudeRead(r Try[string]) AgentEvent = r match {
+    case Success(line) => AgentChunk(Text = line)
+    case Failure(e)    => classifyReadFailure(e)
+}
+
+func classifyClaudeDiagnostic(r Try[string]) AgentEvent = r match {
+    case Success(line) => AgentDiagnostic(Text = line)
+    case Failure(e)    => classifyReadFailure(e)
+}
+
+// ----------------------------------------------------------------------------
+// `claude` CLI argv
+// ----------------------------------------------------------------------------
+
+// claudeArgs assembles the `claude` CLI flags for a spawn:
+//   - `--print` always, so claude reads the prompt from stdin and
+//     exits after responding instead of starting a TTY-bound REPL.
+//   - `--input-format stream-json` so multiple JSON envelopes (initial
+//     prompt + zero-or-more tool_result envelopes) can be delivered on
+//     a single stdin that stays open for the whole turn. Required for
+//     AskUserQuestion: the model emits a tool_use and blocks on stdin
+//     for the matching tool_result; without it the question was lost.
+//   - `--output-format stream-json` so the read pump can walk member
+//     output line-by-line. claude requires `--verbose` alongside it
+//     under `--print`.
+//   - `--verbose` always — required by `--print + stream-json`.
+//   - `--model <name>` when m.Model is Some — pins the model.
+//   - `--dangerously-skip-permissions` when the team opted in.
+//   - `--session-id <id>` on a fresh session, `--resume <id>` on a
+//     returning one. Per-member ids keep concurrent fan-outs from
+//     racing on claude's implicit "most recent in cwd" semantics.
+func claudeArgs(m Member, dangerouslySkipPermissions bool, sessionId string, isNewSession bool) Array[string] {
+    val base = ArrayOf(
+        "--print",
+        "--input-format", "stream-json",
+        "--output-format", "stream-json",
+        "--verbose",
+    )
+    val withModel = m.Model match {
+        case Some(name) => base.AppendAll(ArrayOf("--model", name))
+        case None()     => base
+    }
+    val withDanger = if (dangerouslySkipPermissions) withModel.Append("--dangerously-skip-permissions")
+                     else                            withModel
+    val sessionFlag = if (isNewSession) "--session-id" else "--resume"
+    return withDanger.AppendAll(ArrayOf(sessionFlag, sessionId))
+}
+
+// ----------------------------------------------------------------------------
+// stream-json wire envelopes
+// ----------------------------------------------------------------------------
+
+// userPromptEnvelope is the stream-json shape for the first turn's
+// prompt. `Role` is always "user"; `Content` is the prompt text.
+struct userPromptEnvelope(
+    Type    string,
+    Message userPromptMessage,
+)
+struct userPromptMessage(
+    Role    string,
+    Content string,
+)
+
+// toolResultEnvelope is the stream-json shape for satisfying a prior
+// tool_use. Wraps a tool_result content block in a user-role message.
+// `Content` here is a list with exactly one tool_result entry.
+struct toolResultEnvelope(
+    Type    string,
+    Message toolResultMessage,
+)
+struct toolResultMessage(
+    Role    string,
+    Content Array[toolResultBlock],
+)
+struct toolResultBlock(
+    Type      string,
+    ToolUseId string,
+    Content   string,
+    IsError   bool,
+)
+
+val userPromptCodec = json.Codec[userPromptEnvelope](json.SnakeCase())
+val toolResultCodec = json.Codec[toolResultEnvelope](json.SnakeCase())
+
+// Exported test seams for the internal encoders — let cross-package
+// tests assert the wire format without re-deriving it.
+func EncodeUserPromptEnvelopeForTest(prompt string) string = encodeUserPromptEnvelope(prompt)
+func EncodeToolResultEnvelopeForTest(toolUseId string, answer string) string = encodeToolResultEnvelope(toolUseId, answer)
+
+// encodeUserPromptEnvelope builds the first-turn JSON envelope for
+// `prompt`. Falls back to the raw prompt on encoder failure (defensive
+// — the codec is a pure function over a tiny struct; failure would
+// indicate a runtime bug, but we should not lose the turn for it).
+func encodeUserPromptEnvelope(prompt string) string {
+    val env = userPromptEnvelope(
+        Type    = "user",
+        Message = userPromptMessage(Role = "user", Content = prompt),
+    )
+    return userPromptCodec.Encode(env) match {
+        case Success(s) => s
+        case Failure(_) => prompt
+    }
+}
+
+// encodeToolResultEnvelope builds the JSON envelope acknowledging the
+// AskUserQuestion tool_use whose id is `toolUseId`. `answer` is
+// rendered as the tool_result content (free-text — claude accepts it).
+func encodeToolResultEnvelope(toolUseId string, answer string) string {
+    val block = toolResultBlock(
+        Type      = "tool_result",
+        ToolUseId = toolUseId,
+        Content   = answer,
+        IsError   = false,
+    )
+    val env = toolResultEnvelope(
+        Type    = "user",
+        Message = toolResultMessage(Role = "user", Content = ArrayOf(block)),
+    )
+    return toolResultCodec.Encode(env) match {
+        case Success(s) => s
+        case Failure(_) => answer  // not ideal — caller will see no response from the model
+    }
+}

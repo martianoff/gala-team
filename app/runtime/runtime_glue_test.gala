@@ -207,6 +207,73 @@ func runGitInDir(dir string, args Array[string]) {
 }
 
 // ----------------------------------------------------------------------------
+// Start-fresh worktree wipe reliability — the "I reset but the
+// engineers still have old changes" regression.
+// ----------------------------------------------------------------------------
+
+// fsNukeUntilGone must remove a populated directory and be idempotent
+// on an already-gone path. Pure filesystem — no git fixture needed.
+func TestFsNukeUntilGone_RemovesPopulatedDir(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_nuke_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    // Non-empty: a nested dir mimics an engineer's leftover work.
+    val _child, cerr = os.MkdirTemp(dir, "child_")
+    if cerr != nil { return IsTrue(t, false) }
+    val gone = fsNukeUntilGone(dir, 3)
+    val t1 = IsTrue(t, gone)
+    // Idempotent: a second call on the now-gone path returns true.
+    return IsTrue(t1, fsNukeUntilGone(dir, 3))
+}
+
+// The core regression: a worktree that gets dirtied then removed must
+// be DEREGISTERED, so the next ensureWorktree rebuilds it clean rather
+// than reusing the prior session's dirty checkout. Before the fix a
+// single transient `git worktree remove` failure left it registered
+// and ensureWorktree reused it verbatim.
+func TestRemoveWorktree_DeregistersDirtySoNextSpawnIsClean(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_wt_reset_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "init"))
+    val proj = Project(
+        Name = "demo", Repo = dir,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+    val mem = Member(
+        Name = "Kael", Role = Engineer(),
+        Personality = "", Model = None[string](),
+        Extra = "", Onboarding = EmptyArray[string](),
+    )
+    val wtPath = ensureWorktree(proj, mem) match {
+        case Success(p) => p
+        case Failure(_) => ""
+    }
+    if wtPath == "" { return IsTrue(t, false) }
+    val regBefore = isRegisteredWorktree(proj, wtPath)
+    // Simulate the prior session's leftover work: an untracked dir
+    // inside the engineer's worktree.
+    val staleDir, serr = os.MkdirTemp(wtPath, "stale_old_change_")
+    if serr != nil { return IsTrue(t, false) }
+    // Start fresh's per-engineer cleanup.
+    val _ = RemoveWorktree(proj, mem)
+    val regAfter = isRegisteredWorktree(proj, wtPath)
+    val t1 = IsTrue(t, regBefore)
+    val t2 = IsFalse(t1, regAfter)
+    // Prove the next engineer lands clean: re-create the worktree and
+    // confirm the prior session's leftover is gone.
+    val wt2 = ensureWorktree(proj, mem) match {
+        case Success(p) => p
+        case Failure(_) => ""
+    }
+    if wt2 == "" { return IsTrue(t2, false) }
+    return IsFalse(t2, leadWtPathIsLiveDir(staleDir))
+}
+
+// ----------------------------------------------------------------------------
 // ghTitle — derive a clean PR title from a TL @summary body
 // ----------------------------------------------------------------------------
 

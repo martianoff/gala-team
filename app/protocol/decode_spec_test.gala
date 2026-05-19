@@ -83,8 +83,10 @@ func TestDecode_DuplicateChunkIsIdempotent(t T) T {
             Input = ("@dispatch(Felix) Implement the parser.\n@end", tl(0)),
             Expected = 1,
         ),
-        // a member sign-off, re-flushed → still one Finished (terminalFingerprint
-        // no longer needed to tell the replay apart from a fresh sign-off).
+        // a member sign-off, re-flushed → still one Finished: member view is
+        // end-anchored, so the replayed block resolves to a single terminal
+        // (the tl() dispatch cases exercise content-hash dedup collapsing
+        // byte-identical duplicates).
         Case[Tuple[string, DecodeContext], int](
             Name = "single-finished",
             Input = ("@finished\nParser landed; tests green.\n@end", mem("Sable", 0)),

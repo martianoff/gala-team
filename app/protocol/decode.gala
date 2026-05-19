@@ -190,11 +190,13 @@ func extractMemberTerminal(lines Array[string], ctx DecodeContext) Array[Message
     val n = lines.Length()
     val endIdx = lastBareEndIndex(lines, n)
     if (endIdx < 0) { return EmptyArray[Message]() }
-    return nearestTerminalOpener(lines, endIdx) match {
-        case None()         => EmptyArray[Message]()
-        case Some((j, o))   => {
-            val body = bodyBetween(lines, j, endIdx, o.SameLineRest)
-            tokenToKind(o.Kind) match {
+    val opener = nearestTerminalOpener(lines, endIdx)
+    return opener match {
+        case None()  => EmptyArray[Message]()
+        case Some(o) => {
+            val body = bodyBetween(lines, o.OpenIdx, endIdx, o.Tag.SameLineRest)
+            val kindOpt = tokenToKind(o.Tag.Kind)
+            return kindOpt match {
                 case None()     => EmptyArray[Message]()
                 case Some(kind) =>
                     ArrayOf[Message](NewMessage(ctx.Sender, ctx.Recipient, kind, body, ctx.Epoch))
@@ -202,6 +204,14 @@ func extractMemberTerminal(lines Array[string], ctx DecodeContext) Array[Message
         }
     }
 }
+
+// anchoredOpener pairs a parsed opener with the line it was found on,
+// so callers don't need a nested (int, openingTag) tuple pattern (GALA
+// tuple destructuring binds identifiers, which is fragile here).
+struct anchoredOpener(
+    OpenIdx int,
+    Tag     openingTag,
+)
 
 // lastBareEndIndex scans backward for the last line that is exactly
 // `@end` (trailing whitespace tolerated). -1 when none.
@@ -220,13 +230,17 @@ func lastBareEndIndex(lines Array[string], n int) int {
 // blocked). @dispatch / @consult / @summary are TL-only and never a
 // member's sign-off, so a member quoting `@dispatch(` in an audit must
 // not anchor here.
-func nearestTerminalOpener(lines Array[string], endIdx int) Option[Tuple[int, openingTag]] {
-    var found = None[Tuple[int, openingTag]]()
+func nearestTerminalOpener(lines Array[string], endIdx int) Option[anchoredOpener] {
+    var found = None[anchoredOpener]()
     var j = endIdx - 1
     for found.IsEmpty() && j >= 0 {
-        parseOpeningTag(lines.Get(j)) match {
-            case Some(o) =>
-                if (isMemberTerminalKind(o.Kind)) { found = Some[Tuple[int, openingTag]]((j, o)) }
+        val tag = parseOpeningTag(lines.Get(j))
+        tag match {
+            case Some(o) => {
+                if isMemberTerminalKind(o.Kind) {
+                    found = Some[anchoredOpener](anchoredOpener(OpenIdx = j, Tag = o))
+                }
+            }
             case None() => {}
         }
         j = j - 1

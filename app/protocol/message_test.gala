@@ -3,6 +3,7 @@ package protocol
 import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
+    . "martianoff/gala/go_interop"
 )
 
 // ----- content-hash identity ------------------------------------------------
@@ -37,7 +38,7 @@ func TestNewMessage_NoFieldBoundaryCollision(t T) T {
 // The Id is a fixed-width 16-hex-digit string (two 32-bit words).
 func TestNewMessage_IdShape(t T) T {
     val m = NewMessage("_lead", "Felix", Dispatch(), "body", 0)
-    return Eq(t, m.Id.Length(), 16)
+    return Eq(t, len(ToRunes(m.Id)), 16)
 }
 
 // Defaults: fresh message is attempt 1, no causal parent.

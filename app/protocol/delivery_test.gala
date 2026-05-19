@@ -126,11 +126,9 @@ func TestAggregateNudges_BatchesAllSilent(t T) T {
     )
     return AggregateNudges(states, ns(400), pol()) match {
         case Some(act) => act match {
-            case IssueNudge(member, text) => {
-                val t1 = Contains(t, member, "Kael")
-                val t2 = Contains(t1, member, "Mira")
-                return IsFalse(t2, member.Contains("Lyra"))
-            }
+            case IssueNudge(member, _) =>
+                // Folded in input order; Lyra (Working) is excluded.
+                Eq(t, member, "Kael, Mira")
             case _ => IsTrue(t, false)
         }
         case None() => IsTrue(t, false)

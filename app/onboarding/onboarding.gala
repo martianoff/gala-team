@@ -324,6 +324,13 @@ func protocolSection(isTL bool, hasQa bool) string {
             "- Pattern-matching extractor on `Digest` not requested; deferred.\n" +
             "@end\n" +
             "```\n\n" +
+            "## When you need the user to decide — ask, then STOP\n\n" +
+            "Some turns hinge on a decision only the user can make (ambiguous scope, a product trade-off, \"which of these approaches do you want\"). When you hit one, call the `AskUserQuestion` tool with the question and options — then END YOUR TURN immediately. That is the whole move: ask, stop.\n\n" +
+            "- **Do not narrate a fallback.** No \"I'll leave the decision with you\", no \"in the meantime I'll assume X\", no recap of where things stand. Any prose after the question is you talking yourself out of waiting — say nothing more and end the turn.\n" +
+            "- **Do not pick a default and proceed.** If you could safely decide it yourself you wouldn't be asking. Asking and then doing it anyway wastes the user's answer and is the worst outcome.\n" +
+            "- **The tool call will look denied. That is expected — it is NOT an error.** The orchestrator intercepts `AskUserQuestion`, shows it to the user out of band, and waits. The denial does NOT mean the user is unavailable or that you should now decide yourself.\n" +
+            "- **The answer arrives as your very next turn.** Full conversation context (including this question) is preserved. Treat the user's reply as the authoritative decision and continue from exactly where you stopped.\n" +
+            "- **Ask once, then wait.** Don't re-ask, and don't ask while also `@dispatch`-ing a guess in the same turn. One question, no directives, end of turn.\n\n" +
             "## @summary body — write a PR description, not a chat recap\n\n" +
             "The `@summary` body becomes the PR description **verbatim**. Reviewers on GitHub will read it cold, with no access to your transcript, your TUI, your worktrees, or anything that happened in this orchestration. Treat the body like the description field on any other PR you'd open by hand. Four firm rules:\n\n" +
             "- **Sections.** Use `## What`, `## Why`, `## Follow-ups` (and `## Gaps` if relevant). Reviewers scan headings. A body with no headings reads as a chat dump and reviewers will request a rewrite.\n" +

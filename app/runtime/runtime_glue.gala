@@ -534,21 +534,70 @@ func RemoveLeadWorktree(proj Project) Try[bool] = Try(() => {
     return removeWorktreeAt(proj, LeadWorktreePath(proj))
 })
 
+// removeWorktreeAt tears down the worktree at wtPath and — critically
+// — guarantees git's internal registration for it is gone, even when
+// the directory itself can't be fully deleted.
+//
+// Past sessions hit this exact failure: `git worktree remove --force`
+// exited non-zero (a just-exited claude.exe, or a Windows file
+// watcher / indexer, still held a handle inside the dir), the old
+// code panicked, the surrounding Try swallowed it, and the worktree
+// survived BOTH on disk AND in `git worktree list`. The next engineer
+// spawn saw it via isRegisteredWorktree(), took ensureWorktree's
+// reuse-as-is path, and inherited the prior session's dirty checkout
+// — observed as "I reset the session but the engineers still have old
+// changes".
+//
+// Escalation, never fatal:
+//   1. git's own worktree-aware removal (handles the registration in
+//      the common case).
+//   2. Filesystem nuke with a bounded retry, so a transient handle
+//      lock that clears within a moment still ends with an empty path.
+//   3. `git worktree prune` UNCONDITIONALLY. This is the linchpin:
+//      even if the directory lingers, prune drops git's metadata so
+//      isRegisteredWorktree() returns false, routing the next
+//      ensureWorktree() through its clean wipe+recreate path instead
+//      of reusing a dirty checkout.
+//
+// Returns whether the directory itself is finally gone (informational;
+// correctness rests on the unconditional prune, not on this bool).
 func removeWorktreeAt(proj Project, wtPath string) bool {
-    if !leadWtPathIsLiveDir(wtPath) { return true }  // already gone
+    if !leadWtPathIsLiveDir(wtPath) {
+        val _ = PruneWorktrees(proj)
+        return true
+    }
+    val _ = gitWorktreeRemoveForce(proj, wtPath)
+    val gone = fsNukeUntilGone(wtPath, 3)
+    val _ = PruneWorktrees(proj)
+    return gone
+}
+
+// gitWorktreeRemoveForce runs `git worktree remove --force` without
+// ever panicking — any spawn/exit failure just means "git couldn't do
+// it, fall back to the filesystem". Returns true only on a clean exit.
+func gitWorktreeRemoveForce(proj Project, wtPath string) bool {
     val opts = subprocess.NewSpawnOpts(
         "git",
         ArrayOf("worktree", "remove", "--force", wtPath).ToGoSlice(),
         SliceEmpty[string](),
         proj.Repo,
     )
-    val proc = subprocess.Spawn(opts) match {
-        case Success(p)   => p
-        case Failure(err) => panic(s"git worktree remove ${wtPath}: ${err.Error()}")
+    return subprocess.Spawn(opts) match {
+        case Success(p) => p.Wait().GetOrElse(1) == 0
+        case Failure(_) => false
     }
-    val code = proc.Wait().Get()
-    if code != 0 { panic(s"git worktree remove ${wtPath} exited with code ${code}") }
-    return true
+}
+
+// fsNukeUntilGone deletes wtPath with fs.RemoveAll, retrying up to
+// `attempts` times. Pure filesystem (no git), so it is safe to unit
+// test and gives a transient Windows handle lock (a just-exited
+// claude.exe / IDE indexer) a few more chances to release before we
+// fall back to the unconditional prune carrying correctness alone.
+func fsNukeUntilGone(wtPath string, attempts int) bool {
+    if !leadWtPathIsLiveDir(wtPath) { return true }
+    if attempts <= 0 { return false }
+    val _ = fs.RemoveAll(wtPath)
+    return fsNukeUntilGone(wtPath, attempts - 1)
 }
 
 // PruneWorktrees runs `git worktree prune` to drop git's internal

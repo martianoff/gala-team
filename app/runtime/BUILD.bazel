@@ -3,6 +3,7 @@ load("@gala//:gala.bzl", "gala_library")
 gala_library(
     name = "runtime",
     srcs = [
+        "claude_transport.gala",
         "debuglog.gala",
         "runtime_glue.gala",
         "session_id.gala",
@@ -16,6 +17,7 @@ gala_library(
     ],
     importpath = "github.com/martianoff/gala_team/app/runtime",
     deps = [
+        "//app/agent",
         "//app/policy",
         "//app/project",
         "//app/team",

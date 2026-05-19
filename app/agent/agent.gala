@@ -1,0 +1,78 @@
+package agent
+
+import (
+    "martianoff/gala/concurrent"
+    . "martianoff/gala/std"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/agent — the transport-neutral AI-agent port.
+//
+// The orchestrator talks to an AI agent only through the types in this
+// file. The local CLI adapter lives in app/runtime; a future remote
+// service can supply a different AgentTransport without any change
+// here or in app/ui. Nothing in this package knows how the agent runs.
+// ============================================================================
+
+// AgentEvent is one thing an agent produces while working a turn.
+//
+//   AgentChunk      — a unit of assistant output text.
+//   AgentDiagnostic — out-of-band diagnostic text (auth / setup / health
+//                      notices) the agent surfaces alongside its output.
+//   AgentTurnEnded  — the agent finished the turn cleanly; no more output
+//                      until the next input.
+//   AgentFailed     — the event source broke; Err carries the cause.
+sealed type AgentEvent {
+    case AgentChunk(Text string)
+    case AgentDiagnostic(Text string)
+    case AgentTurnEnded()
+    case AgentFailed(Err error)
+}
+
+// AgentInput is one thing the orchestrator hands to an agent during a
+// turn.
+//
+//   PromptInput      — the user / orchestrator prompt for this turn.
+//   ToolResultInput  — the answer to a prior tool request, joined back
+//                      to the originating call by ToolUseId.
+sealed type AgentInput {
+    case PromptInput(Text string)
+    case ToolResultInput(ToolUseId string, Answer string)
+}
+
+// AgentSession is one live conversation turn with an agent.
+//
+//   Send      — deliver an AgentInput. Try carries a delivery failure.
+//   EndTurn   — signal "no more input this turn"; the agent may wrap up.
+//   NextEvent — the next AgentEvent, asynchronously. Re-invoked by the
+//               caller as a self-perpetuating pump (one in flight at a
+//               time).
+//   Close     — terminate the session and release its resources.
+type AgentSession interface {
+    Send(in AgentInput) Try[bool]
+    EndTurn() Try[bool]
+    NextEvent() concurrent.Future[AgentEvent]
+    Close() Try[bool]
+}
+
+// AgentTransport opens sessions. It is the single injection point: the
+// orchestrator defaults to the local CLI transport but any caller can
+// pass another implementation instead.
+type AgentTransport interface {
+    Open(spec AgentSpec) Try[AgentSession]
+}
+
+// AgentSpec is everything a transport needs to start a session. It is
+// deliberately free of any execution detail — Member / Workspace /
+// SessionId describe WHO and WHERE, never HOW the agent is run.
+//
+//   IsNewSession                — fresh conversation vs. resumed one.
+//   DangerouslySkipPermissions  — opt-in, surfaced from team.yaml.
+struct AgentSpec(
+    Member                     Member,
+    Workspace                  string,
+    SessionId                  string,
+    IsNewSession               bool,
+    DangerouslySkipPermissions bool,
+)

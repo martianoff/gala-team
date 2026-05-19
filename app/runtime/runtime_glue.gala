@@ -7,10 +7,10 @@ import (
     "martianoff/gala/strings"
     "martianoff/gala/subprocess"
     "martianoff/gala/concurrent"
-    "martianoff/gala/json"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
+    . "github.com/martianoff/gala_team/app/agent"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
@@ -49,10 +49,11 @@ sealed type Msg {
     case RtWorktreesWiped()
 }
 
-// MemberSession pairs a Member with the live subprocess driving them.
+// MemberSession pairs a Member with the live agent session driving
+// them, addressed only through the transport-neutral port (app/agent).
 struct MemberSession(
     Member  Member,
-    Process subprocess.Process,
+    Session AgentSession,
 )
 
 // ----------------------------------------------------------------------------
@@ -94,14 +95,30 @@ func SpawnSession(
     dangerouslySkipPermissions bool,
     sessionId string,
     isNewSession bool,
+) Try[MemberSession] =
+    SpawnSessionWith(NewClaudeProcessTransport(), proj, m, workspace, dangerouslySkipPermissions, sessionId, isNewSession)
+
+// SpawnSessionWith is the transport injection point: a future remote
+// agent supplies a different AgentTransport and nothing else in the
+// orchestrator changes. `proj` is unused today but kept to mirror
+// SpawnSession's signature.
+func SpawnSessionWith(
+    transport AgentTransport,
+    proj Project,
+    m Member,
+    workspace string,
+    dangerouslySkipPermissions bool,
+    sessionId string,
+    isNewSession bool,
 ) Try[MemberSession] {
-    val opts = subprocess.NewSpawnOpts(
-        "claude",
-        claudeArgs(m, dangerouslySkipPermissions, sessionId, isNewSession).ToGoSlice(),
-        SliceEmpty[string](),
-        workspace,
+    val spec = AgentSpec(
+        Member                     = m,
+        Workspace                  = workspace,
+        SessionId                  = sessionId,
+        IsNewSession               = isNewSession,
+        DangerouslySkipPermissions = dangerouslySkipPermissions,
     )
-    return subprocess.Spawn(opts).Map((p) => MemberSession(Member = m, Process = p))
+    return transport.Open(spec).Map((sess) => MemberSession(Member = m, Session = sess))
 }
 
 // EnsureWorkspace returns the cwd to spawn `m` in, given the team's
@@ -624,238 +641,103 @@ func PruneWorktrees(proj Project) Try[bool] = Try(() => {
     return true
 })
 
-// claudeArgs assembles the `claude` CLI flags for a spawn:
-//   - `--print` always, so claude reads the prompt from stdin
-//     and exits after responding instead of starting a TTY-bound
-//     REPL. Without this, claude hangs on piped stdin.
-//   - `--output-format stream-json` always, so the chunk pump can
-//     walk member output line-by-line. claude requires
-//     `--verbose` alongside it under `--print` (otherwise it
-//     errors with "stream-json requires --verbose").
-//   - `--verbose` always — required by `--print +
-//     --output-format=stream-json`.
-//   - `--model <name>` when m.Model is Some — pins the model.
-//   - `--dangerously-skip-permissions` when the enclosing team
-//     opted in via team.yaml. Off by default; turning it on is a
-//     deliberate decision the user makes per-team.
-//   - `--session-id <id>` on the first turn, `--resume <id>` on
-//     subsequent turns. Per-member ids keep concurrent fan-outs
-//     (Felix and Mira dispatched in parallel) from racing on
-//     claude's implicit "most recent in cwd" `--continue`
-//     semantics.
-func claudeArgs(m Member, dangerouslySkipPermissions bool, sessionId string, isNewSession bool) Array[string] {
-    // `--input-format stream-json` lets us pipe multiple JSON envelopes
-    // (initial prompt + zero-or-more tool_result envelopes) to the
-    // subprocess on a single stdin without closing it after the first
-    // write. Required for AskUserQuestion handling: when the model
-    // emits a tool_use, claude blocks on stdin waiting for the
-    // matching tool_result; with the prior plain-text input mode there
-    // was no way to satisfy that block, so the tool call was reported
-    // back to the model as "user dismissed" and the question was lost
-    // to the user. Now we keep stdin open for the duration of the
-    // turn, forward the question to the UI, and write the tool_result
-    // envelope back when the user answers.
-    val base = ArrayOf(
-        "--print",
-        "--input-format", "stream-json",
-        "--output-format", "stream-json",
-        "--verbose",
-    )
-    val withModel = m.Model match {
-        case Some(name) => base.AppendAll(ArrayOf("--model", name))
-        case None()     => base
-    }
-    val withDanger = if (dangerouslySkipPermissions) withModel.Append("--dangerously-skip-permissions")
-                     else                            withModel
-    val sessionFlag = if (isNewSession) "--session-id" else "--resume"
-    return withDanger.AppendAll(ArrayOf(sessionFlag, sessionId))
+// ----------------------------------------------------------------------------
+// Future builders — the AgentEvent → Msg boundary
+//
+// MemberSession drives an agent.AgentSession (the port). These pump
+// functions call the port and translate AgentEvent → the internal Msg
+// type so app/ui, headless and consult stay untouched. The `claude`
+// CLI specifics live in claude_transport.gala.
+// ----------------------------------------------------------------------------
+
+// agentEventToMsg maps a stdout-stream AgentEvent to a runtime Msg. A
+// clean turn end is reported as RtSessionFailed carrying an error
+// whose .Error() == "EOF" — every downstream end-of-stream check is a
+// string compare on that text. AgentDiagnostic never reaches this pump
+// for the `claude` transport but is routed sensibly for any transport
+// that interleaves it.
+func agentEventToMsg(name string, ev AgentEvent) Msg = ev match {
+    case AgentChunk(text)      => RtChunkArrived(Member = name, Line = text)
+    case AgentDiagnostic(text) => RtStderrArrived(Member = name, Line = text)
+    case AgentTurnEnded()      => RtSessionFailed(Member = name, Err = errors.New("EOF"))
+    case AgentFailed(err)      => RtSessionFailed(Member = name, Err = err)
 }
 
-// ----------------------------------------------------------------------------
-// Future builders
-// ----------------------------------------------------------------------------
+// agentDiagnosticToMsg maps the diagnostic stream to a runtime Msg: a
+// line is RtStderrArrived; any terminal event ends the pump as
+// RtStderrEnded.
+func agentDiagnosticToMsg(name string, ev AgentEvent) Msg = ev match {
+    case AgentDiagnostic(text) => RtStderrArrived(Member = name, Line = text)
+    case AgentChunk(_)         => RtStderrEnded(Member = name)
+    case AgentTurnEnded()      => RtStderrEnded(Member = name)
+    case AgentFailed(_)        => RtStderrEnded(Member = name)
+}
 
-// NextChunkFuture schedules the next ReadLine on the session's stdout.
-// Returns a Future that resolves to ChunkArrived (success), SessionFailed
-// (any error including EOF — callers can match on Err to distinguish).
-//
-// EOF is treated as SessionFailed(io.EOF) so the orchestrator can
-// transition the member's status to Done; matching on Err lets callers
-// distinguish "stream done" from a real failure.
+// NextChunkFuture schedules the next output event and maps it to a Msg.
+// RtChunkArrived on output; RtSessionFailed on turn-end (Err.Error()
+// == "EOF") or a real read error — callers match on Err to distinguish
+// "stream done" from a genuine failure.
 func NextChunkFuture(s MemberSession) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => s.Process.ReadLine() match {
-        case Success(line) => RtChunkArrived(Member = name, Line = line)
-        case Failure(err)  => RtSessionFailed(Member = name, Err = err)
-    })
+    return s.Session.NextEvent().Map((ev) => agentEventToMsg(name, ev))
 }
 
-// NextStderrFuture schedules the next ReadStderrLine on the session.
-// Mirrors NextChunkFuture's shape but emits RtStderrArrived (or
-// RtStderrEnded on EOF) so the orchestrator can surface auth /
-// permission / install errors that claude only writes to stderr.
-//
-// stderr drain is best-effort — failures here don't terminate the
-// member; the stdout side remains the authoritative liveness signal.
+// NextStderrFuture schedules the next diagnostic event so the
+// orchestrator can surface auth / permission / install errors.
+// Diagnostics are not on the abstract port (a local-process concept):
+// the `claude` adapter exposes them via ClaudeProcessSession's
+// diagnostic stream, which this narrows to. Any other transport has no
+// separate diagnostic channel — it would interleave AgentDiagnostic on
+// NextEvent instead — so it ends the stderr pump cleanly with one
+// RtStderrEnded, keeping the two-independent-pumps behaviour intact.
 func NextStderrFuture(s MemberSession) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => s.Process.ReadStderrLine() match {
-        case Success(line) => RtStderrArrived(Member = name, Line = line)
-        case Failure(_)    => RtStderrEnded(Member = name)
-    })
+    return s.Session match {
+        case c: ClaudeProcessSession => c.NextDiagnosticFuture().Map((ev) => agentDiagnosticToMsg(name, ev))
+        case _                       => concurrent.FutureOf[Msg](RtStderrEnded(Member = name))
+    }
 }
 
-// SendFuture writes the initial-turn user prompt to claude's stdin as
-// a `{"type":"user","message":{"role":"user","content":"..."}}`
-// envelope. Stdin is intentionally left OPEN — with
-// `--input-format stream-json` claude reads additional envelopes (tool_result
-// for AskUserQuestion, follow-up prompts) on the same stdin. Closing
-// it would terminate the subprocess mid-turn the moment a tool_use
-// block is emitted, which used to happen on every clarifying question.
-//
-// CloseSendFuture is the explicit close path, dispatched once the
-// turn's `result` event lands (no more tool calls coming).
-//
-// Returns WriteSent on success, SessionFailed on a write error
-// (rare; usually means claude already exited).
+// SendFuture delivers the initial-turn prompt through the port. The
+// session stays open across the turn so a tool_result (AskUserQuestion)
+// or follow-up can follow; CloseSendFuture is the explicit end.
 func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => {
-        val line = encodeUserPromptEnvelope(prompt)
-        val w = s.Process.WriteLine(line)
-        if w.IsFailure() {
-            return RtSessionFailed(Member = name, Err = w.GetError())
-        }
-        return RtWriteSent(Member = name)
+    return concurrent.FutureApply[Msg](() => s.Session.Send(PromptInput(Text = prompt)) match {
+        case Success(_)   => RtWriteSent(Member = name)
+        case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })
 }
 
-// SendToolResultFuture writes a tool_result envelope to the session's
-// stdin in response to a prior AskUserQuestion tool_use. `toolUseId`
-// MUST exactly match the `id` from the assistant's tool_use block —
-// claude joins them on this id and a mismatch makes the model see the
-// tool call as unanswered. `answer` is the user's free-text response;
-// claude accepts free-text content for AskUserQuestion fine.
-//
-// Stdin stays open after this write — claude continues the turn,
-// streaming more assistant chunks and eventually a `result` event,
-// after which the orchestrator closes stdin via CloseSendFuture.
+// SendToolResultFuture answers a prior AskUserQuestion tool_use.
+// `toolUseId` MUST match the `id` from the assistant's tool_use block —
+// the agent joins them on this id; a mismatch leaves the call
+// unanswered.
 func SendToolResultFuture(s MemberSession, toolUseId string, answer string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => {
-        val line = encodeToolResultEnvelope(toolUseId, answer)
-        val w = s.Process.WriteLine(line)
-        if w.IsFailure() {
-            return RtSessionFailed(Member = name, Err = w.GetError())
-        }
-        return RtWriteSent(Member = name)
+    return concurrent.FutureApply[Msg](() => s.Session.Send(ToolResultInput(ToolUseId = toolUseId, Answer = answer)) match {
+        case Success(_)   => RtWriteSent(Member = name)
+        case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })
 }
 
-// CloseSendFuture sends EOF to the subprocess's stdin so it can
-// gracefully shut down at the end of a turn. Dispatched from the
-// onChunk handler when a `result` event lands — that's claude's
-// "done with this turn" signal, after which the model has no more
-// work to do until the next user prompt (which spawns a fresh
-// --resume subprocess).
+// CloseSendFuture ends the turn's input so the agent can wrap up.
+// Dispatched when a `result` event lands.
 func CloseSendFuture(s MemberSession) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => {
-        val c = s.Process.CloseStdin()
-        if c.IsFailure() {
-            return RtSessionFailed(Member = name, Err = c.GetError())
-        }
-        return RtWriteSent(Member = name)
+    return concurrent.FutureApply[Msg](() => s.Session.EndTurn() match {
+        case Success(_)   => RtWriteSent(Member = name)
+        case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })
-}
-
-// userPromptEnvelope is the stream-json shape for the first turn's
-// prompt. `Role` is always "user"; `Content` is the prompt text.
-struct userPromptEnvelope(
-    Type    string,
-    Message userPromptMessage,
-)
-struct userPromptMessage(
-    Role    string,
-    Content string,
-)
-
-// toolResultEnvelope is the stream-json shape for satisfying a prior
-// tool_use. Wraps a tool_result content block in a user-role message.
-// `Content` here is a list with exactly one tool_result entry.
-struct toolResultEnvelope(
-    Type    string,
-    Message toolResultMessage,
-)
-struct toolResultMessage(
-    Role    string,
-    Content Array[toolResultBlock],
-)
-struct toolResultBlock(
-    Type      string,
-    ToolUseId string,
-    Content   string,
-    IsError   bool,
-)
-
-val userPromptCodec = json.Codec[userPromptEnvelope](json.SnakeCase())
-val toolResultCodec = json.Codec[toolResultEnvelope](json.SnakeCase())
-
-// EncodeUserPromptEnvelopeForTest is the exported test seam for the
-// internal encodeUserPromptEnvelope — keeps the production caller path
-// unchanged (private) while letting the test binary across packages
-// assert on the wire format without re-deriving it.
-func EncodeUserPromptEnvelopeForTest(prompt string) string = encodeUserPromptEnvelope(prompt)
-
-// EncodeToolResultEnvelopeForTest mirrors EncodeUserPromptEnvelopeForTest
-// for the tool_result envelope. Production callers use the in-package
-// `encodeToolResultEnvelope`.
-func EncodeToolResultEnvelopeForTest(toolUseId string, answer string) string = encodeToolResultEnvelope(toolUseId, answer)
-
-// encodeUserPromptEnvelope builds the first-turn JSON envelope for
-// `prompt`. Falls back to the raw prompt on encoder failure (defensive
-// — the codec is a pure function over a tiny struct; failure would
-// indicate a runtime bug, but we should not lose the turn for it).
-func encodeUserPromptEnvelope(prompt string) string {
-    val env = userPromptEnvelope(
-        Type    = "user",
-        Message = userPromptMessage(Role = "user", Content = prompt),
-    )
-    return userPromptCodec.Encode(env) match {
-        case Success(s) => s
-        case Failure(_) => prompt
-    }
-}
-
-// encodeToolResultEnvelope builds the JSON envelope acknowledging the
-// AskUserQuestion tool_use whose id is `toolUseId`. `answer` is
-// rendered as the tool_result content (free-text — claude accepts it).
-func encodeToolResultEnvelope(toolUseId string, answer string) string {
-    val block = toolResultBlock(
-        Type      = "tool_result",
-        ToolUseId = toolUseId,
-        Content   = answer,
-        IsError   = false,
-    )
-    val env = toolResultEnvelope(
-        Type    = "user",
-        Message = toolResultMessage(Role = "user", Content = ArrayOf(block)),
-    )
-    return toolResultCodec.Encode(env) match {
-        case Success(s) => s
-        case Failure(_) => answer  // not ideal — caller will see no response from the model
-    }
 }
 
 // ----------------------------------------------------------------------------
 // Lifecycle
 // ----------------------------------------------------------------------------
 
-// CloseSession gracefully terminates a member's subprocess: kills it,
-// then waits for the OS to reap it. The first failure short-circuits;
-// the result is Success(true) only when both legs succeed.
-func CloseSession(s MemberSession) Try[bool] =
-    s.Process.Kill().FlatMap((_) => s.Process.Wait()).Map((_) => true)
+// CloseSession terminates a member's agent session; the port's Close
+// owns the kill-then-reap detail.
+func CloseSession(s MemberSession) Try[bool] = s.Session.Close()
 
 // CloseAllSessions kills every live MemberSession in `sessions` and
 // waits for the OS to reap each one. Returns an Array of (member

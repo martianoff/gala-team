@@ -2529,6 +2529,35 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
 // flips to StIdle so the heartbeat doesn't keep escalating timers.
 // @help pauses the member (StHelpWaiting) and (in #28) opens a TL
 // clarification turn. @blocked surfaces a user-visible failure.
+// terminalBody returns the payload text of a member-terminal
+// directive. Only @done/@finished/@review (Finished), @help (Help)
+// and @blocked (Blocked) reach here via MemberTerminal; anything
+// else yields "" and is treated as "no terminal".
+func terminalBody(d Directive) string = d match {
+    case Finished(b) => b
+    case Help(b)     => b
+    case Blocked(b)  => b
+    case _           => ""
+}
+
+// terminalFingerprint is a stable content hash of a terminal block,
+// used to tell two sign-offs apart. FNV-1a-style fold over the body's
+// runes — distinct bodies (a quoted snippet vs the real
+// multi-paragraph sign-off) collide only astronomically rarely; an
+// empty body stays at the offset basis, which never equals a real
+// sign-off's hash. Plain rune index-loop so it depends on nothing
+// beyond Go builtins (update.gala's `strings` is the Go stdlib one).
+func terminalFingerprint(d Directive) int {
+    val rs = ToRunes(terminalBody(d))
+    var h = int(2166136261)
+    var i = 0
+    for i < len(rs) {
+        h = (h * 16777619) + int(rs[i])
+        i = i + 1
+    }
+    return h
+}
+
 func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     if speaker == m.Team.Lead.Name {
         return (m, EmptyArray[Cmd[AppMsg]]())
@@ -2537,20 +2566,32 @@ func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[
     val nextBuffer = if (priorBuffer == "") line else priorBuffer + "\n" + line
     // MemberTerminal (see its doc) returns the member's real sign-off
     // robustly against quoted directive syntax in the body, or None
-    // until the closing `@end` has streamed in. A member emits exactly
-    // one terminal directive; MemberDirectivesFired is the 0/1
-    // fire-once guard — a re-dispatch's MemberDirectivesFired.Remove
-    // resets it so the next turn can sign off again.
+    // until the closing `@end` has streamed in.
+    //
+    // MemberDirectivesFired is keyed by the terminal's content
+    // fingerprint, NOT a 0/1 latch. The latch was defeated by the
+    // streaming case: a QA reviewer's FIRST chunk legitimately quotes
+    // the deliverables / the directive protocol it must review, so an
+    // early buffer snapshot transiently contains only a QUOTED
+    // `@finished … @end`. MemberTerminal matched it, the one-shot
+    // burned, and the member's REAL later sign-off was then dropped —
+    // no MemberDone, FSM hung in QAGate until the user intervened.
+    // Re-firing whenever a genuinely DIFFERENT terminal block appears
+    // lets the real sign-off through, while a stable buffer (the same
+    // terminal observed across later chunks) still fires exactly once.
+    // A re-dispatch's MemberDirectivesFired.Remove resets the key so
+    // the next turn's sign-off (even an identical body) fires again.
     val withBuffer = m.Copy(MemberBuffers = m.MemberBuffers.Put(speaker, nextBuffer))
-    val alreadyFired = m.MemberDirectivesFired.Get(speaker).GetOrElse(0) > 0
+    val lastFp = m.MemberDirectivesFired.Get(speaker).GetOrElse(0)
     return MemberTerminal(nextBuffer) match {
         case None()  => (withBuffer, EmptyArray[Cmd[AppMsg]]())
         case Some(d) => {
-            if alreadyFired {
+            val fp = terminalFingerprint(d)
+            if fp == lastFp {
                 return (withBuffer, EmptyArray[Cmd[AppMsg]]())
             }
             val withFired = withBuffer.Copy(
-                MemberDirectivesFired = m.MemberDirectivesFired.Put(speaker, 1),
+                MemberDirectivesFired = m.MemberDirectivesFired.Put(speaker, fp),
             )
             val (m1, cmd) = applyMemberDirective(withFired, speaker, d)
             return (m1, ArrayOf[Cmd[AppMsg]](cmd))

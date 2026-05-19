@@ -1,0 +1,239 @@
+package ui
+
+// pump_characterization_test — the regression oracle for the
+// Agent-port refactor.
+//
+// This file pins the OBSERVABLE behavior of the current subprocess
+// pump (onChunk / onStderr / onSessionFailed and the WriteSent
+// no-op) end-to-end: it drives a representative AppModel through
+// Update, then renders it through View, and asserts on the things a
+// re-sourcing of the pump's events would silently break —
+// conversation-log lines, member status transitions, FSM finalization,
+// and the rendered TUI frame.
+//
+// The contract: porting the pump to the Agent path must leave every
+// assertion below green. If any drifts, the port changed behavior.
+//
+// All cases are hermetic — no `claude` subprocess is spawned. The
+// crash-retry case deliberately names an off-roster member so
+// respawnMember short-circuits in findMemberByName before any spawn,
+// while the retry bookkeeping (the part a regression would break) is
+// still applied.
+
+import (
+    "os"
+    "strings"
+    "github.com/martianoff/gala-tui"
+    "github.com/martianoff/gala_team/app/session"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/policy"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ---------------------------------------------------------------------------
+// fixtures
+// ---------------------------------------------------------------------------
+
+// pcProject points Repo at a fresh temp dir so onChunk's synchronous
+// persistConversation has somewhere to write — keeping LastError clean
+// so the error-banner assertions only fire for the cases that mean to.
+func pcProject() Project {
+    val dir, err = os.MkdirTemp("", "gala_team_pump_char_")
+    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    return Project(
+        Name = "demo", Repo = dir,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+}
+
+func pcTeam() Team {
+    val iris = Member(
+        Name = "Iris", Role = TeamLead(),
+        Personality = "calm", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val felix = Member(
+        Name = "Felix", Role = Engineer(),
+        Personality = "terse", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    return Team(
+        Key = "main", Name = "Skunkworks", Description = "",
+        Members = ArrayOf[Member](iris, felix), Lead = iris,
+        Onboarding = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
+    )
+}
+
+func pcModel() AppModel = InitialModel(pcProject(), pcTeam(), DefaultWorkflow(), DefaultPolicy())
+
+val pcW = 100
+val pcH = 34
+
+func pcRender(m AppModel) string = gala_tui.Snapshot(View(m), pcW, pcH)
+
+// ---------------------------------------------------------------------------
+// ChunkArrived — a normal streamed chunk
+// ---------------------------------------------------------------------------
+
+// A representative real `claude --output-format stream-json` assistant
+// line MUST: (1) decode to exactly one transcript entry of clean prose
+// with the JSON envelope stripped, (2) flip the speaker to working,
+// (3) render behind the speaker prefix without leaking the envelope
+// into the pane, and (4) show "working" in the member-detail modal.
+// Re-sourcing the codec / filter / status flip would trip one of these.
+func TestPump_ChunkArrived_NormalStreamedChunk_DecodesFlipsAndRenders(t T) T {
+    val seed = pcModel()
+    val line = "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-7\",\"id\":\"msg_03\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"The project root is a Bazel-managed Go monorepo.\"}],\"usage\":{\"input_tokens\":5,\"output_tokens\":20,\"cache_read_input_tokens\":0}}}"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = line))
+    // 1. exactly one line, attributed, decoded, envelope stripped.
+    val felixLines = m.Conversation.Filter((cl) => cl.Speaker == "Felix")
+    val t1 = Eq(t, felixLines.Size(), 1)
+    val text = felixLines.Get(0).Text
+    val t2 = IsTrue(t1, strings.Contains(text, "Bazel-managed Go monorepo"))
+    val t3 = IsFalse(t2, strings.Contains(text, "input_tokens"))
+    val t4 = IsFalse(t3, strings.Contains(text, "session_id"))
+    // 2. status transition: a streamed chunk marks the speaker working.
+    val st = m.Statuses.Get("Felix").GetOrElse(StIdle())
+    val t5 = st match {
+        case StWorking() => IsTrue(t4, true)
+        case _           => IsTrue(t4, false)
+    }
+    // 3. rendered pane: prose behind the prefix, no envelope tail.
+    val out = pcRender(m)
+    val t6 = IsTrue(t5, strings.Contains(out, "Felix: "))
+    val t7 = IsTrue(t6, strings.Contains(out, "Bazel-managed Go monorepo"))
+    val t8 = IsFalse(t7, strings.Contains(out, "input_tokens"))
+    // 4. rendered member-detail modal reflects the working status.
+    val detail = pcRender(m.Copy(MemberDetailOpen = Some("Felix")))
+    return IsTrue(t8, strings.Contains(detail, "Status: working"))
+}
+
+// The plain-prose fast path (non-stream-json input) appends the line
+// verbatim under the speaker and renders it intact.
+func TestPump_ChunkArrived_PlainProse_AppendsLineAndRenders(t T) T {
+    val seed = pcModel()
+    val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = "patched the parser and added a round-trip test"))
+    val t1 = Eq(t, m.Conversation.Size(), 1)
+    val cl = m.Conversation.Get(0)
+    val t2 = Eq(t1, cl.Speaker, "Felix")
+    val t3 = Eq(t2, cl.Text, "patched the parser and added a round-trip test")
+    val out = pcRender(m)
+    return IsTrue(t3, strings.Contains(out, "Felix: patched the parser and added a round-trip test"))
+}
+
+// ---------------------------------------------------------------------------
+// StderrArrived — a diagnostic line
+// ---------------------------------------------------------------------------
+
+// stderr is operator-facing, not transcript content. It must NOT enter
+// the conversation; it must land in LastError verbatim and render in
+// the error banner with the warning glyph. A pump port that routed
+// stderr into the chat (or dropped it) would trip this.
+func TestPump_StderrArrived_DiagnosticSurfacesAsErrorNotTranscript(t T) T {
+    val seed = pcModel()
+    val (m, _) = Update(seed, StderrArrived(Member = "Felix", Line = "claude: error: not logged in"))
+    val t1 = Eq(t, m.Conversation.Size(), 0)
+    val t2 = m.LastError match {
+        case Some(s) => IsTrue(t1, strings.Contains(s, "Felix stderr: claude: error: not logged in"))
+        case None()  => IsTrue(t1, false)
+    }
+    val out = pcRender(m)
+    val t3 = IsTrue(t2, strings.Contains(out, "⚠"))
+    val t4 = IsTrue(t3, strings.Contains(out, "Felix stderr:"))
+    return IsTrue(t4, strings.Contains(out, "not logged in"))
+}
+
+// ---------------------------------------------------------------------------
+// SessionFailed — the pump's terminal event
+// ---------------------------------------------------------------------------
+
+// Clean EOF is how every `claude --print` turn ends. When it arrives
+// for the lead mid-orchestration (FSM in TLThinking) on a plain-chat
+// turn buffer, the pump must finalize: drop the session, flip the lead
+// idle, and route the FSM back to Idle — visible in the header label
+// flipping from "state: TL thinking" to "state: idle".
+func TestPump_SessionFailed_CleanEofMidTurn_FinalizesTlTurnToIdle(t T) T {
+    val seed = pcModel().Copy(
+        State      = TLThinking(),
+        TurnBuffer = "I'll hold for your direction before dispatching anyone.",
+    )
+    val before = pcRender(seed)
+    val t0 = IsTrue(t, strings.Contains(before, "state: TL thinking"))
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val t1 = m.State match {
+        case Idle() => IsTrue(t0, true)
+        case _      => IsTrue(t0, false)
+    }
+    val t2 = m.Sessions.Get("Iris") match {
+        case None()  => IsTrue(t1, true)
+        case Some(_) => IsTrue(t1, false)
+    }
+    val st = m.Statuses.Get("Iris").GetOrElse(StWorking())
+    val t3 = st match {
+        case StIdle() => IsTrue(t2, true)
+        case _        => IsTrue(t2, false)
+    }
+    val after = pcRender(m)
+    val t4 = IsTrue(t3, strings.Contains(after, "state: idle"))
+    return IsFalse(t4, strings.Contains(after, "state: TL thinking"))
+}
+
+// A non-clean SessionFailed (crash) escalates into the auto-retry
+// path: LastError carries the "retry N/M" budget, the member flips to
+// StRecovering, and the error banner renders the recovery line.
+// "Ghost" is off-roster so respawnMember's findMemberByName
+// short-circuits before any subprocess spawn — keeping the oracle
+// hermetic while still pinning the retry bookkeeping a crash-handling
+// regression would break.
+func TestPump_SessionFailed_MidTurnCrash_EscalatesToRecoveryWithBanner(t T) T {
+    val seed = pcModel()
+    val (m, _) = Update(seed, SessionFailed(Member = "Ghost", ErrText = "connection reset by peer"))
+    val t1 = m.LastError match {
+        case Some(s) => IsTrue(t, strings.Contains(s, "Ghost: connection reset by peer — retry 1/2"))
+        case None()  => IsTrue(t, false)
+    }
+    val st = m.Statuses.Get("Ghost").GetOrElse(StIdle())
+    val t2 = st match {
+        case StRecovering(att, max) => Eq(Eq(t1, att, 1), max, 2)
+        case _                      => IsTrue(t1, false)
+    }
+    val out = pcRender(m)
+    val t3 = IsTrue(t2, strings.Contains(out, "⚠"))
+    return IsTrue(t3, strings.Contains(out, "Ghost: connection reset by peer — retry 1/2"))
+}
+
+// ---------------------------------------------------------------------------
+// WriteSent — a pure no-op
+// ---------------------------------------------------------------------------
+
+// WriteSent acknowledges a stdin write; it must perturb nothing the
+// renderer reads. The strongest oracle is a byte-identical frame: if a
+// pump port ever starts touching model state on WriteSent, the
+// before/after snapshot diverges and this fails.
+func TestPump_WriteSent_IsPureNoOp_ModelAndFrameUnchanged(t T) T {
+    val seed = pcModel().Copy(
+        Composer     = "draft prompt",
+        Tick         = 7,
+        Conversation = ArrayOf[session.ConversationLine](
+            session.ConversationLine(Speaker = "you",  Text = "ship the metrics endpoint"),
+            session.ConversationLine(Speaker = "Iris", Text = "on it"),
+        ),
+    )
+    val before = pcRender(seed)
+    val (m, _) = Update(seed, WriteSent(Member = "Iris"))
+    val t1 = Eq(t, m.Composer, "draft prompt")
+    val t2 = Eq(t1, m.Tick, 7)
+    val t3 = Eq(t2, m.Conversation.Size(), 2)
+    val t4 = m.LastError match {
+        case None()  => IsTrue(t3, true)
+        case Some(_) => IsTrue(t3, false)
+    }
+    val after = pcRender(m)
+    return Eq(t4, after, before)
+}

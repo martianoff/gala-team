@@ -325,6 +325,16 @@ struct AppModel(
     // re-derives an already-admitted Id and Ledger.Admit rejects it
     // exactly once.
     Ledger protocol.Ledger,
+    // Per-member delivery state driven by protocol.OnChunk / OnTerminal
+    // / Tick. Replaces the ad-hoc Working→Slow→Stuck→Failed ladder that
+    // used to live in livenessStatus + bandFor. Absent entry == no
+    // dispatch in flight for that member.
+    DeliveryStates HashMap[string, protocol.DeliveryState],
+    // Most recent Dispatch Message per member, so Tick has the
+    // authoritative `m` to bump-and-re-deliver on Redeliver. Set on
+    // every TL→member @dispatch fanout; never cleared (Acked / Abandoned
+    // terminal states sit in DeliveryStates and stop Tick from acting).
+    LastDispatchedMsg HashMap[string, protocol.Message],
     // Captured @done body per member from the most recent dispatched
     // turn. Drained by buildRelayPrompt when the orchestrator opens a
     // TL relay turn (#28). Empty string if a member finished via EOF
@@ -582,6 +592,8 @@ func InitialModelWithTeams(
     MemberJsonBuf         = EmptyHashMap[string, string](),
     MemberDirectivesFired = EmptyHashMap[string, int](),
     Ledger                = protocol.EmptyLedger(),
+    DeliveryStates        = EmptyHashMap[string, protocol.DeliveryState](),
+    LastDispatchedMsg     = EmptyHashMap[string, protocol.Message](),
     MemberDoneBodies      = EmptyHashMap[string, string](),
     MemberBlockedReasons  = EmptyHashMap[string, string](),
     PostPromptSent        = EmptyHashSet[string](),

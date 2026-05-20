@@ -2949,32 +2949,40 @@ func buildBlockedNudgePrompt(tm Team, name string, reason string) string {
 
 // maybeDispatchConsults inspects the latest TL chunk for newly-
 // completed `@consult(name) … @end` blocks. Returns the updated model
-// (with `TurnBuffer`, `ConsultsFired`, ActiveConsults, ConsultBuffers
-// advanced) plus an array of Cmds — one re-armed event-pump per
-// successfully-spawned consult, plus an immediate MsgCmd for any
-// consult whose SpawnConsult failed pre-stream.
+// (with `TurnBuffer` accumulated, Ledger advanced, ActiveConsults and
+// ConsultBuffers populated for each newly-admitted consult) plus the
+// re-armed event-pump Cmds.
 //
 // Non-TL chunks are no-ops; the per-turn buffer only tracks the lead
 // since other members never emit `@consult`.
+//
+// Identity is the content-hash Id on each protocol Message: a
+// re-emitted byte-identical chunk re-derives an already-admitted Id
+// and Ledger.Admit rejects it exactly once. No index watermark is
+// needed; this replaces the ConsultsFired counter.
 func maybeDispatchConsults(m AppModel, speaker string, line string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     if speaker != m.Team.Lead.Name {
         return (m, EmptyArray[Cmd[AppMsg]]())
     }
     val nextBuffer = if (m.TurnBuffer == "") line else m.TurnBuffer + "\n" + line
-    val dirs = Parse(nextBuffer)
-    val consults = dirs.Collect({
-        case Consult(target, _, body) => (target, body)
-    })
-    val total = consults.Size()
-    if total <= m.ConsultsFired {
+    val msgs = protocol.Decode(nextBuffer, protocol.TLDecodeContext(0))
+    val consults = msgs.Filter((mm) => protocol.KindTag(mm.Kind) == "consult")
+    if (consults.IsEmpty()) {
         return (m.Copy(TurnBuffer = nextBuffer), EmptyArray[Cmd[AppMsg]]())
     }
-    val withBuffer = m.Copy(TurnBuffer = nextBuffer, ConsultsFired = total)
-    return consults.Drop(m.ConsultsFired).FoldLeft(
+    val withBuffer = m.Copy(TurnBuffer = nextBuffer)
+    return consults.FoldLeft(
         (withBuffer, EmptyArray[Cmd[AppMsg]]()),
-        (acc, c) => {
-            val (m1, cmd) = dispatchOneConsult(acc.V1, c.V1, c.V2)
-            return (m1, acc.V2.Append(cmd))
+        (acc, mm) => {
+            val (l1, admitted) = acc.V1.Ledger.Admit(mm)
+            val acc1 = acc.V1.Copy(Ledger = l1)
+            return admitted match {
+                case None()   => (acc1, acc.V2)
+                case Some(am) => {
+                    val (m1, cmd) = dispatchOneConsult(acc1, am.Recipient, am.Body)
+                    return (m1, acc.V2.Append(cmd))
+                }
+            }
         },
     )
 }

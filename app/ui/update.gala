@@ -3130,7 +3130,21 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         //   - Other member → MemberDone(name, body). FSM drains the
         //     pending set and advances to QAGate / TLReview / relay.
         if name == cleaned.Team.Lead.Name {
-            val rawDirs = Parse(cleaned.TurnBuffer)
+            // Lead-buffer directives split across two paths now:
+            //   - @dispatch / @consult / @summary route through the
+            //     protocol decoder (content-hash identity + Ledger
+            //     dedup) and the Message → Directive adapter.
+            //   - @base / @plan are TL-only orchestrator control
+            //     directives, not agent-to-agent messages, so they
+            //     come from the narrowly-scoped ParseBaseAndPlan
+            //     reader. Concatenated into one Array[Directive]; the
+            //     downstream filters (applyBaseDirective takes the
+            //     FIRST Base; applyPlanDirective the FIRST Plan; FSM
+            //     afterTLDone the FIRST Summary or all Dispatch
+            //     targets) don't depend on inter-kind source order.
+            val protocolDirs = FromMessages(protocol.Decode(cleaned.TurnBuffer, protocol.TLDecodeContext(0)))
+            val controlDirs  = ParseBaseAndPlan(cleaned.TurnBuffer)
+            val rawDirs = controlDirs.AppendAll(protocolDirs)
             // Capture @base from the lead's turn so the eventual
             // gh pr create can pass --base. First Base directive wins:
             // the TL is expected to declare the base ref ONCE near the
@@ -3272,7 +3286,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             case Some(mm) => detectMalformedMemberReport(memberBuffer, mm)
             case None()   => ""
         }
-        val parsedDirs = Parse(memberBuffer)
+        val parsedDirs = protocol.Decode(memberBuffer, protocol.MemberDecodeContext(name, 0))
         if parsedDirs.IsEmpty() && memberMalformed != "" {
             return mem match {
                 case None() => (cleaned, NoCmd[AppMsg]())
@@ -4109,8 +4123,8 @@ func isDuplicateOfLastConvoLine(convo Array[session.ConversationLine], speaker s
 // detectMalformedDispatch scans the TL's turn buffer for fingerprints
 // of an attempted-but-invalid dispatch. Returns a short human-readable
 // reason describing what was seen, or "" when nothing looks malformed.
-// Used after Parse() returns zero directives — if there are clear
-// signs the TL TRIED to dispatch (named members in headings, used
+// Used after the inbound decoder returns zero directives — if there
+// are clear signs the TL TRIED to dispatch (named members in headings, used
 // arrow notation, used multi-target @dispatch), the orchestrator
 // nudges them back to the protocol instead of silently dropping the
 // turn.
@@ -5218,8 +5232,8 @@ func extractSummaryFromText(text string) string {
 }
 
 func parseRawSummary(text string) string {
-    val dirs = Parse(text)
-    val summaries = dirs.Collect({ case Summary(body) => body })
+    val msgs = protocol.Decode(text, protocol.TLDecodeContext(0))
+    val summaries = msgs.Filter((mm) => protocol.KindTag(mm.Kind) == "summary").Map((mm) => mm.Body)
     if summaries.IsEmpty() { return "" }
     return summaries.Get(summaries.Size() - 1)
 }
@@ -5680,8 +5694,9 @@ func onConsultEnded(m AppModel, name string, errText Option[string]) Tuple[AppMo
 // so we don't need to wrap each line in a ConversationLine just to
 // unwrap it for parsing.
 func extractConsultSummary(lines Array[string]) Option[string] =
-    Parse(lines.MkString("\n"))
-        .Collect({ case Summary(body) => body })
+    protocol.Decode(lines.MkString("\n"), protocol.TLDecodeContext(0))
+        .Filter((mm) => protocol.KindTag(mm.Kind) == "summary")
+        .Map((mm) => mm.Body)
         .HeadOption()
 
 // onConsultCompleted records the consult outcome in the conversation

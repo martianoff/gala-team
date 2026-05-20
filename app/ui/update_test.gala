@@ -125,6 +125,52 @@ func TestSessionFailed_PlainChatTLResponse_LandsBackInIdle(t T) T {
     }
 }
 
+// Transport-auth-failure guard. When claude-code's OAuth token has
+// been rejected, the subprocess prints the 401 line to stdout and
+// exits. onChunk routes the 401 to LastError (not Visible), so the
+// lead's TurnBuffer is empty and parsedDirs.IsEmpty(). If the FSM
+// stepped TLThinking → Idle here, the prior QAGate's pending user
+// question would be silently forgotten (the original symptom: user
+// types "continue", subprocess crashes on stale creds, orchestrator
+// parks in Idle with no pending_q, user sees no question to act on).
+// The guard keeps the FSM where it was AND surfaces a system notice
+// telling the user to re-run /login.
+func TestSessionFailed_TransportAuthError_PreservesStateAndSurfacesNotice(t T) T {
+    val seed = sampleModel().Copy(
+        State      = TLThinking(),
+        TurnBuffer = "",
+        LastError  = Some("Iris: Failed to authenticate. API Error: 401 Invalid authentication credentials"),
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val stateOk = m.State match {
+        case TLThinking() => IsTrue(t, true)
+        case _            => IsTrue(t, false)
+    }
+    val noticeOk = m.Conversation.Size() >= 1 && m.Conversation.Get(m.Conversation.Size() - 1).Speaker == "system" &&
+                   strings.Contains(m.Conversation.Get(m.Conversation.Size() - 1).Text, "authentication failed")
+    return IsTrue(stateOk, noticeOk)
+}
+
+// Save-after-FSM-transition. The pre-fix bug: latest.json was written
+// inside applyChunkVisible (per-chunk) so the snapshot captured
+// state_tag=TLThinking; the FSM TLDone→Idle transition fired ~250ms
+// later from onSessionFailed without another save, leaving the
+// snapshot lagging the running state by one transition. After the
+// fix, persistAppModel runs after every transition return path, so
+// the on-disk Snapshot.StateTag matches the model's State.
+func TestSessionFailed_PlainChat_PersistsPostTransitionState(t T) T {
+    val seed = sampleModel().Copy(
+        State      = TLThinking(),
+        TurnBuffer = "I'll wait for your direction.",
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val snap = session.Load(m.Project.Repo)
+    return snap match {
+        case Some(s) => IsTrue(t, s.StateTag == "Idle")
+        case None()  => IsTrue(t, false)
+    }
+}
+
 func TestTickMsg_BumpsCounter(t T) T {
     val (m1, _) = Update(sampleModel(), TickMsg())
     val (m2, _) = Update(m1, TickMsg())
@@ -811,6 +857,31 @@ func TestLooksLikeStaleSessionError_RejectsUnrelatedError(t T) T {
 
 func TestLooksLikeStaleSessionError_RejectsEmpty(t T) T {
     return IsTrue(t, !looksLikeStaleSessionError(""))
+}
+
+// End-to-end transport-auth error. The Claude transport reclassifies
+// the 401 line from stdout as an AgentDiagnostic (see
+// claude_transport.classifyClaudeRead + LooksLikeTransportAuthError);
+// it then arrives in the UI as StderrArrived → onStderr, which sets
+// LastError as a warning. The line must NOT land in the conversation
+// as the member's reply — that was the original bug.
+func TestStderrArrived_TransportAuthError_SetsLastErrorNotConversation(t T) T {
+    val authLine = "Failed to authenticate. API Error: 401 Invalid authentication credentials"
+    val (m, _) = Update(sampleModel(), StderrArrived(Member = "Iris", Line = authLine))
+    val t1 = Eq(t, m.Conversation.Size(), 0)
+    return m.LastError match {
+        case Some(s) => IsTrue(t1, strings.Contains(s, "Failed to authenticate"))
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+// Belt-and-braces: an unrelated prose line still fast-paths into the
+// conversation. Guards against a future regression where everything
+// gets reclassified as diagnostic.
+func TestChunkArrived_OrdinaryProse_StillAppendsToConversation(t T) T {
+    val (m, _) = Update(sampleModel(), ChunkArrived(Member = "Iris", Line = "Both findings confirmed."))
+    val t1 = Eq(t, m.Conversation.Size(), 1)
+    return Eq(t1, m.Conversation.Get(0).Text, "Both findings confirmed.")
 }
 
 // Direct unit test for validatePrBody — empty body is rejected.

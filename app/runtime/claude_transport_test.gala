@@ -18,6 +18,61 @@ func TestClassifyClaudeRead_LineIsChunk(t T) T {
     }
 }
 
+// Transport-auth-error guard. The claude-code CLI prints
+// "Failed to authenticate. API Error: 401 Invalid authentication
+// credentials" to stdout as plain prose when its OAuth token has
+// been rejected. Past behaviour classified it as an AgentChunk → the
+// UI committed it to the conversation as the agent's reply, the
+// directive parser found zero @summary/@blocked in the otherwise-
+// empty turn buffer, the FSM stepped TLThinking → Idle, and the
+// prior gate's pending user question was forgotten. The transport
+// now routes the line onto AgentDiagnostic — same channel that
+// existing onStderr handling surfaces as a toast + LastError without
+// touching the conversation.
+func TestClassifyClaudeRead_AuthErrorIsDiagnostic(t T) T {
+    val authLine = "Failed to authenticate. API Error: 401 Invalid authentication credentials"
+    return classifyClaudeRead(Success(authLine)) match {
+        case AgentDiagnostic(text) => Eq(t, text, authLine)
+        case _                     => IsTrue(t, false)
+    }
+}
+
+func TestClassifyClaudeRead_403IsDiagnostic(t T) T {
+    return classifyClaudeRead(Success("API Error: 403 Forbidden")) match {
+        case AgentDiagnostic(_) => IsTrue(t, true)
+        case _                  => IsTrue(t, false)
+    }
+}
+
+// Looks-like-transport-auth-error: substring matcher, case-
+// insensitive, also matches wrapped forms like
+// "Vesper stderr: Failed to authenticate..." that the UI's
+// onSessionFailed guard checks against LastError.
+func TestLooksLikeTransportAuthError_Matches401Verbatim(t T) T {
+    return IsTrue(t, LooksLikeTransportAuthError("Failed to authenticate. API Error: 401 Invalid authentication credentials"))
+}
+
+func TestLooksLikeTransportAuthError_Matches403(t T) T {
+    return IsTrue(t, LooksLikeTransportAuthError("API Error: 403 Forbidden"))
+}
+
+func TestLooksLikeTransportAuthError_MatchesCaseInsensitive(t T) T {
+    return IsTrue(t, LooksLikeTransportAuthError("FAILED TO AUTHENTICATE"))
+}
+
+func TestLooksLikeTransportAuthError_MatchesWrappedLastError(t T) T {
+    val wrapped = "Vesper stderr: Failed to authenticate. API Error: 401 Invalid authentication credentials"
+    return IsTrue(t, LooksLikeTransportAuthError(wrapped))
+}
+
+func TestLooksLikeTransportAuthError_RejectsOrdinaryProse(t T) T {
+    return IsTrue(t, !LooksLikeTransportAuthError("Both findings confirmed."))
+}
+
+func TestLooksLikeTransportAuthError_RejectsEmpty(t T) T {
+    return IsTrue(t, !LooksLikeTransportAuthError(""))
+}
+
 // A clean end ("EOF" failure) is AgentTurnEnded, not AgentFailed.
 func TestClassifyClaudeRead_EofIsTurnEnded(t T) T {
     return classifyClaudeRead(Failure[string](errors.New("EOF"))) match {

@@ -1,0 +1,58 @@
+// `Some[T](Case(namedArgs))` mis-lowering repro — failing call sites.
+// Pair with the sibling `types.gala`. See the parent report at
+// `../some-wrap-sealed-case-mis-lowered.md` for full context.
+//
+// Build this package and observe that branches a, e, g, h lower
+// correctly to `Some[T]{}.Apply(Case{}.Apply(<args>))`, while branches
+// b, c, d, f lower to a bare `Some[T]{}.Apply(Case{})` — `.Apply(...)`
+// and the constructor arguments are dropped. The Go compiler then
+// rejects:
+//
+//     cannot use B{} (value of struct type B) as T value in argument
+//     to Some[T]{}.Apply
+//
+// The four-case subset {C, D, E, F} alone exhibits the structural-
+// identity contrast: all four cases declare a single `string` field
+// named `P` and are wrapped identically, yet C, D, F mis-lower while E
+// does not. Trimming the repro to just those four cases is the
+// smallest demonstration of "structurally identical, but lowering
+// differs"; the full eight cases additionally cover the arity and
+// container-field axes. Dropping case H also removes the only need for
+// the `collection_immutable` import.
+//
+// Variations to try once the baseline reproduces (see the parent
+// report for the rationale of each):
+//
+//   1. Collapse `types.gala` and this file into one source. The
+//      observed scenario always had them split; whether a single-file
+//      form still triggers the defect is unknown.
+//   2. Permute the case declaration order in `sealed type T`. The
+//      broken set in the observed scenario was {B, C, D, F}; check
+//      whether it tracks declaration position or case name.
+//   3. Add a sibling Bazel package defining `sealed type S` with case
+//      names that overlap T's (zero-arg cases is fine), and import
+//      that package here. The observed scenario had this overlap;
+//      whether it is required, contributing, or coincidental is
+//      unknown.
+//   4. Convert one broken branch to positional constructor arguments
+//      (e.g. `Some[T](B(x, None[string](), x))`) to test whether
+//      named arguments are part of the trigger.
+
+package pkg_a
+
+import (
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+func wrap(tag string, x string) Option[T] {
+    if (tag == "a") { return Some[T](A(P = x, Q = x)) }
+    if (tag == "b") { return Some[T](B(P = x, Q = None[string](), R = x)) }
+    if (tag == "c") { return Some[T](C(P = x)) }
+    if (tag == "d") { return Some[T](D(P = x)) }
+    if (tag == "e") { return Some[T](E(P = x)) }
+    if (tag == "f") { return Some[T](F(P = x)) }
+    if (tag == "g") { return Some[T](G(P = x)) }
+    if (tag == "h") { return Some[T](H(P = EmptyArray[string]())) }
+    return None[T]()
+}

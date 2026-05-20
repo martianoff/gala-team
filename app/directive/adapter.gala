@@ -51,7 +51,4 @@ func FromMessage(m protocol.Message) Option[Directive] {
 // preserved — the decoder already emitted source order and deduped by
 // Id, so the caller hands this straight to TLDone / member routing.
 func FromMessages(msgs Array[protocol.Message]) Array[Directive] =
-    msgs.FoldLeft(EmptyArray[Directive](), (acc, m) => FromMessage(m) match {
-        case Some(d) => acc.Append(d)
-        case None()  => acc
-    })
+    msgs.Collect((m) => FromMessage(m))

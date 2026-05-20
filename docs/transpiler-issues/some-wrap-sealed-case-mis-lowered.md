@@ -151,29 +151,45 @@ likely a more fruitful starting point than studying one call site.
 
 ## Minimal repro steps
 
-A trimmed copy of `pkg_a` is included alongside this report at
-`./some-wrap-sealed-case-mis-lowered/repro.gala`. From a fresh
-checkout of a Bazel module that depends on the `gala` module
+A trimmed copy of `pkg_a` is included alongside this report as a
+sibling-split pair (`./some-wrap-sealed-case-mis-lowered/types.gala`
+and `.../wrap.gala`) — the split mirrors the observed trigger
+conditions, where the sealed-type declaration and the
+`Some[T](Case(...))` constructions always lived in different source
+files of the same package. From a fresh checkout of a Bazel module
+that depends on the `gala` module
 (`bazel_dep(name = "gala", version = "1.0.0")`):
 
-1. Place `repro.gala` inside a package directory (`pkg_a/`) wired by a
-   `gala_library` target whose `srcs` includes it. Either inline the
-   sealed-type declaration as in the repro file, or split it into a
-   sibling `types.gala`.
+1. Place `types.gala` and `wrap.gala` together in a package directory
+   (`pkg_a/`) wired by a single `gala_library` target whose `srcs`
+   includes both.
 2. `bazel build //path/to/pkg_a:pkg_a` — observe the `GoCompilePkg`
-   failure with the four `cannot use X{} ... as T value` errors.
+   failure with four `cannot use X{} ... as T value` errors (for
+   cases B, C, D, F).
 3. Inspect the generated Go under
    `bazel-out/.../bin/path/to/pkg_a/pkg_a_<N>.gen.go` and confirm the
    bare struct literals on the broken branches versus
-   `Case{}.Apply(args...)` on the working branches.
+   `Case{}.Apply(args...)` on the working branches (A, E, G, H).
 
-To probe the non-local trigger:
+## Optional diagnostics
 
-4. Delete the broken function `wrap`, leaving the package with only
-   the sealed-type declaration and any sibling file that already used
-   the same construct. Confirm the build goes green.
-5. Re-add `wrap` and confirm the sibling file's untouched constructs
-   regress.
+These probe the non-local trigger and the narrowing axes; they are
+not required to reproduce the failure.
+
+- Delete `wrap.gala`, leaving the package with only `types.gala` plus
+  any sibling file that already used the same construct. Confirm the
+  build goes green, then re-add `wrap.gala` and confirm the sibling
+  file's untouched constructs regress.
+- Collapse `types.gala` and `wrap.gala` into a single source file in
+  the same package. The observed scenario always had them split;
+  whether a single-file form still triggers is unknown.
+- Drop case H (the only case carrying an `Array[string]` field) and
+  the `collection_immutable` import. The remaining seven cases still
+  exhibit the broken set {B, C, D, F} versus working set {A, E, G}.
+  Further trimming to the four-case subset {C, D, E, F} preserves
+  the strongest single-axis diagnostic: those four cases are
+  structurally identical (one `string` field `P`), yet C, D, F mis-
+  lower while E does not.
 
 ## Scope notes
 

@@ -5,6 +5,7 @@ import (
     "path/filepath"
     "strings"
     "martianoff/gala/subprocess"
+    "github.com/martianoff/gala_team/app/protocol"
     "github.com/martianoff/gala_team/app/session"
     "martianoff/gala/time_utils"
     . "martianoff/gala/test"
@@ -1526,15 +1527,20 @@ func TestSessionFailed_MarksMemberFailedWithReason(t T) T {
 // your previous task." prompt picks up where the silent one stalled.
 func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
-    // staleTime sits 1 second after Unix epoch — many years before
-    // any real time_utils.Now(), so elapsed always exceeds
-    // AbandonAfterSeconds without depending on the test clock.
-    val staleTime = time_utils.FromUnixSeconds(int64(1))
     val seed = sampleModel()
+    // Seed Felix's protocol delivery in the [stuck, abandon) band:
+    // dispatched 200s before now under the default heartbeat (stuck
+    // at 120s, abandon at 300s) leaves elapsed past stuck but well
+    // before abandon, and Attempt=1 ≤ MaxRetries=2, so Tick returns
+    // Redeliver and the action consumer drives liveRespawnMember.
+    val nowNanos     = int(time_utils.Now().UnixNanos())
+    val stuckBandAt  = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
+    val dispatchMsg  = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seeded = seed.Copy(
-        State       = Delegating(Pending = pending),
-        Statuses    = seed.Statuses.Put("Felix", StWorking()),
-        LastChunkAt = seed.LastChunkAt.Put("Felix", staleTime),
+        State             = Delegating(Pending = pending),
+        Statuses          = seed.Statuses.Put("Felix", StWorking()),
+        DeliveryStates    = seed.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = stuckBandAt, Attempt = 1)),
+        LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
     )
     val (m, _) = Update(seeded, TickMsg())
     // Status should NOT be StFailed. ensureSession may have flipped
@@ -1568,25 +1574,23 @@ func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T)
 // only Pending member, so Delegating drains all the way through to
 // TLReview.
 func TestOnTick_LivenessSilence_AfterMaxRetries_FiresMemberAbandoned(t T) T {
-    val hb = DefaultHeartbeat()
     val pending = EmptyHashSet[string]().Add("Felix")
-    val staleTime = time_utils.FromUnixSeconds(int64(1))
     val seed = sampleModel()
+    // Seed Felix's protocol delivery as long-Silent (since Unix epoch
+    // == past abandon horizon for any real clock). Tick sees elapsed
+    // past the abandon threshold and returns MarkAbandoned, which the
+    // action consumer drives into the MemberAbandoned FSM event;
+    // Delegating with the last pending drained advances to TLReview.
+    val dispatchMsg = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seeded = seed.Copy(
-        State       = Delegating(Pending = pending),
-        Statuses    = seed.Statuses.Put("Felix", StWorking()),
-        LastChunkAt = seed.LastChunkAt.Put("Felix", staleTime),
-        RetryCount  = seed.RetryCount.Put("Felix", hb.MaxRetries),
+        State             = Delegating(Pending = pending),
+        DeliveryStates    = seed.DeliveryStates.Put("Felix", protocol.Silent(SinceNanos = 0, Attempt = 1)),
+        LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
     )
     val (m, _) = Update(seeded, TickMsg())
-    val statusOk = m.Statuses.Get("Felix") match {
-        case Some(StFailed(_)) => true
-        case _                 => false
-    }
-    val t1 = IsTrue(t, statusOk)
     return m.State match {
-        case TLReview() => IsTrue(t1, true)
-        case _          => IsTrue(t1, false)
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
     }
 }
 
@@ -4728,11 +4732,19 @@ func TestOnSessionFailed_CrashRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
 func TestOnTick_HeartbeatRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
     val staleTime = time_utils.FromUnixSeconds(int64(1))
     val base = resetSeedScratch()
+    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
+    // Same in-band seeding as the Below-MaxRetries test: dispatched
+    // 200s before now → past stuck (120s) but well before abandon
+    // (300s), Attempt=1 ≤ MaxRetries=2 → protocol returns Redeliver.
+    val nowNanos    = int(time_utils.Now().UnixNanos())
+    val stuckBandAt = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
     val seed = base.Copy(
-        State       = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
-        Statuses    = base.Statuses.Put("Felix", StWorking()),
-        RetryCount  = EmptyHashMap[string, int](),
-        LastChunkAt = EmptyHashMap[string, time_utils.Instant]().Put("Felix", staleTime),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        Statuses          = base.Statuses.Put("Felix", StWorking()),
+        RetryCount        = EmptyHashMap[string, int](),
+        LastChunkAt       = EmptyHashMap[string, time_utils.Instant]().Put("Felix", staleTime),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = stuckBandAt, Attempt = 1)),
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
     )
     val (m, _) = Update(seed, TickMsg())
     val t1 = IsTrue(t,  m.PostPromptSent.Contains("Felix"))

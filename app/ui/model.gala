@@ -3,6 +3,7 @@ package ui
 import (
     "github.com/martianoff/gala_team/app/session"
     "github.com/martianoff/gala_team/app/directive"
+    "github.com/martianoff/gala_team/app/protocol"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/time_utils"
@@ -318,6 +319,12 @@ struct AppModel(
     // member-emitted directives. The parser returns directives in
     // source order so anything past index N is new.
     MemberDirectivesFired HashMap[string, int],
+    // Durable dedup gate for inbound protocol Messages, keyed by
+    // content-hash Id. Replaces the FNV terminalFingerprint latch and
+    // the ConsultsFired index watermark: a re-emitted stream chunk
+    // re-derives an already-admitted Id and Ledger.Admit rejects it
+    // exactly once.
+    Ledger protocol.Ledger,
     // Captured @done body per member from the most recent dispatched
     // turn. Drained by buildRelayPrompt when the orchestrator opens a
     // TL relay turn (#28). Empty string if a member finished via EOF
@@ -574,6 +581,7 @@ func InitialModelWithTeams(
     MemberBuffers         = EmptyHashMap[string, string](),
     MemberJsonBuf         = EmptyHashMap[string, string](),
     MemberDirectivesFired = EmptyHashMap[string, int](),
+    Ledger                = protocol.EmptyLedger(),
     MemberDoneBodies      = EmptyHashMap[string, string](),
     MemberBlockedReasons  = EmptyHashMap[string, string](),
     PostPromptSent        = EmptyHashSet[string](),

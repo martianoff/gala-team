@@ -8,6 +8,7 @@ import (
     "runtime"
     "github.com/martianoff/gala_team/app/onboarding"
     "github.com/martianoff/gala_team/app/policy"
+    "github.com/martianoff/gala_team/app/protocol"
     "github.com/martianoff/gala_team/app/session"
     "martianoff/gala/time_utils"
     . "martianoff/gala/std"
@@ -2529,72 +2530,40 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
 // flips to StIdle so the heartbeat doesn't keep escalating timers.
 // @help pauses the member (StHelpWaiting) and (in #28) opens a TL
 // clarification turn. @blocked surfaces a user-visible failure.
-// terminalBody returns the payload text of a member-terminal
-// directive. Only @done/@finished/@review (Finished), @help (Help)
-// and @blocked (Blocked) reach here via MemberTerminal; anything
-// else yields "" and is treated as "no terminal".
-func terminalBody(d Directive) string = d match {
-    case Finished(b) => b
-    case Help(b)     => b
-    case Blocked(b)  => b
-    case _           => ""
-}
-
-// terminalFingerprint is a stable content hash of a terminal block,
-// used to tell two sign-offs apart. FNV-1a-style fold over the body's
-// runes — distinct bodies (a quoted snippet vs the real
-// multi-paragraph sign-off) collide only astronomically rarely; an
-// empty body stays at the offset basis, which never equals a real
-// sign-off's hash. Plain rune index-loop so it depends on nothing
-// beyond Go builtins (update.gala's `strings` is the Go stdlib one).
-func terminalFingerprint(d Directive) int {
-    val rs = ToRunes(terminalBody(d))
-    var h = int(2166136261)
-    var i = 0
-    for i < len(rs) {
-        h = (h * 16777619) + int(rs[i])
-        i = i + 1
-    }
-    return h
-}
-
+// maybeHandleMemberDirectives accumulates the member's streamed text
+// in MemberBuffers[speaker] and routes each newly-admitted member
+// terminal (Finished/Help/Blocked) through applyMemberDirective.
+//
+// protocol.Decode under MemberDecodeContext is end-anchored and yields
+// at most one terminal Message per call — already robust against a
+// deliverable that QUOTES `@dispatch(` / `@finished` as documented
+// examples (the backward scan ignores quoted openers before the real
+// sign-off). protocol.Ledger.Admit then keys identity on the
+// content-hash Id: re-flushed chunks, transient matches of a quoted
+// sign-off, and post-restart replays all re-derive the same Id and
+// are rejected exactly once. This replaces the FNV terminalFingerprint
+// latch and the per-speaker MemberDirectivesFired index.
 func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     if speaker == m.Team.Lead.Name {
         return (m, EmptyArray[Cmd[AppMsg]]())
     }
     val priorBuffer = m.MemberBuffers.Get(speaker).GetOrElse("")
     val nextBuffer = if (priorBuffer == "") line else priorBuffer + "\n" + line
-    // MemberTerminal (see its doc) returns the member's real sign-off
-    // robustly against quoted directive syntax in the body, or None
-    // until the closing `@end` has streamed in.
-    //
-    // MemberDirectivesFired is keyed by the terminal's content
-    // fingerprint, NOT a 0/1 latch. The latch was defeated by the
-    // streaming case: a QA reviewer's FIRST chunk legitimately quotes
-    // the deliverables / the directive protocol it must review, so an
-    // early buffer snapshot transiently contains only a QUOTED
-    // `@finished … @end`. MemberTerminal matched it, the one-shot
-    // burned, and the member's REAL later sign-off was then dropped —
-    // no MemberDone, FSM hung in QAGate until the user intervened.
-    // Re-firing whenever a genuinely DIFFERENT terminal block appears
-    // lets the real sign-off through, while a stable buffer (the same
-    // terminal observed across later chunks) still fires exactly once.
-    // A re-dispatch's MemberDirectivesFired.Remove resets the key so
-    // the next turn's sign-off (even an identical body) fires again.
     val withBuffer = m.Copy(MemberBuffers = m.MemberBuffers.Put(speaker, nextBuffer))
-    val lastFp = m.MemberDirectivesFired.Get(speaker).GetOrElse(0)
-    return MemberTerminal(nextBuffer) match {
-        case None()  => (withBuffer, EmptyArray[Cmd[AppMsg]]())
-        case Some(d) => {
-            val fp = terminalFingerprint(d)
-            if fp == lastFp {
-                return (withBuffer, EmptyArray[Cmd[AppMsg]]())
+    val msgs = protocol.Decode(nextBuffer, protocol.MemberDecodeContext(speaker, 0))
+    if (msgs.IsEmpty()) {
+        return (withBuffer, EmptyArray[Cmd[AppMsg]]())
+    }
+    val (l1, admitted) = withBuffer.Ledger.Admit(msgs.Get(0))
+    val withLedger = withBuffer.Copy(Ledger = l1)
+    return admitted match {
+        case None() => (withLedger, EmptyArray[Cmd[AppMsg]]())
+        case Some(am) => FromMessage(am) match {
+            case None() => (withLedger, EmptyArray[Cmd[AppMsg]]())
+            case Some(d) => {
+                val (m1, cmd) = applyMemberDirective(withLedger, speaker, d)
+                return (m1, ArrayOf[Cmd[AppMsg]](cmd))
             }
-            val withFired = withBuffer.Copy(
-                MemberDirectivesFired = m.MemberDirectivesFired.Put(speaker, fp),
-            )
-            val (m1, cmd) = applyMemberDirective(withFired, speaker, d)
-            return (m1, ArrayOf[Cmd[AppMsg]](cmd))
         }
     }
 }

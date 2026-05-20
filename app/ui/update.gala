@@ -254,6 +254,14 @@ func orchestrationOf(m AppModel) session.Orchestration {
         case Some(pq) => (pq.Member, pq.ToolUseId, pq.QuestionText)
         case None()   => ("", "", "")
     }
+    // PostPromptSent is the per-dispatch latch that prevents the
+    // workflow.post_engineer_prompt from firing twice for the same
+    // engineer in one cycle. Persist it flat — without this, a
+    // resume mid-cycle wipes the HashSet and any engineer that
+    // already ran the prompt pre-resume gets put through it again,
+    // making the FSM appear stuck on Delegating(name) for the
+    // duration of the redundant round.
+    val postPromptList = m.PostPromptSent.FoldLeft(EmptyArray[string](), (acc, s) => acc.Append(s))
     return session.Orchestration(
         StateTag         = stateTag(m.State),
         StatePending     = statePendingList(m.State),
@@ -273,6 +281,7 @@ func orchestrationOf(m AppModel) session.Orchestration {
         PendingQMember   = pqM,
         PendingQToolUse  = pqT,
         PendingQText     = pqX,
+        PostPromptSent   = postPromptList,
     )
 }
 
@@ -296,6 +305,12 @@ func pendingQFromSnap(snap session.Snapshot) Option[PendingQuestion] =
 // ago" label, so sub-second fidelity is irrelevant).
 func RehydrateOrchestration(m AppModel, snap session.Snapshot) AppModel {
     if snap.StateTag == "" { return m }
+    // Rebuild the PostPromptSent HashSet from the flat Array the
+    // snapshot persists. The post-engineer-prompt latch must survive
+    // resume — without it, an engineer that already ran the prompt
+    // pre-resume gets a redundant round on the first @finished after
+    // resume, and the FSM appears stuck on Delegating(name).
+    val postPromptSet = snap.PostPromptSent.FoldLeft(EmptyHashSet[string](), (acc, s) => acc.Add(s))
     return m.Copy(
         State          = stateFromSnap(snap.StateTag, snap.StatePending, snap.StateReason, snap.StateSummaryBody),
         Plan           = snap.Plan,
@@ -310,6 +325,7 @@ func RehydrateOrchestration(m AppModel, snap session.Snapshot) AppModel {
             OpenedAt = time_utils.FromUnixSeconds(sp.OpenedAtNanos / int64(1000000000)),
         )),
         PendingQuestion = pendingQFromSnap(snap),
+        PostPromptSent  = postPromptSet,
     )
 }
 
@@ -464,7 +480,16 @@ func updateLivenessStatuses(
                     return (m1, curCmds.Append(respawnCmd), curStuck)
                 }
                 val nextState = transitionLogged(withStatus.State, MemberAbandoned(MemberName = name), transitionContext(withStatus))
-                return (withStatus.Copy(State = nextState), curCmds, curStuck)
+                // Save AFTER the transition. The heartbeat path is
+                // the canonical "no follow-up chunk to ride a save
+                // on" case — an abandoned member by definition stops
+                // producing visible output, so without persisting
+                // here the snapshot can lag the in-memory FSM
+                // indefinitely. Past sessions captured a
+                // Delegating→QAGate hop here followed by 12+ minutes
+                // of nothing, then a tui_exit that pinned latest.json
+                // to the pre-transition Delegating.
+                return (persistAppModel(withStatus.Copy(State = nextState)), curCmds, curStuck)
             }
             case _ => (withStatus, curCmds, curStuck)
         }
@@ -543,7 +568,12 @@ func spawnAggregatedStuckNudge(
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val first = stuck.Get(0)
     val nextState = transitionLogged(m.State, MemberStuck(MemberName = first), transitionContext(m))
-    val withState = m.Copy(State = nextState)
+    // Save AFTER the transition. The TL nudge that follows will
+    // produce chunks and trigger per-chunk saves on its own, but
+    // persisting here removes the race window where a crash
+    // between the FSM step and the first chunk leaves latest.json
+    // stuck at the pre-nudge Delegating state.
+    val withState = persistAppModel(m.Copy(State = nextState))
     val prompt = buildAggregatedStuckPrompt(withState, stuck, now)
     val (afterSpawn, spawnCmds) = spawnTLNudge(withState, s"stuck-batch-${stuck.Size()}", prompt)
     val merged = spawnCmds.FoldLeft(cmds, (a, c) => a.Append(c))
@@ -2929,7 +2959,11 @@ func onMemberHelp(m AppModel, name string, question string) Tuple[AppModel, Cmd[
     // post-@help output is the model rambling rather than waiting.
     // The TL's nudge turn brings them back via a fresh dispatch.
     val closed = closeLiveSession(m, name)
-    val m1 = closed.Copy(State = nextState, Toasts = toast)
+    // Save AFTER the transition. The TL nudge that follows will
+    // emit chunks and ride per-chunk saves, but a crash between
+    // here and the nudge's first chunk would otherwise leave
+    // latest.json at the pre-help Delegating state.
+    val m1 = persistAppModel(closed.Copy(State = nextState, Toasts = toast))
     val m2 = setStatus(m1, name, StHelpWaiting(question))
     val (m3, cmds) = spawnTLNudge(m2, s"help-${name}", buildHelpNudgePrompt(name, question))
     return (m3, batchAll(cmds))
@@ -2965,11 +2999,15 @@ func onMemberBlocked(m AppModel, name string, reason string) Tuple[AppModel, Cmd
     // the transcript even though the member has self-marked failed.
     // PendingClosures drops the queued reads the pump still owns.
     val closed = closeLiveSession(m, name)
-    val m1 = closed.Copy(
+    // Save AFTER the transition. The blocked member's subprocess
+    // is gone (no more chunks), and the follow-up TL relay may not
+    // emit visibly until the user reads its prompt; persisting now
+    // keeps latest.json consistent with the FSM hop.
+    val m1 = persistAppModel(closed.Copy(
         State                = nextState,
         Toasts               = toast,
         MemberBlockedReasons = closed.MemberBlockedReasons.Put(name, reason),
-    )
+    ))
     val m2 = setStatus(m1, name, failedStatus)
     // Auto-spawn a TL relay turn so the lead can attempt to fix
     // the blocker without user intervention. Two cases:
@@ -3454,7 +3492,10 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
     return findMemberByName(m.Team.Members, name) match {
         case None() => {
             val nextState = transitionLogged(m.State, MemberAbandoned(MemberName = name), transitionContext(m))
-            return (m.Copy(State = nextState), NoCmd[AppMsg]())
+            // Save AFTER the transition; same reasoning as the
+            // heartbeat MemberAbandoned path — no subsequent chunk
+            // arrives to ride a per-chunk save on.
+            return (persistAppModel(m.Copy(State = nextState)), NoCmd[AppMsg]())
         }
         case Some(_) => {
             val mClosed = closeLiveSession(m, name)
@@ -5233,20 +5274,26 @@ func onApprovalReadyResult(m AppModel, body string, reason Option[string]) Tuple
         val r = reason.GetOrElse("")
         val nextState = transitionLogged(m.State, ApprovalRejected(), transitionContext(m))
         val toast = m.Toasts.PushError(s"approval blocked: ${r}", time_utils.Now(), time_utils.Seconds(int64(8)))
-        return (m.Copy(
+        // Save AFTER the transition. The Approval→Idle hop has no
+        // follow-up chunk that would ride a per-chunk save, so
+        // without persisting here a tui_exit during the modal-
+        // dismissal window would resume from the pre-transition
+        // Approval state.
+        val rejected = persistAppModel(m.Copy(
             State        = nextState,
             LastError    = Some(s"approval: ${r}"),
             Toasts       = toast,
             Conversation = m.Conversation.Append(
                 session.ConversationLine(Speaker = "policy", Text = s"approval blocked: ${r}"),
             ),
-        ), NoCmd[AppMsg]())
+        ))
+        return (rejected, NoCmd[AppMsg]())
     }
     val nextState = transitionLogged(m.State, ApprovalAccepted(), transitionContext(m))
-    val withState = m.Copy(
+    val withState = persistAppModel(m.Copy(
         State        = nextState,
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = "/approve")),
-    )
+    ))
     if m.Policy.PreMerge.IsEmpty() {
         return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body, m.ActiveBase, prBranchOverrideFor(m))))
     }
@@ -5315,7 +5362,11 @@ func onSummaryReadyResult(m AppModel, member string, reason Option[string]) Tupl
         return (m1, batchAll(nudgeCmds))
     }
     val nextState = transitionLogged(cleared.State, TLDone(Directives = dirs), transitionContext(cleared))
-    val withState = setStatus(cleared.Copy(State = nextState), member, StIdle())
+    // Save AFTER the transition. onSummaryReadyResult is async
+    // (the readiness Future just landed); the FSM hop here moves
+    // into Approval and there's no follow-up chunk to ride a
+    // per-chunk save on until the user acts on the modal.
+    val withState = setStatus(persistAppModel(cleared.Copy(State = nextState)), member, StIdle())
     // AutoApprove: when the @summary lands cleanly and the batch
     // toggle is on, run the same approveAndKickHooks pipeline a manual
     // approve would have triggered. Dispatched via KeyApprove so the activity
@@ -5639,7 +5690,10 @@ func onReject(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // the audit trail captures what was rejected.
 func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val nextState = transitionLogged(m.State, ApprovalRejected(), transitionContext(m))
-    val withState = m.Copy(
+    // Save AFTER the transition. The user just rejected an
+    // approval; the FSM sits at Idle waiting on the redirect
+    // prompt and there's no chunk to ride a per-chunk save on.
+    val withState = persistAppModel(m.Copy(
         State = nextState,
         Conversation = m.Conversation
             .Append(session.ConversationLine(Speaker = "you", Text = "/reject"))
@@ -5647,7 +5701,7 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
                 Speaker = "system",
                 Text = "Approval rejected. Type a prompt to redirect the team — the lead picks it up as the next turn.",
             )),
-    )
+    ))
     return (withState, NoCmd[AppMsg]())
 }
 

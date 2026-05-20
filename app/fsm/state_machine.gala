@@ -181,13 +181,39 @@ func onDelegating(pending HashSet[string], event Event, ctx TransitionContext) A
         }
     }
 
+// A TL turn that lands here can come from a few paths: a member's
+// @blocked / @help that didn't drain the pending set (FSM stayed in
+// QAGate but the orchestrator still spawned a TL relay), or a pre-
+// existing TL subprocess that emitted its turn-end while we were in
+// QAGate. Past behaviour fell into the catch-all and self-looped,
+// silently swallowing whatever directives the TL emitted —
+// including a @summary that asked the user a decision-required
+// question. The user saw the prose in the transcript with no
+// approval modal, no surfaced affordance, and no FSM state to act
+// on. Route @summary through Approval so it reaches the user; for
+// anything else (plain prose, partial @dispatch) keep QAGate so the
+// pending QA review isn't torn down.
 func onQAGate(pending HashSet[string], event Event, ctx TransitionContext) AppState =
     memberCompletion(event, pending, ctx, false) match {
         case Some(s) => s
         case None()  => event match {
-            case QADone() => TLReview()
-            case _        => QAGate(Pending = pending)
+            case QADone()     => TLReview()
+            case TLDone(dirs) => afterTLDoneInQaGate(dirs, pending, ctx)
+            case _            => QAGate(Pending = pending)
         }
+    }
+
+// afterTLDoneInQaGate is afterTLDone with one override: when QA is
+// still pending, a TL turn whose directives would otherwise route to
+// Idle or Delegating must NOT tear down the QAGate. Only @summary
+// (which produces Approval) overrides the gate — the user-decision
+// modal takes precedence over a still-running QA review. Everything
+// else self-loops, preserving the pending set so QA can drain on its
+// own.
+func afterTLDoneInQaGate(dirs Array[Directive], pending HashSet[string], ctx TransitionContext) AppState =
+    afterTLDone(dirs, ctx) match {
+        case Approval(body) => Approval(SummaryBody = body)
+        case _              => QAGate(Pending = pending)
     }
 
 // onTLNudging routes nudge-turn TL responses. A nudge interrupts a

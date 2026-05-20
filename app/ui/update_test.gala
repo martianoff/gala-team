@@ -4406,6 +4406,109 @@ func TestQaGateStuck_RepromptsReviewer_NotTL(t T) T {
     return IsTrue(t1, leadUntouched)
 }
 
+// Heartbeat gating: a member whose status was StWorking but who's
+// no longer in the FSM's pending set must NOT escalate to
+// StStuck/StFailed on the elapsed-time walk. Past sessions captured
+// three ghost MemberStuck transitions for Sable in eight minutes
+// while the FSM was Idle (the pending entry had drained but Sable's
+// status hadn't yet flipped). The new pending gate in
+// escalateByElapsed keeps the status at the working fallback for
+// any non-pending member, so no MemberStuck FSM event fires.
+func TestHeartbeat_DoesNotEscalateNonPendingMember(t T) T {
+    val proj  = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    val team  = sampleTeam()
+    val now   = time_utils.FromUnixSeconds(int64(10000))
+    val stale = time_utils.FromUnixSeconds(int64(9700))  // 300s ago, past StuckAfterSeconds=120
+    val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
+    val felix = team.Members.Find((m) => m.Name == "Felix")
+    if !felix.IsDefined() { return IsTrue(t, false) }
+    val seed = base.Copy(
+        // FSM in Idle — nobody is pending. Without the gate, Felix
+        // would tick up to StStuck and fire MemberStuck → Idle.
+        State       = Idle(),
+        Statuses    = base.Statuses.Put("Felix", StWorking()),
+        LastChunkAt = base.LastChunkAt.Put("Felix", stale),
+    )
+    val (m, _) = updateLivenessStatuses(seed, team.Members, now)
+    val stateOk = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    // Felix's status must stay at StWorking — no escalation.
+    val statusOk = m.Statuses.Get("Felix").GetOrElse(StIdle()) match {
+        case StWorking() => true
+        case _           => false
+    }
+    return IsTrue(stateOk, statusOk)
+}
+
+// Heartbeat in-flight-nudge gate: when the FSM is already in
+// TLNudging(reason="stuck", pending), the orchestrator has dispatched
+// a TL turn to address the stuck batch and is waiting on its TLDone.
+// Re-walking the liveness escalations now would self-loop on
+// TLNudging → MemberStuck → TLNudging every heartbeat tick — six
+// such transitions in 30 minutes in past sessions. The early return
+// preserves the FSM (and the status map) until the nudge resolves.
+func TestHeartbeat_SkipsWalkWhileStuckNudgeInFlight(t T) T {
+    val proj  = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    val team  = sampleTeam()
+    val now   = time_utils.FromUnixSeconds(int64(10000))
+    val stale = time_utils.FromUnixSeconds(int64(9500))  // 500s ago, past AbandonAfterSeconds=300
+    val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
+    val seed = base.Copy(
+        State       = TLNudging(Reason = "stuck", Pending = EmptyHashSet[string]().Add("Felix")),
+        Statuses    = base.Statuses.Put("Felix", StStuck()),
+        LastChunkAt = base.LastChunkAt.Put("Felix", stale),
+    )
+    val (m, _) = updateLivenessStatuses(seed, team.Members, now)
+    // FSM is unchanged — no MemberAbandoned, no MemberStuck.
+    val stateOk = m.State match {
+        case TLNudging(reason, pending) => reason == "stuck" && pending.Contains("Felix")
+        case _                          => false
+    }
+    return IsTrue(t, stateOk)
+}
+
+// Rate-limit-event classifier: an "allowed" status is the background
+// noise that fires multiple times per turn — drop silently so the
+// toast surface isn't spammed.
+func TestRateLimitEventChunk_AllowedStatusDropsSilently(t T) T {
+    val envelope = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":1779179400,\"rateLimitType\":\"five_hour\"},\"uuid\":\"x\",\"session_id\":\"y\"}"
+    val chunk = rateLimitEventChunk(envelope)
+    val t1 = Eq(t, chunk.Visible, "")
+    return Eq(t1, chunk.ErrorText, "")
+}
+
+// A non-allowed status (approaching / rejected / etc.) surfaces as
+// ErrorText so the existing toast + LastError surface picks it up.
+// Visible stays empty — rate-limit warnings must never land in the
+// conversation as the agent's reply.
+func TestRateLimitEventChunk_ApproachingStatusSetsErrorText(t T) T {
+    val envelope = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"approaching\",\"resetsAt\":1779179400,\"rateLimitType\":\"five_hour\"}}"
+    val chunk = rateLimitEventChunk(envelope)
+    val t1 = Eq(t, chunk.Visible, "")
+    val t2 = IsTrue(t1, strings.Contains(chunk.ErrorText, "approaching"))
+    return IsTrue(t2, strings.Contains(chunk.ErrorText, "five_hour"))
+}
+
+// Classifier integration: the rate_limit_event branch in
+// filterClaudeStreamJsonFor wires the chunk into the per-member
+// chunk pipeline. An allowed event drops silently (no error); a
+// non-allowed event produces ErrorText.
+func TestFilterClaudeStreamJson_RateLimitAllowed_Drops(t T) T {
+    val envelope = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":1,\"rateLimitType\":\"five_hour\"}}"
+    val chunk = filterClaudeStreamJsonFor("Felix", envelope)
+    return Eq(t, chunk.ErrorText, "")
+}
+
+func TestFilterClaudeStreamJson_RateLimitApproaching_SurfacesErrorText(t T) T {
+    val envelope = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":1,\"rateLimitType\":\"five_hour\"}}"
+    val chunk = filterClaudeStreamJsonFor("Felix", envelope)
+    return IsTrue(t, strings.Contains(chunk.ErrorText, "rejected"))
+}
+
 // onPasteClipboard's UI-thread half: Ctrl+V returns immediately
 // with the model unchanged. The actual insert / toast / LastError
 // updates fire when ClipboardPasted / ClipboardFailed lands.

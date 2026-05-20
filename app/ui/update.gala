@@ -2277,6 +2277,28 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 // ordering guarantee the user expects (close terminal → reopen → see
 // the same transcript). Failures are stuck in LastError so the user
 // notices but the TUI keeps running.
+// recordChunkArrival stamps both the silence-clock origin (LastChunkAt)
+// and the protocol delivery state (any chunk → Working via OnChunk;
+// Acked / Abandoned terminals are sticky). One bundle so every onChunk
+// return path advances both in lockstep.
+func recordChunkArrival(m AppModel, name string) AppModel {
+    val now      = time_utils.Now()
+    val nowNanos = int(now.UnixNanos())
+    val cur      = m.DeliveryStates.Get(name).GetOrElse(protocol.Sent(AtNanos = nowNanos, Attempt = 1))
+    return m.Copy(
+        LastChunkAt    = m.LastChunkAt.Put(name, now),
+        DeliveryStates = m.DeliveryStates.Put(name, protocol.OnChunk(cur, nowNanos)),
+    )
+}
+
+// recordMemberTerminal advances the speaker's protocol delivery state
+// through OnTerminal so subsequent Ticks know the delivery is Acked
+// and stop firing Redeliver/IssueNudge against it.
+func recordMemberTerminal(m AppModel, name string) AppModel {
+    val cur = m.DeliveryStates.Get(name).GetOrElse(protocol.Sent(AtNanos = 0, Attempt = 1))
+    return m.Copy(DeliveryStates = m.DeliveryStates.Put(name, protocol.OnTerminal(cur)))
+}
+
 func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
     // Stale-event drop: closeLiveSession bumps PendingClosures by 1
     // for each kill so the inevitable EOF (or any in-flight chunk)
@@ -2342,7 +2364,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
             case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
             case None()  => NoCmd[AppMsg]()
         }
-        return (m1.Copy(LastChunkAt = m1.LastChunkAt.Put(name, time_utils.Now())), batchAll(ArrayOf[Cmd[AppMsg]](c, pumpCmd)))
+        return (recordChunkArrival(m1, name), batchAll(ArrayOf[Cmd[AppMsg]](c, pumpCmd)))
     }
     // Buffer-and-extract: append this chunk to the member's running
     // raw-byte buffer, then pull out every COMPLETE `{...}` envelope
@@ -2374,7 +2396,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
             case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
             case None()  => NoCmd[AppMsg]()
         }
-        return (mWithBuf.Copy(LastChunkAt = mWithBuf.LastChunkAt.Put(name, time_utils.Now())), pumpCmd)
+        return (recordChunkArrival(mWithBuf, name), pumpCmd)
     }
     // Process each complete envelope through the visible-text /
     // token-accrual / directive pipeline in source order. Fold the
@@ -2391,7 +2413,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
         case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
         case None()  => NoCmd[AppMsg]()
     }
-    return (mFinal.Copy(LastChunkAt = mFinal.LastChunkAt.Put(name, time_utils.Now())), batchAll(foldedCmds.Append(pumpCmd)))
+    return (recordChunkArrival(mFinal, name), batchAll(foldedCmds.Append(pumpCmd)))
 }
 
 // applyOneEnvelope runs the per-envelope pipeline: whitelist-filter
@@ -2548,14 +2570,19 @@ func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[
     }
     val (l1, admitted) = withBuffer.Ledger.Admit(msgs.Get(0))
     val withLedger = withBuffer.Copy(Ledger = l1)
-    // The "no directive to apply" branch (Ledger rejected the Id OR
-    // the admitted Message is a kind FromMessage doesn't surface — the
-    // Nudge/Ack delivery kinds never produced inbound) collapses to a
-    // single None via FlatMap.
+    // When admit accepts the message, this is the speaker's sign-off;
+    // advance the protocol delivery state through OnTerminal so Tick
+    // knows the delivery is Acked and stops firing against it. The
+    // "no directive to apply" tail (Ledger rejected OR FromMessage
+    // returns None on Nudge/Ack) collapses via FlatMap.
+    val withTerminal = admitted match {
+        case Some(_) => recordMemberTerminal(withLedger, speaker)
+        case None()  => withLedger
+    }
     return admitted.FlatMap((am) => FromMessage(am)) match {
-        case None()  => (withLedger, EmptyArray[Cmd[AppMsg]]())
+        case None()  => (withTerminal, EmptyArray[Cmd[AppMsg]]())
         case Some(d) => {
-            val (m1, cmd) = applyMemberDirective(withLedger, speaker, d)
+            val (m1, cmd) = applyMemberDirective(withTerminal, speaker, d)
             return (m1, ArrayOf[Cmd[AppMsg]](cmd))
         }
     }
@@ -3577,7 +3604,16 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
                         body
                     }
                     val cmd = sendAndPumpCmd(withStatus, mem, wrapped)
-                    return (withStatus, curCmds.Append(cmd))
+                    // Seed the protocol delivery state for this
+                    // dispatch: the Message identity Tick will use to
+                    // bump-and-redeliver if the member goes silent.
+                    val nowNanos  = int(withStatus.NowAt.UnixNanos())
+                    val dispatchMsg = protocol.NewMessage(withStatus.Team.Lead.Name, name, protocol.Dispatch(), body, 0)
+                    val withDelivery = withStatus.Copy(
+                        DeliveryStates    = withStatus.DeliveryStates.Put(name, protocol.Sent(AtNanos = nowNanos, Attempt = 1)),
+                        LastDispatchedMsg = withStatus.LastDispatchedMsg.Put(name, dispatchMsg),
+                    )
+                    return (withDelivery, curCmds.Append(cmd))
                 }
             }
         }

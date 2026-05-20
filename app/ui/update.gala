@@ -422,6 +422,20 @@ func updateLivenessStatuses(
     m AppModel, members Array[Member], now time_utils.Instant,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val leadName = m.Team.Lead.Name
+    // Skip the liveness walk entirely while a stuck nudge is in
+    // flight. TLNudging(reason="stuck", pending) means we've already
+    // dispatched a TL turn to address these stuck members and are
+    // waiting for its TLDone. Re-escalating the same members every
+    // heartbeat tick produces TLNudging --MemberStuck--> TLNudging
+    // self-loops with no semantic change — past sessions captured a
+    // ~30-minute stretch of 6 such redundant transitions before the
+    // nudge resolved (or the member was abandoned). The nudge's
+    // TLDone is the right resolution boundary; let it land.
+    val inStuckNudge = m.State match {
+        case TLNudging(reason, _) => reason == "stuck"
+        case _                    => false
+    }
+    if inStuckNudge { return (m, EmptyArray[Cmd[AppMsg]]()) }
     val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyArray[string]())
     val (m1, cmds, stuckNames) = members.FoldLeft(seed, (acc, mem) => {
         val (curM, curCmds, curStuck) = acc
@@ -679,7 +693,19 @@ func memberIsFsmPending(s AppState, name string) bool = s match {
 // Working-family status to keep when below the slowness band.
 // Thresholds come from m.Policy.Heartbeat — per-team configurable via
 // the policy.heartbeat: yaml block (or defaults from DefaultHeartbeat).
+//
+// Gate: only escalate members the FSM is actively waiting on
+// (memberIsFsmPending). After a TLDone / MemberDone drains the
+// pending set, a member whose status hadn't yet flipped to Idle (the
+// status walk and the FSM transition aren't strictly ordered) would
+// otherwise keep ticking up the elapsed-time band and fire a ghost
+// MemberStuck / MemberAbandoned against a member nobody is waiting
+// for — past sessions showed this firing three times in eight
+// minutes for Sable while the FSM was Idle. The pending-set check
+// matches idleParkedStatus' guard and is the same notion of "FSM
+// still expects this member to make progress."
 func escalateByElapsed(m AppModel, name string, now time_utils.Instant, fallback Status) Status {
+    if !memberIsFsmPending(m.State, name) { return fallback }
     val opt = m.LastChunkAt.Get(name)
     return opt match {
         case None()   => fallback
@@ -4569,9 +4595,82 @@ func filterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
             }
         }
     }
+    if kind == "rate_limit_event" {
+        // claude-code emits rate_limit_event envelopes with shape
+        // {"type":"rate_limit_event","rate_limit_info":{
+        //    "status":"allowed|approaching|rejected|...",
+        //    "resetsAt":<unix-epoch>,
+        //    "rateLimitType":"five_hour|...",
+        //    "overageStatus":"...","isUsingOverage":bool}, ...}
+        // The mixed snake_case outer / camelCase inner means
+        // claudeResultCodec's SnakeCase mapper can't decode the
+        // inner block directly. We only need three signals to
+        // decide whether to surface a toast — status, rateLimitType,
+        // resetsAt — so a small string extractor is enough and
+        // skips the codec mapper-style problem entirely.
+        val chunk = rateLimitEventChunk(trimmed)
+        val dropped = chunk.Visible == "" && chunk.ErrorText == ""
+        val reason = if (dropped) "rate_limit_event status=allowed (background)" else ""
+        TraceClaudeLine(member, envelope, chunk.Visible, chunk.ErrorText, dropped, reason)
+        return chunk
+    }
     val typeStr = if (kind == "") "<no type>" else kind
     TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${typeStr}")
     return emptyChunk()
+}
+
+// extractJsonField pulls the value of `"<key>":"<value>"` out of a
+// JSON envelope. Cheap string match used by the rate-limit classifier
+// to read a few inner-object fields without paying for codec mapper
+// dance over a mixed snake_case / camelCase payload. Returns "" when
+// the key is absent or the value isn't a quoted string.
+func extractJsonField(trimmed string, key string) string {
+    val needle = s"\"${key}\":\""
+    val parts = strings.SplitN(trimmed, needle, 2)
+    if len(parts) < 2 { return "" }
+    val rest = parts[1]
+    val tail = strings.SplitN(rest, "\"", 2)
+    if len(tail) < 2 { return "" }
+    return tail[0]
+}
+
+// rateLimitEventChunk inspects a rate_limit_event envelope and
+// returns either an empty chunk (status="allowed", the background
+// "everything's fine" tick that fires multiple times per turn — past
+// sessions saw 65 of these in one run, all benign) or a chunk with
+// ErrorText set to a human-readable toast when the status indicates
+// the team is approaching, has hit, or is being throttled by the
+// limit. The downstream applyChunkVisible surfaces ErrorText as a
+// warning toast + LastError; we deliberately do NOT route this
+// through Visible so the rate-limit warning never lands in the
+// conversation transcript as the agent's reply.
+//
+// Surface signal: <status> (the actionable cue: approaching /
+// rejected / etc.) and <rateLimitType> (which window — five_hour /
+// ...). resetsAt is a JSON number in claude-code's current payload
+// shape so extractJsonField (which only matches quoted strings)
+// returns "" — keeping the toast short and avoiding a brittle
+// numeric extractor that breaks if the schema gains a quoted ISO
+// timestamp later. The orchestrator's existing toast queue handles
+// dedup so multiple consecutive non-allowed events in one turn
+// don't spam the user.
+func rateLimitEventChunk(envelope string) ClaudeChunk {
+    val status = extractJsonField(envelope, "status")
+    if status == "" || status == "allowed" { return emptyChunk() }
+    val limitType = extractJsonField(envelope, "rateLimitType")
+    val limitLabel = if (limitType == "") "" else s" (${limitType})"
+    val msg = s"Claude API rate limit ${status}${limitLabel}"
+    return ClaudeChunk(
+        Visible         = "",
+        ErrorText       = msg,
+        LiveTurn        = None[ClaudeUsage](),
+        FinalTurn       = None[ClaudeUsage](),
+        CostUsd         = 0.0,
+        AskQuestionId   = "",
+        AskQuestionText = "",
+        TurnEnded       = false,
+        IsToolActivity  = false,
+    )
 }
 
 // extractJsonType returns the value of the top-level `"type":"…"`

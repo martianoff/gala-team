@@ -1761,19 +1761,22 @@ func TestChunkArrived_NonLeadDoesNotBuffer(t T) T {
 func TestChunkArrived_LeadConsultBlock_KicksOneDispatch(t T) T {
     val seed = sampleModel()
     val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = "@consult(transpiler) help\n@end"))
-    val t1 = Eq(t, m.ConsultsFired, 1)
     val last = m.Conversation.Get(m.Conversation.Size() - 1)
-    val t2 = Eq(t1, last.Speaker, "consult")
-    return IsTrue(t2, last.Text == "dispatching → transpiler")
+    val t1 = Eq(t, last.Speaker, "consult")
+    return IsTrue(t1, last.Text == "dispatching → transpiler")
 }
 
 // A second @consult block in the same turn fires a second dispatch
-// without re-firing the first (ConsultsFired guards against that).
+// without re-firing the first. With protocol.Decode + Ledger the
+// content-hash gate keeps each unique Message admitted exactly once,
+// so the conversation log carries two distinct "dispatching → …"
+// entries for {a, b}.
 func TestChunkArrived_TwoConsults_FireInSequence(t T) T {
     val seed = sampleModel()
     val msg = "@consult(a) one\n@end\n@consult(b) two\n@end"
     val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = msg))
-    return Eq(t, m.ConsultsFired, 2)
+    val dispatches = m.Conversation.Filter((cl) => cl.Speaker == "consult")
+    return Eq(t, dispatches.Size(), 2)
 }
 
 // KeySubmit resets the per-turn buffer and consult counter — the next
@@ -2669,17 +2672,19 @@ func TestOnChunk_LegitimateProseWithJsonSubstrings_PassesThrough(t T) T {
 func TestDispatchOneConsult_DoesNotLoopBackToMainTeam(t T) T {
     // Two-team model where the main team's key is "main"; a chunk
     // emitting `@consult(main)` should fall through to the registry
-    // (which is empty) and fire a ConsultFailed via MsgCmd.
+    // (which is empty) and fire a ConsultFailed via MsgCmd. What we
+    // verify is that the main team isn't picked as the in-project
+    // sibling, which would have spawned a real claude session and
+    // crashed the test (no claude binary on PATH) — observable via
+    // a conversation log "dispatching → main" entry being recorded
+    // (the dispatch attempt happened) without a crash.
     val seed = sampleModel()
     val (m, _) = Update(seed, ChunkArrived(
         Member = "Iris",
         Line   = "@consult(main) loop\n@end",
     ))
-    // ConsultsFired bumps regardless — the dispatch attempt happened.
-    // What we want to verify is that the main team isn't picked as
-    // the in-project sibling, which would have spawned a real claude
-    // session and crashed the test (no claude binary on PATH).
-    return Eq(t, m.ConsultsFired, 1)
+    val dispatches = m.Conversation.Filter((cl) => cl.Speaker == "consult")
+    return Eq(t, dispatches.Size(), 1)
 }
 
 // ---------------------------------------------------------------------------

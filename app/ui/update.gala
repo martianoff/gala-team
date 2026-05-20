@@ -3488,23 +3488,14 @@ func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
 // rather than aborting the whole fanout so a typo'd member name
 // doesn't strand the rest of the dispatch.
 func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, Cmd[AppMsg]] {
-    val rawTargets = dirs.Collect({
+    // protocol.Decode + Ledger.Admit upstream already deduplicate
+    // byte-identical re-emitted chunks by content-hash Id: a TL stream
+    // that re-flushes the same `@dispatch` block re-derives an admitted
+    // Id and is dropped before reaching here. dedupTargetsByName is no
+    // longer required.
+    val targets = dirs.Collect({
         case Dispatch(name, body) => (name, body)
     })
-    // Dedupe by member name — keep the first body, drop subsequent
-    // duplicates. Iris's claude stream can occasionally emit the same
-    // chunk twice (claude buffer flush, --resume mid-envelope, pump
-    // retry); without dedup, TurnBuffer accumulates duplicate
-    // @dispatch blocks and the FoldLeft below spawns each target
-    // twice. The second spawn uses --resume against a session id the
-    // first spawn hasn't yet registered with claude, racing into a
-    // "No conversation found with session ID …" error.
-    //
-    // Observed in past sessions: a TL emitted one logical turn but
-    // claude streamed two identical chunks; an engineer ended up
-    // dispatched twice and the second --resume crashed with the
-    // session-id lookup error.
-    val targets = dedupTargetsByName(rawTargets)
     // Drop @dispatch() targets that point at a QA member when the
     // workflow auto-spawns QA. Without this, Iris including a QA
     // member in her first @dispatch list would fan out QA in parallel
@@ -3611,24 +3602,6 @@ func looksLikeStaleSessionError(err string) bool {
     return strings.Contains(lower, "no conversation found") ||
            strings.Contains(lower, "session not found") ||
            strings.Contains(lower, "session id not found")
-}
-
-// dedupTargetsByName collapses duplicate (name, body) tuples down to
-// the first occurrence per name. Order is preserved (FoldLeft over the
-// input array). Used by spawnDispatchedMembers to defend against
-// claude streams that repeat the same chunk and inflate the parsed
-// directive list — the orchestrator should treat a logical "dispatch
-// Felix" intent as one spawn, not N spawns where N is the number of
-// times claude redundantly flushed the same line.
-func dedupTargetsByName(targets Array[Tuple[string, string]]) Array[Tuple[string, string]] {
-    val seed = (EmptyArray[Tuple[string, string]](), EmptyHashMap[string, bool]())
-    val (out, _) = targets.FoldLeft(seed, (acc, t) => {
-        val (kept, seen) = acc
-        val (name, _) = t
-        if seen.Get(name).IsDefined() { return (kept, seen) }
-        return (kept.Append(t), seen.Put(name, true))
-    })
-    return out
 }
 
 // workflow auto-spawns QA so we don't double-dispatch.

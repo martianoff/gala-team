@@ -241,3 +241,38 @@ func ActionName(a DeliveryAction) string = a match {
     case Escalate(_)        => "escalate"
     case MarkAbandoned(_)   => "abandon"
 }
+
+// Field accessors. GALA pattern matching does not resolve qualified
+// case constructors (`case protocol.X(...)` is a parser-level
+// variable binding, not a constructor pattern), so a consumer outside
+// this package cannot destructure a DeliveryAction. These accessors
+// give the consumer a stable, tag-dispatched read path: pick the
+// branch via ActionName, then extract via the matching accessor.
+//
+// Each returns Option so the caller treats a kind-mismatched access
+// as None rather than an undefined fallback.
+
+func RedeliverMessage(a DeliveryAction) Option[Message] = a match {
+    case Redeliver(m) => Some[Message](m)
+    case _            => None[Message]()
+}
+
+func IssueNudgeText(a DeliveryAction) Option[string] = a match {
+    case IssueNudge(_, t) => Some[string](t)
+    case _                => None[string]()
+}
+
+func IssueNudgeMember(a DeliveryAction) Option[string] = a match {
+    case IssueNudge(m, _) => Some[string](m)
+    case _                => None[string]()
+}
+
+func MarkAbandonedMember(a DeliveryAction) Option[string] = a match {
+    case MarkAbandoned(m) => Some[string](m)
+    case _                => None[string]()
+}
+
+func EscalateMember(a DeliveryAction) Option[string] = a match {
+    case Escalate(m) => Some[string](m)
+    case _           => None[string]()
+}

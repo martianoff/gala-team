@@ -387,104 +387,123 @@ func onTick(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // auto-unwrap from Immutable[ToastQueue] happens at the boundary.
 func pruneToasts(q ToastQueue, now time_utils.Instant) ToastQueue = q.Prune(now)
 
-// updateLivenessStatuses walks `members` and maps each to a derived
-// status from LastChunkAt. On a band transition: (1) status flipped
-// in m.Statuses; (2) toast pushed; (3) FSM event emitted so
-// Delegating advances toward TLNudging (stuck) — or, on hitting the
-// abandon threshold, the heartbeat tries to revive the silent member
-// via the same respawn path the crash-recovery uses (closeLiveSession
-// + ensureSession + "Continue your previous task."). MemberAbandoned
-// only fires after the Heartbeat.MaxRetries budget is exhausted; the
-// retry counter auto-clears in onChunk on the next successful chunk,
-// so transient silence won't burn the budget permanently.
+// updateLivenessStatuses drives the per-member protocol delivery FSM
+// (Tick) for each non-lead member with a dispatch in flight, then
+// folds every currently-silent member into AT MOST ONE batched TL
+// nudge via AggregateNudges. The DeliveryAction vocabulary it consumes
+// — Redeliver / IssueNudge / MarkAbandoned — subsumes the old ad-hoc
+// ladder (liveRespawnMember bounded retry, the bandFor escalation,
+// spawnAggregatedStuckNudge's pile-on fix) into one driver.
 //
-// Past sessions captured a member who got dispatched, did a few
-// reads, and then went silent — the orchestrator's heartbeat marked
-// them StFailed and immediately fired MemberAbandoned, burying half
-// the parallel scope and forcing the TL to take over from the lead
-// worktree. The respawn path lets a fresh subprocess pick up the
-// --resume conversation, which is what the manual "kill the member,
-// restart" recovery did anyway.
+// Lead is excluded by name: a long TLReview pause (waiting on the
+// user) must not flip the lead's delivery state to Silent — direct
+// user prompts and relay turns drive the lead, not the heartbeat.
 //
-// CRITICAL: TL nudges are batched at the END of the walk, not fired
-// per-member. Without batching, when N engineers all hit the stuck
-// threshold in the same tick (typical when the user runs a parallel
-// dispatch fan-out and walks away), the orchestrator spawns N TL
-// nudges back-to-back — each lands a separate claude turn at the
-// lead, the user sees N "TL is working" toasts, and the team
-// pipeline pile-on confuses everyone.
-//
-// Aggregated nudge: collect every newly-stuck member during the
-// walk; afterwards, if any are present, emit ONE MemberStuck FSM
-// transition + ONE spawnTLNudge with a prompt that lists every stuck
-// member. Failed (abandoned) transitions are still per-member because
-// they don't spawn a nudge turn — they only advance the pending set.
+// Members without a LastDispatchedMsg entry have no in-flight delivery
+// to Tick — skipped. Tick's per-member IssueNudge on first-cross is
+// dropped in favor of AggregateNudges' batched IssueNudge (one nudge
+// that names every silent member, not N back-to-back TL turns).
 func updateLivenessStatuses(
     m AppModel, members Array[Member], now time_utils.Instant,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val leadName = m.Team.Lead.Name
-    val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyArray[string]())
-    val (m1, cmds, stuckNames) = members.FoldLeft(seed, (acc, mem) => {
-        val (curM, curCmds, curStuck) = acc
+    val nowNanos = int(now.UnixNanos())
+    val policy   = protocol.PolicyFromHeartbeat(
+        m.Policy.Heartbeat.SlowAfterSeconds,
+        m.Policy.Heartbeat.StuckAfterSeconds,
+        m.Policy.Heartbeat.AbandonAfterSeconds,
+        m.Policy.Heartbeat.MaxRetries,
+    )
+
+    // 1. Tick each non-lead member that has a dispatch in flight.
+    val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyArray[Tuple[string, protocol.DeliveryAction]]())
+    val (m1, cmds, actions) = members.FoldLeft(seed, (acc, mem) => {
+        val (curM, curCmds, curActions) = acc
         val name = mem.Name
-        // Lead is driven by direct user prompts + relay turns, not
-        // by the heartbeat-stuck/abandon machinery. A long TLReview
-        // pause (waiting on the user) would otherwise flip the lead
-        // to Stuck/Failed and emit a spurious MemberStuck/Abandoned
-        // FSM event — past audits caught the lead hitting
-        // MemberAbandoned during a long TLReview→TLReview pause.
-        if name == leadName { return (curM, curCmds, curStuck) }
-        val current = curM.Statuses.Get(name).GetOrElse(StIdle())
-        val derived = livenessStatus(curM, name, current, now)
-        if statusTag(current) == statusTag(derived) { return (curM, curCmds, curStuck) }
-        val withStatus = curM.Copy(
-            Statuses = curM.Statuses.Put(name, derived),
-            Toasts   = pushTransitionToast(curM.Toasts, name, derived, now),
-        )
-        return derived match {
-            case StStuck() => (withStatus, curCmds, curStuck.Append(name))
-            case StFailed(_) => {
-                val maxRetries = maxAutoRetriesOf(curM)
-                val retries = curM.RetryCount.Get(name).GetOrElse(0)
-                if retries < maxRetries {
-                    val (m1, respawnCmd) = liveRespawnMember(withStatus, name, retries + 1, maxRetries)
-                    return (m1, curCmds.Append(respawnCmd), curStuck)
-                }
-                val nextState = transitionLogged(withStatus.State, MemberAbandoned(MemberName = name), transitionContext(withStatus))
-                return (withStatus.Copy(State = nextState), curCmds, curStuck)
+        if (name == leadName) { return (curM, curCmds, curActions) }
+        return curM.LastDispatchedMsg.Get(name) match {
+            case None() => (curM, curCmds, curActions)
+            case Some(msg) => {
+                val st = curM.DeliveryStates.Get(name).GetOrElse(protocol.Sent(AtNanos = nowNanos, Attempt = 1))
+                val (newSt, action) = protocol.Tick(st, msg, nowNanos, policy)
+                val updated = curM.Copy(DeliveryStates = curM.DeliveryStates.Put(name, newSt))
+                return (updated, curCmds, curActions.Append((name, action)))
             }
-            case _ => (withStatus, curCmds, curStuck)
         }
     })
-    if stuckNames.IsEmpty() { return (m1, cmds) }
-    // In QAGate a stuck QA reviewer is re-prompted DIRECTLY to finish
-    // its review — NOT bounced to a TL nudge. The TL never did the QA
-    // work; asking it to "decide what to do about stuck QA" just makes
-    // it redo or re-dispatch a review it has no context for, and the
-    // FSM is still parked in QAGate waiting on that same reviewer. The
-    // correct recovery is to wake the reviewer back up where it
-    // stalled. Any non-QA stuck member (or a QA member stuck outside
-    // QAGate) still goes to the TL via the aggregated nudge.
-    val inQaGate = m1.State match {
-        case QAGate(_) => true
-        case _         => false
+
+    // 2. Consume per-member actions. Redeliver and MarkAbandoned fire
+    //    via the existing recovery / FSM-transition paths; IssueNudge
+    //    is intentionally dropped here — the aggregate below replaces
+    //    it (the pile-on fix the old spawnAggregatedStuckNudge guarded).
+    val (m2, cmds2) = actions.FoldLeft((m1, cmds), (acc2, pair) => {
+        val (curM, curCmds) = acc2
+        val (name, action) = pair
+        return consumeDeliveryAction(curM, curCmds, name, action)
+    })
+
+    // 3. AggregateNudges → one IssueNudge naming every silent member,
+    //    or None when nobody is silent. Spawned as a single TL nudge.
+    val statePairs = aggregateStatePairs(m2, members, leadName)
+    return protocol.AggregateNudges(statePairs, nowNanos, policy) match {
+        case None()    => (m2, cmds2)
+        case Some(act) => fireAggregateNudge(m2, cmds2, act)
     }
-    if inQaGate {
-        val seed2 = (m1, cmds, EmptyArray[string]())
-        val (m2, cmds2, nonQaStuck) = stuckNames.FoldLeft(seed2, (acc, name) => {
-            val (curM, curCmds, curOther) = acc
-            return findMemberByName(curM.Team.Members, name) match {
-                case Some(mem) if SameRole(mem.Role, QA()) => {
-                    val (m3, c) = nudgeStuckQaReviewer(curM, mem, now)
-                    return (m3, curCmds.Append(c), curOther)
-                }
-                case _ => (curM, curCmds, curOther.Append(name))
-            }
-        })
-        if nonQaStuck.IsEmpty() { return (m2, cmds2) }
-        return spawnAggregatedStuckNudge(m2, nonQaStuck, cmds2, now)
+}
+
+// aggregateStatePairs assembles (name, DeliveryState) for every non-
+// lead member that has a tracked DeliveryState entry, in roster order.
+// AggregateNudges scans this list for `Silent` states.
+func aggregateStatePairs(
+    m AppModel, members Array[Member], leadName string,
+) Array[Tuple[string, protocol.DeliveryState]] = members.FoldLeft(
+    EmptyArray[Tuple[string, protocol.DeliveryState]](),
+    (acc, mem) => {
+        val n = mem.Name
+        if (n == leadName) { return acc }
+        return m.DeliveryStates.Get(n) match {
+            case None()    => acc
+            case Some(st)  => acc.Append((n, st))
+        }
+    },
+)
+
+// fireAggregateNudge spawns ONE TL nudge for a batched IssueNudge,
+// or a no-op for any other action (AggregateNudges only ever returns
+// IssueNudge; the catch-all keeps the FSM total).
+func fireAggregateNudge(
+    m AppModel, cmds Array[Cmd[AppMsg]], act protocol.DeliveryAction,
+) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    if (protocol.ActionName(act) != "nudge") { return (m, cmds) }
+    val text = protocol.IssueNudgeText(act).GetOrElse("")
+    val nextState = transitionLogged(m.State, MemberStuck(MemberName = ""), transitionContext(m))
+    val (m1, ncmds) = spawnTLNudge(m.Copy(State = nextState), "stuck-batch", text)
+    return (m1, ncmds.FoldLeft(cmds, (a, c) => a.Append(c)))
+}
+
+// consumeDeliveryAction applies one per-member DeliveryAction. Per-
+// member IssueNudge is dropped on AggregateNudges' behalf; Redeliver
+// drives the existing bounded-retry respawn; MarkAbandoned fires the
+// existing FSM MemberAbandoned transition; NoOp / Escalate are
+// pass-through. Tag dispatch (ActionName) plus protocol accessors —
+// GALA does not resolve qualified case constructors in patterns, so
+// the consumer extracts via the protocol's field accessors.
+func consumeDeliveryAction(
+    m AppModel, cmds Array[Cmd[AppMsg]], name string, action protocol.DeliveryAction,
+) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    val tag = protocol.ActionName(action)
+    if (tag == "redeliver") {
+        val maxRetries = maxAutoRetriesOf(m)
+        val retries    = m.RetryCount.Get(name).GetOrElse(0)
+        val (m1, c)    = liveRespawnMember(m, name, retries + 1, maxRetries)
+        return (m1, cmds.Append(c))
     }
-    return spawnAggregatedStuckNudge(m1, stuckNames, cmds, now)
+    if (tag == "abandon") {
+        val nextState = transitionLogged(m.State, MemberAbandoned(MemberName = name), transitionContext(m))
+        return (m.Copy(State = nextState), cmds)
+    }
+    // noop / nudge (dropped on aggregate's behalf) / escalate (unused)
+    return (m, cmds)
 }
 
 // nudgeStuckQaReviewer wakes a QA reviewer that went silent mid-

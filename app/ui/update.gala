@@ -587,6 +587,7 @@ func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Arra
     val mClosed = closeLiveSession(m, lead.Name).Copy(
         TurnBuffer    = "",
         ConsultsFired = 0,
+        Ledger        = protocol.EmptyLedger(),
     )
     return ensureSession(mClosed, lead) match {
         case Left(err) => {
@@ -1740,6 +1741,7 @@ func clearSessionState(m AppModel) AppModel {
         TotalCostUsd          = 0.0,
         TurnBuffer            = "",
         ConsultsFired         = 0,
+        Ledger                = protocol.EmptyLedger(),
         ActiveConsults        = EmptyHashMap[string, ConsultSession](),
         ConsultBuffers        = EmptyHashMap[string, Array[string]](),
         ConsultViewerOpen     = false,
@@ -1843,6 +1845,7 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         ConversationSticky = true,
         TurnBuffer    = "",
         ConsultsFired = 0,
+        Ledger        = protocol.EmptyLedger(),
         // Reset @base — a new prompt starts a fresh PR-base decision.
         // The TL re-emits @base early in this turn if stacking is
         // wanted; otherwise the PR opens against the project default.
@@ -2519,30 +2522,19 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
 }
 
 
-// maybeHandleMemberDirectives parses non-TL streams for newly-completed
-// @done / @help / @blocked blocks (the member-emitted directives). The
-// TL has its own block-handling path (maybeDispatchConsults); this is
-// the symmetric path for downstream members. Same buffer / watermark
-// shape so directives fire exactly once per stream regardless of how
-// chunks arrive.
-//
-// @done captures the body for the eventual TL relay turn (#28); status
-// flips to StIdle so the heartbeat doesn't keep escalating timers.
-// @help pauses the member (StHelpWaiting) and (in #28) opens a TL
-// clarification turn. @blocked surfaces a user-visible failure.
 // maybeHandleMemberDirectives accumulates the member's streamed text
 // in MemberBuffers[speaker] and routes each newly-admitted member
-// terminal (Finished/Help/Blocked) through applyMemberDirective.
+// terminal (Finished / Help / Blocked) through applyMemberDirective.
 //
 // protocol.Decode under MemberDecodeContext is end-anchored and yields
 // at most one terminal Message per call — already robust against a
 // deliverable that QUOTES `@dispatch(` / `@finished` as documented
 // examples (the backward scan ignores quoted openers before the real
-// sign-off). protocol.Ledger.Admit then keys identity on the
-// content-hash Id: re-flushed chunks, transient matches of a quoted
-// sign-off, and post-restart replays all re-derive the same Id and
-// are rejected exactly once. This replaces the FNV terminalFingerprint
-// latch and the per-speaker MemberDirectivesFired index.
+// sign-off). protocol.Ledger.Admit then keys identity on the content-
+// hash Id: re-flushed chunks, transient matches of a quoted sign-off,
+// and post-restart replays all re-derive the same Id and are rejected
+// exactly once. This replaces the FNV terminalFingerprint latch and
+// the per-speaker MemberDirectivesFired index.
 func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     if speaker == m.Team.Lead.Name {
         return (m, EmptyArray[Cmd[AppMsg]]())
@@ -2556,14 +2548,15 @@ func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[
     }
     val (l1, admitted) = withBuffer.Ledger.Admit(msgs.Get(0))
     val withLedger = withBuffer.Copy(Ledger = l1)
-    return admitted match {
-        case None() => (withLedger, EmptyArray[Cmd[AppMsg]]())
-        case Some(am) => FromMessage(am) match {
-            case None() => (withLedger, EmptyArray[Cmd[AppMsg]]())
-            case Some(d) => {
-                val (m1, cmd) = applyMemberDirective(withLedger, speaker, d)
-                return (m1, ArrayOf[Cmd[AppMsg]](cmd))
-            }
+    // The "no directive to apply" branch (Ledger rejected the Id OR
+    // the admitted Message is a kind FromMessage doesn't surface — the
+    // Nudge/Ack delivery kinds never produced inbound) collapses to a
+    // single None via FlatMap.
+    return admitted.FlatMap((am) => FromMessage(am)) match {
+        case None()  => (withLedger, EmptyArray[Cmd[AppMsg]]())
+        case Some(d) => {
+            val (m1, cmd) = applyMemberDirective(withLedger, speaker, d)
+            return (m1, ArrayOf[Cmd[AppMsg]](cmd))
         }
     }
 }

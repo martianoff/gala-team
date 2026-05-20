@@ -4443,6 +4443,41 @@ func TestHeartbeat_DoesNotEscalateNonPendingMember(t T) T {
     return IsTrue(stateOk, statusOk)
 }
 
+// Heartbeat-driven MemberAbandoned persists the post-transition
+// snapshot. The walk path is the canonical "no follow-up chunk to
+// ride a per-chunk save on" case: an abandoned member by definition
+// stops producing visible output, so without persisting here the
+// snapshot would lag the in-memory FSM indefinitely. Past session
+// captured Delegating→QAGate from this path followed by 12 minutes
+// of nothing, then a tui_exit pinning latest.json to Delegating.
+func TestHeartbeat_AbandonedMember_PersistsPostTransitionState(t T) T {
+    val proj  = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    val team  = sampleTeam()
+    val now   = time_utils.FromUnixSeconds(int64(20000))
+    val stale = time_utils.FromUnixSeconds(int64(19000))  // 1000s ago, past AbandonAfterSeconds=300
+    val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
+    val seed = base.Copy(
+        State       = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        Statuses    = base.Statuses.Put("Felix", StWorking()),
+        LastChunkAt = base.LastChunkAt.Put("Felix", stale),
+        // RetryCount past max so the path takes MemberAbandoned, not
+        // liveRespawnMember.
+        RetryCount  = base.RetryCount.Put("Felix", 10),
+    )
+    val (m, _) = updateLivenessStatuses(seed, team.Members, now)
+    val snap = session.Load(m.Project.Repo)
+    return snap match {
+        case Some(s) => {
+            // The walk drains Felix from pending → afterMemberDone
+            // collapses to TLReview (no QA required in sampleModel).
+            val tag = s.StateTag
+            return IsTrue(t, tag == "TLReview" || tag == "QAGate" || tag == "Idle")
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
 // Heartbeat in-flight-nudge gate: when the FSM is already in
 // TLNudging(reason="stuck", pending), the orchestrator has dispatched
 // a TL turn to address the stuck batch and is waiting on its TLDone.
@@ -5111,6 +5146,37 @@ func TestRehydrateOrchestration_RestoresStateAndPlan(t T) T {
         case _           => IsTrue(t, false)
     }
     return Eq(t1, m.PlanShipped, 1)
+}
+
+// PostPromptSent round-trips through orchestrationOf → Save → Load →
+// RehydrateOrchestration. The persisted Array is converted back to
+// the HashSet shape the orchestrator uses, and members that already
+// received the post-engineer prompt show up in the rehydrated set so
+// postPromptDue returns false for them — no redundant /simplify round
+// on the post-resume @finished.
+func TestRehydrateOrchestration_RestoresPostPromptSent(t T) T {
+    val snap = session.Snapshot(
+        ProjectName    = "demo",
+        SavedAt         = int64(0),
+        Conversation   = EmptyArray[session.ConversationLine](),
+        ActiveMembers  = EmptyArray[string](),
+        StateTag       = "Delegating",
+        StatePending   = ArrayOf("Lyra"),
+        PostPromptSent = ArrayOf("Lyra"),
+    )
+    val m = RehydrateOrchestration(sampleModel().Copy(State = Idle()), snap)
+    return IsTrue(t, m.PostPromptSent.Contains("Lyra"))
+}
+
+// orchestrationOf flattens m.PostPromptSent (HashSet) to Array for
+// Save. Two members in the set both make it into the persisted shape.
+func TestOrchestrationOf_FlattensPostPromptSent(t T) T {
+    val seed = sampleModel().Copy(
+        PostPromptSent = EmptyHashSet[string]().Add("Lyra").Add("Kael"),
+    )
+    val orch = orchestrationOf(seed)
+    val t1 = Eq(t, orch.PostPromptSent.Size(), 2)
+    return IsTrue(t1, orch.PostPromptSent.Contains("Lyra") && orch.PostPromptSent.Contains("Kael"))
 }
 
 // A legacy snapshot (empty StateTag) must NOT touch the model — old

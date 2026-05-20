@@ -3091,6 +3091,27 @@ func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) 
     case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some(s"session save: ${err.Error()}"))
 }
 
+// persistAppModel re-writes latest.json from the model's current
+// Conversation + Orchestration without changing the in-memory model
+// other than to record a save failure. Call this AFTER an FSM
+// transition that the per-chunk persistConversation save (which fires
+// inside applyChunkVisible BEFORE the transition fires) couldn't have
+// captured — otherwise the snapshot on disk lags the running state
+// by one transition. The observed failure mode: a TL turn's last
+// chunk persists with state_tag=TLThinking, pending_q_*=empty; ~250ms
+// later onSessionFailed parses an empty TurnBuffer, fires TLDone, FSM
+// advances to Idle, and we return WITHOUT another save — so a TUI
+// restart resumes from a half-state snapshot (TLThinking on disk,
+// Idle in the now-dead process's event log). Save-after-transition
+// closes that window.
+func persistAppModel(m AppModel) AppModel = session.Save(
+    m.Project.Repo, m.Project.Name, m.Conversation, activeMemberNames(m), serialiseSessionIds(m),
+    orchestrationOf(m),
+) match {
+    case Success(_)   => m
+    case Failure(err) => m.Copy(LastError = Some(s"session save: ${err.Error()}"))
+}
+
 // serialiseSessionIds flattens AppModel.SessionIds (HashMap) into the
 // SessionIdEntry array shape the snapshot persists. Empty map → empty
 // array (no entries written).
@@ -3178,6 +3199,32 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             //      Iris's reply and decides what to do next.
             // Either way, no Delegating, no auto-QA.
             if dirs.IsEmpty() {
+                // Transport-auth-failure guard. When the claude-code
+                // subprocess exits because its OAuth token was
+                // rejected, the stdout error line is already routed
+                // through ErrorText by onChunk (see
+                // looksLikeTransportAuthError), so the TurnBuffer is
+                // empty and we end up here with dirs.IsEmpty(). If we
+                // fire TLDone now the FSM steps TLThinking → Idle and
+                // the prior QAGate's pending question is forgotten —
+                // the user re-launches the TUI, types "continue", and
+                // gets nothing because the orchestrator's view of the
+                // world is "Idle, no work pending." Instead: leave
+                // the FSM untouched, surface a clear system notice
+                // telling the user how to recover, and let the next
+                // UserPrompted (after they re-run /login) re-dispatch
+                // the lead from whichever state we were in. The
+                // session save in persistAppModel below picks up the
+                // notice; no FSM event is emitted.
+                val lastErr = cleanedB.LastError.GetOrElse("")
+                if LooksLikeTransportAuthError(lastErr) {
+                    val notice = s"${name}: Claude Code authentication failed (the OAuth token was rejected). Run `/login` in your terminal, then re-prompt to retry. The orchestrator has not advanced state; the prior turn's pending question (if any) is preserved."
+                    val nextConvo = cleanedB.Conversation.Append(
+                        session.ConversationLine(Speaker = "system", Text = notice, At = time_utils.Now().UnixNanos()),
+                    )
+                    val saved = persistConversation(cleanedB, nextConvo)
+                    return (setStatus(saved, name, StIdle()), NoCmd[AppMsg]())
+                }
                 val malformedReason = detectMalformedDispatch(cleanedB.TurnBuffer, cleanedB.Team)
                 if malformedReason != "" {
                     val (m1, nudgeCmds) = spawnTLNudge(
@@ -3196,7 +3243,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 // by construction, so the FSM agrees with the direct
                 // assignment that lived here before.
                 val nextState = transitionLogged(cleanedB.State, TLDone(Directives = EmptyArray[Directive]()), transitionContext(cleanedB))
-                return (setStatus(cleanedB.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
+                return (setStatus(persistAppModel(cleanedB.Copy(State = nextState)), name, StIdle()), NoCmd[AppMsg]())
             }
             // Empty-after-QA-filter guard. If every dispatch target
             // resolved to a QA member (and qa_required is on), the
@@ -3251,7 +3298,13 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                         summaryReadyCmd(cleanedB.Project, name))
             }
             val nextState = transitionLogged(cleanedB.State, TLDone(Directives = dirs), transitionContext(cleanedB))
-            val withState = setStatus(cleanedB.Copy(State = nextState), name, StIdle())
+            // Save AFTER the transition so a TUI exit between this
+            // line and the next user input doesn't leave latest.json
+            // pinned to the pre-transition state_tag. (The per-chunk
+            // save inside applyChunkVisible captures the prior state
+            // only; without this, recovery would resume from a
+            // half-state snapshot.) See persistAppModel.
+            val withState = setStatus(persistAppModel(cleanedB.Copy(State = nextState)), name, StIdle())
             // If the new state is Delegating, fan out: spawn each
             // dispatched member's session with their per-target body
             // as the prompt. Without this, members stay StIdle forever
@@ -3322,7 +3375,8 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         }
         val body = cleaned.MemberDoneBodies.Get(name).GetOrElse("")
         val nextState = transitionLogged(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
-        return (setStatus(cleaned.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
+        // Save AFTER the transition; see persistAppModel.
+        return (setStatus(persistAppModel(cleaned.Copy(State = nextState)), name, StIdle()), NoCmd[AppMsg]())
     }
     val maxRetries = maxAutoRetriesOf(m)
     val retries = m.RetryCount.Get(name).GetOrElse(0)

@@ -4263,6 +4263,63 @@ func TestOnStderr_FiresLogStderrEvent(t T) T {
     return IsTrue(t, strings.Contains(contents, "rate limit reached"))
 }
 
+// LastError surface must NOT carry the full stderr line. A past
+// session saw an 8 KB stream-json `tool_result` envelope land on
+// stderr (claude-code anomaly: misrouted a large response from
+// stdout to stderr) and the un-truncated form filled the bottom-bar
+// LastError area, clobbering the help-key hint rendering for the
+// rest of the run. truncateForToast clamps the LastError surface
+// for the same reason it clamps the toast.
+func TestOnStderr_LastErrorIsTruncated(t T) T {
+    val dir = setupDebugRepo("on_stderr_trunc")
+    defer os.RemoveAll(dir)
+    val m = sampleModel()
+    // 4 KB stderr line. truncateForToast clamps to ~80 chars.
+    val giant = strings.Repeat("x", 4000)
+    val (m1, _) = Update(m, StderrArrived(Member = "Sable", Line = giant))
+    return m1.LastError match {
+        case None()    => IsTrue(t, false)
+        case Some(err) => IsTrue(t, len(err) < 200)
+    }
+}
+
+// QAGate variant of the heartbeat-abandoned test from PR #61. A live
+// session captured Sable in QAGate(Pending={Sable}) with StWorking
+// status and LastChunkAt aged past AbandonAfterSeconds; the walk
+// should escalate her status and either respawn (if retries < max)
+// or fire MemberAbandoned (which drains QAGate → TLReview). The
+// debuglog flush fix in this PR is what makes the FSM transition
+// observable in events.jsonl — without it, transitions fired but
+// were silently dropped after the first write failure.
+func TestHeartbeat_QAGateAbandonedMember_DrainsToTLReview(t T) T {
+    val proj  = emptyLeadBranchProject()
+    defer os.RemoveAll(proj.Repo)
+    val sable = Member(
+        Name = "Sable", Role = QA(),
+        Personality = "rigorous",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val team  = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
+    val now   = time_utils.FromUnixSeconds(int64(30000))
+    val stale = time_utils.FromUnixSeconds(int64(29000))  // 1000s ago, past AbandonAfterSeconds=300
+    val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
+    val seed = base.Copy(
+        State       = QAGate(Pending = EmptyHashSet[string]().Add("Sable")),
+        Statuses    = base.Statuses.Put("Sable", StWorking()),
+        LastChunkAt = base.LastChunkAt.Put("Sable", stale),
+        // RetryCount past max so the path takes MemberAbandoned, not
+        // liveRespawnMember (which would keep us in QAGate).
+        RetryCount  = base.RetryCount.Put("Sable", 10),
+    )
+    val (m, _) = updateLivenessStatuses(seed, team.Members, now)
+    // afterMemberDone with empty pending → TLReview.
+    return m.State match {
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // UI-thread offload regression tests.
 //

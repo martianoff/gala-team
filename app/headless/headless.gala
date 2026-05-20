@@ -4,11 +4,11 @@ import (
     "martianoff/gala/json"
     "martianoff/gala/strings"
     "github.com/martianoff/gala_team/app/onboarding"
+    "github.com/martianoff/gala_team/app/protocol"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
     . "martianoff/gala/go_interop"
     . "martianoff/gala/collection_immutable"
-    . "github.com/martianoff/gala_team/app/directive"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/runtime"
@@ -368,11 +368,13 @@ func isDuplicateOfLast(convo Array[session.ConversationLine], speaker string, te
     }
 
 // extractSummary joins every member-spoken line of the conversation
-// (skipping the user's prompt), runs the directive parser, and
-// returns the body of the first @summary if one is present.
+// (skipping the user's prompt), runs the inbound protocol decoder
+// against the lead view, and returns the body of the first @summary
+// if one is present.
 func extractSummary(convo Array[session.ConversationLine]) Option[string] =
-    Parse(convo.Collect({ case cl if cl.Speaker != "you" => cl.Text }).MkString("\n"))
-        .Collect({ case Summary(body) => body })
+    protocol.Decode(convo.Collect({ case cl if cl.Speaker != "you" => cl.Text }).MkString("\n"), protocol.TLDecodeContext(0))
+        .Filter((mm) => protocol.KindTag(mm.Kind) == "summary")
+        .Map((mm) => mm.Body)
         .HeadOption()
 
 // EncodeJson serialises a HeadlessResult to a JSON string suitable for

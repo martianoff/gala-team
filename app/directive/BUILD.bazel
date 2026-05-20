@@ -6,7 +6,6 @@ gala_library(
         "adapter.gala",
         "control.gala",
         "directive.gala",
-        "parser.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/directive",
     deps = [
@@ -19,14 +18,13 @@ gala_library(
 )
 
 gala_go_test(
-    name = "parser_test",
-    srcs = ["parser_test.gala"],
+    name = "adapter_test",
+    srcs = ["adapter_test.gala"],
     pkg = "directive",
     lib_srcs = [
         "adapter.gala",
         "control.gala",
         "directive.gala",
-        "parser.gala",
     ],
     deps = [
         "//app/protocol",
@@ -37,14 +35,13 @@ gala_go_test(
 )
 
 gala_go_test(
-    name = "adapter_test",
-    srcs = ["adapter_test.gala"],
+    name = "control_test",
+    srcs = ["control_test.gala"],
     pkg = "directive",
     lib_srcs = [
         "adapter.gala",
         "control.gala",
         "directive.gala",
-        "parser.gala",
     ],
     deps = [
         "//app/protocol",

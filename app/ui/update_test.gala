@@ -761,38 +761,6 @@ func TestSetStatus_KeepsLastChunkAtOnWorkingToWorking(t T) T {
     }
 }
 
-// Direct unit test for dedupTargetsByName — first occurrence wins,
-// order preserved. Defends against a TL claude stream emitting one
-// logical turn as two identical chunks: without dedup, TurnBuffer
-// would accumulate duplicate @dispatch blocks and the FoldLeft in
-// spawnDispatchedMembers would spawn each member twice.
-func TestDedupTargetsByName_DropsDuplicates(t T) T {
-    val targets = ArrayOf(
-        ("Felix", "body F"),
-        ("Mira",  "body M"),
-        ("Felix", "body F duplicate"),
-        ("Mira",  "body M duplicate"),
-    )
-    val out = dedupTargetsByName(targets)
-    val a = Eq(t, out.Size(), 2)
-    val b = Eq(a, out.Get(0).V1, "Felix")
-    val c = Eq(b, out.Get(0).V2, "body F")            // first occurrence body kept
-    val d = Eq(c, out.Get(1).V1, "Mira")
-    return Eq(d, out.Get(1).V2, "body M")
-}
-
-func TestDedupTargetsByName_PassesUniqueThrough(t T) T {
-    val targets = ArrayOf(("Felix", "F"), ("Mira", "M"), ("Theo", "T"))
-    val out = dedupTargetsByName(targets)
-    val a = Eq(t, out.Size(), 3)
-    return Eq(a, out.Get(2).V1, "Theo")
-}
-
-func TestDedupTargetsByName_EmptyInputReturnsEmpty(t T) T {
-    val out = dedupTargetsByName(EmptyArray[Tuple[string, string]]())
-    return Eq(t, out.Size(), 0)
-}
-
 // Stale-session-id detection — claude returns this when --resume
 // points at an id it doesn't recognise. Detection is case-insensitive
 // substring so wording variations across claude versions all match.
@@ -5014,10 +4982,3 @@ func TestMemberDirectives_QuotedThenRealSignoffStillFires(t T) T {
     return IsTrue(t1, firedReal > 0)
 }
 
-func TestTerminalFingerprint_DistinguishesAndDedupes(t T) T {
-    val a = terminalFingerprint(Finished("quoted example body"))
-    val b = terminalFingerprint(Finished("the genuine multi-line sign-off body that differs"))
-    val c = terminalFingerprint(Finished("quoted example body"))
-    val t1 = IsTrue(t, a != b)
-    return IsTrue(t1, a == c)
-}

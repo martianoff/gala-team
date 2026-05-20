@@ -5,10 +5,10 @@ gala_library(
     srcs = ["headless.gala"],
     importpath = "github.com/martianoff/gala_team/app/headless",
     deps = [
-        "//app/directive",
         "//app/onboarding",
         "//app/policy",
         "//app/project",
+        "//app/protocol",
         "//app/runtime",
         "//app/session",
         "//app/team",

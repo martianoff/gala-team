@@ -2208,9 +2208,16 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
     }
     val short = truncateForToast(trimmed)
     val toast = m.Toasts.PushWarn(s"${name} (stderr): ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
+    // Use the truncated form for LastError too — the full stderr
+    // line lands in events.jsonl already via LogStderr above, so
+    // the audit trail is intact. A past session captured an 8 KB
+    // stream-json `tool_result` envelope claude-code wrote to
+    // stderr instead of stdout; without the trim it filled the
+    // bottom-bar LastError surface and clobbered the help-key hint
+    // rendering for the whole session.
     val m1 = m.Copy(
         Toasts    = toast,
-        LastError = Some(s"${name} stderr: ${trimmed}"),
+        LastError = Some(s"${name} stderr: ${short}"),
     )
     return (m1, pumpCmd)
 }

@@ -4657,23 +4657,63 @@ func TestOnMemberDone_Engineer_DefersUntilUncommittedCheckResult(t T) T {
 // UncommittedCheckResult with dirty=false (clean worktree) finalises
 // the @finished — adds the body to MemberDoneBodies and flips status
 // to StIdle. Mirrors the inline path's behaviour.
-func TestOnUncommittedCheckResult_CleanFinalises(t T) T {
+//
+// The FSM-transition assertion was added later — the original
+// version of this test checked bodyLogged + idleNow only, which
+// silently passed even when finaliseMemberDone forgot to fire the
+// MemberDone FSM event. Past behaviour: QA member emitted @finished,
+// body got recorded, status flipped to Idle, FSM stayed in QAGate
+// forever. With finaliseMemberDone now firing MemberDone inline,
+// from Delegating(Pending={Felix}) the FSM correctly drains to
+// QAGate (QA required + QA member exists) or TLReview.
+// Body-logged check uses finaliseMemberDone DIRECTLY (not via the
+// Update wrapper) — when the FSM advances to TLReview, the wrapper
+// fires spawnTLRelay which consumes MemberDoneBodies for the relay
+// prompt and clears it. So testing body-logging through Update only
+// works when the FSM doesn't actually advance, which would defeat
+// the point of the FSM-transition test. Unit-level here, end-to-end
+// FSM behaviour in TestOnUncommittedCheckResult_CleanFinalises_FsmAdvances.
+func TestOnUncommittedCheckResult_CleanFinalises_BodyLogged(t T) T {
     val seed = sampleModel().Copy(
+        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
+    )
+    val (m, _) = finaliseMemberDone(seed, "Felix", "shipped it")
+    return m.MemberDoneBodies.Get("Felix") match {
+        case Some(b) => Eq(t, b, "shipped it")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+func TestOnUncommittedCheckResult_CleanFinalises_StatusIdle(t T) T {
+    val seed = sampleModel().Copy(
+        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped it", Dirty = false))
-    val bodyLogged = m.MemberDoneBodies.Get("Felix") match {
-        case Some(b) => b == "shipped it"
-        case None()  => false
-    }
-    val idleNow = m.Statuses.Get("Felix") match {
+    return m.Statuses.Get("Felix") match {
         case Some(s) => s match {
-            case StIdle() => true
-            case _        => false
+            case StIdle() => IsTrue(t, true)
+            case _        => IsTrue(t, false)
         }
-        case None() => false
+        case None() => IsTrue(t, false)
     }
-    return IsTrue(t, bodyLogged && idleNow)
+}
+
+// With sampleTeam having no QA + DefaultWorkflow QARequired=true,
+// afterMemberDone(inDelegating=true, QARequired, QAMembers=[]) falls
+// through to TLReview because QAMembers is empty. Past behaviour:
+// finaliseMemberDone never fired MemberDone so FSM stayed Delegating.
+func TestOnUncommittedCheckResult_CleanFinalises_FsmAdvances(t T) T {
+    val seed = sampleModel().Copy(
+        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
+    )
+    val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped it", Dirty = false))
+    return m.State match {
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
+    }
 }
 
 // workflowWithPostPrompt is the default workflow with a non-empty
@@ -5317,4 +5357,283 @@ func TestTerminalFingerprint_DistinguishesAndDedupes(t T) T {
     val c = terminalFingerprint(Finished("quoted example body"))
     val t1 = IsTrue(t, a != b)
     return IsTrue(t1, a == c)
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end FSM-transition coverage.
+//
+// The audit that surfaced the finaliseMemberDone-doesn't-fire-MemberDone
+// bug found that most handler tests in this file assert side effects
+// (status flips, body recorded, conversation lines appended) but rarely
+// the FSM transition itself. Pure-FSM tests in state_machine_test.gala
+// cover the Transition(state, event, ctx) → state map exhaustively;
+// what was missing is the bridge layer — does each orchestrator
+// handler correctly DERIVE and FIRE the right event from its input.
+//
+// Tests below assert m.State after each handler / chunk path. One
+// per orchestrator → FSM bridge, plus edge cases for partial drains
+// and team configurations with / without QA.
+// ---------------------------------------------------------------------------
+
+// teamWithQA returns sampleTeam plus a Sable QA member. Used by the
+// QAGate-drain tests so the FSM can actually enter QAGate (which
+// requires QARequired + at least one QA member).
+func teamWithQA() Team {
+    val sable = Member(
+        Name = "Sable", Role = QA(),
+        Personality = "rigorous",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val base = sampleTeam()
+    return base.Copy(Members = base.Members.Append(sable))
+}
+
+// modelWithQA is sampleModel but with the QA-enabled team + workflow.
+// QARequired=true so afterMemberDone routes through QAGate on the
+// engineer drain.
+func modelWithQA() AppModel {
+    val proj = sampleProject()
+    val team = teamWithQA()
+    val wf   = DefaultWorkflow().Copy(QARequired = true)
+    return InitialModel(proj, team, wf, DefaultPolicy())
+}
+
+// finaliseMemberDone (QA path): a QA member emits @finished and
+// finaliseMemberDone fires MemberDone immediately. From QAGate
+// with only Sable pending, the drain hops to TLReview.
+//
+// Past behaviour (bug): finaliseMemberDone wrote MemberDoneBodies
+// but never called transitionLogged. FSM stayed in QAGate forever.
+// Live session: Sable APPROVE'd at 05:01:00 and the FSM stayed
+// stuck in QAGate for 57 minutes until tui_exit.
+func TestFinaliseMemberDone_QAOnly_DrainsQAGateToTLReview(t T) T {
+    val seed = modelWithQA().Copy(
+        State    = QAGate(Pending = arrayToHashSet(ArrayOf("Sable"))),
+        Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
+    )
+    val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
+    return m.State match {
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
+    }
+}
+
+// Partial-drain edge case: two QAs pending, one finishes →
+// QAGate(Pending={Theo}) (the other QA still pending).
+func TestFinaliseMemberDone_QAGate_PartialPending_StaysInQAGate(t T) T {
+    val theo = Member(
+        Name = "Theo", Role = QA(),
+        Personality = "p", Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val seed = modelWithQA().Copy(
+        State = QAGate(Pending = arrayToHashSet(ArrayOf("Sable", "Theo"))),
+        Team  = modelWithQA().Team.Copy(Members = modelWithQA().Team.Members.Append(theo)),
+    )
+    val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
+    return m.State match {
+        case QAGate(rest) => IsTrue(t, rest.Contains("Theo") && !rest.Contains("Sable"))
+        case _            => IsTrue(t, false)
+    }
+}
+
+// Engineer path: engineer @finished → onMemberDone schedules the
+// uncommitted-check Future; the result lands → onUncommittedCheckResult
+// → clean + no post-prompt due (workflow has no post_engineer_prompt
+// in DefaultWorkflow) → finaliseMemberDone → MemberDone FSM event.
+// From Delegating(Pending={Felix}) with no QA team → TLReview.
+//
+// This is end-to-end via the public Update path so the wiring
+// between onMemberDone, uncommittedCheckCmd, onUncommittedCheckResult,
+// and finaliseMemberDone is all exercised.
+func TestEngineerFinish_NoQA_DrainsDelegatingToTLReview(t T) T {
+    val seed = sampleModel().Copy(
+        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
+    )
+    // Synthetic UncommittedCheckResult bypasses the real git probe
+    // so the test is deterministic. The clean path takes the same
+    // finaliseMemberDone call site as a real check-clean result.
+    val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped", Dirty = false))
+    return m.State match {
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
+    }
+}
+
+// Engineer path with QA: same shape but QARequired=true + QA member
+// exists → Delegating drains to QAGate(Pending={Sable}) instead of
+// TLReview.
+func TestEngineerFinish_WithQA_DrainsDelegatingToQAGate(t T) T {
+    val seed = modelWithQA().Copy(
+        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
+    )
+    val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped", Dirty = false))
+    return m.State match {
+        case QAGate(pending) => IsTrue(t, pending.Contains("Sable"))
+        case _               => IsTrue(t, false)
+    }
+}
+
+// EOF-after-@finished must NOT double-fire MemberDone. The
+// alreadyFired guard in onSessionFailed (line ~3443) reads
+// MemberDoneBodies as the in-turn watermark. After finaliseMemberDone
+// fires MemberDone and writes the body, the trailing EOF that
+// arrives moments later from the killed subprocess must be a
+// no-op.
+func TestEofAfterAtFinished_DoesNotDoubleFireMemberDone(t T) T {
+    // Pre-stuff the model into the post-finaliseMemberDone state:
+    // FSM already advanced to TLReview, MemberDoneBodies has the
+    // entry, status is Idle. The EOF arriving now should be silently
+    // dropped — the FSM must stay at TLReview, NOT swing back to
+    // Delegating or any other state.
+    val seed = sampleModel().Copy(
+        State            = TLReview(),
+        MemberDoneBodies = EmptyHashMap[string, string]().Put("Felix", "shipped"),
+        Statuses         = EmptyHashMap[string, Status]().Put("Felix", StIdle()),
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Felix", ErrText = "EOF"))
+    return m.State match {
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
+    }
+}
+
+// Member @help via the chunk path. The @help block streamed in
+// through onChunk → applyChunkVisible → maybeHandleMemberDirectives
+// → applyMemberDirective → onMemberHelp → MemberHelpRequested FSM
+// event → TLNudging(reason="help", pending). The lead never receives
+// the @help directly; the orchestrator synthesises a relay turn.
+func TestChunkArrived_MemberHelp_AdvancesToTLNudging(t T) T {
+    val seed = sampleModel().Copy(
+        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+    )
+    val helpChunk = "Stuck on the API contract — should I extend the existing endpoint or add a new one?\n@help\nNeed routing guidance.\n@end"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = helpChunk))
+    return m.State match {
+        case TLNudging(reason, pending) => IsTrue(t, reason == "help" && pending.Contains("Felix"))
+        case _                          => IsTrue(t, false)
+    }
+}
+
+// Member @blocked via the chunk path. From Delegating(Pending={Felix}),
+// Felix's @blocked drains the pending set → afterMemberDone with empty
+// remainder routes to either QAGate (if QA required + members) or
+// TLReview. sampleModel has no QA so we land in TLReview.
+func TestChunkArrived_MemberBlocked_DrainsToTLReview(t T) T {
+    val seed = sampleModel().Copy(
+        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+    )
+    val blockedChunk = "Can't proceed — the upstream dependency is broken.\n@blocked\nThird-party API is returning 500s; this is outside my scope to fix.\n@end"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = blockedChunk))
+    return m.State match {
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
+    }
+}
+
+// Member @finished via the chunk path. The full pipeline: chunk
+// arrives, applyChunkVisible parses the directive,
+// maybeHandleMemberDirectives identifies the terminal block,
+// applyMemberDirective routes to onMemberDone. For a NON-engineer
+// (QA), onMemberDone calls finaliseMemberDone directly — and now
+// with the bug fix, finaliseMemberDone fires MemberDone.
+//
+// This is the test that would have caught Sable's stuck-in-QAGate
+// symptom from the live session.
+func TestChunkArrived_QAFinished_DrainsToTLReview(t T) T {
+    val seed = modelWithQA().Copy(
+        State    = QAGate(Pending = arrayToHashSet(ArrayOf("Sable"))),
+        Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
+    )
+    val approveChunk = "Reviewed the deliverables; build green; tests pass.\n@finished\nAPPROVE. Migration looks clean.\n@end"
+    val (m, _) = Update(seed, ChunkArrived(Member = "Sable", Line = approveChunk))
+    return m.State match {
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
+    }
+}
+
+// onMemberHelp directly (handler-level): wraps the chunk-path test
+// above with a unit-level call that doesn't depend on the parser.
+// Useful for catching regressions where applyMemberDirective routing
+// changes but the underlying handler is correct.
+func TestOnMemberHelp_FiresMemberHelpRequested(t T) T {
+    val seed = sampleModel().Copy(
+        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+    )
+    val (m, _) = onMemberHelp(seed, "Felix", "Which API should I extend?")
+    return m.State match {
+        case TLNudging(reason, _) => IsTrue(t, reason == "help")
+        case _                    => IsTrue(t, false)
+    }
+}
+
+// onMemberBlocked directly: from Delegating(Pending={Felix}) the
+// blocked drain routes to TLReview (no QA in sampleTeam).
+func TestOnMemberBlocked_FiresMemberBlockedAndDrains(t T) T {
+    val seed = sampleModel().Copy(
+        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+    )
+    val (m, _) = onMemberBlocked(seed, "Felix", "Third-party API down")
+    return m.State match {
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
+    }
+}
+
+// rejectAndIdle: pressing Esc / typing /reject from Approval fires
+// ApprovalRejected and the FSM hops to Idle. The reject path also
+// appends two conversation lines; we only check the FSM here.
+func TestRejectAndIdle_AdvancesToIdle(t T) T {
+    val seed = sampleModel().Copy(State = Approval(SummaryBody = "ship the thing"))
+    val (m, _) = rejectAndIdle(seed)
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
+// UserPrompted from any non-Approval state → TLThinking. Two checks:
+// Delegating (member dispatched) and QAGate (QA in flight) both lose
+// their pending sets on a UserPrompted escape hatch.
+func TestUserPrompted_FromDelegating_LandsInTLThinking(t T) T {
+    val seed = sampleModel().Copy(
+        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        Composer = "redirect: try a different approach",
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    return m.State match {
+        case TLThinking() => IsTrue(t, true)
+        case _            => IsTrue(t, false)
+    }
+}
+
+func TestUserPrompted_FromQAGate_LandsInTLThinking(t T) T {
+    val seed = modelWithQA().Copy(
+        State    = QAGate(Pending = arrayToHashSet(ArrayOf("Sable"))),
+        Composer = "wait, scrap the review",
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    return m.State match {
+        case TLThinking() => IsTrue(t, true)
+        case _            => IsTrue(t, false)
+    }
+}
+
+// Approval is the one state UserPrompted does NOT escape from.
+// User-typed prompts go to the composer normally but DON'T fire
+// UserPrompted; the user must approve or reject the modal first.
+func TestUserPrompted_FromApproval_StaysInApproval(t T) T {
+    val seed = sampleModel().Copy(
+        State    = Approval(SummaryBody = "ship it"),
+        Composer = "should be safe, but...",
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    return m.State match {
+        case Approval(b) => Eq(t, b, "ship it")
+        case _           => IsTrue(t, false)
+    }
 }

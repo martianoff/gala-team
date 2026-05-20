@@ -2897,11 +2897,30 @@ func finaliseMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cm
     // as closeLiveSession in onSubmit; PendingClosures drops the
     // stale chunks the read pump still has queued.
     val closed = closeLiveSession(m, name)
-    val m1 = closed.Copy(
+    // Write MemberDoneBodies + Toasts FIRST so onSessionFailed's
+    // alreadyFired guard (line ~3443) can correctly suppress the
+    // double-fire when the killed subprocess's EOF arrives moments
+    // later.
+    val withBody = closed.Copy(
         MemberDoneBodies = closed.MemberDoneBodies.Put(name, body),
         Toasts           = toast,
     )
-    return (setStatus(m1, name, StIdle()), NoCmd[AppMsg]())
+    // Fire the MemberDone FSM event RIGHT HERE. A prior version
+    // only recorded the body and relied on onSessionFailed's
+    // post-EOF path to fire the transition — but closeLiveSession
+    // bumps PendingClosures so the EOF gets dropped as stale, and
+    // the comment block in onSessionFailed that claimed "the FSM has
+    // already advanced through MemberDone" was wrong: no path ever
+    // fired it. A live session captured a QA member (Sable) emitting
+    // a clean @finished APPROVE block; the FSM stayed in QAGate for
+    // the next 57 minutes until tui_exit because the event never
+    // fired. Firing here fixes both QA (non-engineer path
+    // through onMemberDone) and engineer paths (which arrive via
+    // onUncommittedCheckResult → finaliseMemberDone after the
+    // commit-gate / post-engineer-prompt rounds).
+    val nextState = transitionLogged(withBody.State, MemberDone(MemberName = name, Body = body), transitionContext(withBody))
+    val advanced = persistAppModel(withBody.Copy(State = nextState))
+    return (setStatus(advanced, name, StIdle()), NoCmd[AppMsg]())
 }
 
 // hasUncommittedWork returns true if `cwd` (an engineer's worktree)
@@ -3426,17 +3445,14 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 case Some(mm) => sendMemberNudge(cleaned, mm, memberMalformed)
             }
         }
-        // Duplicate-MemberDone guard. If `@done` was parsed out of the
-        // member's stream already in this turn (onMemberDone wrote the
-        // body into MemberDoneBodies and closed the session via
-        // closeLiveSession), the FSM has already advanced through
-        // MemberDone. The EOF we're processing now is the trailing
-        // signal from that same closure — re-firing MemberDone here
-        // produces the doubled `fsm_transition MemberDone(name)` event
-        // pair observed in the audit log (2 events 54 ms apart). The
-        // FSM tolerates the no-op self-loop but it churns state and
-        // could mis-trigger any future event handler that isn't
-        // idempotent. PendingClosures usually catches this race
+        // Duplicate-MemberDone guard. When @finished is parsed out of
+        // the member's stream, finaliseMemberDone fires the MemberDone
+        // FSM event inline AND writes the body to MemberDoneBodies AND
+        // closes the session via closeLiveSession. The EOF we're
+        // processing now is the trailing signal from that same closure
+        // — re-firing MemberDone here would produce a doubled
+        // `fsm_transition MemberDone(name)` event pair (54 ms apart in
+        // a past audit log). PendingClosures usually catches the race
         // (closeLiveSession bumps it before EOF arrives), but the
         // counter occasionally lands at 0 when timing is unkind.
         // MemberDoneBodies acts as the in-turn watermark.

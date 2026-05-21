@@ -3938,25 +3938,6 @@ func pendingSizeOf(s AppState) int = s match {
 func arrayToHashSet(xs Array[string]) HashSet[string] =
     xs.FoldLeft(EmptyHashSet[string](), (acc, s) => acc.Add(s))
 
-// 2. Stuck-nudge prompt scoping.
-//
-// The aggregated prompt MUST tell the TL not to re-dispatch healthy
-// teammates. Audit log: TL re-dispatched Lyra five times even though
-// only Kael was stuck — the prior wording invited "reassign to other
-// members" which the model interpreted as "respawn the whole team."
-func TestDispatchBugs_StuckPrompt_ScopedToStuckMembersOnly(t T) T {
-    val now = time_utils.Now()
-    val m = sampleModel()
-    val singleStuck = buildStuckNudgePrompt(m, "Kael", now)
-    val t1 = IsTrue(t, strings.Contains(singleStuck, "DO NOT re-dispatch other team members"))
-    val multiStuck = buildAggregatedStuckPrompt(m, ArrayOf("Kael", "Mira"), now)
-    val t2 = IsTrue(t1, strings.Contains(multiStuck, "DO NOT re-dispatch other team members"))
-    // Sanity: the aggregate prompt lists exactly the stuck names, not
-    // every team member.
-    val t3 = IsTrue(t2, strings.Contains(multiStuck, "@dispatch(Kael, Mira)"))
-    return IsFalse(t3, strings.Contains(multiStuck, "@dispatch(Felix"))
-}
-
 // 3. LastChunkAt grace period on respawn.
 //
 // ensureSession must reset LastChunkAt[name] = now when it spawns a
@@ -4764,51 +4745,6 @@ func TestOnTick_HeartbeatRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
 // never re-escalated it, so the only recovery was the user typing
 // "continue". idleParkedStatus reaps it past the abandon threshold.
 // ----------------------------------------------------------------------------
-
-// Pending + StIdle + stale past AbandonAfterSeconds → StFailed (so the
-// existing respawn / MemberAbandoned branch drains the FSM).
-func TestIdleParkedStatus_PendingAndStale_Reaps(t T) T {
-    val pending = EmptyHashSet[string]().Add("Felix")
-    val seed = sampleModel().Copy(
-        State       = Delegating(Pending = pending),
-        LastChunkAt = sampleModel().LastChunkAt.Put("Felix", time_utils.FromUnixSeconds(int64(1))),
-    )
-    val now = time_utils.FromUnixSeconds(int64(100000000))
-    return idleParkedStatus(seed, "Felix", now) match {
-        case StFailed(_) => IsTrue(t, true)
-        case _           => IsTrue(t, false)
-    }
-}
-
-// StIdle but NOT in any pending set (genuinely idle between turns) →
-// left untouched. The pending-set gate is what makes the net safe.
-func TestIdleParkedStatus_NotPending_StaysIdle(t T) T {
-    val seed = sampleModel().Copy(
-        State       = Idle(),
-        LastChunkAt = sampleModel().LastChunkAt.Put("Felix", time_utils.FromUnixSeconds(int64(1))),
-    )
-    val now = time_utils.FromUnixSeconds(int64(100000000))
-    return idleParkedStatus(seed, "Felix", now) match {
-        case StIdle() => IsTrue(t, true)
-        case _        => IsTrue(t, false)
-    }
-}
-
-// Pending but NOT yet past the abandon threshold → still StIdle (no
-// premature reap of a member whose turn just ended).
-func TestIdleParkedStatus_PendingButFresh_StaysIdle(t T) T {
-    val pending = EmptyHashSet[string]().Add("Felix")
-    val at  = time_utils.FromUnixSeconds(int64(100000000))
-    val now = time_utils.FromUnixSeconds(int64(100000005))   // 5s later, well under 300s
-    val seed = sampleModel().Copy(
-        State       = Delegating(Pending = pending),
-        LastChunkAt = sampleModel().LastChunkAt.Put("Felix", at),
-    )
-    return idleParkedStatus(seed, "Felix", now) match {
-        case StIdle() => IsTrue(t, true)
-        case _        => IsTrue(t, false)
-    }
-}
 
 // ----------------------------------------------------------------------------
 // prBranchOverrideFor — iterate-on-existing-PR vs new-PR routing

@@ -274,6 +274,10 @@ func orchestrationOf(m AppModel) session.Orchestration {
         PendingQMember   = pqM,
         PendingQToolUse  = pqT,
         PendingQText     = pqX,
+        // Flatten the per-dispatch post-prompt latch (HashSet in
+        // memory) to a stable Array for the codec. RehydrateOrchestration
+        // rebuilds the HashSet on resume.
+        PostPromptSent   = setToArray(m.PostPromptSent),
     )
 }
 
@@ -311,6 +315,11 @@ func RehydrateOrchestration(m AppModel, snap session.Snapshot) AppModel {
             OpenedAt = time_utils.FromUnixSeconds(sp.OpenedAtNanos / int64(1000000000)),
         )),
         PendingQuestion = pendingQFromSnap(snap),
+        // Rebuild the per-dispatch post-prompt latch from the
+        // persisted Array. Legacy snapshots without the field decode
+        // to EmptyArray, so the HashSet rebuilds empty — same shape
+        // as a brand-new model.
+        PostPromptSent  = snap.PostPromptSent.FoldLeft(EmptyHashSet[string](), (acc, n) => acc.Add(n)),
     )
 }
 

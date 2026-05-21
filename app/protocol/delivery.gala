@@ -261,18 +261,3 @@ func IssueNudgeText(a DeliveryAction) Option[string] = a match {
     case IssueNudge(_, t) => Some[string](t)
     case _                => None[string]()
 }
-
-func IssueNudgeMember(a DeliveryAction) Option[string] = a match {
-    case IssueNudge(m, _) => Some[string](m)
-    case _                => None[string]()
-}
-
-func MarkAbandonedMember(a DeliveryAction) Option[string] = a match {
-    case MarkAbandoned(m) => Some[string](m)
-    case _                => None[string]()
-}
-
-func EscalateMember(a DeliveryAction) Option[string] = a match {
-    case Escalate(m) => Some[string](m)
-    case _           => None[string]()
-}

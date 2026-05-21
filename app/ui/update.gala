@@ -369,12 +369,13 @@ func resumeInFlight(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // The bandFor / livenessStatus helpers below take the typed Heartbeat
 // argument so threshold tweaks per-team take effect on the next tick.
 
-// onTick advances Tick + NowAt, prunes expired toasts, re-derives
-// liveness statuses for every member currently in Working/Slow/Stuck,
-// and — when a member newly transitions to Stuck or Failed — emits the
-// matching FSM event (MemberStuck / MemberAbandoned) so the FSM moves
-// from Delegating into TLNudging. Returns any Cmds produced (e.g. the
-// TL nudge turn spawn) batched.
+// onTick advances Tick + NowAt, prunes expired toasts, and runs the
+// protocol-driven liveness driver: per-member protocol.Tick decides
+// Redeliver / IssueNudge / MarkAbandoned, AggregateNudges folds every
+// currently-silent member into one batched TL nudge, and the resulting
+// actions are consumed via consumeDeliveryAction (the FSM
+// MemberAbandoned transition + the bounded-retry respawn). Returns
+// any Cmds produced (e.g. the TL nudge turn spawn) batched.
 func onTick(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val now = time_utils.Now()
     val pruned = pruneToasts(m.Toasts, now)
@@ -444,12 +445,25 @@ func updateLivenessStatuses(
 
     // 3. AggregateNudges → one IssueNudge naming every silent member,
     //    or None when nobody is silent. Spawned as a single TL nudge.
+    //    The first silent name is passed to the FSM MemberStuck event
+    //    so the transition log carries a real member, not an empty
+    //    placeholder (the FSM itself ignores the name; the log doesn't).
     val statePairs = aggregateStatePairs(m2, members, leadName)
     return protocol.AggregateNudges(statePairs, nowNanos, policy) match {
         case None()    => (m2, cmds2)
-        case Some(act) => fireAggregateNudge(m2, cmds2, act)
+        case Some(act) => fireAggregateNudge(m2, cmds2, act, firstSilentName(statePairs))
     }
 }
+
+// firstSilentName returns the first Silent member in roster order, or
+// "" when nothing is silent. AggregateNudges only fires Some when at
+// least one member is Silent, so a "" result is unreachable in the
+// caller — the empty default is defensive only.
+func firstSilentName(pairs Array[Tuple[string, protocol.DeliveryState]]) string =
+    pairs.Collect((pair) =>
+        if (protocol.StateName(pair.V2) == "silent") Some[string](pair.V1)
+        else                                          None[string]()
+    ).HeadOption().GetOrElse("")
 
 // aggregateStatePairs assembles (name, DeliveryState) for every non-
 // lead member that has a tracked DeliveryState entry, in roster order.
@@ -470,15 +484,17 @@ func aggregateStatePairs(
 
 // fireAggregateNudge spawns ONE TL nudge for a batched IssueNudge,
 // or a no-op for any other action (AggregateNudges only ever returns
-// IssueNudge; the catch-all keeps the FSM total).
+// IssueNudge; the catch-all keeps the FSM total). representativeMember
+// names the first Silent member for the FSM MemberStuck event so the
+// transition log carries a real name rather than an empty placeholder.
 func fireAggregateNudge(
-    m AppModel, cmds Array[Cmd[AppMsg]], act protocol.DeliveryAction,
+    m AppModel, cmds Array[Cmd[AppMsg]], act protocol.DeliveryAction, representativeMember string,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     if (protocol.ActionName(act) != "nudge") { return (m, cmds) }
     val text = protocol.IssueNudgeText(act).GetOrElse("")
-    val nextState = transitionLogged(m.State, MemberStuck(MemberName = ""), transitionContext(m))
+    val nextState = transitionLogged(m.State, MemberStuck(MemberName = representativeMember), transitionContext(m))
     val (m1, ncmds) = spawnTLNudge(m.Copy(State = nextState), "stuck-batch", text)
-    return (m1, ncmds.FoldLeft(cmds, (a, c) => a.Append(c)))
+    return (m1, cmds.AppendAll(ncmds))
 }
 
 // consumeDeliveryAction applies one per-member DeliveryAction. Per-
@@ -493,9 +509,19 @@ func consumeDeliveryAction(
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val tag = protocol.ActionName(action)
     if (tag == "redeliver") {
-        val maxRetries = maxAutoRetriesOf(m)
-        val retries    = m.RetryCount.Get(name).GetOrElse(0)
-        val (m1, c)    = liveRespawnMember(m, name, retries + 1, maxRetries)
+        // Persist the bumped Message back into LastDispatchedMsg so the
+        // next Tick reads the new Attempt against the policy budget.
+        // Without this the protocol's MaxRetries gate is dead: every
+        // subsequent Tick re-reads the original Attempt=1 dispatch,
+        // unconditionally returns Redeliver again, and the retry budget
+        // never enforces.
+        val mWithMsg = protocol.RedeliverMessage(action) match {
+            case Some(bumped) => m.Copy(LastDispatchedMsg = m.LastDispatchedMsg.Put(name, bumped))
+            case None()       => m
+        }
+        val maxRetries = maxAutoRetriesOf(mWithMsg)
+        val retries    = mWithMsg.RetryCount.Get(name).GetOrElse(0)
+        val (m1, c)    = liveRespawnMember(mWithMsg, name, retries + 1, maxRetries)
         return (m1, cmds.Append(c))
     }
     if (tag == "abandon") {
@@ -528,9 +554,11 @@ func consumeDeliveryAction(
 func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val lead = m.Team.Lead
     val mClosed = closeLiveSession(m, lead.Name).Copy(
-        TurnBuffer    = "",
-        ConsultsFired = 0,
-        Ledger        = protocol.EmptyLedger(),
+        TurnBuffer        = "",
+        ConsultsFired     = 0,
+        Ledger            = protocol.EmptyLedger(),
+        DeliveryStates    = EmptyHashMap[string, protocol.DeliveryState](),
+        LastDispatchedMsg = EmptyHashMap[string, protocol.Message](),
     )
     return ensureSession(mClosed, lead) match {
         case Left(err) => {
@@ -1565,6 +1593,8 @@ func clearSessionState(m AppModel) AppModel {
         TurnBuffer            = "",
         ConsultsFired         = 0,
         Ledger                = protocol.EmptyLedger(),
+        DeliveryStates        = EmptyHashMap[string, protocol.DeliveryState](),
+        LastDispatchedMsg     = EmptyHashMap[string, protocol.Message](),
         ActiveConsults        = EmptyHashMap[string, ConsultSession](),
         ConsultBuffers        = EmptyHashMap[string, Array[string]](),
         ConsultViewerOpen     = false,
@@ -1666,9 +1696,11 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // to the bottom of the conversation so they see their own line
         // and the incoming response without having to press End.
         ConversationSticky = true,
-        TurnBuffer    = "",
-        ConsultsFired = 0,
-        Ledger        = protocol.EmptyLedger(),
+        TurnBuffer        = "",
+        ConsultsFired     = 0,
+        Ledger            = protocol.EmptyLedger(),
+        DeliveryStates    = EmptyHashMap[string, protocol.DeliveryState](),
+        LastDispatchedMsg = EmptyHashMap[string, protocol.Message](),
         // Reset @base — a new prompt starts a fresh PR-base decision.
         // The TL re-emits @base early in this turn if stacking is
         // wanted; otherwise the PR opens against the project default.
@@ -2083,23 +2115,6 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
     }
 }
 
-// onChunk records a streamed line under the speaker's name, persists
-// the updated transcript via app/session, and re-arms the pump for the
-// same member (one in-flight Future per active member). If the session
-// has been closed (e.g. SessionFailed already swept it out of
-// m.Sessions) the pump is not restarted.
-//
-// When the chunk came from the Team Lead, the line is also appended to
-// `TurnBuffer` and the directive parser is rerun against the buffer;
-// any newly-completed `@consult(name) … @end` blocks past the
-// `ConsultsFired` watermark are dispatched as RunConsultFuture and
-// batched into the returned Cmd alongside the next chunk pull.
-//
-// Save runs synchronously: the file is small, the write is fast, and
-// pushing it through a Future would lose the exactly-after-this-chunk
-// ordering guarantee the user expects (close terminal → reopen → see
-// the same transcript). Failures are stuck in LastError so the user
-// notices but the TUI keeps running.
 // recordChunkArrival stamps both the silence-clock origin (LastChunkAt)
 // and the protocol delivery state (any chunk → Working via OnChunk;
 // Acked / Abandoned terminals are sticky). One bundle so every onChunk
@@ -2122,6 +2137,20 @@ func recordMemberTerminal(m AppModel, name string) AppModel {
     return m.Copy(DeliveryStates = m.DeliveryStates.Put(name, protocol.OnTerminal(cur)))
 }
 
+// onChunk records a streamed line under the speaker's name, persists
+// the transcript via app/session, advances the speaker's delivery
+// state via recordChunkArrival, and re-arms the pump for the same
+// member (one in-flight Future per active member). If the session has
+// been closed (e.g. SessionFailed already swept it out of m.Sessions)
+// the pump is not restarted. For TL chunks, the line accumulates into
+// TurnBuffer and the protocol decoder + Ledger run against it to
+// dispatch any newly-admitted @consult blocks via maybeDispatchConsults.
+//
+// Save runs synchronously: the file is small, the write is fast, and
+// pushing it through a Future would lose the exactly-after-this-chunk
+// ordering guarantee the user expects (close terminal → reopen → see
+// the same transcript). Failures are stuck in LastError so the user
+// notices but the TUI keeps running.
 func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
     // Stale-event drop: closeLiveSession bumps PendingClosures by 1
     // for each kill so the inevitable EOF (or any in-flight chunk)

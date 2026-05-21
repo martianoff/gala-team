@@ -3183,17 +3183,16 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
     return respawnMember(withStatus, name)
 }
 
-// liveRespawnMember kicks a member that the heartbeat just escalated
-// to StFailed because LastChunkAt is older than AbandonAfterSeconds.
-// The subprocess is technically still alive (no SessionFailed has
-// arrived) but it's not producing chunks — the orchestrator can't
-// distinguish "model thinking" from "deadlocked claude" from "stuck
-// MCP handshake" without taking action. Acting: kill the silent
+// liveRespawnMember is the action consumer for protocol.Redeliver:
+// the delivery FSM has decided a silent member crossed the stuck
+// threshold with retry budget remaining, so we kill the wedged
 // subprocess via closeLiveSession, bump RetryCount, flip status to
-// StRecovering, then run the same respawnMember path crash recovery
+// StRecovering, and run the same respawnMember path crash recovery
 // uses. The fresh subprocess gets `--resume <sid>` so the model
 // reloads the prior conversation and the "Continue your previous
-// task." prompt nudges it forward.
+// task." prompt nudges it forward. This is the ONE trigger now —
+// the ad-hoc heartbeat-ladder path that used to also call it was
+// retired with updateLivenessStatuses' rewrite.
 //
 // Shares Heartbeat.MaxRetries with the crash path because both
 // reflect "consecutive attempts to keep this member alive without

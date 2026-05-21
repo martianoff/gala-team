@@ -384,3 +384,46 @@ func TestSaveThenLoad_LegacySnapshotHasEmptyStateTag(t T) T {
         }
     }
 }
+
+// PostPromptSent round-trip — the per-dispatch latch that prevents
+// the workflow.post_engineer_prompt (e.g. `/simplify`) from firing
+// twice for the same engineer in one cycle MUST survive tui_exit /
+// resume. Without persisting it, an engineer who already ran the
+// prompt pre-resume gets put through it again on the post-resume
+// @finished, and the FSM appears stuck on Delegating(name) for the
+// duration of the redundant round.
+func TestSaveThenLoad_PostPromptSentRoundTrips(t T) T {
+    val dir = mkTempDir("postpromptsent")
+    val orch = Orchestration(
+        StateTag       = "Delegating",
+        StatePending   = ArrayOf("Lyra"),
+        PostPromptSent = ArrayOf("Lyra", "Kael"),
+    )
+    val saved = Save(dir, "demo", EmptyArray[ConversationLine](),
+        EmptyArray[string](), EmptyArray[SessionIdEntry](), orch)
+    val t1 = IsTrue(t, saved.IsSuccess())
+    return Load(dir) match {
+        case None()     => IsTrue(t1, false)
+        case Some(snap) => {
+            val t2 = Eq(t1, snap.PostPromptSent.Size(), 2)
+            val t3 = Eq(t2, snap.PostPromptSent.Get(0), "Lyra")
+            return Eq(t3, snap.PostPromptSent.Get(1), "Kael")
+        }
+    }
+}
+
+// A snapshot written without the PostPromptSent field (legacy shape
+// via the no-orchestration Save overload) decodes to an EmptyArray —
+// the rehydrate path then builds an empty HashSet exactly like a
+// fresh model. Pins the "legacy snapshot still resumes" contract.
+func TestSaveThenLoad_PostPromptSentDefaultsToEmpty(t T) T {
+    val dir = mkTempDir("postpromptsent_default")
+    val saved = Save(dir, "demo",
+        ArrayOf(ConversationLine(Speaker = "you", Text = "hi")),
+        EmptyArray[string]())
+    val t1 = IsTrue(t, saved.IsSuccess())
+    return Load(dir) match {
+        case None()     => IsTrue(t1, false)
+        case Some(snap) => IsTrue(t1, snap.PostPromptSent.IsEmpty())
+    }
+}

@@ -3935,9 +3935,6 @@ func pendingSizeOf(s AppState) int = s match {
     case _                   => -1
 }
 
-func arrayToHashSet(xs Array[string]) HashSet[string] =
-    xs.FoldLeft(EmptyHashSet[string](), (acc, s) => acc.Add(s))
-
 // 3. LastChunkAt grace period on respawn.
 //
 // ensureSession must reset LastChunkAt[name] = now when it spawns a
@@ -4874,6 +4871,45 @@ func TestRehydrateOrchestration_LegacyEmptyTagIsNoOp(t T) T {
         case Idle() => IsTrue(t, true)
         case _      => IsTrue(t, false)
     }
+}
+
+// Bridge test: orchestrationOf MUST flatten the in-memory
+// PostPromptSent HashSet to the Snapshot.PostPromptSent Array, or the
+// per-dispatch latch silently fails to round-trip and post-engineer
+// prompts re-fire on already-ran engineers across a tui_exit/resume.
+// Pins the update.gala-side bridge that the codec-only session tests
+// can't see.
+func TestOrchestrationOf_FlattensPostPromptSent(t T) T {
+    val seed = sampleModel().Copy(
+        PostPromptSent = EmptyHashSet[string]().Add("Felix").Add("Mira"),
+    )
+    val orch = orchestrationOf(seed)
+    val t1 = Eq(t, orch.PostPromptSent.Size(), 2)
+    // HashSet iteration order is not insertion order; check membership
+    // via the rebuilt set instead of indexing the array.
+    val rebuilt = arrayToHashSet(orch.PostPromptSent)
+    val t2 = IsTrue(t1, rebuilt.Contains("Felix"))
+    return IsTrue(t2, rebuilt.Contains("Mira"))
+}
+
+// Bridge test: RehydrateOrchestration MUST rebuild the HashSet from
+// the persisted Array. Pins the inverse of the above — deletion of
+// the rehydrate line is what would let resume-after-exit re-fire
+// the post-prompt.
+func TestRehydrateOrchestration_RestoresPostPromptSent(t T) T {
+    val snap = session.Snapshot(
+        ProjectName    = "demo",
+        SavedAt         = int64(0),
+        Conversation    = EmptyArray[session.ConversationLine](),
+        ActiveMembers   = EmptyArray[string](),
+        StateTag        = "Approval",
+        StateSummaryBody = "ship",
+        PostPromptSent  = ArrayOf("Felix", "Mira"),
+    )
+    val m = RehydrateOrchestration(sampleModel().Copy(State = Idle()), snap)
+    val t1 = Eq(t, m.PostPromptSent.Size(), 2)
+    val t2 = IsTrue(t1, m.PostPromptSent.Contains("Felix"))
+    return IsTrue(t2, m.PostPromptSent.Contains("Mira"))
 }
 
 // resumeTargets: pending workers for Delegating, nobody for Idle.

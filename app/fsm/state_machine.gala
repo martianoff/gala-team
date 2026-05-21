@@ -195,32 +195,25 @@ func onQAGate(pending HashSet[string], event Event, ctx TransitionContext) AppSt
 //
 //   - TLDone(@summary)  → Approval (the TL chose to ship)
 //   - TLDone(@dispatch) → Delegating(new targets)
-//   - TLDone(no directive): the TL replied with prose only. This must
-//     NOT drop to Idle while members are still pending — that
-//     silently abandons the run (a pending member's later MemberDone
-//     lands in Idle and is discarded). Fall back to
-//     Delegating(pending) so the pending member's completion still
-//     drains; only Idle when nothing is pending.
-//   - A member that completes/blocks/crashes DURING the nudge turn
-//     drains `pending` exactly like onDelegating (via
-//     memberCompletion), so a finish that races the nudge isn't lost.
+//   - TLDone(no directive) → routes via afterTLDone exactly like a
+//     normal TL turn (Idle when no directives, Delegating when there
+//     are targets, Approval on @summary). A prose-only reply that
+//     drops to Idle is no longer carried back to Delegating(pending)
+//     here: the protocol delivery FSM (Tick) treats a still-silent
+//     pending member as a delivery non-ack and re-escalates on the
+//     next heartbeat via Redeliver / IssueNudge / MarkAbandoned, so
+//     the in-flight run is recovered through the protocol path
+//     instead of via an ad-hoc FSM fallback.
+//   - A member that completes / blocks / crashes DURING the nudge
+//     turn drains `pending` via memberCompletion exactly like
+//     onDelegating, so a finish that races the nudge isn't lost.
 func onTLNudging(reason string, pending HashSet[string], event Event, ctx TransitionContext) AppState =
     memberCompletion(event, pending, ctx, true) match {
         case Some(s) => s
         case None()  => event match {
-            case TLDone(dirs) => afterNudgeTLDone(dirs, pending, ctx)
+            case TLDone(dirs) => afterTLDone(dirs, ctx)
             case _            => TLNudging(Reason = reason, Pending = pending)
         }
-    }
-
-// afterNudgeTLDone is afterTLDone with one override: a no-directive
-// resolution returns to Delegating(pending) instead of Idle whenever
-// members are still pending, so a prose-only nudge reply can't
-// silently kill an in-flight run.
-func afterNudgeTLDone(dirs Array[Directive], pending HashSet[string], ctx TransitionContext) AppState =
-    afterTLDone(dirs, ctx) match {
-        case Idle() => if (pending.IsEmpty()) Idle() else Delegating(Pending = pending)
-        case other  => other
     }
 
 func onApproval(state AppState, event Event) AppState = event match {

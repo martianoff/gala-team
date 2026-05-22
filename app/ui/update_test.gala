@@ -4311,6 +4311,39 @@ func TestApplyChunkVisible_LongErrorText_IsTruncatedInLastError(t T) T {
     }
 }
 
+// claude-code's `result` envelopes with `is_error=true` sometimes
+// carry a stream-json envelope (`{"type":"user","message":...}`) in
+// the `result` field itself. resultEventChunk passes it through into
+// chunk.ErrorText, and PR #65's truncate-only fix still surfaced the
+// first 80 bytes as visible JSON in the bottom bar (the user-reported
+// `⚠ Vesper: {"type":"user","message":...` symptom). Detect the
+// envelope shape on chunk.ErrorText and replace with a clean tag, the
+// same way onStderr does.
+func TestApplyChunkVisible_StreamJsonErrorText_SuppressedTag(t T) T {
+    val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01abc\",\"type\":\"tool_result\",\"content\":\"ok\"}]}}"
+    val errChunk = ClaudeChunk(
+        Visible         = "",
+        ErrorText       = envelope,
+        LiveTurn        = None[ClaudeUsage](),
+        FinalTurn       = None[ClaudeUsage](),
+        CostUsd         = 0.0,
+        AskQuestionId   = "",
+        AskQuestionText = "",
+        TurnEnded       = false,
+        IsToolActivity  = false,
+        IsSynthetic     = false,
+    )
+    val seed = sampleModel()
+    val (m, _) = applyChunkVisible(seed, "Vesper", errChunk)
+    return m.LastError match {
+        case None()    => IsTrue(t, false)
+        case Some(err) => {
+            val t1 = IsTrue(t, strings.Contains(err, "stream-json"))
+            return IsTrue(t1, !strings.Contains(err, "\"type\":\"user\""))
+        }
+    }
+}
+
 // claude-code sometimes misroutes a stream-json envelope onto stderr
 // (observed: a `{"type":"user","message":...}` user-input envelope
 // surfaced under the bottom-bar warning as the literal JSON bytes,

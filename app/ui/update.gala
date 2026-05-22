@@ -486,7 +486,7 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     if m.StateEnteredAt.UnixNanos() <= int64(0) {
         return (m, NoCmd[AppMsg]())
     }
-    val elapsedSec = elapsedSeconds(now, m.StateEnteredAt)
+    val elapsedSec = (now.UnixNanos() - m.StateEnteredAt.UnixNanos()) / int64(1000000000)
     if elapsedSec < threshold {
         return (m, NoCmd[AppMsg]())
     }

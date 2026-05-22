@@ -258,6 +258,14 @@ func orchestrationOf(m AppModel) session.Orchestration {
         case Some(pq) => (pq.Member, pq.ToolUseId, pq.QuestionText)
         case None()   => ("", "", "")
     }
+    // PostPromptSent is the per-dispatch latch that prevents the
+    // workflow.post_engineer_prompt from firing twice for the same
+    // engineer in one cycle. Persist it flat — without this, a
+    // resume mid-cycle wipes the HashSet and any engineer that
+    // already ran the prompt pre-resume gets put through it again,
+    // making the FSM appear stuck on Delegating(name) for the
+    // duration of the redundant round.
+    val postPromptList = m.PostPromptSent.FoldLeft(EmptyArray[string](), (acc, s) => acc.Append(s))
     return session.Orchestration(
         StateTag         = stateTag(m.State),
         StatePending     = statePendingList(m.State),
@@ -277,10 +285,7 @@ func orchestrationOf(m AppModel) session.Orchestration {
         PendingQMember   = pqM,
         PendingQToolUse  = pqT,
         PendingQText     = pqX,
-        // Flatten the per-dispatch post-prompt latch (HashSet in
-        // memory) to a stable Array for the codec. RehydrateOrchestration
-        // rebuilds the HashSet on resume.
-        PostPromptSent   = setToArray(m.PostPromptSent),
+        PostPromptSent   = postPromptList,
     )
 }
 
@@ -304,6 +309,12 @@ func pendingQFromSnap(snap session.Snapshot) Option[PendingQuestion] =
 // ago" label, so sub-second fidelity is irrelevant).
 func RehydrateOrchestration(m AppModel, snap session.Snapshot) AppModel {
     if snap.StateTag == "" { return m }
+    // Rebuild the PostPromptSent HashSet from the flat Array the
+    // snapshot persists. The post-engineer-prompt latch must survive
+    // resume — without it, an engineer that already ran the prompt
+    // pre-resume gets a redundant round on the first @finished after
+    // resume, and the FSM appears stuck on Delegating(name).
+    val postPromptSet = snap.PostPromptSent.FoldLeft(EmptyHashSet[string](), (acc, s) => acc.Add(s))
     return m.Copy(
         State          = stateFromSnap(snap.StateTag, snap.StatePending, snap.StateReason, snap.StateSummaryBody),
         Plan           = snap.Plan,
@@ -318,11 +329,7 @@ func RehydrateOrchestration(m AppModel, snap session.Snapshot) AppModel {
             OpenedAt = time_utils.FromUnixSeconds(sp.OpenedAtNanos / int64(1000000000)),
         )),
         PendingQuestion = pendingQFromSnap(snap),
-        // Rebuild the per-dispatch post-prompt latch from the
-        // persisted Array. Legacy snapshots without the field decode
-        // to EmptyArray, so the HashSet rebuilds empty — same shape
-        // as a brand-new model.
-        PostPromptSent  = arrayToHashSet(snap.PostPromptSent),
+        PostPromptSent  = postPromptSet,
     )
 }
 
@@ -420,6 +427,18 @@ func updateLivenessStatuses(
     m AppModel, members Array[Member], now time_utils.Instant,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val leadName = m.Team.Lead.Name
+    // Skip the liveness walk entirely while a stuck nudge is in
+    // flight. TLNudging(reason="stuck", pending) means a TL turn has
+    // already been dispatched to address these stuck members and is
+    // awaiting its TLDone. Re-Ticking would re-batch the same Silent
+    // members into another IssueNudge every heartbeat — TLNudging →
+    // TLNudging self-loops with no semantic change. The nudge's
+    // TLDone is the right resolution boundary; let it land.
+    val inStuckNudge = m.State match {
+        case TLNudging(reason, _) => reason == "stuck"
+        case _                    => false
+    }
+    if inStuckNudge { return (m, EmptyArray[Cmd[AppMsg]]()) }
     val nowNanos = int(now.UnixNanos())
     val policy   = protocol.PolicyFromHeartbeat(
         m.Policy.Heartbeat.SlowAfterSeconds,
@@ -505,7 +524,13 @@ func fireAggregateNudge(
     if (protocol.ActionName(act) != "nudge") { return (m, cmds) }
     val text = protocol.IssueNudgeText(act).GetOrElse("")
     val nextState = transitionLogged(m.State, MemberStuck(MemberName = representativeMember), transitionContext(m))
-    val (m1, ncmds) = spawnTLNudge(m.Copy(State = nextState), "stuck-batch", text)
+    // Save AFTER the FSM transition + BEFORE spawning the nudge. The
+    // nudge will produce chunks and trigger per-chunk saves on its
+    // own, but persisting here removes the race window where a crash
+    // between the FSM step and the first chunk leaves latest.json
+    // stuck at the pre-nudge Delegating state.
+    val withState = persistAppModel(m.Copy(State = nextState))
+    val (m1, ncmds) = spawnTLNudge(withState, "stuck-batch", text)
     return (m1, cmds.AppendAll(ncmds))
 }
 
@@ -2023,9 +2048,16 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
     }
     val short = truncateForToast(trimmed)
     val toast = m.Toasts.PushWarn(s"${name} (stderr): ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
+    // Use the truncated form for LastError too — the full stderr
+    // line lands in events.jsonl already via LogStderr above, so
+    // the audit trail is intact. A past session captured an 8 KB
+    // stream-json `tool_result` envelope claude-code wrote to
+    // stderr instead of stdout; without the trim it filled the
+    // bottom-bar LastError surface and clobbered the help-key hint
+    // rendering for the whole session.
     val m1 = m.Copy(
         Toasts    = toast,
-        LastError = Some(s"${name} stderr: ${trimmed}"),
+        LastError = Some(s"${name} stderr: ${short}"),
     )
     return (m1, pumpCmd)
 }
@@ -2687,11 +2719,30 @@ func finaliseMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cm
     // as closeLiveSession in onSubmit; PendingClosures drops the
     // stale chunks the read pump still has queued.
     val closed = closeLiveSession(m, name)
-    val m1 = closed.Copy(
+    // Write MemberDoneBodies + Toasts FIRST so onSessionFailed's
+    // alreadyFired guard (line ~3443) can correctly suppress the
+    // double-fire when the killed subprocess's EOF arrives moments
+    // later.
+    val withBody = closed.Copy(
         MemberDoneBodies = closed.MemberDoneBodies.Put(name, body),
         Toasts           = toast,
     )
-    return (setStatus(m1, name, StIdle()), NoCmd[AppMsg]())
+    // Fire the MemberDone FSM event RIGHT HERE. A prior version
+    // only recorded the body and relied on onSessionFailed's
+    // post-EOF path to fire the transition — but closeLiveSession
+    // bumps PendingClosures so the EOF gets dropped as stale, and
+    // the comment block in onSessionFailed that claimed "the FSM has
+    // already advanced through MemberDone" was wrong: no path ever
+    // fired it. A live session captured a QA member (Sable) emitting
+    // a clean @finished APPROVE block; the FSM stayed in QAGate for
+    // the next 57 minutes until tui_exit because the event never
+    // fired. Firing here fixes both QA (non-engineer path
+    // through onMemberDone) and engineer paths (which arrive via
+    // onUncommittedCheckResult → finaliseMemberDone after the
+    // commit-gate / post-engineer-prompt rounds).
+    val nextState = transitionLogged(withBody.State, MemberDone(MemberName = name, Body = body), transitionContext(withBody))
+    val advanced = persistAppModel(withBody.Copy(State = nextState))
+    return (setStatus(advanced, name, StIdle()), NoCmd[AppMsg]())
 }
 
 // hasUncommittedWork returns true if `cwd` (an engineer's worktree)
@@ -2756,7 +2807,11 @@ func onMemberHelp(m AppModel, name string, question string) Tuple[AppModel, Cmd[
     // post-@help output is the model rambling rather than waiting.
     // The TL's nudge turn brings them back via a fresh dispatch.
     val closed = closeLiveSession(m, name)
-    val m1 = closed.Copy(State = nextState, Toasts = toast)
+    // Save AFTER the transition. The TL nudge that follows will
+    // emit chunks and ride per-chunk saves, but a crash between
+    // here and the nudge's first chunk would otherwise leave
+    // latest.json at the pre-help Delegating state.
+    val m1 = persistAppModel(closed.Copy(State = nextState, Toasts = toast))
     val m2 = setStatus(m1, name, StHelpWaiting(question))
     val (m3, cmds) = spawnTLNudge(m2, s"help-${name}", buildHelpNudgePrompt(name, question))
     return (m3, batchAll(cmds))
@@ -2792,11 +2847,15 @@ func onMemberBlocked(m AppModel, name string, reason string) Tuple[AppModel, Cmd
     // the transcript even though the member has self-marked failed.
     // PendingClosures drops the queued reads the pump still owns.
     val closed = closeLiveSession(m, name)
-    val m1 = closed.Copy(
+    // Save AFTER the transition. The blocked member's subprocess
+    // is gone (no more chunks), and the follow-up TL relay may not
+    // emit visibly until the user reads its prompt; persisting now
+    // keeps latest.json consistent with the FSM hop.
+    val m1 = persistAppModel(closed.Copy(
         State                = nextState,
         Toasts               = toast,
         MemberBlockedReasons = closed.MemberBlockedReasons.Put(name, reason),
-    )
+    ))
     val m2 = setStatus(m1, name, failedStatus)
     // Auto-spawn a TL relay turn so the lead can attempt to fix
     // the blocker without user intervention. Two cases:
@@ -2952,6 +3011,27 @@ func persistConversation(m AppModel, nextConvo Array[session.ConversationLine]) 
     case Failure(err) => m.Copy(Conversation = nextConvo, LastError = Some(s"session save: ${err.Error()}"))
 }
 
+// persistAppModel re-writes latest.json from the model's current
+// Conversation + Orchestration without changing the in-memory model
+// other than to record a save failure. Call this AFTER an FSM
+// transition that the per-chunk persistConversation save (which fires
+// inside applyChunkVisible BEFORE the transition fires) couldn't have
+// captured — otherwise the snapshot on disk lags the running state
+// by one transition. The observed failure mode: a TL turn's last
+// chunk persists with state_tag=TLThinking, pending_q_*=empty; ~250ms
+// later onSessionFailed parses an empty TurnBuffer, fires TLDone, FSM
+// advances to Idle, and we return WITHOUT another save — so a TUI
+// restart resumes from a half-state snapshot (TLThinking on disk,
+// Idle in the now-dead process's event log). Save-after-transition
+// closes that window.
+func persistAppModel(m AppModel) AppModel = session.Save(
+    m.Project.Repo, m.Project.Name, m.Conversation, activeMemberNames(m), serialiseSessionIds(m),
+    orchestrationOf(m),
+) match {
+    case Success(_)   => m
+    case Failure(err) => m.Copy(LastError = Some(s"session save: ${err.Error()}"))
+}
+
 // serialiseSessionIds flattens AppModel.SessionIds (HashMap) into the
 // SessionIdEntry array shape the snapshot persists. Empty map → empty
 // array (no entries written).
@@ -3053,6 +3133,32 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             //      Iris's reply and decides what to do next.
             // Either way, no Delegating, no auto-QA.
             if dirs.IsEmpty() {
+                // Transport-auth-failure guard. When the claude-code
+                // subprocess exits because its OAuth token was
+                // rejected, the stdout error line is already routed
+                // through ErrorText by onChunk (see
+                // looksLikeTransportAuthError), so the TurnBuffer is
+                // empty and we end up here with dirs.IsEmpty(). If we
+                // fire TLDone now the FSM steps TLThinking → Idle and
+                // the prior QAGate's pending question is forgotten —
+                // the user re-launches the TUI, types "continue", and
+                // gets nothing because the orchestrator's view of the
+                // world is "Idle, no work pending." Instead: leave
+                // the FSM untouched, surface a clear system notice
+                // telling the user how to recover, and let the next
+                // UserPrompted (after they re-run /login) re-dispatch
+                // the lead from whichever state we were in. The
+                // session save in persistAppModel below picks up the
+                // notice; no FSM event is emitted.
+                val lastErr = cleanedB.LastError.GetOrElse("")
+                if LooksLikeTransportAuthError(lastErr) {
+                    val notice = s"${name}: Claude Code authentication failed (the OAuth token was rejected). Run `/login` in your terminal, then re-prompt to retry. The orchestrator has not advanced state; the prior turn's pending question (if any) is preserved."
+                    val nextConvo = cleanedB.Conversation.Append(
+                        session.ConversationLine(Speaker = "system", Text = notice, At = time_utils.Now().UnixNanos()),
+                    )
+                    val saved = persistConversation(cleanedB, nextConvo)
+                    return (setStatus(saved, name, StIdle()), NoCmd[AppMsg]())
+                }
                 val malformedReason = detectMalformedDispatch(cleanedB.TurnBuffer, cleanedB.Team)
                 if malformedReason != "" {
                     val (m1, nudgeCmds) = spawnTLNudge(
@@ -3071,7 +3177,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 // by construction, so the FSM agrees with the direct
                 // assignment that lived here before.
                 val nextState = transitionLogged(cleanedB.State, TLDone(Directives = EmptyArray[Directive]()), transitionContext(cleanedB))
-                return (setStatus(cleanedB.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
+                return (setStatus(persistAppModel(cleanedB.Copy(State = nextState)), name, StIdle()), NoCmd[AppMsg]())
             }
             // Empty-after-QA-filter guard. If every dispatch target
             // resolved to a QA member (and qa_required is on), the
@@ -3126,7 +3232,13 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                         summaryReadyCmd(cleanedB.Project, name))
             }
             val nextState = transitionLogged(cleanedB.State, TLDone(Directives = dirs), transitionContext(cleanedB))
-            val withState = setStatus(cleanedB.Copy(State = nextState), name, StIdle())
+            // Save AFTER the transition so a TUI exit between this
+            // line and the next user input doesn't leave latest.json
+            // pinned to the pre-transition state_tag. (The per-chunk
+            // save inside applyChunkVisible captures the prior state
+            // only; without this, recovery would resume from a
+            // half-state snapshot.) See persistAppModel.
+            val withState = setStatus(persistAppModel(cleanedB.Copy(State = nextState)), name, StIdle())
             // If the new state is Delegating, fan out: spawn each
             // dispatched member's session with their per-target body
             // as the prompt. Without this, members stay StIdle forever
@@ -3177,17 +3289,14 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                 case Some(mm) => sendMemberNudge(cleaned, mm, memberMalformed)
             }
         }
-        // Duplicate-MemberDone guard. If `@done` was parsed out of the
-        // member's stream already in this turn (onMemberDone wrote the
-        // body into MemberDoneBodies and closed the session via
-        // closeLiveSession), the FSM has already advanced through
-        // MemberDone. The EOF we're processing now is the trailing
-        // signal from that same closure — re-firing MemberDone here
-        // produces the doubled `fsm_transition MemberDone(name)` event
-        // pair observed in the audit log (2 events 54 ms apart). The
-        // FSM tolerates the no-op self-loop but it churns state and
-        // could mis-trigger any future event handler that isn't
-        // idempotent. PendingClosures usually catches this race
+        // Duplicate-MemberDone guard. When @finished is parsed out of
+        // the member's stream, finaliseMemberDone fires the MemberDone
+        // FSM event inline AND writes the body to MemberDoneBodies AND
+        // closes the session via closeLiveSession. The EOF we're
+        // processing now is the trailing signal from that same closure
+        // — re-firing MemberDone here would produce a doubled
+        // `fsm_transition MemberDone(name)` event pair (54 ms apart in
+        // a past audit log). PendingClosures usually catches the race
         // (closeLiveSession bumps it before EOF arrives), but the
         // counter occasionally lands at 0 when timing is unkind.
         // MemberDoneBodies acts as the in-turn watermark.
@@ -3197,7 +3306,8 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         }
         val body = cleaned.MemberDoneBodies.Get(name).GetOrElse("")
         val nextState = transitionLogged(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
-        return (setStatus(cleaned.Copy(State = nextState), name, StIdle()), NoCmd[AppMsg]())
+        // Save AFTER the transition; see persistAppModel.
+        return (setStatus(persistAppModel(cleaned.Copy(State = nextState)), name, StIdle()), NoCmd[AppMsg]())
     }
     val maxRetries = maxAutoRetriesOf(m)
     val retries = m.RetryCount.Get(name).GetOrElse(0)
@@ -3248,7 +3358,10 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
     return findMemberByName(m.Team.Members, name) match {
         case None() => {
             val nextState = transitionLogged(m.State, MemberAbandoned(MemberName = name), transitionContext(m))
-            return (m.Copy(State = nextState), NoCmd[AppMsg]())
+            // Save AFTER the transition; same reasoning as the
+            // heartbeat MemberAbandoned path — no subsequent chunk
+            // arrives to ride a per-chunk save on.
+            return (persistAppModel(m.Copy(State = nextState)), NoCmd[AppMsg]())
         }
         case Some(_) => {
             val mClosed = closeLiveSession(m, name)
@@ -4371,9 +4484,82 @@ func filterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
             }
         }
     }
+    if kind == "rate_limit_event" {
+        // claude-code emits rate_limit_event envelopes with shape
+        // {"type":"rate_limit_event","rate_limit_info":{
+        //    "status":"allowed|approaching|rejected|...",
+        //    "resetsAt":<unix-epoch>,
+        //    "rateLimitType":"five_hour|...",
+        //    "overageStatus":"...","isUsingOverage":bool}, ...}
+        // The mixed snake_case outer / camelCase inner means
+        // claudeResultCodec's SnakeCase mapper can't decode the
+        // inner block directly. We only need three signals to
+        // decide whether to surface a toast — status, rateLimitType,
+        // resetsAt — so a small string extractor is enough and
+        // skips the codec mapper-style problem entirely.
+        val chunk = rateLimitEventChunk(trimmed)
+        val dropped = chunk.Visible == "" && chunk.ErrorText == ""
+        val reason = if (dropped) "rate_limit_event status=allowed (background)" else ""
+        TraceClaudeLine(member, envelope, chunk.Visible, chunk.ErrorText, dropped, reason)
+        return chunk
+    }
     val typeStr = if (kind == "") "<no type>" else kind
     TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${typeStr}")
     return emptyChunk()
+}
+
+// extractJsonField pulls the value of `"<key>":"<value>"` out of a
+// JSON envelope. Cheap string match used by the rate-limit classifier
+// to read a few inner-object fields without paying for codec mapper
+// dance over a mixed snake_case / camelCase payload. Returns "" when
+// the key is absent or the value isn't a quoted string.
+func extractJsonField(trimmed string, key string) string {
+    val needle = s"\"${key}\":\""
+    val parts = strings.SplitN(trimmed, needle, 2)
+    if len(parts) < 2 { return "" }
+    val rest = parts[1]
+    val tail = strings.SplitN(rest, "\"", 2)
+    if len(tail) < 2 { return "" }
+    return tail[0]
+}
+
+// rateLimitEventChunk inspects a rate_limit_event envelope and
+// returns either an empty chunk (status="allowed", the background
+// "everything's fine" tick that fires multiple times per turn — past
+// sessions saw 65 of these in one run, all benign) or a chunk with
+// ErrorText set to a human-readable toast when the status indicates
+// the team is approaching, has hit, or is being throttled by the
+// limit. The downstream applyChunkVisible surfaces ErrorText as a
+// warning toast + LastError; we deliberately do NOT route this
+// through Visible so the rate-limit warning never lands in the
+// conversation transcript as the agent's reply.
+//
+// Surface signal: <status> (the actionable cue: approaching /
+// rejected / etc.) and <rateLimitType> (which window — five_hour /
+// ...). resetsAt is a JSON number in claude-code's current payload
+// shape so extractJsonField (which only matches quoted strings)
+// returns "" — keeping the toast short and avoiding a brittle
+// numeric extractor that breaks if the schema gains a quoted ISO
+// timestamp later. The orchestrator's existing toast queue handles
+// dedup so multiple consecutive non-allowed events in one turn
+// don't spam the user.
+func rateLimitEventChunk(envelope string) ClaudeChunk {
+    val status = extractJsonField(envelope, "status")
+    if status == "" || status == "allowed" { return emptyChunk() }
+    val limitType = extractJsonField(envelope, "rateLimitType")
+    val limitLabel = if (limitType == "") "" else s" (${limitType})"
+    val msg = s"Claude API rate limit ${status}${limitLabel}"
+    return ClaudeChunk(
+        Visible         = "",
+        ErrorText       = msg,
+        LiveTurn        = None[ClaudeUsage](),
+        FinalTurn       = None[ClaudeUsage](),
+        CostUsd         = 0.0,
+        AskQuestionId   = "",
+        AskQuestionText = "",
+        TurnEnded       = false,
+        IsToolActivity  = false,
+    )
 }
 
 // extractJsonType returns the value of the top-level `"type":"…"`
@@ -4936,20 +5122,26 @@ func onApprovalReadyResult(m AppModel, body string, reason Option[string]) Tuple
         val r = reason.GetOrElse("")
         val nextState = transitionLogged(m.State, ApprovalRejected(), transitionContext(m))
         val toast = m.Toasts.PushError(s"approval blocked: ${r}", time_utils.Now(), time_utils.Seconds(int64(8)))
-        return (m.Copy(
+        // Save AFTER the transition. The Approval→Idle hop has no
+        // follow-up chunk that would ride a per-chunk save, so
+        // without persisting here a tui_exit during the modal-
+        // dismissal window would resume from the pre-transition
+        // Approval state.
+        val rejected = persistAppModel(m.Copy(
             State        = nextState,
             LastError    = Some(s"approval: ${r}"),
             Toasts       = toast,
             Conversation = m.Conversation.Append(
                 session.ConversationLine(Speaker = "policy", Text = s"approval blocked: ${r}"),
             ),
-        ), NoCmd[AppMsg]())
+        ))
+        return (rejected, NoCmd[AppMsg]())
     }
     val nextState = transitionLogged(m.State, ApprovalAccepted(), transitionContext(m))
-    val withState = m.Copy(
+    val withState = persistAppModel(m.Copy(
         State        = nextState,
         Conversation = m.Conversation.Append(session.ConversationLine(Speaker = "you", Text = "/approve")),
-    )
+    ))
     if m.Policy.PreMerge.IsEmpty() {
         return (withState, runtimeFutureToCmd(GhPrCreateFuture(m.Project, body, m.ActiveBase, prBranchOverrideFor(m))))
     }
@@ -5018,7 +5210,11 @@ func onSummaryReadyResult(m AppModel, member string, reason Option[string]) Tupl
         return (m1, batchAll(nudgeCmds))
     }
     val nextState = transitionLogged(cleared.State, TLDone(Directives = dirs), transitionContext(cleared))
-    val withState = setStatus(cleared.Copy(State = nextState), member, StIdle())
+    // Save AFTER the transition. onSummaryReadyResult is async
+    // (the readiness Future just landed); the FSM hop here moves
+    // into Approval and there's no follow-up chunk to ride a
+    // per-chunk save on until the user acts on the modal.
+    val withState = setStatus(persistAppModel(cleared.Copy(State = nextState)), member, StIdle())
     // AutoApprove: when the @summary lands cleanly and the batch
     // toggle is on, run the same approveAndKickHooks pipeline a manual
     // approve would have triggered. Dispatched via KeyApprove so the activity
@@ -5342,7 +5538,10 @@ func onReject(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // the audit trail captures what was rejected.
 func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val nextState = transitionLogged(m.State, ApprovalRejected(), transitionContext(m))
-    val withState = m.Copy(
+    // Save AFTER the transition. The user just rejected an
+    // approval; the FSM sits at Idle waiting on the redirect
+    // prompt and there's no chunk to ride a per-chunk save on.
+    val withState = persistAppModel(m.Copy(
         State = nextState,
         Conversation = m.Conversation
             .Append(session.ConversationLine(Speaker = "you", Text = "/reject"))
@@ -5350,7 +5549,7 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
                 Speaker = "system",
                 Text = "Approval rejected. Type a prompt to redirect the team — the lead picks it up as the next turn.",
             )),
-    )
+    ))
     return (withState, NoCmd[AppMsg]())
 }
 

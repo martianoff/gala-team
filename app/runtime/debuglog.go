@@ -126,16 +126,32 @@ func EffectiveTraceDir() string {
 // low-volume (one record per UI / FSM transition) so a single mutex
 // is fine — no per-handle bucketing needed.
 var (
-	debugFileMu  sync.Mutex
-	debugFile    *os.File
-	debugFileErr error
+	debugFileMu sync.Mutex
+	debugFile   *os.File
 )
 
 // AppendDebugEvent appends one JSON line (caller-encoded) to
 // events.jsonl. Opens the file lazily on first call and reuses the
-// handle. Newline-terminated. Returns an error only when the open
-// or first-line-write fails — subsequent failures are squashed via
-// debugFileErr to keep the chunk pump quiet on a misconfigured FS.
+// handle. Newline-terminated.
+//
+// Recoverable failures (file got closed out from under us, the disk
+// hiccupped, antivirus briefly locked the file on Windows) close the
+// cached handle so the NEXT call retries the open fresh. Past behaviour
+// latched the first error into a sticky errDebugX state — a single
+// transient open / write failure permanently disabled the audit log
+// for the rest of the session, and the silence-after-error symptom
+// looked indistinguishable from the orchestrator's event loop being
+// dead. Investigating a live "Sable stuck for 13 minutes" report
+// found events.jsonl frozen for the same duration while the
+// orchestrator was in fact still running; clearing the latch fixes
+// that diagnostic dead-end without changing the happy path.
+//
+// f.Sync after the write forces the OS page cache to disk so a
+// concurrent reader (operator running `tail -f` or `Get-Content`)
+// sees fresh records as they're emitted, not minutes later when
+// Windows decides to flush. events.jsonl writes are infrequent
+// (one per FSM transition / member chunk), so the Sync overhead is
+// negligible vs. the diagnostic value.
 //
 // Thread-safe; called from gala under any goroutine.
 func AppendDebugEvent(line string) error {
@@ -145,25 +161,31 @@ func AppendDebugEvent(line string) error {
 	}
 	debugFileMu.Lock()
 	defer debugFileMu.Unlock()
-	if debugFileErr != nil {
-		return debugFileErr
-	}
 	if debugFile == nil {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			debugFileErr = err
 			return err
 		}
 		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
-			debugFileErr = err
 			return err
 		}
 		debugFile = f
 	}
 	if _, err := debugFile.WriteString(line + "\n"); err != nil {
-		debugFileErr = err
+		// Drop the cached handle — the next call retries the open.
+		// A WriteString failure usually means the underlying file
+		// got rotated / unlinked / locked; clinging to a dead
+		// handle would silently swallow every subsequent event.
+		_ = debugFile.Close()
+		debugFile = nil
 		return err
 	}
+	// Best-effort flush. A Sync failure isn't fatal — the data is in
+	// the kernel buffer regardless, and the next write will succeed.
+	// We surface the original write success rather than the Sync
+	// error so the caller's retry logic (if any) doesn't double-
+	// count on a slow-disk hiccup.
+	_ = debugFile.Sync()
 	return nil
 }
 
@@ -183,7 +205,6 @@ func ResetDebugDir() error {
 		_ = debugFile.Close()
 		debugFile = nil
 	}
-	debugFileErr = nil
 	debugFileMu.Unlock()
 	d := DebugDir()
 	if d == "" {

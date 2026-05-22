@@ -1,6 +1,7 @@
 package runtime
 
 import (
+    "strings"
     "martianoff/gala/subprocess"
     "martianoff/gala/concurrent"
     "martianoff/gala/json"
@@ -90,14 +91,59 @@ func classifyReadFailure(e error) AgentEvent =
 
 // classifyClaudeRead / classifyClaudeDiagnostic map one stdout / stderr
 // read to an AgentEvent. Pure — unit-tested directly.
+//
+// A successful stdout read is usually an assistant chunk, but the
+// `claude` CLI also prints transport-layer errors (OAuth token
+// expired / rejected) to stdout as plain prose with no JSON shape —
+// e.g. "Failed to authenticate. API Error: 401 Invalid authentication
+// credentials". Past behaviour treated those lines as model output:
+// the line was committed to the conversation as the agent's reply,
+// the directive parser found no @summary/@blocked in the (otherwise
+// empty) turn buffer, the orchestrator stepped TLThinking → Idle, and
+// the prior gate's pending user question was silently forgotten.
+// LooksLikeTransportAuthError catches those lines here and routes
+// them to AgentDiagnostic — the transport-neutral channel the agent
+// port already exposes for "out-of-band diagnostic text (auth /
+// setup / health notices)". The UI's onStderr handler surfaces them
+// as a toast + LastError without touching the conversation.
 func classifyClaudeRead(r Try[string]) AgentEvent = r match {
-    case Success(line) => AgentChunk(Text = line)
+    case Success(line) => if (LooksLikeTransportAuthError(line)) AgentDiagnostic(Text = line) else AgentChunk(Text = line)
     case Failure(e)    => classifyReadFailure(e)
 }
 
 func classifyClaudeDiagnostic(r Try[string]) AgentEvent = r match {
     case Success(line) => AgentDiagnostic(Text = line)
     case Failure(e)    => classifyReadFailure(e)
+}
+
+// LooksLikeTransportAuthError returns true when `s` is a claude-code
+// transport-layer auth/identity failure rather than model output.
+// Two surface shapes the CLI prints when its OAuth token has expired
+// or is rejected by Anthropic:
+//
+//   - "Failed to authenticate. API Error: 401 Invalid authentication
+//     credentials" (canonical 401 from the API).
+//   - "API Error: 403 ..." (org/billing-blocked credentials).
+//
+// Used by classifyClaudeRead above (to route matching stdout lines
+// onto the AgentDiagnostic channel instead of AgentChunk) and by the
+// UI's onSessionFailed lead-EOF guard (to suppress the TLDone
+// transition when the just-finished turn was a transport failure, so
+// the prior gate's pending question is preserved). Case-insensitive
+// substring — both error wording variants Anthropic uses match, and
+// wrapped forms like "Vesper stderr: Failed to authenticate..." also
+// match so the same helper works on a LastError surface.
+//
+// Public (exported) because UI code in app/ui needs to inspect
+// LastError strings for the same signature when deciding whether to
+// advance the FSM.
+func LooksLikeTransportAuthError(s string) bool {
+    if s == "" { return false }
+    val lower = strings.ToLower(s)
+    return strings.Contains(lower, "failed to authenticate") ||
+           strings.Contains(lower, "invalid authentication credentials") ||
+           strings.Contains(lower, "api error: 401") ||
+           strings.Contains(lower, "api error: 403")
 }
 
 // ----------------------------------------------------------------------------

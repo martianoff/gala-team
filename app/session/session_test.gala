@@ -386,14 +386,15 @@ func TestSaveThenLoad_LegacySnapshotHasEmptyStateTag(t T) T {
 }
 
 // PostPromptSent round-trip — the per-dispatch latch that prevents
-// the workflow.post_engineer_prompt (e.g. `/simplify`) from firing
-// twice for the same engineer in one cycle MUST survive tui_exit /
-// resume. Without persisting it, an engineer who already ran the
-// prompt pre-resume gets put through it again on the post-resume
-// @finished, and the FSM appears stuck on Delegating(name) for the
-// duration of the redundant round.
+// the workflow.post_engineer_prompt (e.g. /simplify) from firing twice
+// for the same engineer in one cycle MUST survive a tui_exit/resume.
+// Without persisting, an engineer who already ran the prompt
+// pre-resume gets put through it again on the post-resume @finished,
+// and the FSM appears stuck on Delegating(name) for the duration of
+// the redundant round.
 func TestSaveThenLoad_PostPromptSentRoundTrips(t T) T {
     val dir = mkTempDir("postpromptsent")
+    defer fs.RemoveAll(dir)
     val orch = Orchestration(
         StateTag       = "Delegating",
         StatePending   = ArrayOf("Lyra"),
@@ -406,24 +407,26 @@ func TestSaveThenLoad_PostPromptSentRoundTrips(t T) T {
         case None()     => IsTrue(t1, false)
         case Some(snap) => {
             val t2 = Eq(t1, snap.PostPromptSent.Size(), 2)
-            val t3 = Eq(t2, snap.PostPromptSent.Get(0), "Lyra")
-            return Eq(t3, snap.PostPromptSent.Get(1), "Kael")
+            val t3 = IsTrue(t2, snap.PostPromptSent.Contains("Lyra"))
+            return IsTrue(t3, snap.PostPromptSent.Contains("Kael"))
         }
     }
 }
 
-// A snapshot written without the PostPromptSent field (legacy shape
-// via the no-orchestration Save overload) decodes to an EmptyArray —
-// the rehydrate path then builds an empty HashSet exactly like a
-// fresh model. Pins the "legacy snapshot still resumes" contract.
+// Legacy-snapshot path: a save written before PostPromptSent existed
+// (or one for a team without post_engineer_prompt configured) must
+// decode cleanly with an empty PostPromptSent array. Otherwise an
+// existing on-disk snapshot would fail to decode after the schema
+// extension and the user would resume from a fresh empty state.
 func TestSaveThenLoad_PostPromptSentDefaultsToEmpty(t T) T {
-    val dir = mkTempDir("postpromptsent_default")
+    val dir = mkTempDir("postpromptsent_legacy")
+    defer fs.RemoveAll(dir)
     val saved = Save(dir, "demo",
         ArrayOf(ConversationLine(Speaker = "you", Text = "hi")),
         EmptyArray[string]())
     val t1 = IsTrue(t, saved.IsSuccess())
     return Load(dir) match {
         case None()     => IsTrue(t1, false)
-        case Some(snap) => IsTrue(t1, snap.PostPromptSent.IsEmpty())
+        case Some(snap) => Eq(t1, snap.PostPromptSent.Size(), 0)
     }
 }

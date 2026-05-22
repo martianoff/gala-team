@@ -111,13 +111,13 @@ struct SnapPr(
 //     open-PR list).
 //   PendingQ* — an unanswered AskUserQuestion (empty Member == none).
 //   PostPromptSent — engineers that already received the
-//     workflow.post_engineer_prompt this dispatch cycle. Without
-//     persisting it, a resume mid-cycle wipes the in-memory HashSet
-//     and the next @finished re-fires the post-prompt (e.g.
-//     `/simplify`) on engineers that already ran it — the FSM appears
-//     stuck on Delegating(name) for the duration of the redundant
-//     round. Persisted as a flat Array[string]; rehydrated back into
-//     the HashSet shape the orchestrator uses.
+//     workflow.post_engineer_prompt this dispatch cycle. Without this,
+//     a resume mid-cycle wipes the in-memory HashSet and the next
+//     @finished re-fires the post-prompt (e.g. /simplify) on engineers
+//     that already ran it — the FSM appears stuck on Delegating(name)
+//     for the duration of the redundant round. Persisted as a flat
+//     Array[string]; rehydrated back into the HashSet shape the
+//     orchestrator uses.
 struct Snapshot(
     ProjectName    string,
     SavedAt        int64,

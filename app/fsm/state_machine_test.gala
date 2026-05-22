@@ -221,6 +221,56 @@ func TestQAGate_UserPromptedResetsToTLThinking(t T) T {
     return Eq(t, stateName(s), "TLThinking")
 }
 
+// QAGate × TLDone — the TL can produce a turn while QA is pending
+// (a member's @blocked or @help that didn't drain the pending set
+// can still spawn a TL relay). Past behaviour swallowed any TLDone
+// here as a self-loop, including a @summary asking the user a
+// decision-required question — the user saw the prose with no
+// approval modal. Routing rules:
+//
+//   - @summary present → Approval (user-decision affordance reaches
+//     the user; outweighs the still-pending QA review).
+//   - Anything else (empty, partial @dispatch, plain prose) → keep
+//     QAGate so the pending QA reviewer isn't torn down by a TL
+//     turn that didn't intend to ship.
+func TestQAGate_TLDoneWithSummary_GoesToApproval(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo")
+    val dirs = ArrayOf[Directive](summary("## Decision required\nPick one of (1) (2) (3)."))
+    val s = Transition(QAGate(Pending = pending), TLDone(Directives = dirs), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "Approval")
+    return s match {
+        case Approval(body) => Eq(t1, body, "## Decision required\nPick one of (1) (2) (3).")
+        case _              => IsTrue(t1, false)
+    }
+}
+
+func TestQAGate_TLDoneEmpty_StaysQAGateWithPending(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo")
+    val dirs = EmptyArray[Directive]()
+    val s = Transition(QAGate(Pending = pending), TLDone(Directives = dirs), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "QAGate")
+    return s match {
+        case QAGate(rest) => Eq(t1, rest.Contains("Theo"), true)
+        case _            => IsTrue(t1, false)
+    }
+}
+
+// A partial @dispatch while QA is pending shouldn't tear down the
+// QAGate either — the TL might be asking another engineer for
+// background work, but the open QA review is still the pipeline's
+// blocking step. Stay in QAGate; the dispatch directive surfaces
+// in the UI via the per-chunk pipeline regardless.
+func TestQAGate_TLDoneWithDispatchOnly_StaysQAGateWithPending(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo")
+    val dirs = ArrayOf[Directive](dispatchTo("Felix"))
+    val s = Transition(QAGate(Pending = pending), TLDone(Directives = dirs), ctxWithQA(true))
+    val t1 = Eq(t, stateName(s), "QAGate")
+    return s match {
+        case QAGate(rest) => Eq(t1, rest.Contains("Theo"), true)
+        case _            => IsTrue(t1, false)
+    }
+}
+
 func TestApproval_IgnoresUserPrompted(t T) T {
     val s = Transition(Approval(SummaryBody = "ship"), UserPrompted(), ctxWithQA(true))
     return Eq(t, stateName(s), "Approval")

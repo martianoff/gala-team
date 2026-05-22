@@ -472,6 +472,15 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     if threshold <= int64(0) {
         return (m, NoCmd[AppMsg]())
     }
+    // StateEnteredAt == UnixEpoch means "this state hasn't been
+    // entered through the normal Update wrapper yet" — either
+    // fresh startup before the first FSM transition, or a test
+    // fixture that seeded the State without setting the timestamp.
+    // Treat both as "not observed yet" so the watchdog doesn't
+    // trip pathologically on a synthetic 56-year gap.
+    if m.StateEnteredAt.UnixNanos() <= int64(0) {
+        return (m, NoCmd[AppMsg]())
+    }
     val elapsedSec = elapsedSeconds(now, m.StateEnteredAt)
     if elapsedSec < threshold {
         return (m, NoCmd[AppMsg]())

@@ -2246,11 +2246,11 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
     // ..." string under a warning icon). The full payload is in
     // events.jsonl via LogStderr above, so the audit trail is
     // intact — surface a clean tag instead of dumping the bytes.
-    val isStreamJson = strings.HasPrefix(trimmed, "{") &&
-                       (strings.Contains(trimmed, "\"type\":\"") ||
-                        strings.Contains(trimmed, "\"message\":"))
-    val short = if (isStreamJson) "stream-json envelope on stderr (see events.jsonl)"
-                else                truncateForToast(trimmed)
+    // looksLikeStreamJson decodes a streamJsonHeader so the check
+    // is a real JSON parse, not a substring heuristic that breaks
+    // when claude-code reshuffles the envelope key order.
+    val short = if (looksLikeStreamJson(trimmed)) "stream-json envelope on stderr (see events.jsonl)"
+                else                                truncateForToast(trimmed)
     val toast = m.Toasts.PushWarn(s"${name} (stderr): ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
     val m1 = m.Copy(
         Toasts    = toast,
@@ -2558,14 +2558,18 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
         mAccrued
     val withErrSurface = if (chunk.ErrorText == "") mRecovered else {
         // Sanitise the visible form: claude-code result envelopes
-        // with is_error=true sometimes carry structured JSON (or
-        // multi-paragraph prose) in the `result` field, and dumping
-        // it verbatim into the bottom-bar toast / LastError clobbers
-        // the keybind hint line and reads like a UX bug. The full
-        // chunk.ErrorText is already captured in events.jsonl via
-        // the trace pipeline; the user-visible surfaces just need a
-        // short tag.
-        val short = truncateForToast(chunk.ErrorText)
+        // with is_error=true sometimes carry a stream-json envelope
+        // (or multi-paragraph prose) in the `result` field, and
+        // dumping it verbatim into the bottom-bar toast / LastError
+        // clobbers the keybind hint line and reads like a UX bug. The
+        // full chunk.ErrorText is already captured in events.jsonl
+        // via the trace pipeline; the user-visible surfaces need a
+        // shape-detected tag, not just a length-trimmed prefix.
+        // looksLikeStreamJson does an actual JSON parse via
+        // streamJsonHeaderCodec, so the check survives reshuffles of
+        // the envelope key order claude-code might emit later.
+        val short = if (looksLikeStreamJson(chunk.ErrorText)) "stream-json envelope in result.error (see events.jsonl)"
+                    else                                       truncateForToast(chunk.ErrorText)
         val toast = mRecovered.Toasts.PushError(s"${name}: ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
         mRecovered.Copy(Toasts = toast, LastError = Some(s"${name}: ${short}"))
     }
@@ -4582,18 +4586,18 @@ struct ClaudePart(Type string, Text string, Id string, Name string)
 // the header live during streaming instead of waiting for the
 // turn-end result.
 //
-// The `message.model` wire field is NOT decoded here — adding it
-// made the codec reject existing envelopes that don't carry it
-// (some past test fixtures + bulk-mode `result`-event paths
-// elide the field), which surfaced as a regression in the
-// tool-use status flip test. Synthetic-envelope detection
-// instead reads the raw envelope string in
-// looksLikeSyntheticEnvelope — substring on `"model":"<synthetic>"`
-// — which keeps the decoded shape stable across claude-code
-// wire changes.
+// Model is the wire field that distinguishes a real model response
+// from claude-code's auto-emitted synthetic envelopes. Real
+// envelopes carry an API model id (e.g. "claude-opus-4-7"); claude-
+// code's stub reply to an isMeta resume input carries the literal
+// "<synthetic>" sentinel. assistantEventChunk reads this directly
+// instead of substring-scanning the raw envelope. Missing on the
+// wire decodes to "" which never matches "<synthetic>", so older /
+// non-synthetic envelopes pass through unchanged.
 struct ClaudeAssistantMsg(
     Content Array[ClaudePart],
     Usage   ClaudeUsage,
+    Model   string,
 )
 
 // ClaudeAssistantEvent is the outer event for a `type=assistant`
@@ -4624,6 +4628,37 @@ struct ClaudeResultEvent(
 // share across calls; building one per chunk would just waste work.
 val claudeAssistantCodec = json.Codec[ClaudeAssistantEvent](json.SnakeCase())
 val claudeResultCodec    = json.Codec[ClaudeResultEvent](json.SnakeCase())
+
+// streamJsonHeader is the bare envelope shape every claude-code
+// stream-json line carries: a top-level `type` field tagging the
+// event kind ("assistant", "user", "result", "system", "tool_use",
+// "tool_use_result", "message_start", ...). Used by
+// looksLikeStreamJson to decide whether a stray bytestring (claude-
+// code stderr output, a result envelope's `result.result` field,
+// etc.) is actually a misrouted stream-json envelope rather than
+// arbitrary prose. Decoded via json.Codec so the check is a real
+// parse rather than a substring heuristic.
+struct streamJsonHeader(Type string)
+val streamJsonHeaderCodec = json.Codec[streamJsonHeader](json.SnakeCase())
+
+// looksLikeStreamJson returns true when `s` parses as a JSON object
+// with a non-empty top-level `type` field. The decode is the
+// authoritative signal: any string that round-trips through the
+// codec to a streamJsonHeader with Type != "" is a real envelope.
+// Arbitrary prose, partial fragments, and non-object JSON all fail
+// the decode and return false. Used by onStderr (to suppress
+// stream-json misrouted onto stderr) and by applyChunkVisible (to
+// suppress stream-json carried in a result envelope's `result`
+// field) so neither surface dumps raw envelope bytes into the
+// bottom-bar toast / LastError.
+func looksLikeStreamJson(s string) bool {
+    val trimmed = strings.TrimSpace(s)
+    if !strings.HasPrefix(trimmed, "{") { return false }
+    return streamJsonHeaderCodec.Decode(trimmed) match {
+        case Success(h) => h.Type != ""
+        case Failure(_) => false
+    }
+}
 
 // ClaudeChunk is the parsed shape of one stream-json line.
 //   Visible:    the user-facing text to append to the transcript
@@ -4998,21 +5033,6 @@ func looksLikeClaudeEnvelope(s string) bool {
     return strings.HasPrefix(t, "{\"type\":")
 }
 
-// looksLikeSyntheticEnvelope tests whether `s` is a claude-code
-// synthetic assistant envelope — one with `"model":"<synthetic>"`
-// inside the message object. claude-code emits these as a stub
-// response to isMeta resume inputs ("Continue from where you left
-// off.") and they carry literal text like "No response requested."
-// in content[].text. Detected via raw-string substring (cheaper
-// than threading the field through the codec, and the literal
-// `<synthetic>` value cannot occur in a real model id) so the
-// shape stays stable across claude-code wire-schema changes.
-// assistantEventChunk uses this to short-circuit synthetic
-// envelopes into syntheticChunk() so they never enter the
-// transcript / bump LastChunkAt / accrue tokens.
-func looksLikeSyntheticEnvelope(s string) bool =
-    strings.Contains(s, "\"model\":\"<synthetic>\"")
-
 // assistantEventChunk extracts the joined text from a complete
 // `assistant` envelope's content[]. Filters parts to `text` for the
 // visible body. tool_use / tool_result / thinking are otherwise
@@ -5034,7 +5054,7 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
     // IsSynthetic flag lets applyChunkVisible bump the per-member
     // synthetic counter so liveRespawnMember can rotate the SessionId
     // when the count crosses the poison threshold.
-    if looksLikeSyntheticEnvelope(rawEnvelope) {
+    if evt.Message.Model == "<synthetic>" {
         return syntheticChunk()
     }
     val texts = evt.Message.Content.Collect({

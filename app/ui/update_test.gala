@@ -1665,6 +1665,128 @@ func TestOnTick_LivenessSilence_AfterMaxRetries_FiresMemberAbandoned(t T) T {
     }
 }
 
+// FSM watchdog: "the FSM must never stick" backstop. Each non-terminal
+// state has a hard ceiling (default 600s) measured against
+// StateEnteredAt. Past the ceiling, onTick forces State = Idle,
+// surfaces a toast, closes any live subprocess for the relevant
+// member(s), and logs a WatchdogExpired fsm_transition. Idle /
+// Approval are excluded — the user is the gating signal there.
+
+func staleStateEnteredAt() time_utils.Instant = time_utils.FromUnixSeconds(int64(1))
+
+func TestStateWatchdog_TLThinking_PastCeiling_ForcesIdle(t T) T {
+    val seed = sampleModel().Copy(
+        State          = TLThinking(),
+        StateEnteredAt = staleStateEnteredAt(),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    val stateOk = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    // LastError carries the watchdog message so the user sees why.
+    return m.LastError match {
+        case Some(err) => IsTrue(stateOk, strings.Contains(err, "watchdog"))
+        case None()    => IsTrue(stateOk, false)
+    }
+}
+
+func TestStateWatchdog_TLReview_PastCeiling_ForcesIdle(t T) T {
+    val seed = sampleModel().Copy(
+        State          = TLReview(),
+        StateEnteredAt = staleStateEnteredAt(),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
+func TestStateWatchdog_TLNudging_PastCeiling_ForcesIdle(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val seed = sampleModel().Copy(
+        State          = TLNudging(Reason = "stuck", Pending = pending),
+        StateEnteredAt = staleStateEnteredAt(),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
+func TestStateWatchdog_Delegating_PastCeiling_ForcesIdle(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val seed = sampleModel().Copy(
+        State          = Delegating(Pending = pending),
+        StateEnteredAt = staleStateEnteredAt(),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
+func TestStateWatchdog_QAGate_PastCeiling_ForcesIdle(t T) T {
+    val pending = EmptyHashSet[string]().Add("Sable")
+    val seed = sampleModel().Copy(
+        State          = QAGate(Pending = pending),
+        StateEnteredAt = staleStateEnteredAt(),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
+// Idle is exempt — a long idle period is normal user-waiting time.
+func TestStateWatchdog_Idle_NeverFires(t T) T {
+    val seed = sampleModel().Copy(
+        State          = Idle(),
+        StateEnteredAt = staleStateEnteredAt(),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    val stateOk = m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+    // LastError must NOT contain a watchdog notice — we didn't fire.
+    return m.LastError match {
+        case Some(err) => IsTrue(stateOk, !strings.Contains(err, "watchdog"))
+        case None()    => IsTrue(stateOk, true)
+    }
+}
+
+// Approval is exempt — the user must approve/reject; a timeout would
+// silently lose the PR.
+func TestStateWatchdog_Approval_NeverFires(t T) T {
+    val seed = sampleModel().Copy(
+        State          = Approval(SummaryBody = "ship it"),
+        StateEnteredAt = staleStateEnteredAt(),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case Approval(_) => IsTrue(t, true)
+        case _           => IsTrue(t, false)
+    }
+}
+
+// Below the ceiling the watchdog is a no-op — no premature forced exit.
+func TestStateWatchdog_TLThinking_BelowCeiling_StaysPut(t T) T {
+    val seed = sampleModel().Copy(
+        State          = TLThinking(),
+        StateEnteredAt = time_utils.Now(),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case TLThinking() => IsTrue(t, true)
+        case _            => IsTrue(t, false)
+    }
+}
+
 // (TestMerged_ResetsAllMembersToIdle removed: merge is no longer an
 // app action, so there is no merge event to reset statuses on. Status
 // reset on a fresh user prompt is covered elsewhere.)

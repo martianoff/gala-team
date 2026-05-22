@@ -600,7 +600,12 @@ func consumeDeliveryAction(
     }
     if (tag == "abandon") {
         val nextState = transitionLogged(m.State, MemberAbandoned(MemberName = name), transitionContext(m))
-        return (m.Copy(State = nextState), cmds)
+        // Save AFTER the transition. The heartbeat path is the
+        // canonical "no follow-up chunk to ride a save on" case — an
+        // abandoned member by definition stops producing visible
+        // output, so without persisting here the snapshot can lag the
+        // in-memory FSM indefinitely.
+        return (persistAppModel(m.Copy(State = nextState)), cmds)
     }
     // noop / nudge (dropped on aggregate's behalf) / escalate (unused)
     return (m, cmds)

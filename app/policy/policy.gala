@@ -72,15 +72,32 @@ struct Heartbeat(
     StuckAfterSeconds   int64,
     AbandonAfterSeconds int64,
     MaxRetries          int,
+    // StateWatchdogSeconds: hard ceiling on how long the FSM may sit
+    // in a non-terminal state (TLThinking / TLReview / TLNudging /
+    // Delegating / QAGate) before the orchestrator forces a recovery
+    // transition. Existed because the per-member heartbeat above
+    // covers only members in the pending set — the TL is explicitly
+    // EXCLUDED from that walk (long TLReview pauses are normal user-
+    // waiting time), so a TL whose subprocess silently stalled mid-
+    // turn had no recovery path. The watchdog is intentionally LONG
+    // (5min default for TL states, 10min for member-gated states)
+    // so it never trips on healthy long-thinks; it's a "the FSM
+    // must never freeze indefinitely" backstop, not a fast-trip
+    // wire. Approval / Idle are excluded — the user is the
+    // gating signal there.
+    StateWatchdogSeconds int64,
 )
 
 // DefaultHeartbeat returns the design defaults — gentle 30s slow
-// nudge, escalate-to-TL after 2min, abandon at 5min, two crash retries.
+// nudge, escalate-to-TL after 2min, abandon at 5min, two crash retries,
+// 10min hard FSM-state ceiling so a silently-stalled TL turn can never
+// park the FSM forever.
 func DefaultHeartbeat() Heartbeat = Heartbeat(
-    SlowAfterSeconds    = int64(30),
-    StuckAfterSeconds   = int64(120),
-    AbandonAfterSeconds = int64(300),
-    MaxRetries          = 2,
+    SlowAfterSeconds     = int64(30),
+    StuckAfterSeconds    = int64(120),
+    AbandonAfterSeconds  = int64(300),
+    MaxRetries           = 2,
+    StateWatchdogSeconds = int64(600),
 )
 
 // Guardrails carries the §5.4 "block this PR if X" toggles. Defaults

@@ -108,10 +108,11 @@ struct WireHook(
 )
 
 struct WireHeartbeat(
-    SlowAfterSeconds    int64,
-    StuckAfterSeconds   int64,
-    AbandonAfterSeconds int64,
-    MaxRetries          int,
+    SlowAfterSeconds     int64,
+    StuckAfterSeconds    int64,
+    AbandonAfterSeconds  int64,
+    MaxRetries           int,
+    StateWatchdogSeconds int64,
 )
 
 struct WireGuardrails(

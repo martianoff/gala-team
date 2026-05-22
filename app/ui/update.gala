@@ -426,8 +426,85 @@ func onTick(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val now = time_utils.Now()
     val pruned = pruneToasts(m.Toasts, now)
     val m1 = m.Copy(Tick = m.Tick + 1, NowAt = now, Toasts = pruned)
-    val (m2, cmds) = updateLivenessStatuses(m1, m1.Team.Members, now)
-    return (m2, batchAll(cmds))
+    // FSM watchdog: forced recovery if the orchestrator has been sat
+    // in the same non-terminal state past the watchdog ceiling. Runs
+    // BEFORE the per-member liveness walk so a single tick can both
+    // trip the watchdog AND immediately reset liveness against the
+    // fresh Idle state (without this, the heartbeat would re-fire
+    // MemberAbandoned against the just-cleared pending set on the
+    // same tick).
+    val (m2, watchdogCmd) = enforceStateWatchdog(m1, now)
+    val (m3, cmds) = updateLivenessStatuses(m2, m2.Team.Members, now)
+    return (m3, batchAll(cmds.Append(watchdogCmd)))
+}
+
+// enforceStateWatchdog is the FSM-must-never-stick backstop. Every
+// non-Idle / non-Approval state has a hard ceiling: when
+// `now - StateEnteredAt` exceeds `Policy.Heartbeat.StateWatchdogSeconds`
+// (default 600s = 10min), the orchestrator forcibly:
+//
+//   1. closes any live claude subprocess for the lead (TL states) or
+//      every pending member (member-gated states) — the read pump may
+//      be wedged on a hung subprocess that won't EOF cleanly (observed
+//      on Windows: Stop-Process -Force terminated the child but the
+//      parent's ReadLine never returned, leaving onSessionFailed un-
+//      fired and the FSM frozen),
+//   2. forces State = Idle() directly — bypasses the normal FSM
+//      transition table because the whole point is "the FSM is
+//      stuck; route it home unconditionally",
+//   3. logs a synthetic `WatchdogExpired` fsm_transition so
+//      events.jsonl carries audit-trail evidence of the forced exit,
+//   4. surfaces a toast + LastError so the user sees what happened.
+//
+// The watchdog cannot loop: forcing State = Idle resets StateEnteredAt
+// via the Update wrapper at line 56, and Idle is explicitly excluded
+// here.
+//
+// Idle / Approval are excluded: in Idle the user is the next event
+// (no orchestrator-side progress to time); in Approval the user must
+// approve/reject and any timeout would silently lose work.
+func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cmd[AppMsg]] {
+    val tag = stateTag(m.State)
+    if tag == "Idle" || tag == "Approval" {
+        return (m, NoCmd[AppMsg]())
+    }
+    val threshold = m.Policy.Heartbeat.StateWatchdogSeconds
+    if threshold <= int64(0) {
+        return (m, NoCmd[AppMsg]())
+    }
+    val elapsedSec = elapsedSeconds(now, m.StateEnteredAt)
+    if elapsedSec < threshold {
+        return (m, NoCmd[AppMsg]())
+    }
+    val leadName = m.Team.Lead.Name
+    val mClosed = m.State match {
+        case TLThinking()    => closeLiveSession(m, leadName)
+        case TLReview()      => closeLiveSession(m, leadName)
+        case TLNudging(_, _) => closeLiveSession(m, leadName)
+        case Delegating(p)   => closeLiveSessionsForPending(m, p)
+        case QAGate(p)       => closeLiveSessionsForPending(m, p)
+        case _               => m
+    }
+    val reason = s"FSM watchdog: ${tag} for ${elapsedSec}s past ${threshold}s ceiling — forcing recovery to Idle"
+    val toast = mClosed.Toasts.PushError(reason, now, time_utils.Seconds(int64(10)))
+    LogFsmTransition(tag, "WatchdogExpired", s"elapsed=${elapsedSec}s", "Idle")
+    val forced = mClosed.Copy(
+        State          = Idle(),
+        StateEnteredAt = now,
+        Toasts         = toast,
+        LastError      = Some(reason),
+    )
+    return (persistAppModel(forced), NoCmd[AppMsg]())
+}
+
+// closeLiveSessionsForPending kills any in-flight claude subprocess
+// for every member in the pending set. Used by the FSM watchdog
+// when Delegating / QAGate trips: hung member subprocesses don't
+// get a chance to wedge a respawn against the freshly-reset Idle
+// state — the watchdog reaps them all in one pass.
+func closeLiveSessionsForPending(m AppModel, pending HashSet[string]) AppModel {
+    val names = setToArray(pending)
+    return names.FoldLeft(m, (acc, name) => closeLiveSession(acc, name))
 }
 
 // pruneToasts is a typed-arg shim around ToastQueue.Prune so the

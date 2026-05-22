@@ -213,7 +213,7 @@ func stateTag(s AppState) string = s match {
 func setToArray(p HashSet[string]) Array[string] =
     p.FoldLeft(EmptyArray[string](), (a, x) => a.Append(x))
 
-func arrayToHashSet(xs Array[string]) HashSet[string] =
+func hashSetFromArray(xs Array[string]) HashSet[string] =
     xs.FoldLeft(EmptyHashSet[string](), (acc, n) => acc.Add(n))
 
 func statePendingList(s AppState) Array[string] = s match {
@@ -237,7 +237,7 @@ func stateSummaryOf(s AppState) string = s match {
 // empty tag — including a legacy snapshot with no persisted state —
 // rebuilds as Idle, so old snapshots resume exactly as before.
 func stateFromSnap(tag string, pending Array[string], reason string, summary string) AppState {
-    val pset = arrayToHashSet(pending)
+    val pset = hashSetFromArray(pending)
     return tag match {
         case "TLThinking" => TLThinking()
         case "Delegating" => Delegating(Pending = pset)

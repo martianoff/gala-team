@@ -3985,7 +3985,7 @@ func TestTurnEnd_PendingNoDirectives_LandsIdleNotFrozen(t T) T {
 // Delegating loop. After the fix only one transition is emitted.
 func TestDispatchBugs_NoDuplicateMemberDoneOnEofAfterAtDone(t T) T {
     val seed = sampleModel().Copy(
-        State            = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State            = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         MemberDoneBodies = EmptyHashMap[string, string]().Put("Felix", "shipped"),
     )
     val before = pendingSizeOf(seed.State)
@@ -4630,7 +4630,7 @@ func TestOnMemberDone_Engineer_DefersUntilUncommittedCheckResult(t T) T {
 // FSM behaviour in TestOnUncommittedCheckResult_CleanFinalises_FsmAdvances.
 func TestOnUncommittedCheckResult_CleanFinalises_BodyLogged(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = finaliseMemberDone(seed, "Felix", "shipped it")
@@ -4642,7 +4642,7 @@ func TestOnUncommittedCheckResult_CleanFinalises_BodyLogged(t T) T {
 
 func TestOnUncommittedCheckResult_CleanFinalises_StatusIdle(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped it", Dirty = false))
@@ -4661,7 +4661,7 @@ func TestOnUncommittedCheckResult_CleanFinalises_StatusIdle(t T) T {
 // finaliseMemberDone never fired MemberDone so FSM stayed Delegating.
 func TestOnUncommittedCheckResult_CleanFinalises_FsmAdvances(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped it", Dirty = false))
@@ -4738,7 +4738,7 @@ func TestPostPrompt_ParallelEngineersIndependent(t T) T {
     )
     val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(mira))
     val base = InitialModel(sampleProject(), team, workflowWithPostPrompt("/simplify"), DefaultPolicy()).Copy(
-        PostPromptSent = arrayToHashSet(ArrayOf("Felix")),
+        PostPromptSent = hashSetFromArray(ArrayOf("Felix")),
     )
     val felixDone  = !postPromptDue(base, "Felix")  // already had its round
     val miraStillDue = postPromptDue(base, "Mira")   // independent, still due
@@ -4757,8 +4757,8 @@ func TestPostPrompt_ParallelEngineersIndependent(t T) T {
 func TestPostPrompt_SecondFinishFinalises(t T) T {
     val seed = sampleModel().Copy(
         Workflow       = workflowWithPostPrompt("/simplify"),
-        PostPromptSent = arrayToHashSet(ArrayOf("Felix")),
-        State          = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        PostPromptSent = hashSetFromArray(ArrayOf("Felix")),
+        State          = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses       = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = onUncommittedCheckResult(seed, "Felix", "simplified it", false)
@@ -4787,7 +4787,7 @@ func TestPostPrompt_SecondFinishFinalises(t T) T {
 func TestPostPrompt_FirstFinishKeepsMemberPending(t T) T {
     val seed = sampleModel().Copy(
         Workflow = workflowWithPostPrompt("/simplify"),
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val due = postPromptDue(seed, "Felix")
     val stillPending = seed.State match {
@@ -4939,7 +4939,7 @@ func resetSeedScratch() AppModel {
         MemberDirectivesFired = EmptyHashMap[string, int]().Put("Felix", 3),
         MemberDoneBodies      = EmptyHashMap[string, string]().Put("Felix", "old done body"),
         MemberBlockedReasons  = EmptyHashMap[string, string]().Put("Felix", "old blocked reason"),
-        PostPromptSent        = arrayToHashSet(ArrayOf("Felix")),
+        PostPromptSent        = hashSetFromArray(ArrayOf("Felix")),
         RetryCount            = EmptyHashMap[string, int]().Put("Felix", 2),
         SessionIds            = EmptyHashMap[string, string]().Put("Felix", "sid-felix-123"),
         LastChunkAt           = EmptyHashMap[string, time_utils.Instant]().Put("Felix", staleTime),
@@ -5163,37 +5163,6 @@ func TestRehydrateOrchestration_RestoresStateAndPlan(t T) T {
     return Eq(t1, m.PlanShipped, 1)
 }
 
-// PostPromptSent round-trips through orchestrationOf → Save → Load →
-// RehydrateOrchestration. The persisted Array is converted back to
-// the HashSet shape the orchestrator uses, and members that already
-// received the post-engineer prompt show up in the rehydrated set so
-// postPromptDue returns false for them — no redundant /simplify round
-// on the post-resume @finished.
-func TestRehydrateOrchestration_RestoresPostPromptSent(t T) T {
-    val snap = session.Snapshot(
-        ProjectName    = "demo",
-        SavedAt         = int64(0),
-        Conversation   = EmptyArray[session.ConversationLine](),
-        ActiveMembers  = EmptyArray[string](),
-        StateTag       = "Delegating",
-        StatePending   = ArrayOf("Lyra"),
-        PostPromptSent = ArrayOf("Lyra"),
-    )
-    val m = RehydrateOrchestration(sampleModel().Copy(State = Idle()), snap)
-    return IsTrue(t, m.PostPromptSent.Contains("Lyra"))
-}
-
-// orchestrationOf flattens m.PostPromptSent (HashSet) to Array for
-// Save. Two members in the set both make it into the persisted shape.
-func TestOrchestrationOf_FlattensPostPromptSent(t T) T {
-    val seed = sampleModel().Copy(
-        PostPromptSent = EmptyHashSet[string]().Add("Lyra").Add("Kael"),
-    )
-    val orch = orchestrationOf(seed)
-    val t1 = Eq(t, orch.PostPromptSent.Size(), 2)
-    return IsTrue(t1, orch.PostPromptSent.Contains("Lyra") && orch.PostPromptSent.Contains("Kael"))
-}
-
 // A legacy snapshot (empty StateTag) must NOT touch the model — old
 // sessions still resume conversation-only.
 func TestRehydrateOrchestration_LegacyEmptyTagIsNoOp(t T) T {
@@ -5224,7 +5193,7 @@ func TestOrchestrationOf_FlattensPostPromptSent(t T) T {
     val t1 = Eq(t, orch.PostPromptSent.Size(), 2)
     // HashSet iteration order is not insertion order; check membership
     // via the rebuilt set instead of indexing the array.
-    val rebuilt = arrayToHashSet(orch.PostPromptSent)
+    val rebuilt = hashSetFromArray(orch.PostPromptSent)
     val t2 = IsTrue(t1, rebuilt.Contains("Felix"))
     return IsTrue(t2, rebuilt.Contains("Mira"))
 }
@@ -5358,7 +5327,7 @@ func modelWithQA() AppModel {
 // stuck in QAGate for 57 minutes until tui_exit.
 func TestFinaliseMemberDone_QAOnly_DrainsQAGateToTLReview(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = arrayToHashSet(ArrayOf("Sable"))),
+        State    = QAGate(Pending = hashSetFromArray(ArrayOf("Sable"))),
         Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
     )
     val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
@@ -5377,7 +5346,7 @@ func TestFinaliseMemberDone_QAGate_PartialPending_StaysInQAGate(t T) T {
         Onboarding = EmptyArray[string](),
     )
     val seed = modelWithQA().Copy(
-        State = QAGate(Pending = arrayToHashSet(ArrayOf("Sable", "Theo"))),
+        State = QAGate(Pending = hashSetFromArray(ArrayOf("Sable", "Theo"))),
         Team  = modelWithQA().Team.Copy(Members = modelWithQA().Team.Members.Append(theo)),
     )
     val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
@@ -5398,7 +5367,7 @@ func TestFinaliseMemberDone_QAGate_PartialPending_StaysInQAGate(t T) T {
 // and finaliseMemberDone is all exercised.
 func TestEngineerFinish_NoQA_DrainsDelegatingToTLReview(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     // Synthetic UncommittedCheckResult bypasses the real git probe
@@ -5416,7 +5385,7 @@ func TestEngineerFinish_NoQA_DrainsDelegatingToTLReview(t T) T {
 // TLReview.
 func TestEngineerFinish_WithQA_DrainsDelegatingToQAGate(t T) T {
     val seed = modelWithQA().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped", Dirty = false))
@@ -5457,7 +5426,7 @@ func TestEofAfterAtFinished_DoesNotDoubleFireMemberDone(t T) T {
 // the @help directly; the orchestrator synthesises a relay turn.
 func TestChunkArrived_MemberHelp_AdvancesToTLNudging(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val helpChunk = "Stuck on the API contract — should I extend the existing endpoint or add a new one?\n@help\nNeed routing guidance.\n@end"
     val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = helpChunk))
@@ -5473,7 +5442,7 @@ func TestChunkArrived_MemberHelp_AdvancesToTLNudging(t T) T {
 // TLReview. sampleModel has no QA so we land in TLReview.
 func TestChunkArrived_MemberBlocked_DrainsToTLReview(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val blockedChunk = "Can't proceed — the upstream dependency is broken.\n@blocked\nThird-party API is returning 500s; this is outside my scope to fix.\n@end"
     val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = blockedChunk))
@@ -5494,7 +5463,7 @@ func TestChunkArrived_MemberBlocked_DrainsToTLReview(t T) T {
 // symptom from the live session.
 func TestChunkArrived_QAFinished_DrainsToTLReview(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = arrayToHashSet(ArrayOf("Sable"))),
+        State    = QAGate(Pending = hashSetFromArray(ArrayOf("Sable"))),
         Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
     )
     val approveChunk = "Reviewed the deliverables; build green; tests pass.\n@finished\nAPPROVE. Migration looks clean.\n@end"
@@ -5511,7 +5480,7 @@ func TestChunkArrived_QAFinished_DrainsToTLReview(t T) T {
 // changes but the underlying handler is correct.
 func TestOnMemberHelp_FiresMemberHelpRequested(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val (m, _) = onMemberHelp(seed, "Felix", "Which API should I extend?")
     return m.State match {
@@ -5524,7 +5493,7 @@ func TestOnMemberHelp_FiresMemberHelpRequested(t T) T {
 // blocked drain routes to TLReview (no QA in sampleTeam).
 func TestOnMemberBlocked_FiresMemberBlockedAndDrains(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val (m, _) = onMemberBlocked(seed, "Felix", "Third-party API down")
     return m.State match {
@@ -5550,7 +5519,7 @@ func TestRejectAndIdle_AdvancesToIdle(t T) T {
 // their pending sets on a UserPrompted escape hatch.
 func TestUserPrompted_FromDelegating_LandsInTLThinking(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Composer = "redirect: try a different approach",
     )
     val (m, _) = Update(seed, KeySubmit())
@@ -5562,7 +5531,7 @@ func TestUserPrompted_FromDelegating_LandsInTLThinking(t T) T {
 
 func TestUserPrompted_FromQAGate_LandsInTLThinking(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = arrayToHashSet(ArrayOf("Sable"))),
+        State    = QAGate(Pending = hashSetFromArray(ArrayOf("Sable"))),
         Composer = "wait, scrap the review",
     )
     val (m, _) = Update(seed, KeySubmit())

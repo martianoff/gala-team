@@ -4342,13 +4342,16 @@ func TestHeartbeat_QAGateAbandonedMember_DrainsToTLReview(t T) T {
     val now   = time_utils.FromUnixSeconds(int64(30000))
     val stale = time_utils.FromUnixSeconds(int64(29000))  // 1000s ago, past AbandonAfterSeconds=300
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
+    val dispatchMsg = protocol.NewMessage(team.Lead.Name, "Sable", protocol.Dispatch(), "review", 0)
     val seed = base.Copy(
-        State       = QAGate(Pending = EmptyHashSet[string]().Add("Sable")),
-        Statuses    = base.Statuses.Put("Sable", StWorking()),
-        LastChunkAt = base.LastChunkAt.Put("Sable", stale),
-        // RetryCount past max so the path takes MemberAbandoned, not
-        // liveRespawnMember (which would keep us in QAGate).
-        RetryCount  = base.RetryCount.Put("Sable", 10),
+        State             = QAGate(Pending = EmptyHashSet[string]().Add("Sable")),
+        Statuses          = base.Statuses.Put("Sable", StWorking()),
+        LastChunkAt       = base.LastChunkAt.Put("Sable", stale),
+        // Protocol-driven: Silent past abandon threshold + Attempt past
+        // policy.MaxRetries forces protocol.Tick → MarkAbandoned.
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Sable", dispatchMsg),
+        DeliveryStates    = base.DeliveryStates.Put("Sable", protocol.Silent(SinceNanos = int(stale.UnixNanos()), Attempt = 100)),
+        RetryCount        = base.RetryCount.Put("Sable", 10),
     )
     val (m, _) = updateLivenessStatuses(seed, team.Members, now)
     // afterMemberDone with empty pending → TLReview.
@@ -4552,13 +4555,16 @@ func TestHeartbeat_AbandonedMember_PersistsPostTransitionState(t T) T {
     val now   = time_utils.FromUnixSeconds(int64(20000))
     val stale = time_utils.FromUnixSeconds(int64(19000))  // 1000s ago, past AbandonAfterSeconds=300
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
+    val dispatchMsg = protocol.NewMessage(team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seed = base.Copy(
-        State       = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
-        Statuses    = base.Statuses.Put("Felix", StWorking()),
-        LastChunkAt = base.LastChunkAt.Put("Felix", stale),
-        // RetryCount past max so the path takes MemberAbandoned, not
-        // liveRespawnMember.
-        RetryCount  = base.RetryCount.Put("Felix", 10),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        Statuses          = base.Statuses.Put("Felix", StWorking()),
+        LastChunkAt       = base.LastChunkAt.Put("Felix", stale),
+        // Protocol-driven: Silent past abandon threshold + Attempt past
+        // policy.MaxRetries forces protocol.Tick → MarkAbandoned.
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Silent(SinceNanos = int(stale.UnixNanos()), Attempt = 100)),
+        RetryCount        = base.RetryCount.Put("Felix", 10),
     )
     val (m, _) = updateLivenessStatuses(seed, team.Members, now)
     val snap = session.Load(m.Project.Repo)

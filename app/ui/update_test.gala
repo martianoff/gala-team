@@ -4238,6 +4238,89 @@ func TestOnStderr_LastErrorIsTruncated(t T) T {
     }
 }
 
+// Result-error envelopes with structured (long / multi-line / JSON-like)
+// `result` payloads must not dump verbatim into the toast / LastError
+// surface — they get truncated like every other user-visible error
+// string. The full payload remains available via events.jsonl. This
+// guards against the same UX leak pattern as the stderr stream-json
+// fix; the chunk-pipeline source is just different.
+func TestApplyChunkVisible_LongErrorText_IsTruncatedInLastError(t T) T {
+    val giant = strings.Repeat("x", 4000)
+    val errChunk = ClaudeChunk(
+        Visible         = "",
+        ErrorText       = giant,
+        LiveTurn        = None[ClaudeUsage](),
+        FinalTurn       = None[ClaudeUsage](),
+        CostUsd         = 0.0,
+        AskQuestionId   = "",
+        AskQuestionText = "",
+        TurnEnded       = false,
+        IsToolActivity  = false,
+        IsSynthetic     = false,
+    )
+    val seed = sampleModel()
+    val (m, _) = applyChunkVisible(seed, "Felix", errChunk)
+    return m.LastError match {
+        case None()    => IsTrue(t, false)
+        case Some(err) => IsTrue(t, len(err) < 200)
+    }
+}
+
+// claude-code's `result` envelopes with `is_error=true` sometimes
+// carry a stream-json envelope (`{"type":"user","message":...}`) in
+// the `result` field itself. resultEventChunk passes it through into
+// chunk.ErrorText, and PR #65's truncate-only fix still surfaced the
+// first 80 bytes as visible JSON in the bottom bar (the user-reported
+// `⚠ Vesper: {"type":"user","message":...` symptom). Detect the
+// envelope shape on chunk.ErrorText and replace with a clean tag, the
+// same way onStderr does.
+func TestApplyChunkVisible_StreamJsonErrorText_SuppressedTag(t T) T {
+    val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01abc\",\"type\":\"tool_result\",\"content\":\"ok\"}]}}"
+    val errChunk = ClaudeChunk(
+        Visible         = "",
+        ErrorText       = envelope,
+        LiveTurn        = None[ClaudeUsage](),
+        FinalTurn       = None[ClaudeUsage](),
+        CostUsd         = 0.0,
+        AskQuestionId   = "",
+        AskQuestionText = "",
+        TurnEnded       = false,
+        IsToolActivity  = false,
+        IsSynthetic     = false,
+    )
+    val seed = sampleModel()
+    val (m, _) = applyChunkVisible(seed, "Vesper", errChunk)
+    return m.LastError match {
+        case None()    => IsTrue(t, false)
+        case Some(err) => {
+            val t1 = IsTrue(t, strings.Contains(err, "stream-json"))
+            return IsTrue(t1, !strings.Contains(err, "\"type\":\"user\""))
+        }
+    }
+}
+
+// claude-code sometimes misroutes a stream-json envelope onto stderr
+// (observed: a `{"type":"user","message":...}` user-input envelope
+// surfaced under the bottom-bar warning as the literal JSON bytes,
+// which the user reads as a UX bug). The clean tag form replaces
+// the bytes so the warning conveys intent ("stream-json on stderr")
+// without leaking JSON into the visible surface; the full payload
+// still lands in events.jsonl via LogStderr.
+func TestOnStderr_StreamJsonShape_SuppressedTag(t T) T {
+    val dir = setupDebugRepo("on_stderr_streamjson")
+    defer os.RemoveAll(dir)
+    val m = sampleModel()
+    val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01abc\",\"type\":\"tool_result\",\"content\":\"ok\"}]}}"
+    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = envelope))
+    return m1.LastError match {
+        case None()    => IsTrue(t, false)
+        case Some(err) => {
+            val t1 = IsTrue(t, strings.Contains(err, "stream-json"))
+            return IsTrue(t1, !strings.Contains(err, "\"type\":\"user\""))
+        }
+    }
+}
+
 // QAGate variant of the heartbeat-abandoned test from PR #61. A live
 // session captured Sable in QAGate(Pending={Sable}) with StWorking
 // status and LastChunkAt aged past AbandonAfterSeconds; the walk
@@ -4554,6 +4637,119 @@ func TestFilterClaudeStreamJson_RateLimitApproaching_SurfacesErrorText(t T) T {
     val envelope = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":1,\"rateLimitType\":\"five_hour\"}}"
     val chunk = filterClaudeStreamJsonFor("Felix", envelope)
     return IsTrue(t, strings.Contains(chunk.ErrorText, "rejected"))
+}
+
+// ----------------------------------------------------------------------------
+// Synthetic-envelope detection.
+//
+// claude-code emits assistant envelopes with message.model == "<synthetic>"
+// as a stub reply to isMeta resume inputs ("Continue from where you left
+// off."). Their content[].text is the literal string "No response
+// requested." with usage = all zeros. Past sessions accumulated 162 of
+// these in one member's jsonl and the model started parroting the same
+// text back from real API calls — the QA gate parked indefinitely
+// because LastChunkAt kept getting bumped on noise. The fix: detect at
+// the classifier, mark IsSynthetic, short-circuit applyChunkVisible
+// (no transcript / no token accrual / no LastChunkAt bump), and bump a
+// per-member synthetic counter that liveRespawnMember reads to decide
+// whether to rotate the SessionId before the next --resume.
+// ----------------------------------------------------------------------------
+
+func syntheticAssistantEnvelope() string =
+    "{\"type\":\"assistant\",\"message\":{\"model\":\"<synthetic>\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"No response requested.\"}],\"usage\":{\"input_tokens\":0,\"output_tokens\":0,\"cache_read_input_tokens\":0}}}"
+
+func realAssistantEnvelope(text string) string =
+    s"{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-7\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"${text}\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0}}}"
+
+// filterClaudeStreamJsonFor on a synthetic envelope returns a chunk
+// flagged IsSynthetic with empty Visible/AskQuestionId. Without this,
+// "No response requested." would render in the transcript.
+func TestFilterClaudeStreamJson_SyntheticEnvelope_FlagsAndDropsText(t T) T {
+    val chunk = filterClaudeStreamJsonFor("Sable", syntheticAssistantEnvelope())
+    val t1 = IsTrue(t, chunk.IsSynthetic)
+    val t2 = Eq(t1, chunk.Visible, "")
+    return Eq(t2, chunk.AskQuestionId, "")
+}
+
+// A real (non-synthetic) assistant envelope still classifies normally
+// — IsSynthetic stays false and Visible carries the model's text.
+func TestFilterClaudeStreamJson_RealAssistantEnvelope_NotSynthetic(t T) T {
+    val chunk = filterClaudeStreamJsonFor("Sable", realAssistantEnvelope("hello"))
+    val t1 = IsTrue(t, !chunk.IsSynthetic)
+    return Eq(t1, chunk.Visible, "hello")
+}
+
+// ChunkArrived with a synthetic envelope must NOT bump LastChunkAt.
+// If it did, the heartbeat would treat the synthetic-only stream as
+// alive and never escalate to MemberAbandoned — the QA-gate freeze
+// observed in past sessions. Seed LastChunkAt = UnixEpoch (past),
+// feed a synthetic chunk, assert the timestamp stayed at UnixEpoch.
+func TestChunkArrived_SyntheticEnvelope_DoesNotBumpLastChunkAt(t T) T {
+    val past = time_utils.UnixEpoch()
+    val seed = sampleModel().Copy(
+        LastChunkAt = EmptyHashMap[string, time_utils.Instant]().Put("Felix", past),
+    )
+    val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = syntheticAssistantEnvelope()))
+    val after = m.LastChunkAt.Get("Felix").GetOrElse(time_utils.Now())
+    return Eq(t, after.UnixNanos(), past.UnixNanos())
+}
+
+// Synthetic chunks increment SyntheticOnlyChunks[name]; the counter
+// is what the heartbeat / respawn path reads to detect poisoning.
+// Two consecutive synthetics → counter == 2.
+func TestChunkArrived_SyntheticEnvelope_IncrementsCounter(t T) T {
+    val seed = sampleModel()
+    val (m1, _) = Update(seed, ChunkArrived(Member = "Felix", Line = syntheticAssistantEnvelope()))
+    val (m2, _) = Update(m1,   ChunkArrived(Member = "Felix", Line = syntheticAssistantEnvelope()))
+    return Eq(t, m2.SyntheticOnlyChunks.Get("Felix").GetOrElse(0), 2)
+}
+
+// A real assistant chunk after synthetics MUST reset the counter back
+// to 0. Without the reset, a transiently-poisoned session that
+// recovers would still trigger SessionId rotation on the next
+// heartbeat escalation — losing legitimate conversation history.
+func TestChunkArrived_RealEnvelopeAfterSynthetics_ResetsCounter(t T) T {
+    val seed = sampleModel()
+    val (m1, _) = Update(seed, ChunkArrived(Member = "Felix", Line = syntheticAssistantEnvelope()))
+    val (m2, _) = Update(m1,   ChunkArrived(Member = "Felix", Line = syntheticAssistantEnvelope()))
+    val (m3, _) = Update(m2,   ChunkArrived(Member = "Felix", Line = realAssistantEnvelope("alive again")))
+    return Eq(t, m3.SyntheticOnlyChunks.Get("Felix").GetOrElse(0), 0)
+}
+
+// rotateSessionIfSyntheticPoisoned is the testable seam for the
+// liveRespawnMember rotation decision. Below the poison threshold,
+// SessionIds[name] is preserved (the respawn keeps --resume on the
+// same id). At/above the threshold, SessionIds[name] is removed so
+// the imminent ensureSession spawns with --session-id <fresh>.
+func TestRotateSessionIfSyntheticPoisoned_BelowThreshold_KeepsSessionId(t T) T {
+    val seed = sampleModel().Copy(
+        SessionIds          = EmptyHashMap[string, string]().Put("Felix", "OLD-SID-123"),
+        SyntheticOnlyChunks = EmptyHashMap[string, int]().Put("Felix", SyntheticPoisonThreshold() - 1),
+    )
+    val (m, poisoned, _) = rotateSessionIfSyntheticPoisoned(seed, "Felix")
+    val t1 = IsTrue(t, !poisoned)
+    return Eq(t1, m.SessionIds.Get("Felix").GetOrElse(""), "OLD-SID-123")
+}
+
+func TestRotateSessionIfSyntheticPoisoned_AtThreshold_DropsSessionId(t T) T {
+    val seed = sampleModel().Copy(
+        SessionIds          = EmptyHashMap[string, string]().Put("Felix", "OLD-SID-456"),
+        SyntheticOnlyChunks = EmptyHashMap[string, int]().Put("Felix", SyntheticPoisonThreshold()),
+    )
+    val (m, poisoned, count) = rotateSessionIfSyntheticPoisoned(seed, "Felix")
+    val t1 = IsTrue(t, poisoned)
+    val t2 = IsTrue(t1, !m.SessionIds.Get("Felix").IsDefined())
+    return Eq(t2, count, SyntheticPoisonThreshold())
+}
+
+func TestRotateSessionIfSyntheticPoisoned_NoCounter_KeepsSessionId(t T) T {
+    val seed = sampleModel().Copy(
+        SessionIds = EmptyHashMap[string, string]().Put("Felix", "OLD-SID-789"),
+    )
+    val (m, poisoned, count) = rotateSessionIfSyntheticPoisoned(seed, "Felix")
+    val t1 = IsTrue(t, !poisoned)
+    val t2 = Eq(t1, count, 0)
+    return Eq(t2, m.SessionIds.Get("Felix").GetOrElse(""), "OLD-SID-789")
 }
 
 // onPasteClipboard's UI-thread half: Ctrl+V returns immediately

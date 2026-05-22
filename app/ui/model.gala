@@ -350,6 +350,19 @@ struct AppModel(
     // Reset on every new turn open (onSubmit / spawnDispatchedMembers
     // / spawnQAReview / spawnTLNudge / @consult relay).
     TurnVisibleChunks HashMap[string, int],
+    // Per-member counter of CONSECUTIVE claude-code synthetic assistant
+    // envelopes (message.model == "<synthetic>") received since the
+    // last real chunk. Real assistant chunks reset this to 0; each
+    // synthetic increments it. When it crosses the poison threshold the
+    // liveRespawnMember path rotates SessionIds[name] so the respawn
+    // spawns with --session-id (fresh jsonl) instead of --resume (the
+    // poisoned one). Without this, a stuck-in-synthetic-loop session
+    // (observed in past sessions: hundreds of synthetic envelopes
+    // accumulating across resumes until the model started parroting
+    // their "No response requested." text back from real API calls)
+    // looks alive to LastChunkAt-based liveness and the QA gate
+    // parks indefinitely.
+    SyntheticOnlyChunks HashMap[string, int],
     // Toggles the help overlay. Bound to `?` and to a clickable `?`
     // button in the header (DESIGN.md §8.5). The overlay is a
     // floating modal that auto-renders the key + mouse parity matrix.
@@ -578,6 +591,7 @@ func InitialModelWithTeams(
     MemberBlockedReasons  = EmptyHashMap[string, string](),
     PostPromptSent        = EmptyHashSet[string](),
     TurnVisibleChunks     = EmptyHashMap[string, int](),
+    SyntheticOnlyChunks   = EmptyHashMap[string, int](),
     HelpVisible           = false,
     ProjectInfoOpen       = false,
     GuidanceOpen          = false,

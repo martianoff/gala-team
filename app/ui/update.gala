@@ -384,6 +384,38 @@ func resumeInFlight(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // The bandFor / livenessStatus helpers below take the typed Heartbeat
 // argument so threshold tweaks per-team take effect on the next tick.
 
+// SyntheticPoisonThreshold is the number of consecutive synthetic
+// (model:"<synthetic>") claude-code assistant envelopes that, by the
+// time the heartbeat decides to respawn a silent member, makes us
+// drop SessionIds[name] before the respawn so ensureSession spawns
+// a fresh claude-code jsonl rather than --resume into the poisoned
+// one. Three keeps the rotation conservative — a one-off synthetic
+// from a single resume cycle won't trip it, but a session that has
+// only ever produced synthetics across multiple heartbeat windows
+// will. Counter resets to 0 on any real chunk (see applyChunkVisible)
+// and on every resetMemberState (fresh dispatch or respawn).
+// Function (not `val`) so test files can use the literal int in
+// arithmetic / HashMap.Put / Eq without an Immutable[int]→int
+// coercion error from the gala-to-Go test compilation pass.
+func SyntheticPoisonThreshold() int = 3
+
+// rotateSessionIfSyntheticPoisoned decides whether the imminent
+// respawn must drop the saved SessionId for `name`. When the per-
+// member synthetic counter has hit the poison threshold, --resume
+// on the existing id will just reload claude-code's poisoned jsonl
+// and the synthetic loop continues — we instead drop the id so
+// ensureSession spawns with --session-id <fresh>, generating a
+// new jsonl with no poison. Returns the updated model, a bool
+// signalling whether rotation happened (for caller logging), and
+// the synthetic count observed (for the LastError message).
+func rotateSessionIfSyntheticPoisoned(m AppModel, name string) Tuple3[AppModel, bool, int] {
+    val synthCount = m.SyntheticOnlyChunks.Get(name).GetOrElse(0)
+    if synthCount < SyntheticPoisonThreshold() {
+        return (m, false, synthCount)
+    }
+    return (m.Copy(SessionIds = m.SessionIds.Remove(name)), true, synthCount)
+}
+
 // onTick advances Tick + NowAt, prunes expired toasts, re-derives
 // liveness statuses for every member currently in Working/Slow/Stuck,
 // and — when a member newly transitions to Stuck or Failed — emits the
@@ -2206,15 +2238,20 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
         )
         return (m1, pumpCmd)
     }
-    val short = truncateForToast(trimmed)
+    // Stream-json shape detection: claude-code occasionally writes
+    // a stream-json envelope (`{"type":"user","message":...}`) to
+    // stderr instead of stdout. The raw bytes are useless in the
+    // bottom-bar surface and just look like a UX bug to the user
+    // (past sessions surfaced the literal "Lyra: {\"type\":\"user\"
+    // ..." string under a warning icon). The full payload is in
+    // events.jsonl via LogStderr above, so the audit trail is
+    // intact — surface a clean tag instead of dumping the bytes.
+    val isStreamJson = strings.HasPrefix(trimmed, "{") &&
+                       (strings.Contains(trimmed, "\"type\":\"") ||
+                        strings.Contains(trimmed, "\"message\":"))
+    val short = if (isStreamJson) "stream-json envelope on stderr (see events.jsonl)"
+                else                truncateForToast(trimmed)
     val toast = m.Toasts.PushWarn(s"${name} (stderr): ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
-    // Use the truncated form for LastError too — the full stderr
-    // line lands in events.jsonl already via LogStderr above, so
-    // the audit trail is intact. A past session captured an 8 KB
-    // stream-json `tool_result` envelope claude-code wrote to
-    // stderr instead of stdout; without the trim it filled the
-    // bottom-bar LastError surface and clobbered the help-key hint
-    // rendering for the whole session.
     val m1 = m.Copy(
         Toasts    = toast,
         LastError = Some(s"${name} stderr: ${short}"),
@@ -2395,6 +2432,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
             AskQuestionText = "",
             TurnEnded       = false,
             IsToolActivity  = false,
+            IsSynthetic     = false,
         )
         val (m1, c) = applyChunkVisible(m, name, proseChunk)
         val pumpCmd = m1.Sessions.Get(name) match {
@@ -2440,17 +2478,34 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     // model across them so multiple envelopes from one ChunkArrived
     // (rare but possible when claude flushes a batch) compose
     // correctly.
-    val seedAcc = (mWithBuf, EmptyArray[Cmd[AppMsg]]())
-    val (mFinal, foldedCmds) = extracted.Envelopes.FoldLeft(seedAcc, (acc, env) => {
-        val (curM, curCmds) = acc
+    val seedAcc = (mWithBuf, EmptyArray[Cmd[AppMsg]](), false)
+    val (mFinal, foldedCmds, anyReal) = extracted.Envelopes.FoldLeft(seedAcc, (acc, env) => {
+        val (curM, curCmds, realSoFar) = acc
+        val priorSynth = curM.SyntheticOnlyChunks.Get(name).GetOrElse(0)
         val (nextM, envCmd) = applyOneEnvelope(curM, name, env)
-        return (nextM, curCmds.Append(envCmd))
+        // Per-envelope "was this real progress?" check: a synthetic
+        // envelope ONLY bumps SyntheticOnlyChunks; anything else
+        // either leaves it alone or removes it (real chunks reset
+        // the counter via applyChunkVisible). So if the counter
+        // grew, this envelope was synthetic.
+        val nextSynth = nextM.SyntheticOnlyChunks.Get(name).GetOrElse(0)
+        val wasSynthetic = nextSynth > priorSynth
+        return (nextM, curCmds.Append(envCmd), realSoFar || !wasSynthetic)
     })
     val pumpCmd = mFinal.Sessions.Get(name) match {
         case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
         case None()  => NoCmd[AppMsg]()
     }
-    return (mFinal.Copy(LastChunkAt = mFinal.LastChunkAt.Put(name, time_utils.Now())), batchAll(foldedCmds.Append(pumpCmd)))
+    // Only bump LastChunkAt when the fold produced at least one
+    // real (non-synthetic) envelope. A synthetic-only batch is
+    // claude-code's auto-stub reply to a resume marker — not
+    // model output — so we leave LastChunkAt at its prior value
+    // and let the heartbeat see the silence.
+    val mWithLastChunk = if (anyReal)
+        mFinal.Copy(LastChunkAt = mFinal.LastChunkAt.Put(name, time_utils.Now()))
+    else
+        mFinal
+    return (mWithLastChunk, batchAll(foldedCmds.Append(pumpCmd)))
 }
 
 // applyOneEnvelope runs the per-envelope pipeline: whitelist-filter
@@ -2466,7 +2521,25 @@ func applyOneEnvelope(m AppModel, name string, envelope string) Tuple[AppModel, 
 // envelope path (via applyOneEnvelope) and the plain-prose fast path
 // in onChunk.
 func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppModel, Cmd[AppMsg]] {
-    val mAccrued = accrueTokens(m, name, chunk)
+    // Synthetic envelopes (claude-code's stub reply to an isMeta
+    // resume input) are not progress. Bump the per-member counter so
+    // liveRespawnMember can rotate the SessionId once enough have
+    // piled up, and short-circuit before token accrual / transcript
+    // append / status flip — the caller (onChunk) gates the
+    // outer LastChunkAt bump on whether any envelope was real, so
+    // a synthetic-only fold leaves the heartbeat's silence math
+    // untouched.
+    if chunk.IsSynthetic {
+        val curr = m.SyntheticOnlyChunks.Get(name).GetOrElse(0)
+        return (m.Copy(SyntheticOnlyChunks = m.SyntheticOnlyChunks.Put(name, curr + 1)), NoCmd[AppMsg]())
+    }
+    // Any real chunk resets the synthetic counter. LastChunkAt is
+    // bumped by the caller (onChunk) so it lands AFTER setStatus's
+    // own LastChunkAt write on the non-working→working transition
+    // (setStatus stamps m.NowAt onto LastChunkAt as part of the
+    // work-start accounting; bumping LastChunkAt here would just
+    // get clobbered downstream).
+    val mAccrued = accrueTokens(m.Copy(SyntheticOnlyChunks = m.SyntheticOnlyChunks.Remove(name)), name, chunk)
     val displayText = chunk.Visible
     // Stale-session-id recovery: claude returns "No conversation found
     // with session ID …" when --resume points at an id claude doesn't
@@ -2484,8 +2557,17 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     else
         mAccrued
     val withErrSurface = if (chunk.ErrorText == "") mRecovered else {
-        val toast = mRecovered.Toasts.PushError(s"${name}: ${chunk.ErrorText}", time_utils.Now(), time_utils.Seconds(int64(8)))
-        mRecovered.Copy(Toasts = toast, LastError = Some(s"${name}: ${chunk.ErrorText}"))
+        // Sanitise the visible form: claude-code result envelopes
+        // with is_error=true sometimes carry structured JSON (or
+        // multi-paragraph prose) in the `result` field, and dumping
+        // it verbatim into the bottom-bar toast / LastError clobbers
+        // the keybind hint line and reads like a UX bug. The full
+        // chunk.ErrorText is already captured in events.jsonl via
+        // the trace pipeline; the user-visible surfaces just need a
+        // short tag.
+        val short = truncateForToast(chunk.ErrorText)
+        val toast = mRecovered.Toasts.PushError(s"${name}: ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
+        mRecovered.Copy(Toasts = toast, LastError = Some(s"${name}: ${short}"))
     }
     // AskUserQuestion forwarding. The model's tool_use block fires
     // BEFORE the model emits any narrative `text` part for the same
@@ -3522,6 +3604,7 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
         }
         case Some(_) => {
             val mClosed = closeLiveSession(m, name)
+            val (mPrepared, poisoned, synthCount) = rotateSessionIfSyntheticPoisoned(mClosed, name)
             // Same unified respawn reset as the crash path
             // (freshTask = false): buffers cleared, LastChunkAt reset
             // to now (so the heartbeat does not instantly re-mark the
@@ -3529,11 +3612,15 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
             // timestamp), PostPromptSent preserved, RetryCount bumped
             // from `retries` to `retries + 1` == the `attempt` the
             // caller computed. `attempt` is kept for the message +
-            // StRecovering only.
-            val reset = resetMemberForRespawn(mClosed, name)
-            val recovering = reset.Copy(
-                LastError = Some(s"${name}: silent past heartbeat — respawn ${attempt}/${max}"),
-            )
+            // StRecovering only. resetMemberForRespawn also clears
+            // SyntheticOnlyChunks[name] so the next cycle starts
+            // from a clean counter.
+            val reset = resetMemberForRespawn(mPrepared, name)
+            val errMsg = if (poisoned)
+                s"${name}: synthetic-only stream (${synthCount}) — rotating session, respawn ${attempt}/${max}"
+            else
+                s"${name}: silent past heartbeat — respawn ${attempt}/${max}"
+            val recovering = reset.Copy(LastError = Some(errMsg))
             val withStatus = setStatus(recovering, name, StRecovering(attempt, max))
             return respawnMember(withStatus, name)
         }
@@ -3593,6 +3680,7 @@ func resetMemberState(m AppModel, name string, freshTask bool) AppModel {
         MemberDirectivesFired = m.MemberDirectivesFired.Remove(name),
         MemberDoneBodies      = m.MemberDoneBodies.Remove(name),
         MemberBlockedReasons  = m.MemberBlockedReasons.Remove(name),
+        SyntheticOnlyChunks   = m.SyntheticOnlyChunks.Remove(name),
         LastChunkAt           = m.LastChunkAt.Put(name, time_utils.Now()),
     )
     return if (freshTask) {
@@ -4493,6 +4581,16 @@ struct ClaudePart(Type string, Text string, Id string, Name string)
 // event delivers the final tally). Decoding it here lets us tick
 // the header live during streaming instead of waiting for the
 // turn-end result.
+//
+// The `message.model` wire field is NOT decoded here — adding it
+// made the codec reject existing envelopes that don't carry it
+// (some past test fixtures + bulk-mode `result`-event paths
+// elide the field), which surfaced as a regression in the
+// tool-use status flip test. Synthetic-envelope detection
+// instead reads the raw envelope string in
+// looksLikeSyntheticEnvelope — substring on `"model":"<synthetic>"`
+// — which keeps the decoded shape stable across claude-code
+// wire changes.
 struct ClaudeAssistantMsg(
     Content Array[ClaudePart],
     Usage   ClaudeUsage,
@@ -4572,6 +4670,16 @@ struct ClaudeChunk(
     // "using <Tool>" lines added no value to the chat and would have
     // spammed the transcript with one entry per tool call.
     IsToolActivity bool,
+    // IsSynthetic flags a claude-code auto-emitted assistant envelope
+    // (message.model == "<synthetic>"). These appear when --resume
+    // input is isMeta or otherwise non-actionable and carry stub text
+    // ("No response requested.") that must NOT enter the transcript,
+    // bump LastChunkAt, or accrue tokens. applyChunkVisible
+    // short-circuits on this flag and increments
+    // m.SyntheticOnlyChunks[name] so the heartbeat / respawn paths
+    // can tell a poisoned session (stdout flowing, no model output)
+    // apart from a healthy silent one.
+    IsSynthetic bool,
 )
 
 // emptyChunk is the "drop this line" marker.
@@ -4585,6 +4693,24 @@ func emptyChunk() ClaudeChunk = ClaudeChunk(
     AskQuestionText = "",
     TurnEnded       = false,
     IsToolActivity  = false,
+    IsSynthetic     = false,
+)
+
+// syntheticChunk marks a claude-code synthetic envelope. The caller
+// (applyChunkVisible) reads IsSynthetic and bumps the per-member
+// synthetic counter without bumping LastChunkAt — the rest of the
+// pipeline treats it as a no-op.
+func syntheticChunk() ClaudeChunk = ClaudeChunk(
+    Visible         = "",
+    ErrorText       = "",
+    LiveTurn        = None[ClaudeUsage](),
+    FinalTurn       = None[ClaudeUsage](),
+    CostUsd         = 0.0,
+    AskQuestionId   = "",
+    AskQuestionText = "",
+    TurnEnded       = false,
+    IsToolActivity  = false,
+    IsSynthetic     = true,
 )
 
 // filterClaudeStreamJsonFor is the chunk classifier. The `member`
@@ -4634,7 +4760,9 @@ func filterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
             case Success(evt) => {
                 val chunk = assistantEventChunk(evt, trimmed)
                 val dropped = chunk.Visible == "" && chunk.AskQuestionId == ""
-                val reason = if (dropped) "assistant chunk with no text parts" else ""
+                val reason = if (chunk.IsSynthetic) "synthetic claude-code resume marker"
+                             else if (dropped)     "assistant chunk with no text parts"
+                             else                   ""
                 TraceClaudeLine(member, envelope, chunk.Visible, "", dropped, reason)
                 return chunk
             }
@@ -4734,6 +4862,7 @@ func rateLimitEventChunk(envelope string) ClaudeChunk {
         AskQuestionText = "",
         TurnEnded       = false,
         IsToolActivity  = false,
+        IsSynthetic     = false,
     )
 }
 
@@ -4869,6 +4998,21 @@ func looksLikeClaudeEnvelope(s string) bool {
     return strings.HasPrefix(t, "{\"type\":")
 }
 
+// looksLikeSyntheticEnvelope tests whether `s` is a claude-code
+// synthetic assistant envelope — one with `"model":"<synthetic>"`
+// inside the message object. claude-code emits these as a stub
+// response to isMeta resume inputs ("Continue from where you left
+// off.") and they carry literal text like "No response requested."
+// in content[].text. Detected via raw-string substring (cheaper
+// than threading the field through the codec, and the literal
+// `<synthetic>` value cannot occur in a real model id) so the
+// shape stays stable across claude-code wire-schema changes.
+// assistantEventChunk uses this to short-circuit synthetic
+// envelopes into syntheticChunk() so they never enter the
+// transcript / bump LastChunkAt / accrue tokens.
+func looksLikeSyntheticEnvelope(s string) bool =
+    strings.Contains(s, "\"model\":\"<synthetic>\"")
+
 // assistantEventChunk extracts the joined text from a complete
 // `assistant` envelope's content[]. Filters parts to `text` for the
 // visible body. tool_use / tool_result / thinking are otherwise
@@ -4879,6 +5023,20 @@ func looksLikeClaudeEnvelope(s string) bool {
 // envelope string is passed through so we can scrape the question
 // text out of the un-decoded `input` JSON.
 func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChunk {
+    // claude-code emits a synthetic assistant envelope
+    // (message.model == "<synthetic>") in response to an isMeta input
+    // ("Continue from where you left off.") on a resumed session. The
+    // payload is a stub literal "No response requested." — the model
+    // never ran. Past sessions accumulated hundreds of these in a
+    // poisoned conversation jsonl and then started parroting the same
+    // text back from real API calls, freezing the QA gate indefinitely.
+    // Treat them as no-ops: empty Visible, no token accrual, but the
+    // IsSynthetic flag lets applyChunkVisible bump the per-member
+    // synthetic counter so liveRespawnMember can rotate the SessionId
+    // when the count crosses the poison threshold.
+    if looksLikeSyntheticEnvelope(rawEnvelope) {
+        return syntheticChunk()
+    }
     val texts = evt.Message.Content.Collect({
         case ClaudePart(kind, text, _, _) if kind == "text" => text
     })
@@ -4904,6 +5062,7 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
         AskQuestionText = askText,
         TurnEnded       = false,
         IsToolActivity  = isToolActivity,
+        IsSynthetic     = false,
     )
 }
 
@@ -5005,6 +5164,7 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
             AskQuestionText = "",
             TurnEnded       = true,
             IsToolActivity  = false,
+            IsSynthetic     = false,
         )
     }
     // Render the `result` field as visible text on a clean turn. Two
@@ -5033,6 +5193,7 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
         AskQuestionText = "",
         TurnEnded       = true,
         IsToolActivity  = false,
+        IsSynthetic     = false,
     )
 }
 

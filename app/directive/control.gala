@@ -1,0 +1,135 @@
+package directive
+
+import (
+    "martianoff/gala/strings"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
+)
+
+// control.gala — minimal reader for the TL-only CONTROL directives
+// `@base` and `@plan`. These are NOT agent-to-agent protocol messages
+// (they don't belong in protocol.MessageKind); they're side-channel
+// instructions from the Team Lead to the orchestrator — base selects
+// the PR's base branch for `gh pr create`, plan stashes an ordered
+// list of follow-up prompts for the multi-PR pipeline.
+//
+// Scope is intentionally narrow: this reader recognises only `@base`
+// and `@plan` openers, and ignores every other token a TL turn might
+// contain (`@dispatch`/`@consult`/`@summary` are routed via
+// protocol.Decode + the Message → Directive adapter; `@finished` /
+// `@help` / `@blocked` are member terminals, also via protocol). It
+// is not a parallel parser for the agent bus; it is a small control-
+// directive reader.
+
+// ParseBaseAndPlan walks the TL buffer front-to-back and emits one
+// Directive per CLOSED `@base ... @end` or `@plan ... @end` block, in
+// source order. Unclosed trailing blocks are dropped — acting on a
+// half-streamed control directive is never correct.
+func ParseBaseAndPlan(buffer string) Array[Directive] {
+    var out = EmptyArray[Directive]()
+    val lines = strings.Split(buffer, "\n")
+    val n = lines.Length()
+    var i = 0
+    for i < n {
+        val opt = controlOpener(lines.Get(i))
+        opt match {
+            case None() => i = i + 1
+            case Some(o) => {
+                val (body, next, closed) = controlBody(lines, i, n, o.SameLine)
+                if (closed) {
+                    buildControlDirective(o.Kind, body) match {
+                        case Some(d) => out = out.Append(d)
+                        case None()  => {}
+                    }
+                    i = next
+                } else {
+                    i = n
+                }
+            }
+        }
+    }
+    return out
+}
+
+// controlOpening is the parsed prefix of a `@base` / `@plan` opener
+// line: the normalised kind token plus any same-line body remainder.
+struct controlOpening(
+    Kind     string,
+    SameLine string,
+)
+
+func controlOpener(line string) Option[controlOpening] {
+    val trimmed = strings.TrimLeft(line, " \t")
+    if (strings.HasPrefix(trimmed, "@base")) {
+        return Some[controlOpening](controlOpening(
+            Kind     = "base",
+            SameLine = strings.TrimLeft(strings.TrimPrefix(trimmed, "@base"), " \t"),
+        ))
+    }
+    if (strings.HasPrefix(trimmed, "@plan")) {
+        return Some[controlOpening](controlOpening(
+            Kind     = "plan",
+            SameLine = strings.TrimLeft(strings.TrimPrefix(trimmed, "@plan"), " \t"),
+        ))
+    }
+    return None[controlOpening]()
+}
+
+func controlBody(lines Array[string], start int, n int, sameLine string) Tuple3[string, int, bool] {
+    var parts = EmptyArray[string]()
+    if (sameLine != "") { parts = parts.Append(sameLine) }
+    var i = start + 1
+    for i < n {
+        val line = lines.Get(i)
+        if (strings.TrimSpace(line) == "@end") {
+            return (joinControlBody(parts), i + 1, true)
+        }
+        parts = parts.Append(line)
+        i = i + 1
+    }
+    return (joinControlBody(parts), n, false)
+}
+
+func joinControlBody(parts Array[string]) string =
+    strings.TrimSpace(parts.MkString("\n"))
+
+func buildControlDirective(kind string, body string) Option[Directive] {
+    if (kind == "base") {
+        // First non-empty token is the ref; empty body drops the
+        // directive so a stray `@base ... @end` never silently locks
+        // the team into an unintended base.
+        val trimmed = strings.TrimSpace(body)
+        if (trimmed == "") { return None[Directive]() }
+        val firstTok = strings.SplitN(trimmed, "\n", 2).Get(0)
+        return Some[Directive](Base(Ref = strings.TrimSpace(firstTok)))
+    }
+    if (kind == "plan") {
+        val items = parseControlPlanItems(body)
+        if (items.IsEmpty()) { return None[Directive]() }
+        return Some[Directive](Plan(Items = items))
+    }
+    return None[Directive]()
+}
+
+// parseControlPlanItems splits the plan body into one item per non-
+// empty line, lenient about list markers ("- ", "* ", "• ", "N.",
+// "N)") so the TL can write the plan as a markdown list.
+func parseControlPlanItems(body string) Array[string] =
+    strings.Split(body, "\n")
+        .Map((ln) => stripControlPlanBullet(strings.TrimSpace(ln)))
+        .Filter((s) => s != "")
+
+func stripControlPlanBullet(s string) string {
+    if (strings.HasPrefix(s, "- ")) { return strings.TrimSpace(strings.TrimPrefix(s, "- ")) }
+    if (strings.HasPrefix(s, "* ")) { return strings.TrimSpace(strings.TrimPrefix(s, "* ")) }
+    if (strings.HasPrefix(s, "• ")) { return strings.TrimSpace(strings.TrimPrefix(s, "• ")) }
+    val rs = ToRunes(s)
+    val n = len(rs)
+    var i = 0
+    for i < n && rs[i] >= '0' && rs[i] <= '9' { i = i + 1 }
+    if (i > 0 && i < n && (rs[i] == '.' || rs[i] == ')')) {
+        return strings.TrimSpace(string(SliceFrom(rs, i + 1)))
+    }
+    return s
+}

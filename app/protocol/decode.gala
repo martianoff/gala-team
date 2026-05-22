@@ -1,0 +1,396 @@
+package protocol
+
+import (
+    "martianoff/gala/strings"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// decode.gala — the idempotent inbound decoder + the durable dedup
+// Ledger.
+//
+// Decode is a PURE function of the full accumulated agent text buffer.
+// It subsumes three directive-extraction hacks:
+//
+//   directive.Parse / directive.ParseClosed
+//       front-to-back @dispatch / @consult / @summary extraction from a
+//       Team-Lead buffer.
+//   directive.MemberTerminal
+//       end-anchored @finished / @review / @done / @help / @blocked
+//       extraction from a member buffer — robust against deliverables
+//       that QUOTE protocol syntax (audits / PRs about this orchestrator
+//       are full of documented `@dispatch(` / `@finished` / `@end`
+//       examples). Anchoring on the LAST bare `@end` and scanning back
+//       to the nearest opener ignores every quoted example before the
+//       real sign-off.
+//
+// The idempotency property is the whole point: decoding a buffer, then
+// decoding that same buffer grown by a byte-identical duplicate chunk
+// (the claude stream occasionally re-emits a chunk on reconnect),
+// yields the SAME Array[Message] — identical Ids, identical order. A
+// duplicated directive block re-derives a Message whose content hash
+// already appeared, and dedupById collapses it. This single property
+// replaces the terminalFingerprint latch, the dedupTargetsByName
+// pass, and the ConsultsFired watermark: decode is a pure function of
+// the buffer; identity is the content hash; dedup is by Id.
+// ============================================================================
+
+// Reserved address tokens. Members address the lead as LeadAddr; the
+// TL's final @summary is addressed to the user. Real members use their
+// configured name.
+func LeadAddr() string = "_lead"
+func UserAddr() string = "_user"
+
+// DecodeContext carries the per-buffer facts Decode needs to stamp
+// identity and routing onto the directives it finds.
+//
+//   Sender    — who produced this buffer (member name | "_lead").
+//   Recipient — default counterparty for member terminals (normally
+//               LeadAddr). TL directives override this from the
+//               directive's own target.
+//   Epoch     — the monotone per-(Sender,Recipient) counter. A
+//               re-dispatch bumps it so a late duplicate of the
+//               PREVIOUS turn's directive hashes differently and cannot
+//               be mistaken for the live one (defeats stale redelivery
+//               across re-dispatch without a side-channel watermark).
+//   LeadView  — true: extract @dispatch / @consult / @summary
+//               front-to-back (the TL emits those). false: extract ONLY
+//               the end-anchored member terminal — a member buffer that
+//               quotes `@dispatch(` in an audit must NOT be parsed as a
+//               real dispatch, which is exactly why MemberTerminal
+//               exists as a separate path.
+struct DecodeContext(
+    Sender    string,
+    Recipient string,
+    Epoch     int,
+    LeadView  bool,
+)
+
+// TLDecodeContext is the context for the Team Lead's own buffer.
+func TLDecodeContext(epoch int) DecodeContext = DecodeContext(
+    Sender    = LeadAddr(),
+    Recipient = UserAddr(),
+    Epoch     = epoch,
+    LeadView  = true,
+)
+
+// MemberDecodeContext is the context for a member's (engineer / QA)
+// buffer. Member terminals are routed back to the lead.
+func MemberDecodeContext(member string, epoch int) DecodeContext = DecodeContext(
+    Sender    = member,
+    Recipient = LeadAddr(),
+    Epoch     = epoch,
+    LeadView  = false,
+)
+
+// Decode is the pure inbound decoder. Returns every protocol Message
+// the buffer carries, in source order, deduplicated by content-hash Id.
+func Decode(buffer string, ctx DecodeContext) Array[Message] {
+    val lines = strings.Split(buffer, "\n")
+    val raw =
+        if (ctx.LeadView) extractLeadDirectives(lines, ctx)
+        else              extractMemberTerminal(lines, ctx)
+    return dedupById(raw)
+}
+
+// dedupById keeps the first occurrence of each Id, preserving order.
+// This is the property that collapses a re-emitted stream chunk: the
+// duplicate re-derives an already-seen content hash. It also subsumes
+// dedupTargetsByName — two byte-identical @dispatch blocks for the same
+// member produce one Message, not N.
+func dedupById(msgs Array[Message]) Array[Message] {
+    val seed = (EmptyArray[Message](), EmptyHashSet[string]())
+    val (out, _) = msgs.FoldLeft(seed, (acc, m) => {
+        val (kept, seen) = acc
+        if (seen.Contains(m.Id)) (kept, seen)
+        else                     (kept.Append(m), seen.Add(m.Id))
+    })
+    return out
+}
+
+// ----------------------------------------------------------------------------
+// Lead-buffer extraction (replaces directive.Parse / ParseClosed)
+// ----------------------------------------------------------------------------
+
+// extractLeadDirectives walks the buffer front-to-back and emits one
+// Message per CLOSED @dispatch / @consult / @summary block. Closed-only
+// is deliberate: acting on a half-streamed directive is never correct,
+// and it keeps Decode idempotent — the same closed block re-emitted is
+// the same content hash. An unclosed trailing block is left for a
+// later, larger buffer to close.
+func extractLeadDirectives(lines Array[string], ctx DecodeContext) Array[Message] {
+    var out = EmptyArray[Message]()
+    var i = 0
+    val n = lines.Length()
+    for i < n {
+        parseOpeningTag(lines.Get(i)) match {
+            case Some(o) => {
+                if (isLeadKind(o.Kind)) {
+                    val (body, next, closed) = collectBody(lines, i, n, o.SameLineRest)
+                    if (closed) {
+                        buildLeadMessage(o, body, ctx) match {
+                            case Some(msg) => out = out.Append(msg)
+                            case None()    => {}
+                        }
+                        i = next
+                    } else {
+                        i = n
+                    }
+                } else {
+                    i = i + 1
+                }
+            }
+            case None() => i = i + 1
+        }
+    }
+    return out
+}
+
+// buildLeadMessage maps a TL opener + body to a routed Message. The
+// recipient comes from the directive's own target for dispatch /
+// consult; @summary is addressed to the user.
+func buildLeadMessage(o openingTag, body string, ctx DecodeContext) Option[Message] {
+    if (o.Kind == "dispatch") {
+        if (o.Target == "") { return None[Message]() }
+        return Some[Message](NewMessage(ctx.Sender, o.Target, Dispatch(), body, ctx.Epoch))
+    }
+    if (o.Kind == "consult") {
+        if (o.Target == "") { return None[Message]() }
+        return Some[Message](NewMessage(ctx.Sender, o.Target, Consult(), body, ctx.Epoch))
+    }
+    if (o.Kind == "summary") {
+        return Some[Message](NewMessage(ctx.Sender, UserAddr(), Summary(), body, ctx.Epoch))
+    }
+    return None[Message]()
+}
+
+func isLeadKind(kind string) bool =
+    kind == "dispatch" || kind == "consult" || kind == "summary"
+
+// ----------------------------------------------------------------------------
+// Member-terminal extraction (replaces directive.MemberTerminal)
+// ----------------------------------------------------------------------------
+
+// extractMemberTerminal returns the member's single operative sign-off.
+// A member works, then emits exactly one terminal block (@finished /
+// @review / @done / @help / @blocked) closed by a bare `@end`.
+//
+// Anchoring on the LAST bare `@end`, then scanning backward for the
+// nearest member-terminal opener, ignores every quoted protocol example
+// before the real sign-off — the front-to-back greedy parser let an
+// earlier QUOTED opener swallow the real terminal as its body, so no
+// completion ever fired and the orchestrator parked forever waiting on
+// a member that had already finished.
+//
+// Empty array (not an error) when there is no closed terminal block yet
+// (still streaming / member never signed off) — the caller simply
+// waits, exactly as the old ParseClosed-returning-nothing gate did.
+func extractMemberTerminal(lines Array[string], ctx DecodeContext) Array[Message] {
+    val n = lines.Length()
+    val endIdx = lastBareEndIndex(lines, n)
+    if (endIdx < 0) { return EmptyArray[Message]() }
+    val opener = nearestTerminalOpener(lines, endIdx)
+    return opener match {
+        case None()  => EmptyArray[Message]()
+        case Some(o) => {
+            val body = bodyBetween(lines, o.OpenIdx, endIdx, o.Tag.SameLineRest)
+            val kindOpt = tokenToKind(o.Tag.Kind)
+            return kindOpt match {
+                case None()     => EmptyArray[Message]()
+                case Some(kind) =>
+                    ArrayOf[Message](NewMessage(ctx.Sender, ctx.Recipient, kind, body, ctx.Epoch))
+            }
+        }
+    }
+}
+
+// anchoredOpener pairs a parsed opener with the line it was found on,
+// so callers don't need a nested (int, openingTag) tuple pattern (GALA
+// tuple destructuring binds identifiers, which is fragile here).
+struct anchoredOpener(
+    OpenIdx int,
+    Tag     openingTag,
+)
+
+// lastBareEndIndex scans backward for the last line that is exactly
+// `@end` (trailing whitespace tolerated). -1 when none.
+func lastBareEndIndex(lines Array[string], n int) int {
+    var endIdx = -1
+    var k = n - 1
+    for endIdx < 0 && k >= 0 {
+        if (strings.TrimSpace(lines.Get(k)) == "@end") { endIdx = k }
+        k = k - 1
+    }
+    return endIdx
+}
+
+// nearestTerminalOpener scans backward from `endIdx-1` for the nearest
+// line that opens a MEMBER-terminal directive (finished / help /
+// blocked). @dispatch / @consult / @summary are TL-only and never a
+// member's sign-off, so a member quoting `@dispatch(` in an audit must
+// not anchor here.
+func nearestTerminalOpener(lines Array[string], endIdx int) Option[anchoredOpener] {
+    var found = None[anchoredOpener]()
+    var j = endIdx - 1
+    for found.IsEmpty() && j >= 0 {
+        val tag = parseOpeningTag(lines.Get(j))
+        tag match {
+            case Some(o) => {
+                if isMemberTerminalKind(o.Kind) {
+                    found = Some[anchoredOpener](anchoredOpener(OpenIdx = j, Tag = o))
+                }
+            }
+            case None() => {}
+        }
+        j = j - 1
+    }
+    return found
+}
+
+func isMemberTerminalKind(kind string) bool =
+    kind == "finished" || kind == "help" || kind == "blocked"
+
+// bodyBetween joins the same-line remainder of the opener plus every
+// line strictly between the opener and the anchoring `@end`.
+func bodyBetween(lines Array[string], openIdx int, endIdx int, sameLineRest string) string {
+    var parts = EmptyArray[string]()
+    if (sameLineRest != "") { parts = parts.Append(sameLineRest) }
+    var b = openIdx + 1
+    for b < endIdx {
+        parts = parts.Append(lines.Get(b))
+        b = b + 1
+    }
+    return joinBody(parts)
+}
+
+// ----------------------------------------------------------------------------
+// Shared opener / body parsing
+// ----------------------------------------------------------------------------
+
+// openingTag is the parsed result of one opening line.
+//   Kind         — normalised token: dispatch | consult | summary |
+//                   finished | help | blocked.
+//   Target       — member / team name for dispatch / consult; "" else.
+//   SameLineRest — body text after the tag on the same line.
+struct openingTag(
+    Kind         string,
+    Target       string,
+    SameLineRest string,
+)
+
+// parseOpeningTag normalises @finished / @review / @done to the single
+// "finished" token — every member- and QA-facing protocol surface
+// advertises those words, and an earlier version of this code only
+// recognised one of them, so a member following the documented
+// vocabulary signed off and nothing fired. Accept what the protocol
+// actually advertises.
+func parseOpeningTag(line string) Option[openingTag] {
+    val trimmed = strings.TrimLeft(line, " \t")
+    if (strings.HasPrefix(trimmed, "@dispatch(")) {
+        return parseTargeted("dispatch", strings.TrimPrefix(trimmed, "@dispatch("))
+    }
+    if (strings.HasPrefix(trimmed, "@consult(")) {
+        return parseTargeted("consult", strings.TrimPrefix(trimmed, "@consult("))
+    }
+    if (strings.HasPrefix(trimmed, "@summary")) {
+        return bodyOnly("summary", strings.TrimPrefix(trimmed, "@summary"))
+    }
+    if (strings.HasPrefix(trimmed, "@finished")) {
+        return bodyOnly("finished", strings.TrimPrefix(trimmed, "@finished"))
+    }
+    if (strings.HasPrefix(trimmed, "@review")) {
+        return bodyOnly("finished", strings.TrimPrefix(trimmed, "@review"))
+    }
+    if (strings.HasPrefix(trimmed, "@done")) {
+        return bodyOnly("finished", strings.TrimPrefix(trimmed, "@done"))
+    }
+    if (strings.HasPrefix(trimmed, "@help")) {
+        return bodyOnly("help", strings.TrimPrefix(trimmed, "@help"))
+    }
+    if (strings.HasPrefix(trimmed, "@blocked")) {
+        return bodyOnly("blocked", strings.TrimPrefix(trimmed, "@blocked"))
+    }
+    return None[openingTag]()
+}
+
+func bodyOnly(kind string, afterTag string) Option[openingTag] = Some[openingTag](openingTag(
+    Kind         = kind,
+    Target       = "",
+    SameLineRest = strings.TrimLeft(afterTag, " \t"),
+))
+
+// parseTargeted handles @dispatch( / @consult( — splits at the first
+// ")" to separate the target from the same-line body. The target is
+// the first comma-separated arg (a project=... tail, if any, is the
+// TL's concern and is not part of the protocol identity).
+func parseTargeted(kind string, afterOpen string) Option[openingTag] {
+    val parts = strings.SplitN(afterOpen, ")", 2)
+    if (parts.Length() < 2) { return None[openingTag]() }
+    val argHead = strings.SplitN(parts.Get(0), ",", 2)
+    val target = strings.TrimSpace(argHead.Get(0))
+    if (target == "") { return None[openingTag]() }
+    return Some[openingTag](openingTag(
+        Kind         = kind,
+        Target       = target,
+        SameLineRest = strings.TrimLeft(parts.Get(1), " \t"),
+    ))
+}
+
+// collectBody walks from the opener to the next bare `@end`. Returns
+// (body, nextIndex, closed). closed=false means the buffer ran out
+// before an `@end` — the caller drops the unclosed block.
+func collectBody(lines Array[string], start int, n int, sameLineRest string) Tuple3[string, int, bool] {
+    var parts = EmptyArray[string]()
+    if (sameLineRest != "") { parts = parts.Append(sameLineRest) }
+    var i = start + 1
+    for i < n {
+        val line = lines.Get(i)
+        if (strings.TrimSpace(line) == "@end") {
+            return (joinBody(parts), i + 1, true)
+        }
+        parts = parts.Append(line)
+        i = i + 1
+    }
+    return (joinBody(parts), n, false)
+}
+
+func joinBody(parts Array[string]) string =
+    strings.TrimSpace(parts.MkString("\n"))
+
+func tokenToKind(token string) Option[MessageKind] {
+    if (token == "dispatch") { return Some[MessageKind](Dispatch()) }
+    if (token == "consult")  { return Some[MessageKind](Consult()) }
+    if (token == "summary")  { return Some[MessageKind](Summary()) }
+    if (token == "finished") { return Some[MessageKind](Finished()) }
+    if (token == "help")     { return Some[MessageKind](HelpRequested()) }
+    if (token == "blocked")  { return Some[MessageKind](Blocked()) }
+    return None[MessageKind]()
+}
+
+// ----------------------------------------------------------------------------
+// Ledger — the durable dedup gate the UI calls (replaces the
+// terminalFingerprint latch + the per-member directives-fired map).
+// ----------------------------------------------------------------------------
+
+// Ledger remembers every Id it has admitted. Immutable: Admit returns a
+// new Ledger so the caller threads it through the model exactly like
+// any other piece of orchestration state.
+struct Ledger(
+    Seen HashSet[string],
+)
+
+// EmptyLedger is the zero state — nothing admitted yet.
+func EmptyLedger() Ledger = Ledger(Seen = EmptyHashSet[string]())
+
+// Admit returns (nextLedger, Some(m)) the first time an Id is seen and
+// (sameLedger, None) for an Id already admitted. The None case is the
+// durable "we already acted on this" gate: a re-emitted chunk, a
+// respawn replay, or a redelivery of an already-handled message all
+// resolve to the same content hash and are rejected exactly once.
+func (l Ledger) Admit(m Message) Tuple[Ledger, Option[Message]] {
+    if (l.Seen.Contains(m.Id)) {
+        return (l, None[Message]())
+    }
+    return (l.Copy(Seen = l.Seen.Add(m.Id)), Some[Message](m))
+}

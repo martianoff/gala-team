@@ -1,0 +1,110 @@
+package directive
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    "github.com/martianoff/gala_team/app/protocol"
+)
+
+// Covers the protocol.Message → directive.Directive boundary: every
+// inbound kind maps to its FSM directive with Recipient/Body routed to
+// the right field; the never-inbound delivery kinds map to None;
+// FromMessages preserves order and drops the None kinds.
+
+func msg(recipient string, kind protocol.MessageKind, body string) protocol.Message =
+    protocol.NewMessage(protocol.LeadAddr(), recipient, kind, body, 0)
+
+func TestFromMessage_Dispatch(t T) T {
+    return FromMessage(msg("Felix", protocol.Dispatch(), "build the parser")) match {
+        case Some(d) => d match {
+            case Dispatch(target, body) => {
+                val t1 = Eq(t, target, "Felix")
+                return Eq(t1, body, "build the parser")
+            }
+            case _ => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+func TestFromMessage_Consult_ProjectOverrideIsNone(t T) T {
+    return FromMessage(msg("transpiler", protocol.Consult(), "repro inside")) match {
+        case Some(d) => d match {
+            case Consult(target, override, body) => {
+                val t1 = Eq(t, target, "transpiler")
+                val t2 = IsNone(t1, override)
+                return Eq(t2, body, "repro inside")
+            }
+            case _ => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+func TestFromMessage_Summary(t T) T {
+    return FromMessage(msg(protocol.UserAddr(), protocol.Summary(), "## Done\nshipped")) match {
+        case Some(d) => d match {
+            case Summary(body) => Eq(t, body, "## Done\nshipped")
+            case _             => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+func TestFromMessage_Finished(t T) T {
+    return FromMessage(msg(protocol.LeadAddr(), protocol.Finished(), "tests green")) match {
+        case Some(d) => d match {
+            case Finished(body) => Eq(t, body, "tests green")
+            case _              => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+func TestFromMessage_Help(t T) T {
+    return FromMessage(msg(protocol.LeadAddr(), protocol.HelpRequested(), "which auth flow?")) match {
+        case Some(d) => d match {
+            case Help(q) => Eq(t, q, "which auth flow?")
+            case _       => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+func TestFromMessage_Blocked(t T) T {
+    return FromMessage(msg(protocol.LeadAddr(), protocol.Blocked(), "gh CLI missing")) match {
+        case Some(d) => d match {
+            case Blocked(r) => Eq(t, r, "gh CLI missing")
+            case _          => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+// Nudge / Ack are delivery-side kinds the inbound decoder never emits.
+// The adapter maps them to None so callers get a total mapping.
+func TestFromMessage_NudgeAndAck_AreNone(t T) T {
+    val tn = IsNone(t, FromMessage(msg("Felix", protocol.Nudge(), "still there?")))
+    return IsNone(tn, FromMessage(msg(protocol.LeadAddr(), protocol.Ack(), "")))
+}
+
+// FromMessages preserves source order and drops the None (Nudge/Ack)
+// kinds so the result is exactly the FSM-consumable directive stream.
+func TestFromMessages_PreservesOrderDropsNone(t T) T {
+    val msgs = ArrayOf[protocol.Message](
+        msg("Felix", protocol.Dispatch(), "a"),
+        msg("Felix", protocol.Nudge(), "ignored"),
+        msg("Mira", protocol.Dispatch(), "b"),
+    )
+    val dirs = FromMessages(msgs)
+    val t1 = Eq(t, dirs.Length(), 2)
+    val t2 = dirs.Get(0) match {
+        case Dispatch(n, _) => Eq(t1, n, "Felix")
+        case _              => IsTrue(t1, false)
+    }
+    return dirs.Get(1) match {
+        case Dispatch(n, _) => Eq(t2, n, "Mira")
+        case _              => IsTrue(t2, false)
+    }
+}

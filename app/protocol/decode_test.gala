@@ -1,0 +1,169 @@
+package protocol
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+)
+
+// These are the lighter, structural decode tests. The authoritative
+// behavioral corpus ships separately as decode_spec_test.gala against
+// the same Message contract; this file proves the wiring.
+
+func tl(epoch int) DecodeContext = TLDecodeContext(epoch)
+func mem(name string, epoch int) DecodeContext = MemberDecodeContext(name, epoch)
+
+// ----- lead-buffer extraction ----------------------------------------------
+
+func TestDecode_SingleDispatch(t T) T {
+    val msgs = Decode("@dispatch(Felix) build parser\n@end", tl(0))
+    val t1 = Eq(t, msgs.Length(), 1)
+    val m = msgs.Get(0)
+    val t2 = Eq(t1, m.Recipient, "Felix")
+    val t3 = Eq(t2, KindTag(m.Kind), "dispatch")
+    return Eq(t3, m.Body, "build parser")
+}
+
+func TestDecode_MultiDispatchPreservesOrder(t T) T {
+    val buf = "@dispatch(Felix) a\n@end\n\n@dispatch(Mira) b\n@end"
+    val msgs = Decode(buf, tl(0))
+    val t1 = Eq(t, msgs.Length(), 2)
+    val t2 = Eq(t1, msgs.Get(0).Recipient, "Felix")
+    return Eq(t2, msgs.Get(1).Recipient, "Mira")
+}
+
+func TestDecode_SummaryAddressedToUser(t T) T {
+    val msgs = Decode("@summary\n## Done\nshipped\n@end", tl(0))
+    val t1 = Eq(t, msgs.Length(), 1)
+    val t2 = Eq(t1, msgs.Get(0).Recipient, UserAddr())
+    return Eq(t2, KindTag(msgs.Get(0).Kind), "summary")
+}
+
+func TestDecode_ConsultTarget(t T) T {
+    val msgs = Decode("@consult(transpiler, project=\"/x\") repro\n@end", tl(0))
+    val t1 = Eq(t, msgs.Length(), 1)
+    val t2 = Eq(t1, msgs.Get(0).Recipient, "transpiler")
+    return Eq(t2, KindTag(msgs.Get(0).Kind), "consult")
+}
+
+// An unclosed trailing block is dropped — acting on a half-streamed
+// directive is never correct, and dropping it keeps Decode idempotent.
+func TestDecode_UnclosedBlockDropped(t T) T {
+    val msgs = Decode("@dispatch(Felix) still streaming", tl(0))
+    return Eq(t, msgs.Length(), 0)
+}
+
+// ----- idempotency under a re-emitted chunk --------------------------------
+
+// The claude stream occasionally re-emits a byte-identical chunk on
+// reconnect. Decoding the grown buffer must yield the SAME Messages
+// (same Ids) — identity is the content hash, so the duplicate collapses.
+func TestDecode_IdempotentUnderDuplicateDispatch(t T) T {
+    val one = "@dispatch(Felix) build parser\n@end"
+    val dup = one + "\n" + one
+    val a = Decode(one, tl(0))
+    val b = Decode(dup, tl(0))
+    val t1 = Eq(t, a.Length(), 1)
+    val t2 = Eq(t1, b.Length(), 1)
+    return Eq(t2, a.Get(0).Id, b.Get(0).Id)
+}
+
+// Two DISTINCT dispatches to the same member (different bodies) are NOT
+// collapsed — only byte-identical re-emission is deduped.
+func TestDecode_DistinctBodiesNotCollapsed(t T) T {
+    val buf = "@dispatch(Felix) task one\n@end\n@dispatch(Felix) task two\n@end"
+    val msgs = Decode(buf, tl(0))
+    val t1 = Eq(t, msgs.Length(), 2)
+    return NotEq(t1, msgs.Get(0).Id, msgs.Get(1).Id)
+}
+
+// ----- member-terminal backward scan ---------------------------------------
+
+// A fully-formed QUOTED @done…@end example precedes the member's real
+// @finished sign-off (audits/PRs about this orchestrator quote protocol
+// syntax). The backward scan from the LAST bare @end ignores the quoted
+// example and returns the REAL deliverable.
+func TestDecode_IgnoresQuotedBlockBeforeRealSignoff(t T) T {
+    val buf = "@done\n" +
+        "(quoted protocol example inside the audit)\n" +
+        "@end\n" +
+        "Then the real sign-off:\n" +
+        "@finished\n" +
+        "Real deliverable: app/protocol shipped.\n" +
+        "@end"
+    val msgs = Decode(buf, mem("Kael", 0))
+    val t1 = Eq(t, msgs.Length(), 1)
+    val m = msgs.Get(0)
+    val t2 = Eq(t1, KindTag(m.Kind), "finished")
+    return Eq(t2, m.Body, "Real deliverable: app/protocol shipped.")
+}
+
+// @finished / @review / @done are aliases — all decode to Finished.
+func TestDecode_TerminalAliases(t T) T {
+    val fin = Decode("@finished\nbody\n@end", mem("Kael", 0)).Get(0)
+    val rev = Decode("@review APPROVE — clean\n@end", mem("Theo", 0)).Get(0)
+    val don = Decode("@done\nbody\n@end", mem("Kael", 0)).Get(0)
+    val t1 = Eq(t,  KindTag(fin.Kind), "finished")
+    val t2 = Eq(t1, KindTag(rev.Kind), "finished")
+    val t3 = Eq(t2, KindTag(don.Kind), "finished")
+    return Eq(t3, rev.Body, "APPROVE — clean")
+}
+
+func TestDecode_HelpAndBlockedTerminals(t T) T {
+    val h = Decode("@help\nwhich auth flow?\n@end", mem("Kael", 0)).Get(0)
+    val b = Decode("@blocked\ngh CLI missing\n@end", mem("Kael", 0)).Get(0)
+    val t1 = Eq(t,  KindTag(h.Kind), "help")
+    return Eq(t1, KindTag(b.Kind), "blocked")
+}
+
+// A member buffer that QUOTES a TL-only @dispatch( must NOT decode as a
+// real dispatch — TL kinds never anchor a member terminal.
+func TestDecode_QuotedDispatchInMemberBufferIgnored(t T) T {
+    val buf = "@dispatch(Felix)\nexample of a dispatch in the audit\n@end"
+    return Eq(t, Decode(buf, mem("Kael", 0)).Length(), 0)
+}
+
+// Still streaming (no closed terminal) → empty, caller waits.
+func TestDecode_NoneWhileStreaming(t T) T {
+    return Eq(t, Decode("@finished\nnot done yet", mem("Kael", 0)).Length(), 0)
+}
+
+// Member terminal idempotent under a re-emitted sign-off chunk.
+func TestDecode_MemberTerminalIdempotent(t T) T {
+    val one = "@finished\nshipped it\n@end"
+    val a = Decode(one, mem("Kael", 0))
+    val b = Decode(one + "\n" + one, mem("Kael", 0))
+    val t1 = Eq(t, a.Length(), 1)
+    val t2 = Eq(t1, b.Length(), 1)
+    return Eq(t2, a.Get(0).Id, b.Get(0).Id)
+}
+
+// ----- Ledger ---------------------------------------------------------------
+
+// First sight of an Id is admitted; a second sight is rejected exactly
+// once — the durable dedup gate.
+func TestLedger_AdmitsOnceRejectsDuplicate(t T) T {
+    val m = NewMessage("_lead", "Felix", Dispatch(), "work", 0)
+    val (l1, first) = EmptyLedger().Admit(m)
+    val (_, second) = l1.Admit(m)
+    val t1 = IsSome(t, first)
+    return IsNone(t1, second)
+}
+
+// Distinct messages both admit; the ledger threads immutably.
+func TestLedger_DistinctMessagesBothAdmit(t T) T {
+    val a = NewMessage("_lead", "Felix", Dispatch(), "a", 0)
+    val b = NewMessage("_lead", "Mira", Dispatch(), "b", 0)
+    val (l1, fa) = EmptyLedger().Admit(a)
+    val (_, fb) = l1.Admit(b)
+    val t1 = IsSome(t, fa)
+    return IsSome(t1, fb)
+}
+
+// Decode + Ledger compose: re-decoding a grown buffer and re-admitting
+// yields nothing new — the end-to-end idempotency guarantee.
+func TestLedger_AbsorbsRedecodedDuplicate(t T) T {
+    val one = "@dispatch(Felix) build\n@end"
+    val (l1, _) = EmptyLedger().Admit(Decode(one, tl(0)).Get(0))
+    val (_, again) = l1.Admit(Decode(one + "\n" + one, tl(0)).Get(0))
+    return IsNone(t, again)
+}

@@ -3,11 +3,13 @@ load("@gala//:gala.bzl", "gala_go_test", "gala_library")
 gala_library(
     name = "directive",
     srcs = [
+        "adapter.gala",
+        "control.gala",
         "directive.gala",
-        "parser.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/directive",
     deps = [
+        "//app/protocol",
         "@gala//collection_immutable",
         "@gala//go_interop",
         "@gala//strings",
@@ -16,14 +18,33 @@ gala_library(
 )
 
 gala_go_test(
-    name = "parser_test",
-    srcs = ["parser_test.gala"],
+    name = "adapter_test",
+    srcs = ["adapter_test.gala"],
     pkg = "directive",
     lib_srcs = [
+        "adapter.gala",
+        "control.gala",
         "directive.gala",
-        "parser.gala",
     ],
     deps = [
+        "//app/protocol",
+        "@gala//collection_immutable",
+        "@gala//go_interop",
+        "@gala//strings",
+    ],
+)
+
+gala_go_test(
+    name = "control_test",
+    srcs = ["control_test.gala"],
+    pkg = "directive",
+    lib_srcs = [
+        "adapter.gala",
+        "control.gala",
+        "directive.gala",
+    ],
+    deps = [
+        "//app/protocol",
         "@gala//collection_immutable",
         "@gala//go_interop",
         "@gala//strings",

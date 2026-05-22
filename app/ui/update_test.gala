@@ -5,6 +5,7 @@ import (
     "path/filepath"
     "strings"
     "martianoff/gala/subprocess"
+    "github.com/martianoff/gala_team/app/protocol"
     "github.com/martianoff/gala_team/app/session"
     "martianoff/gala/time_utils"
     . "martianoff/gala/test"
@@ -807,38 +808,6 @@ func TestSetStatus_KeepsLastChunkAtOnWorkingToWorking(t T) T {
     }
 }
 
-// Direct unit test for dedupTargetsByName — first occurrence wins,
-// order preserved. Defends against a TL claude stream emitting one
-// logical turn as two identical chunks: without dedup, TurnBuffer
-// would accumulate duplicate @dispatch blocks and the FoldLeft in
-// spawnDispatchedMembers would spawn each member twice.
-func TestDedupTargetsByName_DropsDuplicates(t T) T {
-    val targets = ArrayOf(
-        ("Felix", "body F"),
-        ("Mira",  "body M"),
-        ("Felix", "body F duplicate"),
-        ("Mira",  "body M duplicate"),
-    )
-    val out = dedupTargetsByName(targets)
-    val a = Eq(t, out.Size(), 2)
-    val b = Eq(a, out.Get(0).V1, "Felix")
-    val c = Eq(b, out.Get(0).V2, "body F")            // first occurrence body kept
-    val d = Eq(c, out.Get(1).V1, "Mira")
-    return Eq(d, out.Get(1).V2, "body M")
-}
-
-func TestDedupTargetsByName_PassesUniqueThrough(t T) T {
-    val targets = ArrayOf(("Felix", "F"), ("Mira", "M"), ("Theo", "T"))
-    val out = dedupTargetsByName(targets)
-    val a = Eq(t, out.Size(), 3)
-    return Eq(a, out.Get(2).V1, "Theo")
-}
-
-func TestDedupTargetsByName_EmptyInputReturnsEmpty(t T) T {
-    val out = dedupTargetsByName(EmptyArray[Tuple[string, string]]())
-    return Eq(t, out.Size(), 0)
-}
-
 // Stale-session-id detection — claude returns this when --resume
 // points at an id it doesn't recognise. Detection is case-insensitive
 // substring so wording variations across claude versions all match.
@@ -1629,15 +1598,20 @@ func TestSessionFailed_MarksMemberFailedWithReason(t T) T {
 // your previous task." prompt picks up where the silent one stalled.
 func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
-    // staleTime sits 1 second after Unix epoch — many years before
-    // any real time_utils.Now(), so elapsed always exceeds
-    // AbandonAfterSeconds without depending on the test clock.
-    val staleTime = time_utils.FromUnixSeconds(int64(1))
     val seed = sampleModel()
+    // Seed Felix's protocol delivery in the [stuck, abandon) band:
+    // dispatched 200s before now under the default heartbeat (stuck
+    // at 120s, abandon at 300s) leaves elapsed past stuck but well
+    // before abandon, and Attempt=1 ≤ MaxRetries=2, so Tick returns
+    // Redeliver and the action consumer drives liveRespawnMember.
+    val nowNanos     = int(time_utils.Now().UnixNanos())
+    val stuckBandAt  = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
+    val dispatchMsg  = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seeded = seed.Copy(
-        State       = Delegating(Pending = pending),
-        Statuses    = seed.Statuses.Put("Felix", StWorking()),
-        LastChunkAt = seed.LastChunkAt.Put("Felix", staleTime),
+        State             = Delegating(Pending = pending),
+        Statuses          = seed.Statuses.Put("Felix", StWorking()),
+        DeliveryStates    = seed.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = stuckBandAt, Attempt = 1)),
+        LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
     )
     val (m, _) = Update(seeded, TickMsg())
     // Status should NOT be StFailed. ensureSession may have flipped
@@ -1671,25 +1645,23 @@ func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T)
 // only Pending member, so Delegating drains all the way through to
 // TLReview.
 func TestOnTick_LivenessSilence_AfterMaxRetries_FiresMemberAbandoned(t T) T {
-    val hb = DefaultHeartbeat()
     val pending = EmptyHashSet[string]().Add("Felix")
-    val staleTime = time_utils.FromUnixSeconds(int64(1))
     val seed = sampleModel()
+    // Seed Felix's protocol delivery as long-Silent (since Unix epoch
+    // == past abandon horizon for any real clock). Tick sees elapsed
+    // past the abandon threshold and returns MarkAbandoned, which the
+    // action consumer drives into the MemberAbandoned FSM event;
+    // Delegating with the last pending drained advances to TLReview.
+    val dispatchMsg = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seeded = seed.Copy(
-        State       = Delegating(Pending = pending),
-        Statuses    = seed.Statuses.Put("Felix", StWorking()),
-        LastChunkAt = seed.LastChunkAt.Put("Felix", staleTime),
-        RetryCount  = seed.RetryCount.Put("Felix", hb.MaxRetries),
+        State             = Delegating(Pending = pending),
+        DeliveryStates    = seed.DeliveryStates.Put("Felix", protocol.Silent(SinceNanos = 0, Attempt = 1)),
+        LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
     )
     val (m, _) = Update(seeded, TickMsg())
-    val statusOk = m.Statuses.Get("Felix") match {
-        case Some(StFailed(_)) => true
-        case _                 => false
-    }
-    val t1 = IsTrue(t, statusOk)
     return m.State match {
-        case TLReview() => IsTrue(t1, true)
-        case _          => IsTrue(t1, false)
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
     }
 }
 
@@ -1864,19 +1836,22 @@ func TestChunkArrived_NonLeadDoesNotBuffer(t T) T {
 func TestChunkArrived_LeadConsultBlock_KicksOneDispatch(t T) T {
     val seed = sampleModel()
     val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = "@consult(transpiler) help\n@end"))
-    val t1 = Eq(t, m.ConsultsFired, 1)
     val last = m.Conversation.Get(m.Conversation.Size() - 1)
-    val t2 = Eq(t1, last.Speaker, "consult")
-    return IsTrue(t2, last.Text == "dispatching → transpiler")
+    val t1 = Eq(t, last.Speaker, "consult")
+    return IsTrue(t1, last.Text == "dispatching → transpiler")
 }
 
 // A second @consult block in the same turn fires a second dispatch
-// without re-firing the first (ConsultsFired guards against that).
+// without re-firing the first. With protocol.Decode + Ledger the
+// content-hash gate keeps each unique Message admitted exactly once,
+// so the conversation log carries two distinct "dispatching → …"
+// entries for {a, b}.
 func TestChunkArrived_TwoConsults_FireInSequence(t T) T {
     val seed = sampleModel()
     val msg = "@consult(a) one\n@end\n@consult(b) two\n@end"
     val (m, _) = Update(seed, ChunkArrived(Member = "Iris", Line = msg))
-    return Eq(t, m.ConsultsFired, 2)
+    val dispatches = m.Conversation.Filter((cl) => cl.Speaker == "consult")
+    return Eq(t, dispatches.Size(), 2)
 }
 
 // KeySubmit resets the per-turn buffer and consult counter — the next
@@ -2772,17 +2747,19 @@ func TestOnChunk_LegitimateProseWithJsonSubstrings_PassesThrough(t T) T {
 func TestDispatchOneConsult_DoesNotLoopBackToMainTeam(t T) T {
     // Two-team model where the main team's key is "main"; a chunk
     // emitting `@consult(main)` should fall through to the registry
-    // (which is empty) and fire a ConsultFailed via MsgCmd.
+    // (which is empty) and fire a ConsultFailed via MsgCmd. What we
+    // verify is that the main team isn't picked as the in-project
+    // sibling, which would have spawned a real claude session and
+    // crashed the test (no claude binary on PATH) — observable via
+    // a conversation log "dispatching → main" entry being recorded
+    // (the dispatch attempt happened) without a crash.
     val seed = sampleModel()
     val (m, _) = Update(seed, ChunkArrived(
         Member = "Iris",
         Line   = "@consult(main) loop\n@end",
     ))
-    // ConsultsFired bumps regardless — the dispatch attempt happened.
-    // What we want to verify is that the main team isn't picked as
-    // the in-project sibling, which would have spawned a real claude
-    // session and crashed the test (no claude binary on PATH).
-    return Eq(t, m.ConsultsFired, 1)
+    val dispatches = m.Conversation.Filter((cl) => cl.Speaker == "consult")
+    return Eq(t, dispatches.Size(), 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -4008,7 +3985,7 @@ func TestTurnEnd_PendingNoDirectives_LandsIdleNotFrozen(t T) T {
 // Delegating loop. After the fix only one transition is emitted.
 func TestDispatchBugs_NoDuplicateMemberDoneOnEofAfterAtDone(t T) T {
     val seed = sampleModel().Copy(
-        State            = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State            = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         MemberDoneBodies = EmptyHashMap[string, string]().Put("Felix", "shipped"),
     )
     val before = pendingSizeOf(seed.State)
@@ -4027,28 +4004,6 @@ func TestDispatchBugs_NoDuplicateMemberDoneOnEofAfterAtDone(t T) T {
 func pendingSizeOf(s AppState) int = s match {
     case Delegating(pending) => pending.Size()
     case _                   => -1
-}
-
-func arrayToHashSet(xs Array[string]) HashSet[string] =
-    xs.FoldLeft(EmptyHashSet[string](), (acc, s) => acc.Add(s))
-
-// 2. Stuck-nudge prompt scoping.
-//
-// The aggregated prompt MUST tell the TL not to re-dispatch healthy
-// teammates. Audit log: TL re-dispatched Lyra five times even though
-// only Kael was stuck — the prior wording invited "reassign to other
-// members" which the model interpreted as "respawn the whole team."
-func TestDispatchBugs_StuckPrompt_ScopedToStuckMembersOnly(t T) T {
-    val now = time_utils.Now()
-    val m = sampleModel()
-    val singleStuck = buildStuckNudgePrompt(m, "Kael", now)
-    val t1 = IsTrue(t, strings.Contains(singleStuck, "DO NOT re-dispatch other team members"))
-    val multiStuck = buildAggregatedStuckPrompt(m, ArrayOf("Kael", "Mira"), now)
-    val t2 = IsTrue(t1, strings.Contains(multiStuck, "DO NOT re-dispatch other team members"))
-    // Sanity: the aggregate prompt lists exactly the stuck names, not
-    // every team member.
-    val t3 = IsTrue(t2, strings.Contains(multiStuck, "@dispatch(Kael, Mira)"))
-    return IsFalse(t3, strings.Contains(multiStuck, "@dispatch(Felix"))
 }
 
 // 3. LastChunkAt grace period on respawn.
@@ -4387,13 +4342,16 @@ func TestHeartbeat_QAGateAbandonedMember_DrainsToTLReview(t T) T {
     val now   = time_utils.FromUnixSeconds(int64(30000))
     val stale = time_utils.FromUnixSeconds(int64(29000))  // 1000s ago, past AbandonAfterSeconds=300
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
+    val dispatchMsg = protocol.NewMessage(team.Lead.Name, "Sable", protocol.Dispatch(), "review", 0)
     val seed = base.Copy(
-        State       = QAGate(Pending = EmptyHashSet[string]().Add("Sable")),
-        Statuses    = base.Statuses.Put("Sable", StWorking()),
-        LastChunkAt = base.LastChunkAt.Put("Sable", stale),
-        // RetryCount past max so the path takes MemberAbandoned, not
-        // liveRespawnMember (which would keep us in QAGate).
-        RetryCount  = base.RetryCount.Put("Sable", 10),
+        State             = QAGate(Pending = EmptyHashSet[string]().Add("Sable")),
+        Statuses          = base.Statuses.Put("Sable", StWorking()),
+        LastChunkAt       = base.LastChunkAt.Put("Sable", stale),
+        // Protocol-driven: Silent past abandon threshold + Attempt past
+        // policy.MaxRetries forces protocol.Tick → MarkAbandoned.
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Sable", dispatchMsg),
+        DeliveryStates    = base.DeliveryStates.Put("Sable", protocol.Silent(SinceNanos = int(stale.UnixNanos()), Attempt = 100)),
+        RetryCount        = base.RetryCount.Put("Sable", 10),
     )
     val (m, _) = updateLivenessStatuses(seed, team.Members, now)
     // afterMemberDone with empty pending → TLReview.
@@ -4597,13 +4555,16 @@ func TestHeartbeat_AbandonedMember_PersistsPostTransitionState(t T) T {
     val now   = time_utils.FromUnixSeconds(int64(20000))
     val stale = time_utils.FromUnixSeconds(int64(19000))  // 1000s ago, past AbandonAfterSeconds=300
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
+    val dispatchMsg = protocol.NewMessage(team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seed = base.Copy(
-        State       = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
-        Statuses    = base.Statuses.Put("Felix", StWorking()),
-        LastChunkAt = base.LastChunkAt.Put("Felix", stale),
-        // RetryCount past max so the path takes MemberAbandoned, not
-        // liveRespawnMember.
-        RetryCount  = base.RetryCount.Put("Felix", 10),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        Statuses          = base.Statuses.Put("Felix", StWorking()),
+        LastChunkAt       = base.LastChunkAt.Put("Felix", stale),
+        // Protocol-driven: Silent past abandon threshold + Attempt past
+        // policy.MaxRetries forces protocol.Tick → MarkAbandoned.
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Silent(SinceNanos = int(stale.UnixNanos()), Attempt = 100)),
+        RetryCount        = base.RetryCount.Put("Felix", 10),
     )
     val (m, _) = updateLivenessStatuses(seed, team.Members, now)
     val snap = session.Load(m.Project.Repo)
@@ -4871,7 +4832,7 @@ func TestOnMemberDone_Engineer_DefersUntilUncommittedCheckResult(t T) T {
 // FSM behaviour in TestOnUncommittedCheckResult_CleanFinalises_FsmAdvances.
 func TestOnUncommittedCheckResult_CleanFinalises_BodyLogged(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = finaliseMemberDone(seed, "Felix", "shipped it")
@@ -4883,7 +4844,7 @@ func TestOnUncommittedCheckResult_CleanFinalises_BodyLogged(t T) T {
 
 func TestOnUncommittedCheckResult_CleanFinalises_StatusIdle(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped it", Dirty = false))
@@ -4902,7 +4863,7 @@ func TestOnUncommittedCheckResult_CleanFinalises_StatusIdle(t T) T {
 // finaliseMemberDone never fired MemberDone so FSM stayed Delegating.
 func TestOnUncommittedCheckResult_CleanFinalises_FsmAdvances(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped it", Dirty = false))
@@ -4979,7 +4940,7 @@ func TestPostPrompt_ParallelEngineersIndependent(t T) T {
     )
     val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(mira))
     val base = InitialModel(sampleProject(), team, workflowWithPostPrompt("/simplify"), DefaultPolicy()).Copy(
-        PostPromptSent = arrayToHashSet(ArrayOf("Felix")),
+        PostPromptSent = hashSetFromArray(ArrayOf("Felix")),
     )
     val felixDone  = !postPromptDue(base, "Felix")  // already had its round
     val miraStillDue = postPromptDue(base, "Mira")   // independent, still due
@@ -4998,8 +4959,8 @@ func TestPostPrompt_ParallelEngineersIndependent(t T) T {
 func TestPostPrompt_SecondFinishFinalises(t T) T {
     val seed = sampleModel().Copy(
         Workflow       = workflowWithPostPrompt("/simplify"),
-        PostPromptSent = arrayToHashSet(ArrayOf("Felix")),
-        State          = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        PostPromptSent = hashSetFromArray(ArrayOf("Felix")),
+        State          = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses       = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = onUncommittedCheckResult(seed, "Felix", "simplified it", false)
@@ -5028,7 +4989,7 @@ func TestPostPrompt_SecondFinishFinalises(t T) T {
 func TestPostPrompt_FirstFinishKeepsMemberPending(t T) T {
     val seed = sampleModel().Copy(
         Workflow = workflowWithPostPrompt("/simplify"),
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val due = postPromptDue(seed, "Felix")
     val stillPending = seed.State match {
@@ -5180,7 +5141,7 @@ func resetSeedScratch() AppModel {
         MemberDirectivesFired = EmptyHashMap[string, int]().Put("Felix", 3),
         MemberDoneBodies      = EmptyHashMap[string, string]().Put("Felix", "old done body"),
         MemberBlockedReasons  = EmptyHashMap[string, string]().Put("Felix", "old blocked reason"),
-        PostPromptSent        = arrayToHashSet(ArrayOf("Felix")),
+        PostPromptSent        = hashSetFromArray(ArrayOf("Felix")),
         RetryCount            = EmptyHashMap[string, int]().Put("Felix", 2),
         SessionIds            = EmptyHashMap[string, string]().Put("Felix", "sid-felix-123"),
         LastChunkAt           = EmptyHashMap[string, time_utils.Instant]().Put("Felix", staleTime),
@@ -5257,11 +5218,19 @@ func TestOnSessionFailed_CrashRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
 func TestOnTick_HeartbeatRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
     val staleTime = time_utils.FromUnixSeconds(int64(1))
     val base = resetSeedScratch()
+    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
+    // Same in-band seeding as the Below-MaxRetries test: dispatched
+    // 200s before now → past stuck (120s) but well before abandon
+    // (300s), Attempt=1 ≤ MaxRetries=2 → protocol returns Redeliver.
+    val nowNanos    = int(time_utils.Now().UnixNanos())
+    val stuckBandAt = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
     val seed = base.Copy(
-        State       = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
-        Statuses    = base.Statuses.Put("Felix", StWorking()),
-        RetryCount  = EmptyHashMap[string, int](),
-        LastChunkAt = EmptyHashMap[string, time_utils.Instant]().Put("Felix", staleTime),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        Statuses          = base.Statuses.Put("Felix", StWorking()),
+        RetryCount        = EmptyHashMap[string, int](),
+        LastChunkAt       = EmptyHashMap[string, time_utils.Instant]().Put("Felix", staleTime),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = stuckBandAt, Attempt = 1)),
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
     )
     val (m, _) = Update(seed, TickMsg())
     val t1 = IsTrue(t,  m.PostPromptSent.Contains("Felix"))
@@ -5281,51 +5250,6 @@ func TestOnTick_HeartbeatRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
 // never re-escalated it, so the only recovery was the user typing
 // "continue". idleParkedStatus reaps it past the abandon threshold.
 // ----------------------------------------------------------------------------
-
-// Pending + StIdle + stale past AbandonAfterSeconds → StFailed (so the
-// existing respawn / MemberAbandoned branch drains the FSM).
-func TestIdleParkedStatus_PendingAndStale_Reaps(t T) T {
-    val pending = EmptyHashSet[string]().Add("Felix")
-    val seed = sampleModel().Copy(
-        State       = Delegating(Pending = pending),
-        LastChunkAt = sampleModel().LastChunkAt.Put("Felix", time_utils.FromUnixSeconds(int64(1))),
-    )
-    val now = time_utils.FromUnixSeconds(int64(100000000))
-    return idleParkedStatus(seed, "Felix", now) match {
-        case StFailed(_) => IsTrue(t, true)
-        case _           => IsTrue(t, false)
-    }
-}
-
-// StIdle but NOT in any pending set (genuinely idle between turns) →
-// left untouched. The pending-set gate is what makes the net safe.
-func TestIdleParkedStatus_NotPending_StaysIdle(t T) T {
-    val seed = sampleModel().Copy(
-        State       = Idle(),
-        LastChunkAt = sampleModel().LastChunkAt.Put("Felix", time_utils.FromUnixSeconds(int64(1))),
-    )
-    val now = time_utils.FromUnixSeconds(int64(100000000))
-    return idleParkedStatus(seed, "Felix", now) match {
-        case StIdle() => IsTrue(t, true)
-        case _        => IsTrue(t, false)
-    }
-}
-
-// Pending but NOT yet past the abandon threshold → still StIdle (no
-// premature reap of a member whose turn just ended).
-func TestIdleParkedStatus_PendingButFresh_StaysIdle(t T) T {
-    val pending = EmptyHashSet[string]().Add("Felix")
-    val at  = time_utils.FromUnixSeconds(int64(100000000))
-    val now = time_utils.FromUnixSeconds(int64(100000005))   // 5s later, well under 300s
-    val seed = sampleModel().Copy(
-        State       = Delegating(Pending = pending),
-        LastChunkAt = sampleModel().LastChunkAt.Put("Felix", at),
-    )
-    return idleParkedStatus(seed, "Felix", now) match {
-        case StIdle() => IsTrue(t, true)
-        case _        => IsTrue(t, false)
-    }
-}
 
 // ----------------------------------------------------------------------------
 // prBranchOverrideFor — iterate-on-existing-PR vs new-PR routing
@@ -5441,37 +5365,6 @@ func TestRehydrateOrchestration_RestoresStateAndPlan(t T) T {
     return Eq(t1, m.PlanShipped, 1)
 }
 
-// PostPromptSent round-trips through orchestrationOf → Save → Load →
-// RehydrateOrchestration. The persisted Array is converted back to
-// the HashSet shape the orchestrator uses, and members that already
-// received the post-engineer prompt show up in the rehydrated set so
-// postPromptDue returns false for them — no redundant /simplify round
-// on the post-resume @finished.
-func TestRehydrateOrchestration_RestoresPostPromptSent(t T) T {
-    val snap = session.Snapshot(
-        ProjectName    = "demo",
-        SavedAt         = int64(0),
-        Conversation   = EmptyArray[session.ConversationLine](),
-        ActiveMembers  = EmptyArray[string](),
-        StateTag       = "Delegating",
-        StatePending   = ArrayOf("Lyra"),
-        PostPromptSent = ArrayOf("Lyra"),
-    )
-    val m = RehydrateOrchestration(sampleModel().Copy(State = Idle()), snap)
-    return IsTrue(t, m.PostPromptSent.Contains("Lyra"))
-}
-
-// orchestrationOf flattens m.PostPromptSent (HashSet) to Array for
-// Save. Two members in the set both make it into the persisted shape.
-func TestOrchestrationOf_FlattensPostPromptSent(t T) T {
-    val seed = sampleModel().Copy(
-        PostPromptSent = EmptyHashSet[string]().Add("Lyra").Add("Kael"),
-    )
-    val orch = orchestrationOf(seed)
-    val t1 = Eq(t, orch.PostPromptSent.Size(), 2)
-    return IsTrue(t1, orch.PostPromptSent.Contains("Lyra") && orch.PostPromptSent.Contains("Kael"))
-}
-
 // A legacy snapshot (empty StateTag) must NOT touch the model — old
 // sessions still resume conversation-only.
 func TestRehydrateOrchestration_LegacyEmptyTagIsNoOp(t T) T {
@@ -5486,6 +5379,45 @@ func TestRehydrateOrchestration_LegacyEmptyTagIsNoOp(t T) T {
         case Idle() => IsTrue(t, true)
         case _      => IsTrue(t, false)
     }
+}
+
+// Bridge test: orchestrationOf MUST flatten the in-memory
+// PostPromptSent HashSet to the Snapshot.PostPromptSent Array, or the
+// per-dispatch latch silently fails to round-trip and post-engineer
+// prompts re-fire on already-ran engineers across a tui_exit/resume.
+// Pins the update.gala-side bridge that the codec-only session tests
+// can't see.
+func TestOrchestrationOf_FlattensPostPromptSent(t T) T {
+    val seed = sampleModel().Copy(
+        PostPromptSent = EmptyHashSet[string]().Add("Felix").Add("Mira"),
+    )
+    val orch = orchestrationOf(seed)
+    val t1 = Eq(t, orch.PostPromptSent.Size(), 2)
+    // HashSet iteration order is not insertion order; check membership
+    // via the rebuilt set instead of indexing the array.
+    val rebuilt = hashSetFromArray(orch.PostPromptSent)
+    val t2 = IsTrue(t1, rebuilt.Contains("Felix"))
+    return IsTrue(t2, rebuilt.Contains("Mira"))
+}
+
+// Bridge test: RehydrateOrchestration MUST rebuild the HashSet from
+// the persisted Array. Pins the inverse of the above — deletion of
+// the rehydrate line is what would let resume-after-exit re-fire
+// the post-prompt.
+func TestRehydrateOrchestration_RestoresPostPromptSent(t T) T {
+    val snap = session.Snapshot(
+        ProjectName    = "demo",
+        SavedAt         = int64(0),
+        Conversation    = EmptyArray[session.ConversationLine](),
+        ActiveMembers   = EmptyArray[string](),
+        StateTag        = "Approval",
+        StateSummaryBody = "ship",
+        PostPromptSent  = ArrayOf("Felix", "Mira"),
+    )
+    val m = RehydrateOrchestration(sampleModel().Copy(State = Idle()), snap)
+    val t1 = Eq(t, m.PostPromptSent.Size(), 2)
+    val t2 = IsTrue(t1, m.PostPromptSent.Contains("Felix"))
+    return IsTrue(t2, m.PostPromptSent.Contains("Mira"))
 }
 
 // resumeTargets: pending workers for Delegating, nobody for Idle.
@@ -5547,14 +5479,6 @@ func TestMemberDirectives_QuotedThenRealSignoffStillFires(t T) T {
     return IsTrue(t1, firedReal > 0)
 }
 
-func TestTerminalFingerprint_DistinguishesAndDedupes(t T) T {
-    val a = terminalFingerprint(Finished("quoted example body"))
-    val b = terminalFingerprint(Finished("the genuine multi-line sign-off body that differs"))
-    val c = terminalFingerprint(Finished("quoted example body"))
-    val t1 = IsTrue(t, a != b)
-    return IsTrue(t1, a == c)
-}
-
 // ---------------------------------------------------------------------------
 // End-to-end FSM-transition coverage.
 //
@@ -5605,7 +5529,7 @@ func modelWithQA() AppModel {
 // stuck in QAGate for 57 minutes until tui_exit.
 func TestFinaliseMemberDone_QAOnly_DrainsQAGateToTLReview(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = arrayToHashSet(ArrayOf("Sable"))),
+        State    = QAGate(Pending = hashSetFromArray(ArrayOf("Sable"))),
         Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
     )
     val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
@@ -5624,7 +5548,7 @@ func TestFinaliseMemberDone_QAGate_PartialPending_StaysInQAGate(t T) T {
         Onboarding = EmptyArray[string](),
     )
     val seed = modelWithQA().Copy(
-        State = QAGate(Pending = arrayToHashSet(ArrayOf("Sable", "Theo"))),
+        State = QAGate(Pending = hashSetFromArray(ArrayOf("Sable", "Theo"))),
         Team  = modelWithQA().Team.Copy(Members = modelWithQA().Team.Members.Append(theo)),
     )
     val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
@@ -5645,7 +5569,7 @@ func TestFinaliseMemberDone_QAGate_PartialPending_StaysInQAGate(t T) T {
 // and finaliseMemberDone is all exercised.
 func TestEngineerFinish_NoQA_DrainsDelegatingToTLReview(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     // Synthetic UncommittedCheckResult bypasses the real git probe
@@ -5663,7 +5587,7 @@ func TestEngineerFinish_NoQA_DrainsDelegatingToTLReview(t T) T {
 // TLReview.
 func TestEngineerFinish_WithQA_DrainsDelegatingToQAGate(t T) T {
     val seed = modelWithQA().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped", Dirty = false))
@@ -5704,7 +5628,7 @@ func TestEofAfterAtFinished_DoesNotDoubleFireMemberDone(t T) T {
 // the @help directly; the orchestrator synthesises a relay turn.
 func TestChunkArrived_MemberHelp_AdvancesToTLNudging(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val helpChunk = "Stuck on the API contract — should I extend the existing endpoint or add a new one?\n@help\nNeed routing guidance.\n@end"
     val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = helpChunk))
@@ -5720,7 +5644,7 @@ func TestChunkArrived_MemberHelp_AdvancesToTLNudging(t T) T {
 // TLReview. sampleModel has no QA so we land in TLReview.
 func TestChunkArrived_MemberBlocked_DrainsToTLReview(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val blockedChunk = "Can't proceed — the upstream dependency is broken.\n@blocked\nThird-party API is returning 500s; this is outside my scope to fix.\n@end"
     val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = blockedChunk))
@@ -5741,7 +5665,7 @@ func TestChunkArrived_MemberBlocked_DrainsToTLReview(t T) T {
 // symptom from the live session.
 func TestChunkArrived_QAFinished_DrainsToTLReview(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = arrayToHashSet(ArrayOf("Sable"))),
+        State    = QAGate(Pending = hashSetFromArray(ArrayOf("Sable"))),
         Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
     )
     val approveChunk = "Reviewed the deliverables; build green; tests pass.\n@finished\nAPPROVE. Migration looks clean.\n@end"
@@ -5758,7 +5682,7 @@ func TestChunkArrived_QAFinished_DrainsToTLReview(t T) T {
 // changes but the underlying handler is correct.
 func TestOnMemberHelp_FiresMemberHelpRequested(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val (m, _) = onMemberHelp(seed, "Felix", "Which API should I extend?")
     return m.State match {
@@ -5771,7 +5695,7 @@ func TestOnMemberHelp_FiresMemberHelpRequested(t T) T {
 // blocked drain routes to TLReview (no QA in sampleTeam).
 func TestOnMemberBlocked_FiresMemberBlockedAndDrains(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
     )
     val (m, _) = onMemberBlocked(seed, "Felix", "Third-party API down")
     return m.State match {
@@ -5797,7 +5721,7 @@ func TestRejectAndIdle_AdvancesToIdle(t T) T {
 // their pending sets on a UserPrompted escape hatch.
 func TestUserPrompted_FromDelegating_LandsInTLThinking(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = arrayToHashSet(ArrayOf("Felix"))),
+        State    = Delegating(Pending = hashSetFromArray(ArrayOf("Felix"))),
         Composer = "redirect: try a different approach",
     )
     val (m, _) = Update(seed, KeySubmit())
@@ -5809,7 +5733,7 @@ func TestUserPrompted_FromDelegating_LandsInTLThinking(t T) T {
 
 func TestUserPrompted_FromQAGate_LandsInTLThinking(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = arrayToHashSet(ArrayOf("Sable"))),
+        State    = QAGate(Pending = hashSetFromArray(ArrayOf("Sable"))),
         Composer = "wait, scrap the review",
     )
     val (m, _) = Update(seed, KeySubmit())

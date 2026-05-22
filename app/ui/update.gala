@@ -8,6 +8,7 @@ import (
     "runtime"
     "github.com/martianoff/gala_team/app/onboarding"
     "github.com/martianoff/gala_team/app/policy"
+    "github.com/martianoff/gala_team/app/protocol"
     "github.com/martianoff/gala_team/app/session"
     "martianoff/gala/time_utils"
     . "martianoff/gala/std"
@@ -212,6 +213,9 @@ func stateTag(s AppState) string = s match {
 func setToArray(p HashSet[string]) Array[string] =
     p.FoldLeft(EmptyArray[string](), (a, x) => a.Append(x))
 
+func hashSetFromArray(xs Array[string]) HashSet[string] =
+    xs.FoldLeft(EmptyHashSet[string](), (acc, n) => acc.Add(n))
+
 func statePendingList(s AppState) Array[string] = s match {
     case Delegating(p)   => setToArray(p)
     case QAGate(p)       => setToArray(p)
@@ -233,7 +237,7 @@ func stateSummaryOf(s AppState) string = s match {
 // empty tag — including a legacy snapshot with no persisted state —
 // rebuilds as Idle, so old snapshots resume exactly as before.
 func stateFromSnap(tag string, pending Array[string], reason string, summary string) AppState {
-    val pset = pending.FoldLeft(EmptyHashSet[string](), (acc, n) => acc.Add(n))
+    val pset = hashSetFromArray(pending)
     return tag match {
         case "TLThinking" => TLThinking()
         case "Delegating" => Delegating(Pending = pset)
@@ -386,8 +390,8 @@ func resumeInFlight(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 
 // SyntheticPoisonThreshold is the number of consecutive synthetic
 // (model:"<synthetic>") claude-code assistant envelopes that, by the
-// time the heartbeat decides to respawn a silent member, makes us
-// drop SessionIds[name] before the respawn so ensureSession spawns
+// time a protocol Redeliver decides to respawn a silent member, makes
+// us drop SessionIds[name] before the respawn so ensureSession spawns
 // a fresh claude-code jsonl rather than --resume into the poisoned
 // one. Three keeps the rotation conservative — a one-off synthetic
 // from a single resume cycle won't trip it, but a session that has
@@ -416,12 +420,13 @@ func rotateSessionIfSyntheticPoisoned(m AppModel, name string) Tuple3[AppModel, 
     return (m.Copy(SessionIds = m.SessionIds.Remove(name)), true, synthCount)
 }
 
-// onTick advances Tick + NowAt, prunes expired toasts, re-derives
-// liveness statuses for every member currently in Working/Slow/Stuck,
-// and — when a member newly transitions to Stuck or Failed — emits the
-// matching FSM event (MemberStuck / MemberAbandoned) so the FSM moves
-// from Delegating into TLNudging. Returns any Cmds produced (e.g. the
-// TL nudge turn spawn) batched.
+// onTick advances Tick + NowAt, prunes expired toasts, and runs the
+// protocol-driven liveness driver: per-member protocol.Tick decides
+// Redeliver / IssueNudge / MarkAbandoned, AggregateNudges folds every
+// currently-silent member into one batched TL nudge, and the resulting
+// actions are consumed via consumeDeliveryAction (the FSM
+// MemberAbandoned transition + the bounded-retry respawn). Returns
+// any Cmds produced (e.g. the TL nudge turn spawn) batched.
 func onTick(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val now = time_utils.Now()
     val pruned = pruneToasts(m.Toasts, now)
@@ -434,210 +439,178 @@ func onTick(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // auto-unwrap from Immutable[ToastQueue] happens at the boundary.
 func pruneToasts(q ToastQueue, now time_utils.Instant) ToastQueue = q.Prune(now)
 
-// updateLivenessStatuses walks `members` and maps each to a derived
-// status from LastChunkAt. On a band transition: (1) status flipped
-// in m.Statuses; (2) toast pushed; (3) FSM event emitted so
-// Delegating advances toward TLNudging (stuck) — or, on hitting the
-// abandon threshold, the heartbeat tries to revive the silent member
-// via the same respawn path the crash-recovery uses (closeLiveSession
-// + ensureSession + "Continue your previous task."). MemberAbandoned
-// only fires after the Heartbeat.MaxRetries budget is exhausted; the
-// retry counter auto-clears in onChunk on the next successful chunk,
-// so transient silence won't burn the budget permanently.
+// updateLivenessStatuses drives the per-member protocol delivery FSM
+// (Tick) for each non-lead member with a dispatch in flight, then
+// folds every currently-silent member into AT MOST ONE batched TL
+// nudge via AggregateNudges. The DeliveryAction vocabulary it consumes
+// — Redeliver / IssueNudge / MarkAbandoned — subsumes the old ad-hoc
+// ladder (liveRespawnMember bounded retry, the bandFor escalation,
+// spawnAggregatedStuckNudge's pile-on fix) into one driver.
 //
-// Past sessions captured a member who got dispatched, did a few
-// reads, and then went silent — the orchestrator's heartbeat marked
-// them StFailed and immediately fired MemberAbandoned, burying half
-// the parallel scope and forcing the TL to take over from the lead
-// worktree. The respawn path lets a fresh subprocess pick up the
-// --resume conversation, which is what the manual "kill the member,
-// restart" recovery did anyway.
+// Lead is excluded by name: a long TLReview pause (waiting on the
+// user) must not flip the lead's delivery state to Silent — direct
+// user prompts and relay turns drive the lead, not the heartbeat.
 //
-// CRITICAL: TL nudges are batched at the END of the walk, not fired
-// per-member. Without batching, when N engineers all hit the stuck
-// threshold in the same tick (typical when the user runs a parallel
-// dispatch fan-out and walks away), the orchestrator spawns N TL
-// nudges back-to-back — each lands a separate claude turn at the
-// lead, the user sees N "TL is working" toasts, and the team
-// pipeline pile-on confuses everyone.
-//
-// Aggregated nudge: collect every newly-stuck member during the
-// walk; afterwards, if any are present, emit ONE MemberStuck FSM
-// transition + ONE spawnTLNudge with a prompt that lists every stuck
-// member. Failed (abandoned) transitions are still per-member because
-// they don't spawn a nudge turn — they only advance the pending set.
+// Members without a LastDispatchedMsg entry have no in-flight delivery
+// to Tick — skipped. Tick's per-member IssueNudge on first-cross is
+// dropped in favor of AggregateNudges' batched IssueNudge (one nudge
+// that names every silent member, not N back-to-back TL turns).
 func updateLivenessStatuses(
     m AppModel, members Array[Member], now time_utils.Instant,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val leadName = m.Team.Lead.Name
     // Skip the liveness walk entirely while a stuck nudge is in
-    // flight. TLNudging(reason="stuck", pending) means we've already
-    // dispatched a TL turn to address these stuck members and are
-    // waiting for its TLDone. Re-escalating the same members every
-    // heartbeat tick produces TLNudging --MemberStuck--> TLNudging
-    // self-loops with no semantic change — past sessions captured a
-    // ~30-minute stretch of 6 such redundant transitions before the
-    // nudge resolved (or the member was abandoned). The nudge's
+    // flight. TLNudging(reason="stuck", pending) means a TL turn has
+    // already been dispatched to address these stuck members and is
+    // awaiting its TLDone. Re-Ticking would re-batch the same Silent
+    // members into another IssueNudge every heartbeat — TLNudging →
+    // TLNudging self-loops with no semantic change. The nudge's
     // TLDone is the right resolution boundary; let it land.
     val inStuckNudge = m.State match {
         case TLNudging(reason, _) => reason == "stuck"
         case _                    => false
     }
     if inStuckNudge { return (m, EmptyArray[Cmd[AppMsg]]()) }
-    val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyArray[string]())
-    val (m1, cmds, stuckNames) = members.FoldLeft(seed, (acc, mem) => {
-        val (curM, curCmds, curStuck) = acc
+    val nowNanos = int(now.UnixNanos())
+    val policy   = protocol.PolicyFromHeartbeat(
+        m.Policy.Heartbeat.SlowAfterSeconds,
+        m.Policy.Heartbeat.StuckAfterSeconds,
+        m.Policy.Heartbeat.AbandonAfterSeconds,
+        m.Policy.Heartbeat.MaxRetries,
+    )
+
+    // 1. Tick each non-lead member that has a dispatch in flight.
+    val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyArray[Tuple[string, protocol.DeliveryAction]]())
+    val (m1, cmds, actions) = members.FoldLeft(seed, (acc, mem) => {
+        val (curM, curCmds, curActions) = acc
         val name = mem.Name
-        // Lead is driven by direct user prompts + relay turns, not
-        // by the heartbeat-stuck/abandon machinery. A long TLReview
-        // pause (waiting on the user) would otherwise flip the lead
-        // to Stuck/Failed and emit a spurious MemberStuck/Abandoned
-        // FSM event — past audits caught the lead hitting
-        // MemberAbandoned during a long TLReview→TLReview pause.
-        if name == leadName { return (curM, curCmds, curStuck) }
-        val current = curM.Statuses.Get(name).GetOrElse(StIdle())
-        val derived = livenessStatus(curM, name, current, now)
-        if statusTag(current) == statusTag(derived) { return (curM, curCmds, curStuck) }
-        val withStatus = curM.Copy(
-            Statuses = curM.Statuses.Put(name, derived),
-            Toasts   = pushTransitionToast(curM.Toasts, name, derived, now),
-        )
-        return derived match {
-            case StStuck() => (withStatus, curCmds, curStuck.Append(name))
-            case StFailed(_) => {
-                val maxRetries = maxAutoRetriesOf(curM)
-                val retries = curM.RetryCount.Get(name).GetOrElse(0)
-                if retries < maxRetries {
-                    val (m1, respawnCmd) = liveRespawnMember(withStatus, name, retries + 1, maxRetries)
-                    return (m1, curCmds.Append(respawnCmd), curStuck)
-                }
-                val nextState = transitionLogged(withStatus.State, MemberAbandoned(MemberName = name), transitionContext(withStatus))
-                // Save AFTER the transition. The heartbeat path is
-                // the canonical "no follow-up chunk to ride a save
-                // on" case — an abandoned member by definition stops
-                // producing visible output, so without persisting
-                // here the snapshot can lag the in-memory FSM
-                // indefinitely. Past sessions captured a
-                // Delegating→QAGate hop here followed by 12+ minutes
-                // of nothing, then a tui_exit that pinned latest.json
-                // to the pre-transition Delegating.
-                return (persistAppModel(withStatus.Copy(State = nextState)), curCmds, curStuck)
+        if (name == leadName) { return (curM, curCmds, curActions) }
+        return curM.LastDispatchedMsg.Get(name) match {
+            case None() => (curM, curCmds, curActions)
+            case Some(msg) => {
+                val st = curM.DeliveryStates.Get(name).GetOrElse(protocol.Sent(AtNanos = nowNanos, Attempt = 1))
+                val (newSt, action) = protocol.Tick(st, msg, nowNanos, policy)
+                val updated = curM.Copy(DeliveryStates = curM.DeliveryStates.Put(name, newSt))
+                return (updated, curCmds, curActions.Append((name, action)))
             }
-            case _ => (withStatus, curCmds, curStuck)
         }
     })
-    if stuckNames.IsEmpty() { return (m1, cmds) }
-    // In QAGate a stuck QA reviewer is re-prompted DIRECTLY to finish
-    // its review — NOT bounced to a TL nudge. The TL never did the QA
-    // work; asking it to "decide what to do about stuck QA" just makes
-    // it redo or re-dispatch a review it has no context for, and the
-    // FSM is still parked in QAGate waiting on that same reviewer. The
-    // correct recovery is to wake the reviewer back up where it
-    // stalled. Any non-QA stuck member (or a QA member stuck outside
-    // QAGate) still goes to the TL via the aggregated nudge.
-    val inQaGate = m1.State match {
-        case QAGate(_) => true
-        case _         => false
-    }
-    if inQaGate {
-        val seed2 = (m1, cmds, EmptyArray[string]())
-        val (m2, cmds2, nonQaStuck) = stuckNames.FoldLeft(seed2, (acc, name) => {
-            val (curM, curCmds, curOther) = acc
-            return findMemberByName(curM.Team.Members, name) match {
-                case Some(mem) if SameRole(mem.Role, QA()) => {
-                    val (m3, c) = nudgeStuckQaReviewer(curM, mem, now)
-                    return (m3, curCmds.Append(c), curOther)
-                }
-                case _ => (curM, curCmds, curOther.Append(name))
-            }
-        })
-        if nonQaStuck.IsEmpty() { return (m2, cmds2) }
-        return spawnAggregatedStuckNudge(m2, nonQaStuck, cmds2, now)
-    }
-    return spawnAggregatedStuckNudge(m1, stuckNames, cmds, now)
-}
 
-// nudgeStuckQaReviewer wakes a QA reviewer that went silent mid-
-// review back up — directly, in the SAME session, with the FSM left
-// in QAGate. No MemberStuck FSM event (onQAGate ignores it anyway)
-// and crucially no TL nudge: the lead has no QA context and bouncing
-// it there strands the gate. The prompt tells the reviewer exactly
-// how to close the turn so the gate drains; with the parser now
-// accepting @finished/@review (alongside @done/@blocked) that sign-
-// off actually parses.
-func nudgeStuckQaReviewer(m AppModel, mem Member, now time_utils.Instant) Tuple[AppModel, Cmd[AppMsg]] {
-    val elapsed = m.LastChunkAt.Get(mem.Name) match {
-        case None()   => int64(0)
-        case Some(at) => elapsedSeconds(now, at)
-    }
-    val prompt = s"System: you've been silent for ${elapsed}s mid-review and the orchestrator is parked in QA waiting on you. Finish the review now and CLOSE THE TURN with a sign-off block on its own lines: `@review APPROVE` / `@review REJECT` (or `@finished` if it passes / `@blocked` if it can't), the body with your findings, then `@end` on its own line. Until that block lands, the pipeline cannot advance."
-    // Kill the hung subprocess first (same shape as liveRespawnMember):
-    // a silent-stuck reviewer's old process may still be alive but
-    // wedged; without closing it the fresh --resume turn races the
-    // corpse and PendingClosures can't disambiguate the stale EOF.
-    val mClosed = closeLiveSession(m, mem.Name)
-    return ensureSession(mClosed, mem) match {
-        case Left(err)  => {
-            LogSpawnFailure(mem.Name, "qa_stuck_nudge", err)
-            return (mClosed.Copy(LastError = Some(s"qa-nudge ${mem.Name}: ${err}")), NoCmd[AppMsg]())
-        }
-        case Right(m1)  => {
-            val withStatus = setStatus(m1, mem.Name, StWorking())
-            return (withStatus, sendAndPumpCmd(withStatus, mem, prompt))
-        }
+    // 2. Consume per-member actions. Redeliver and MarkAbandoned fire
+    //    via the existing recovery / FSM-transition paths; IssueNudge
+    //    is intentionally dropped here — the aggregate below replaces
+    //    it (the pile-on fix the old spawnAggregatedStuckNudge guarded).
+    val (m2, cmds2) = actions.FoldLeft((m1, cmds), (acc2, pair) => {
+        val (curM, curCmds) = acc2
+        val (name, action) = pair
+        return consumeDeliveryAction(curM, curCmds, name, action)
+    })
+
+    // 3. AggregateNudges → one IssueNudge naming every silent member,
+    //    or None when nobody is silent. Spawned as a single TL nudge.
+    //    The first silent name is passed to the FSM MemberStuck event
+    //    so the transition log carries a real member, not an empty
+    //    placeholder (the FSM itself ignores the name; the log doesn't).
+    val statePairs = aggregateStatePairs(m2, members, leadName)
+    return protocol.AggregateNudges(statePairs, nowNanos, policy) match {
+        case None()    => (m2, cmds2)
+        case Some(act) => fireAggregateNudge(m2, cmds2, act, firstSilentName(statePairs))
     }
 }
 
-// spawnAggregatedStuckNudge fires a single TL nudge covering every
-// newly-stuck member. Transitions the FSM via the FIRST stuck name
-// (one MemberStuck event is enough — the FSM only tracks "are we
-// nudging?" not which member) and builds an aggregated prompt.
-func spawnAggregatedStuckNudge(
-    m AppModel,
-    stuck Array[string],
-    cmds Array[Cmd[AppMsg]],
-    now time_utils.Instant,
+// firstSilentName returns the first Silent member in roster order, or
+// "" when nothing is silent. AggregateNudges only fires Some when at
+// least one member is Silent, so a "" result is unreachable in the
+// caller — the empty default is defensive only.
+func firstSilentName(pairs Array[Tuple[string, protocol.DeliveryState]]) string =
+    pairs.Collect((pair) =>
+        if (protocol.StateName(pair.V2) == "silent") Some[string](pair.V1)
+        else                                          None[string]()
+    ).HeadOption().GetOrElse("")
+
+// aggregateStatePairs assembles (name, DeliveryState) for every non-
+// lead member that has a tracked DeliveryState entry, in roster order.
+// AggregateNudges scans this list for `Silent` states.
+func aggregateStatePairs(
+    m AppModel, members Array[Member], leadName string,
+) Array[Tuple[string, protocol.DeliveryState]] = members.FoldLeft(
+    EmptyArray[Tuple[string, protocol.DeliveryState]](),
+    (acc, mem) => {
+        val n = mem.Name
+        if (n == leadName) { return acc }
+        return m.DeliveryStates.Get(n) match {
+            case None()    => acc
+            case Some(st)  => acc.Append((n, st))
+        }
+    },
+)
+
+// fireAggregateNudge spawns ONE TL nudge for a batched IssueNudge,
+// or a no-op for any other action (AggregateNudges only ever returns
+// IssueNudge; the catch-all keeps the FSM total). representativeMember
+// names the first Silent member for the FSM MemberStuck event so the
+// transition log carries a real name rather than an empty placeholder.
+func fireAggregateNudge(
+    m AppModel, cmds Array[Cmd[AppMsg]], act protocol.DeliveryAction, representativeMember string,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
-    val first = stuck.Get(0)
-    val nextState = transitionLogged(m.State, MemberStuck(MemberName = first), transitionContext(m))
-    // Save AFTER the transition. The TL nudge that follows will
-    // produce chunks and trigger per-chunk saves on its own, but
-    // persisting here removes the race window where a crash
+    if (protocol.ActionName(act) != "nudge") { return (m, cmds) }
+    val text = protocol.IssueNudgeText(act).GetOrElse("")
+    val nextState = transitionLogged(m.State, MemberStuck(MemberName = representativeMember), transitionContext(m))
+    // Save AFTER the FSM transition + BEFORE spawning the nudge. The
+    // nudge will produce chunks and trigger per-chunk saves on its
+    // own, but persisting here removes the race window where a crash
     // between the FSM step and the first chunk leaves latest.json
     // stuck at the pre-nudge Delegating state.
     val withState = persistAppModel(m.Copy(State = nextState))
-    val prompt = buildAggregatedStuckPrompt(withState, stuck, now)
-    val (afterSpawn, spawnCmds) = spawnTLNudge(withState, s"stuck-batch-${stuck.Size()}", prompt)
-    val merged = spawnCmds.FoldLeft(cmds, (a, c) => a.Append(c))
-    return (afterSpawn, merged)
+    val (m1, ncmds) = spawnTLNudge(withState, "stuck-batch", text)
+    return (m1, cmds.AppendAll(ncmds))
 }
 
-// buildAggregatedStuckPrompt formats a system message listing every
-// stuck member in one block. Falls back to the single-member prompt
-// when only one is stuck — the additional "members listed below"
-// boilerplate is wasted cognitive load when there's just one.
-//
-// IMPORTANT directive: the prompt explicitly tells the TL NOT to
-// re-dispatch members who weren't named in the stuck list. The
-// real-world failure mode (audit log 05:18:30→05:24:54) was the TL
-// re-dispatching the WHOLE team on every Kael-stuck nudge, killing
-// Lyra's in-flight work each cycle and producing 5 redundant Lyra
-// spawns for one prompt.
-func buildAggregatedStuckPrompt(m AppModel, stuck Array[string], now time_utils.Instant) string {
-    if stuck.Size() == 1 {
-        return buildStuckNudgePrompt(m, stuck.Get(0), now)
-    }
-    val rows = stuck.Map((name) => {
-        val elapsed = m.LastChunkAt.Get(name) match {
-            case None()   => int64(0)
-            case Some(at) => elapsedSeconds(now, at)
+// consumeDeliveryAction applies one per-member DeliveryAction. Per-
+// member IssueNudge is dropped on AggregateNudges' behalf; Redeliver
+// drives the existing bounded-retry respawn; MarkAbandoned fires the
+// existing FSM MemberAbandoned transition; NoOp / Escalate are
+// pass-through. Tag dispatch (ActionName) plus protocol accessors —
+// GALA does not resolve qualified case constructors in patterns, so
+// the consumer extracts via the protocol's field accessors.
+func consumeDeliveryAction(
+    m AppModel, cmds Array[Cmd[AppMsg]], name string, action protocol.DeliveryAction,
+) Tuple[AppModel, Array[Cmd[AppMsg]]] {
+    val tag = protocol.ActionName(action)
+    if (tag == "redeliver") {
+        // Persist the bumped Message back into LastDispatchedMsg so the
+        // next Tick reads the new Attempt against the policy budget.
+        // Without this the protocol's MaxRetries gate is dead: every
+        // subsequent Tick re-reads the original Attempt=1 dispatch,
+        // unconditionally returns Redeliver again, and the retry budget
+        // never enforces.
+        val mWithMsg = protocol.RedeliverMessage(action) match {
+            case Some(bumped) => m.Copy(LastDispatchedMsg = m.LastDispatchedMsg.Put(name, bumped))
+            case None()       => m
         }
-        return s"  • ${name} silent for ${elapsed}s"
-    })
-    val joined = rows.MkString("\n")
-    val onlyTheseNames = stuck.MkString(", ")
-    return s"System: ${stuck.Size()} members went stuck simultaneously past the heartbeat threshold:\n${joined}\n\nDecide what to do — re-prompt ONLY these stuck members via @dispatch(${onlyTheseNames}), reassign their work to a non-stuck teammate, or @summary the turn as-is and surface the failures.\n\nDO NOT re-dispatch other team members — every other engineer is still actively making progress on their original brief. Re-dispatching them now would kill their in-flight work and waste the turn they've already spent."
+        // Before respawning, rotate the saved claude-code session id
+        // when the member's recent output has been only synthetic
+        // envelopes — otherwise --resume reloads the poisoned jsonl and
+        // the synthetic loop continues across the retry.
+        val (mRotated, _, _) = rotateSessionIfSyntheticPoisoned(mWithMsg, name)
+        val maxRetries = maxAutoRetriesOf(mRotated)
+        val retries    = mRotated.RetryCount.Get(name).GetOrElse(0)
+        val (m1, c)    = liveRespawnMember(mRotated, name, retries + 1, maxRetries)
+        return (m1, cmds.Append(c))
+    }
+    if (tag == "abandon") {
+        val nextState = transitionLogged(m.State, MemberAbandoned(MemberName = name), transitionContext(m))
+        // Save AFTER the transition. The heartbeat path is the
+        // canonical "no follow-up chunk to ride a save on" case — an
+        // abandoned member by definition stops producing visible
+        // output, so without persisting here the snapshot can lag the
+        // in-memory FSM indefinitely.
+        return (persistAppModel(m.Copy(State = nextState)), cmds)
+    }
+    // noop / nudge (dropped on aggregate's behalf) / escalate (unused)
+    return (m, cmds)
 }
+
 
 // spawnTLNudge fires a fresh TL turn with the given system prompt.
 // Reuses the existing ensureSession + sendAndPumpCmd path so the TL
@@ -660,8 +633,11 @@ func buildAggregatedStuckPrompt(m AppModel, stuck Array[string], now time_utils.
 func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val lead = m.Team.Lead
     val mClosed = closeLiveSession(m, lead.Name).Copy(
-        TurnBuffer    = "",
-        ConsultsFired = 0,
+        TurnBuffer        = "",
+        ConsultsFired     = 0,
+        Ledger            = protocol.EmptyLedger(),
+        DeliveryStates    = EmptyHashMap[string, protocol.DeliveryState](),
+        LastDispatchedMsg = EmptyHashMap[string, protocol.Message](),
     )
     return ensureSession(mClosed, lead) match {
         case Left(err) => {
@@ -675,138 +651,6 @@ func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Arra
     }
 }
 
-// buildStuckNudgePrompt formats the system message the TL gets when
-// a member goes stuck. Includes elapsed seconds so the lead can
-// decide whether to re-prompt the same member, reassign the work, or
-// abandon the task. Scoped to JUST the named stuck member — see
-// buildAggregatedStuckPrompt for the rationale on why TL must NOT
-// re-dispatch healthy teammates.
-func buildStuckNudgePrompt(m AppModel, name string, now time_utils.Instant) string {
-    val elapsed = m.LastChunkAt.Get(name) match {
-        case None()   => int64(0)
-        case Some(at) => elapsedSeconds(now, at)
-    }
-    return s"System: ${name} has been silent for ${elapsed}s past the stuck threshold. Decide what to do — re-prompt them via @dispatch(${name}), reassign the work to a non-stuck teammate, or @summary the turn as-is. Reply with the directive(s) you want me to execute.\n\nDO NOT re-dispatch other team members — only ${name} is stuck. Other engineers are still actively working on their original briefs; re-dispatching them now would kill their in-flight work."
-}
-
-// pushTransitionToast maps a status escalation to a toast and pushes
-// it onto the queue. StWorking is the baseline (no toast); only the
-// upward bands surface to the user. Slow → 4s info, Stuck → 6s warn,
-// Failed → 8s error. Recovery / Help / Done get their own toasts
-// from the (future) protocol-level handlers — not from the heartbeat.
-func pushTransitionToast(q ToastQueue, name string, derived Status, now time_utils.Instant) ToastQueue = derived match {
-    case StSlow()    => q.PushInfo(s"${name} is slow", now, time_utils.Seconds(int64(4)))
-    case StStuck()   => q.PushWarn(s"${name} stuck — TL will nudge", now, time_utils.Seconds(int64(6)))
-    case StFailed(_) => q.PushError(s"${name} abandoned", now, time_utils.Seconds(int64(8)))
-    case _           => q
-}
-
-// livenessStatus derives the next status from the current one + elapsed
-// time since LastChunkAt. Only Working/Slow/Stuck escalate via the
-// heartbeat; everything else is sticky and returned unchanged.
-func livenessStatus(m AppModel, name string, current Status, now time_utils.Instant) Status = current match {
-    case StWorking() => escalateByElapsed(m, name, now, StWorking())
-    case StSlow()    => escalateByElapsed(m, name, now, StSlow())
-    case StStuck()   => escalateByElapsed(m, name, now, StStuck())
-    // Safety net for a parked run: kept a TINY one-call arm on
-    // purpose — inlining the nested match/if here perturbs gala's
-    // name resolver enough to mis-bind a bare `Parse` elsewhere in
-    // this file to `time_utils.Parse` (the documented resolver
-    // order-sensitivity; see applyMemberDirective). The logic lives
-    // in idleParkedStatus.
-    case StIdle()    => idleParkedStatus(m, name, now)
-    case _           => current
-}
-
-// idleParkedStatus reaps a member the FSM is still BLOCKED on (it is
-// in the Delegating / QAGate / TLNudging pending set) that has gone
-// StIdle — its turn clean-ended without a parsed completion, so no
-// MemberDone fired and the pipeline can't advance. Past the abandon
-// threshold it returns StFailed so the existing respawn /
-// MemberAbandoned branch reaps it and the FSM drains on its own
-// (instead of the user having to type "continue"). A member that is
-// StIdle but NOT pending (genuinely between turns) is left untouched
-// — the pending-set gate is what makes this safe.
-func idleParkedStatus(m AppModel, name string, now time_utils.Instant) Status {
-    if !memberIsFsmPending(m.State, name) { return StIdle() }
-    return m.LastChunkAt.Get(name) match {
-        case None()   => StIdle()
-        case Some(at) =>
-            if (elapsedSeconds(now, at) >= m.Policy.Heartbeat.AbandonAfterSeconds)
-                StFailed(Reason = s"parked: pending but idle past ${m.Policy.Heartbeat.AbandonAfterSeconds}s")
-            else
-                StIdle()
-    }
-}
-
-// memberIsFsmPending: is `name` in the FSM's still-waiting-on set.
-// Empty in any non-member-waiting state (Idle / TLThinking /
-// TLReview / Approval), so idleParkedStatus can never mis-fire on a
-// member legitimately idle between turns.
-func memberIsFsmPending(s AppState, name string) bool = s match {
-    case Delegating(p)   => p.Contains(name)
-    case QAGate(p)       => p.Contains(name)
-    case TLNudging(_, p) => p.Contains(name)
-    case _               => false
-}
-
-// escalateByElapsed returns Failed/Stuck/Slow when the member has been
-// silent past the matching threshold. `fallback` is the current
-// Working-family status to keep when below the slowness band.
-// Thresholds come from m.Policy.Heartbeat — per-team configurable via
-// the policy.heartbeat: yaml block (or defaults from DefaultHeartbeat).
-//
-// Gate: only escalate members the FSM is actively waiting on
-// (memberIsFsmPending). After a TLDone / MemberDone drains the
-// pending set, a member whose status hadn't yet flipped to Idle (the
-// status walk and the FSM transition aren't strictly ordered) would
-// otherwise keep ticking up the elapsed-time band and fire a ghost
-// MemberStuck / MemberAbandoned against a member nobody is waiting
-// for — past sessions showed this firing three times in eight
-// minutes for Sable while the FSM was Idle. The pending-set check
-// matches idleParkedStatus' guard and is the same notion of "FSM
-// still expects this member to make progress."
-func escalateByElapsed(m AppModel, name string, now time_utils.Instant, fallback Status) Status {
-    if !memberIsFsmPending(m.State, name) { return fallback }
-    val opt = m.LastChunkAt.Get(name)
-    return opt match {
-        case None()   => fallback
-        case Some(at) => bandFor(elapsedSeconds(now, at), fallback, m.Policy.Heartbeat)
-    }
-}
-
-// bandFor maps elapsed seconds to a status using the per-team
-// heartbeat thresholds. Failed for >= AbandonAfterSeconds, Stuck for
-// >= StuckAfterSeconds, Slow for >= SlowAfterSeconds, otherwise the
-// caller's fallback (Working / Slow / Stuck preserved).
-func bandFor(secs int64, fallback Status, hb policy.Heartbeat) Status {
-    if secs >= hb.AbandonAfterSeconds { return StFailed(Reason = s"abandoned: silent ${hb.AbandonAfterSeconds}s+") }
-    if secs >= hb.StuckAfterSeconds   { return StStuck() }
-    if secs >= hb.SlowAfterSeconds    { return StSlow() }
-    return fallback
-}
-
-func elapsedSeconds(now time_utils.Instant, last time_utils.Instant) int64 {
-    val nanosNow = now.UnixNanos()
-    val nanosLast = last.UnixNanos()
-    if nanosNow <= nanosLast { return int64(0) }
-    return (nanosNow - nanosLast) / int64(1000000000)
-}
-
-// statusTag projects Status to a stable string label so the heartbeat
-// can detect transitions without comparing payloads (StRecovering's
-// Attempt/Max bumps are NOT transitions for our purposes).
-func statusTag(s Status) string = s match {
-    case StIdle()           => "idle"
-    case StQueued()         => "queued"
-    case StWorking()        => "working"
-    case StSlow()           => "slow"
-    case StStuck()          => "stuck"
-    case StRecovering(_, _) => "recovering"
-    case StHelpWaiting(_)   => "help-waiting"
-    case StDone()           => "done"
-    case StFailed(_)        => "failed"
-}
 
 func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     // Palette interception: when the command palette is open, route
@@ -1827,6 +1671,9 @@ func clearSessionState(m AppModel) AppModel {
         TotalCostUsd          = 0.0,
         TurnBuffer            = "",
         ConsultsFired         = 0,
+        Ledger                = protocol.EmptyLedger(),
+        DeliveryStates        = EmptyHashMap[string, protocol.DeliveryState](),
+        LastDispatchedMsg     = EmptyHashMap[string, protocol.Message](),
         ActiveConsults        = EmptyHashMap[string, ConsultSession](),
         ConsultBuffers        = EmptyHashMap[string, Array[string]](),
         ConsultViewerOpen     = false,
@@ -1928,8 +1775,11 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         // to the bottom of the conversation so they see their own line
         // and the incoming response without having to press End.
         ConversationSticky = true,
-        TurnBuffer    = "",
-        ConsultsFired = 0,
+        TurnBuffer        = "",
+        ConsultsFired     = 0,
+        Ledger            = protocol.EmptyLedger(),
+        DeliveryStates    = EmptyHashMap[string, protocol.DeliveryState](),
+        LastDispatchedMsg = EmptyHashMap[string, protocol.Message](),
         // Reset @base — a new prompt starts a fresh PR-base decision.
         // The TL re-emits @base early in this turn if stacking is
         // wanted; otherwise the PR opens against the project default.
@@ -2356,17 +2206,36 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
     }
 }
 
+// recordChunkArrival stamps both the silence-clock origin (LastChunkAt)
+// and the protocol delivery state (any chunk → Working via OnChunk;
+// Acked / Abandoned terminals are sticky). One bundle so every onChunk
+// return path advances both in lockstep.
+func recordChunkArrival(m AppModel, name string) AppModel {
+    val now      = time_utils.Now()
+    val nowNanos = int(now.UnixNanos())
+    val cur      = m.DeliveryStates.Get(name).GetOrElse(protocol.Sent(AtNanos = nowNanos, Attempt = 1))
+    return m.Copy(
+        LastChunkAt    = m.LastChunkAt.Put(name, now),
+        DeliveryStates = m.DeliveryStates.Put(name, protocol.OnChunk(cur, nowNanos)),
+    )
+}
+
+// recordMemberTerminal advances the speaker's protocol delivery state
+// through OnTerminal so subsequent Ticks know the delivery is Acked
+// and stop firing Redeliver/IssueNudge against it.
+func recordMemberTerminal(m AppModel, name string) AppModel {
+    val cur = m.DeliveryStates.Get(name).GetOrElse(protocol.Sent(AtNanos = 0, Attempt = 1))
+    return m.Copy(DeliveryStates = m.DeliveryStates.Put(name, protocol.OnTerminal(cur)))
+}
+
 // onChunk records a streamed line under the speaker's name, persists
-// the updated transcript via app/session, and re-arms the pump for the
-// same member (one in-flight Future per active member). If the session
-// has been closed (e.g. SessionFailed already swept it out of
-// m.Sessions) the pump is not restarted.
-//
-// When the chunk came from the Team Lead, the line is also appended to
-// `TurnBuffer` and the directive parser is rerun against the buffer;
-// any newly-completed `@consult(name) … @end` blocks past the
-// `ConsultsFired` watermark are dispatched as RunConsultFuture and
-// batched into the returned Cmd alongside the next chunk pull.
+// the transcript via app/session, advances the speaker's delivery
+// state via recordChunkArrival, and re-arms the pump for the same
+// member (one in-flight Future per active member). If the session has
+// been closed (e.g. SessionFailed already swept it out of m.Sessions)
+// the pump is not restarted. For TL chunks, the line accumulates into
+// TurnBuffer and the protocol decoder + Ledger run against it to
+// dispatch any newly-admitted @consult blocks via maybeDispatchConsults.
 //
 // Save runs synchronously: the file is small, the write is fast, and
 // pushing it through a Future would lose the exactly-after-this-chunk
@@ -2439,7 +2308,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
             case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
             case None()  => NoCmd[AppMsg]()
         }
-        return (m1.Copy(LastChunkAt = m1.LastChunkAt.Put(name, time_utils.Now())), batchAll(ArrayOf[Cmd[AppMsg]](c, pumpCmd)))
+        return (recordChunkArrival(m1, name), batchAll(ArrayOf[Cmd[AppMsg]](c, pumpCmd)))
     }
     // Buffer-and-extract: append this chunk to the member's running
     // raw-byte buffer, then pull out every COMPLETE `{...}` envelope
@@ -2471,7 +2340,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
             case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
             case None()  => NoCmd[AppMsg]()
         }
-        return (mWithBuf.Copy(LastChunkAt = mWithBuf.LastChunkAt.Put(name, time_utils.Now())), pumpCmd)
+        return (recordChunkArrival(mWithBuf, name), pumpCmd)
     }
     // Process each complete envelope through the visible-text /
     // token-accrual / directive pipeline in source order. Fold the
@@ -2496,16 +2365,13 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
         case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
         case None()  => NoCmd[AppMsg]()
     }
-    // Only bump LastChunkAt when the fold produced at least one
-    // real (non-synthetic) envelope. A synthetic-only batch is
-    // claude-code's auto-stub reply to a resume marker — not
-    // model output — so we leave LastChunkAt at its prior value
-    // and let the heartbeat see the silence.
-    val mWithLastChunk = if (anyReal)
-        mFinal.Copy(LastChunkAt = mFinal.LastChunkAt.Put(name, time_utils.Now()))
-    else
-        mFinal
-    return (mWithLastChunk, batchAll(foldedCmds.Append(pumpCmd)))
+    // Only advance the protocol delivery state + LastChunkAt when the
+    // fold produced at least one real (non-synthetic) envelope. A
+    // synthetic-only batch is claude-code's auto-stub reply to a resume
+    // marker — not model output — so we leave the delivery state at
+    // its prior value and let protocol.Tick see continued silence.
+    val mWithChunk = if (anyReal) recordChunkArrival(mFinal, name) else mFinal
+    return (mWithChunk, batchAll(foldedCmds.Append(pumpCmd)))
 }
 
 // applyOneEnvelope runs the per-envelope pipeline: whitelist-filter
@@ -2667,82 +2533,45 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
 }
 
 
-// maybeHandleMemberDirectives parses non-TL streams for newly-completed
-// @done / @help / @blocked blocks (the member-emitted directives). The
-// TL has its own block-handling path (maybeDispatchConsults); this is
-// the symmetric path for downstream members. Same buffer / watermark
-// shape so directives fire exactly once per stream regardless of how
-// chunks arrive.
+// maybeHandleMemberDirectives accumulates the member's streamed text
+// in MemberBuffers[speaker] and routes each newly-admitted member
+// terminal (Finished / Help / Blocked) through applyMemberDirective.
 //
-// @done captures the body for the eventual TL relay turn (#28); status
-// flips to StIdle so the heartbeat doesn't keep escalating timers.
-// @help pauses the member (StHelpWaiting) and (in #28) opens a TL
-// clarification turn. @blocked surfaces a user-visible failure.
-// terminalBody returns the payload text of a member-terminal
-// directive. Only @done/@finished/@review (Finished), @help (Help)
-// and @blocked (Blocked) reach here via MemberTerminal; anything
-// else yields "" and is treated as "no terminal".
-func terminalBody(d Directive) string = d match {
-    case Finished(b) => b
-    case Help(b)     => b
-    case Blocked(b)  => b
-    case _           => ""
-}
-
-// terminalFingerprint is a stable content hash of a terminal block,
-// used to tell two sign-offs apart. FNV-1a-style fold over the body's
-// runes — distinct bodies (a quoted snippet vs the real
-// multi-paragraph sign-off) collide only astronomically rarely; an
-// empty body stays at the offset basis, which never equals a real
-// sign-off's hash. Plain rune index-loop so it depends on nothing
-// beyond Go builtins (update.gala's `strings` is the Go stdlib one).
-func terminalFingerprint(d Directive) int {
-    val rs = ToRunes(terminalBody(d))
-    var h = int(2166136261)
-    var i = 0
-    for i < len(rs) {
-        h = (h * 16777619) + int(rs[i])
-        i = i + 1
-    }
-    return h
-}
-
+// protocol.Decode under MemberDecodeContext is end-anchored and yields
+// at most one terminal Message per call — already robust against a
+// deliverable that QUOTES `@dispatch(` / `@finished` as documented
+// examples (the backward scan ignores quoted openers before the real
+// sign-off). protocol.Ledger.Admit then keys identity on the content-
+// hash Id: re-flushed chunks, transient matches of a quoted sign-off,
+// and post-restart replays all re-derive the same Id and are rejected
+// exactly once. This replaces the FNV terminalFingerprint latch and
+// the per-speaker MemberDirectivesFired index.
 func maybeHandleMemberDirectives(m AppModel, speaker string, line string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     if speaker == m.Team.Lead.Name {
         return (m, EmptyArray[Cmd[AppMsg]]())
     }
     val priorBuffer = m.MemberBuffers.Get(speaker).GetOrElse("")
     val nextBuffer = if (priorBuffer == "") line else priorBuffer + "\n" + line
-    // MemberTerminal (see its doc) returns the member's real sign-off
-    // robustly against quoted directive syntax in the body, or None
-    // until the closing `@end` has streamed in.
-    //
-    // MemberDirectivesFired is keyed by the terminal's content
-    // fingerprint, NOT a 0/1 latch. The latch was defeated by the
-    // streaming case: a QA reviewer's FIRST chunk legitimately quotes
-    // the deliverables / the directive protocol it must review, so an
-    // early buffer snapshot transiently contains only a QUOTED
-    // `@finished … @end`. MemberTerminal matched it, the one-shot
-    // burned, and the member's REAL later sign-off was then dropped —
-    // no MemberDone, FSM hung in QAGate until the user intervened.
-    // Re-firing whenever a genuinely DIFFERENT terminal block appears
-    // lets the real sign-off through, while a stable buffer (the same
-    // terminal observed across later chunks) still fires exactly once.
-    // A re-dispatch's MemberDirectivesFired.Remove resets the key so
-    // the next turn's sign-off (even an identical body) fires again.
     val withBuffer = m.Copy(MemberBuffers = m.MemberBuffers.Put(speaker, nextBuffer))
-    val lastFp = m.MemberDirectivesFired.Get(speaker).GetOrElse(0)
-    return MemberTerminal(nextBuffer) match {
-        case None()  => (withBuffer, EmptyArray[Cmd[AppMsg]]())
+    val msgs = protocol.Decode(nextBuffer, protocol.MemberDecodeContext(speaker, 0))
+    if (msgs.IsEmpty()) {
+        return (withBuffer, EmptyArray[Cmd[AppMsg]]())
+    }
+    val (l1, admitted) = withBuffer.Ledger.Admit(msgs.Get(0))
+    val withLedger = withBuffer.Copy(Ledger = l1)
+    // When admit accepts the message, this is the speaker's sign-off;
+    // advance the protocol delivery state through OnTerminal so Tick
+    // knows the delivery is Acked and stops firing against it. The
+    // "no directive to apply" tail (Ledger rejected OR FromMessage
+    // returns None on Nudge/Ack) collapses via FlatMap.
+    val withTerminal = admitted match {
+        case Some(_) => recordMemberTerminal(withLedger, speaker)
+        case None()  => withLedger
+    }
+    return admitted.FlatMap((am) => FromMessage(am)) match {
+        case None()  => (withTerminal, EmptyArray[Cmd[AppMsg]]())
         case Some(d) => {
-            val fp = terminalFingerprint(d)
-            if fp == lastFp {
-                return (withBuffer, EmptyArray[Cmd[AppMsg]]())
-            }
-            val withFired = withBuffer.Copy(
-                MemberDirectivesFired = m.MemberDirectivesFired.Put(speaker, fp),
-            )
-            val (m1, cmd) = applyMemberDirective(withFired, speaker, d)
+            val (m1, cmd) = applyMemberDirective(withTerminal, speaker, d)
             return (m1, ArrayOf[Cmd[AppMsg]](cmd))
         }
     }
@@ -3156,32 +2985,40 @@ func buildBlockedNudgePrompt(tm Team, name string, reason string) string {
 
 // maybeDispatchConsults inspects the latest TL chunk for newly-
 // completed `@consult(name) … @end` blocks. Returns the updated model
-// (with `TurnBuffer`, `ConsultsFired`, ActiveConsults, ConsultBuffers
-// advanced) plus an array of Cmds — one re-armed event-pump per
-// successfully-spawned consult, plus an immediate MsgCmd for any
-// consult whose SpawnConsult failed pre-stream.
+// (with `TurnBuffer` accumulated, Ledger advanced, ActiveConsults and
+// ConsultBuffers populated for each newly-admitted consult) plus the
+// re-armed event-pump Cmds.
 //
 // Non-TL chunks are no-ops; the per-turn buffer only tracks the lead
 // since other members never emit `@consult`.
+//
+// Identity is the content-hash Id on each protocol Message: a
+// re-emitted byte-identical chunk re-derives an already-admitted Id
+// and Ledger.Admit rejects it exactly once. No index watermark is
+// needed; this replaces the ConsultsFired counter.
 func maybeDispatchConsults(m AppModel, speaker string, line string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     if speaker != m.Team.Lead.Name {
         return (m, EmptyArray[Cmd[AppMsg]]())
     }
     val nextBuffer = if (m.TurnBuffer == "") line else m.TurnBuffer + "\n" + line
-    val dirs = Parse(nextBuffer)
-    val consults = dirs.Collect({
-        case Consult(target, _, body) => (target, body)
-    })
-    val total = consults.Size()
-    if total <= m.ConsultsFired {
+    val msgs = protocol.Decode(nextBuffer, protocol.TLDecodeContext(0))
+    val consults = msgs.Filter((mm) => protocol.KindTag(mm.Kind) == "consult")
+    if (consults.IsEmpty()) {
         return (m.Copy(TurnBuffer = nextBuffer), EmptyArray[Cmd[AppMsg]]())
     }
-    val withBuffer = m.Copy(TurnBuffer = nextBuffer, ConsultsFired = total)
-    return consults.Drop(m.ConsultsFired).FoldLeft(
+    val withBuffer = m.Copy(TurnBuffer = nextBuffer)
+    return consults.FoldLeft(
         (withBuffer, EmptyArray[Cmd[AppMsg]]()),
-        (acc, c) => {
-            val (m1, cmd) = dispatchOneConsult(acc.V1, c.V1, c.V2)
-            return (m1, acc.V2.Append(cmd))
+        (acc, mm) => {
+            val (l1, admitted) = acc.V1.Ledger.Admit(mm)
+            val acc1 = acc.V1.Copy(Ledger = l1)
+            return admitted match {
+                case None()   => (acc1, acc.V2)
+                case Some(am) => {
+                    val (m1, cmd) = dispatchOneConsult(acc1, am.Recipient, am.Body)
+                    return (m1, acc.V2.Append(cmd))
+                }
+            }
         },
     )
 }
@@ -3350,7 +3187,21 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         //   - Other member → MemberDone(name, body). FSM drains the
         //     pending set and advances to QAGate / TLReview / relay.
         if name == cleaned.Team.Lead.Name {
-            val rawDirs = Parse(cleaned.TurnBuffer)
+            // Lead-buffer directives split across two paths now:
+            //   - @dispatch / @consult / @summary route through the
+            //     protocol decoder (content-hash identity + Ledger
+            //     dedup) and the Message → Directive adapter.
+            //   - @base / @plan are TL-only orchestrator control
+            //     directives, not agent-to-agent messages, so they
+            //     come from the narrowly-scoped ParseBaseAndPlan
+            //     reader. Concatenated into one Array[Directive]; the
+            //     downstream filters (applyBaseDirective takes the
+            //     FIRST Base; applyPlanDirective the FIRST Plan; FSM
+            //     afterTLDone the FIRST Summary or all Dispatch
+            //     targets) don't depend on inter-kind source order.
+            val protocolDirs = FromMessages(protocol.Decode(cleaned.TurnBuffer, protocol.TLDecodeContext(0)))
+            val controlDirs  = ParseBaseAndPlan(cleaned.TurnBuffer)
+            val rawDirs = controlDirs.AppendAll(protocolDirs)
             // Capture @base from the lead's turn so the eventual
             // gh pr create can pass --base. First Base directive wins:
             // the TL is expected to declare the base ref ONCE near the
@@ -3524,7 +3375,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             case Some(mm) => detectMalformedMemberReport(memberBuffer, mm)
             case None()   => ""
         }
-        val parsedDirs = Parse(memberBuffer)
+        val parsedDirs = protocol.Decode(memberBuffer, protocol.MemberDecodeContext(name, 0))
         if parsedDirs.IsEmpty() && memberMalformed != "" {
             return mem match {
                 case None() => (cleaned, NoCmd[AppMsg]())
@@ -3576,17 +3427,16 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
     return respawnMember(withStatus, name)
 }
 
-// liveRespawnMember kicks a member that the heartbeat just escalated
-// to StFailed because LastChunkAt is older than AbandonAfterSeconds.
-// The subprocess is technically still alive (no SessionFailed has
-// arrived) but it's not producing chunks — the orchestrator can't
-// distinguish "model thinking" from "deadlocked claude" from "stuck
-// MCP handshake" without taking action. Acting: kill the silent
+// liveRespawnMember is the action consumer for protocol.Redeliver:
+// the delivery FSM has decided a silent member crossed the stuck
+// threshold with retry budget remaining, so we kill the wedged
 // subprocess via closeLiveSession, bump RetryCount, flip status to
-// StRecovering, then run the same respawnMember path crash recovery
+// StRecovering, and run the same respawnMember path crash recovery
 // uses. The fresh subprocess gets `--resume <sid>` so the model
 // reloads the prior conversation and the "Continue your previous
-// task." prompt nudges it forward.
+// task." prompt nudges it forward. This is the ONE trigger now —
+// the ad-hoc heartbeat-ladder path that used to also call it was
+// retired with updateLivenessStatuses' rewrite.
 //
 // Shares Heartbeat.MaxRetries with the crash path because both
 // reflect "consecutive attempts to keep this member alive without
@@ -3747,23 +3597,14 @@ func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
 // rather than aborting the whole fanout so a typo'd member name
 // doesn't strand the rest of the dispatch.
 func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, Cmd[AppMsg]] {
-    val rawTargets = dirs.Collect({
+    // protocol.Decode + Ledger.Admit upstream already deduplicate
+    // byte-identical re-emitted chunks by content-hash Id: a TL stream
+    // that re-flushes the same `@dispatch` block re-derives an admitted
+    // Id and is dropped before reaching here. dedupTargetsByName is no
+    // longer required.
+    val targets = dirs.Collect({
         case Dispatch(name, body) => (name, body)
     })
-    // Dedupe by member name — keep the first body, drop subsequent
-    // duplicates. Iris's claude stream can occasionally emit the same
-    // chunk twice (claude buffer flush, --resume mid-envelope, pump
-    // retry); without dedup, TurnBuffer accumulates duplicate
-    // @dispatch blocks and the FoldLeft below spawns each target
-    // twice. The second spawn uses --resume against a session id the
-    // first spawn hasn't yet registered with claude, racing into a
-    // "No conversation found with session ID …" error.
-    //
-    // Observed in past sessions: a TL emitted one logical turn but
-    // claude streamed two identical chunks; an engineer ended up
-    // dispatched twice and the second --resume crashed with the
-    // session-id lookup error.
-    val targets = dedupTargetsByName(rawTargets)
     // Drop @dispatch() targets that point at a QA member when the
     // workflow auto-spawns QA. Without this, Iris including a QA
     // member in her first @dispatch list would fan out QA in parallel
@@ -3838,7 +3679,16 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
                         body
                     }
                     val cmd = sendAndPumpCmd(withStatus, mem, wrapped)
-                    return (withStatus, curCmds.Append(cmd))
+                    // Seed the protocol delivery state for this
+                    // dispatch: the Message identity Tick will use to
+                    // bump-and-redeliver if the member goes silent.
+                    val nowNanos  = int(withStatus.NowAt.UnixNanos())
+                    val dispatchMsg = protocol.NewMessage(withStatus.Team.Lead.Name, name, protocol.Dispatch(), body, 0)
+                    val withDelivery = withStatus.Copy(
+                        DeliveryStates    = withStatus.DeliveryStates.Put(name, protocol.Sent(AtNanos = nowNanos, Attempt = 1)),
+                        LastDispatchedMsg = withStatus.LastDispatchedMsg.Put(name, dispatchMsg),
+                    )
+                    return (withDelivery, curCmds.Append(cmd))
                 }
             }
         }
@@ -3870,24 +3720,6 @@ func looksLikeStaleSessionError(err string) bool {
     return strings.Contains(lower, "no conversation found") ||
            strings.Contains(lower, "session not found") ||
            strings.Contains(lower, "session id not found")
-}
-
-// dedupTargetsByName collapses duplicate (name, body) tuples down to
-// the first occurrence per name. Order is preserved (FoldLeft over the
-// input array). Used by spawnDispatchedMembers to defend against
-// claude streams that repeat the same chunk and inflate the parsed
-// directive list — the orchestrator should treat a logical "dispatch
-// Felix" intent as one spawn, not N spawns where N is the number of
-// times claude redundantly flushed the same line.
-func dedupTargetsByName(targets Array[Tuple[string, string]]) Array[Tuple[string, string]] {
-    val seed = (EmptyArray[Tuple[string, string]](), EmptyHashMap[string, bool]())
-    val (out, _) = targets.FoldLeft(seed, (acc, t) => {
-        val (kept, seen) = acc
-        val (name, _) = t
-        if seen.Get(name).IsDefined() { return (kept, seen) }
-        return (kept.Append(t), seen.Put(name, true))
-    })
-    return out
 }
 
 // workflow auto-spawns QA so we don't double-dispatch.
@@ -4395,8 +4227,8 @@ func isDuplicateOfLastConvoLine(convo Array[session.ConversationLine], speaker s
 // detectMalformedDispatch scans the TL's turn buffer for fingerprints
 // of an attempted-but-invalid dispatch. Returns a short human-readable
 // reason describing what was seen, or "" when nothing looks malformed.
-// Used after Parse() returns zero directives — if there are clear
-// signs the TL TRIED to dispatch (named members in headings, used
+// Used after the inbound decoder returns zero directives — if there
+// are clear signs the TL TRIED to dispatch (named members in headings, used
 // arrow notation, used multi-target @dispatch), the orchestrator
 // nudges them back to the protocol instead of silently dropping the
 // turn.
@@ -5676,8 +5508,8 @@ func extractSummaryFromText(text string) string {
 }
 
 func parseRawSummary(text string) string {
-    val dirs = Parse(text)
-    val summaries = dirs.Collect({ case Summary(body) => body })
+    val msgs = protocol.Decode(text, protocol.TLDecodeContext(0))
+    val summaries = msgs.Filter((mm) => protocol.KindTag(mm.Kind) == "summary").Map((mm) => mm.Body)
     if summaries.IsEmpty() { return "" }
     return summaries.Get(summaries.Size() - 1)
 }
@@ -6141,8 +5973,9 @@ func onConsultEnded(m AppModel, name string, errText Option[string]) Tuple[AppMo
 // so we don't need to wrap each line in a ConversationLine just to
 // unwrap it for parsing.
 func extractConsultSummary(lines Array[string]) Option[string] =
-    Parse(lines.MkString("\n"))
-        .Collect({ case Summary(body) => body })
+    protocol.Decode(lines.MkString("\n"), protocol.TLDecodeContext(0))
+        .Filter((mm) => protocol.KindTag(mm.Kind) == "summary")
+        .Map((mm) => mm.Body)
         .HeadOption()
 
 // onConsultCompleted records the consult outcome in the conversation

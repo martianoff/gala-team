@@ -1,0 +1,113 @@
+package directive
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+)
+
+// Covers the narrowly-scoped @base / @plan control-directive reader.
+// Inbound agent-bus directives (@dispatch/@consult/@summary/@finished/
+// @help/@blocked) are owned by app/protocol and adapter_test.gala —
+// this file proves only the TL-only control side-channel.
+
+func firstControl(t T, msg string) Directive {
+    val arr = ParseBaseAndPlan(msg)
+    if (arr.IsEmpty()) { panic("expected at least one control directive") }
+    return arr.Get(0)
+}
+
+// ----- @base ---------------------------------------------------------------
+
+func TestBase_RefOnSameLine(t T) T = firstControl(t, "@base previous\n@end") match {
+    case Base(ref) => Eq(t, ref, "previous")
+    case _         => IsTrue(t, false)
+}
+
+func TestBase_RefOnSeparateLine(t T) T = firstControl(t, "@base\nmain\n@end") match {
+    case Base(ref) => Eq(t, ref, "main")
+    case _         => IsTrue(t, false)
+}
+
+func TestBase_EmptyBody_DropsDirective(t T) T =
+    IsTrue(t, ParseBaseAndPlan("@base\n@end").IsEmpty())
+
+func TestBase_LiteralBranchName(t T) T = firstControl(t, "@base feat/payments-stack\n@end") match {
+    case Base(ref) => Eq(t, ref, "feat/payments-stack")
+    case _         => IsTrue(t, false)
+}
+
+// ----- @plan ---------------------------------------------------------------
+
+func TestPlan_NumberedList(t T) T {
+    val msg = "@plan\n1. Stripe SDK\n2. Webhook handler\n3. Refund flow\n@end"
+    return firstControl(t, msg) match {
+        case Plan(items) => {
+            val t1 = Eq(t, items.Length(), 3)
+            val t2 = Eq(t1, items.Get(0), "Stripe SDK")
+            val t3 = Eq(t2, items.Get(1), "Webhook handler")
+            return Eq(t3, items.Get(2), "Refund flow")
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+func TestPlan_DashBullets(t T) T {
+    val msg = "@plan\n- One\n- Two\n- Three\n@end"
+    return firstControl(t, msg) match {
+        case Plan(items) => {
+            val t1 = Eq(t, items.Length(), 3)
+            val t2 = Eq(t1, items.Get(0), "One")
+            val t3 = Eq(t2, items.Get(1), "Two")
+            return Eq(t3, items.Get(2), "Three")
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+func TestPlan_PlainLinesWithBlankSeparators(t T) T {
+    val msg = "@plan\nFirst PR\n\nSecond PR\n\nThird PR\n@end"
+    return firstControl(t, msg) match {
+        case Plan(items) => {
+            val t1 = Eq(t, items.Length(), 3)
+            return Eq(t1, items.Get(0), "First PR")
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+func TestPlan_EmptyBody_DropsDirective(t T) T =
+    IsTrue(t, ParseBaseAndPlan("@plan\n@end").IsEmpty())
+
+// ----- combined / ordering -------------------------------------------------
+
+// @base + @plan in one TL turn surface in source order so applyBaseDirective
+// and applyPlanDirective each take the first occurrence cleanly.
+func TestControl_BaseThenPlan_PreservesOrder(t T) T {
+    val msg = "@base previous\n@end\n\n@plan\nA\nB\n@end"
+    val dirs = ParseBaseAndPlan(msg)
+    val t1 = Eq(t, dirs.Length(), 2)
+    val t2 = dirs.Get(0) match {
+        case Base(_) => IsTrue(t1, true)
+        case _       => IsTrue(t1, false)
+    }
+    return dirs.Get(1) match {
+        case Plan(_) => IsTrue(t2, true)
+        case _       => IsTrue(t2, false)
+    }
+}
+
+// Non-control directives in the buffer are IGNORED — this reader is
+// narrowly scoped and does NOT shadow protocol.Decode for the agent bus.
+func TestControl_IgnoresAgentBusDirectives(t T) T {
+    val msg = "@dispatch(Felix) work\n@end\n\n@base previous\n@end\n\n@summary done\n@end"
+    val dirs = ParseBaseAndPlan(msg)
+    val t1 = Eq(t, dirs.Length(), 1)
+    return dirs.Get(0) match {
+        case Base(ref) => Eq(t1, ref, "previous")
+        case _         => IsTrue(t1, false)
+    }
+}
+
+// Unclosed trailing block is dropped — streaming safety.
+func TestControl_UnclosedDropped(t T) T =
+    IsTrue(t, ParseBaseAndPlan("@base previous").IsEmpty())

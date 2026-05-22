@@ -338,15 +338,17 @@ func TestDelegating_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
     }
 }
 
-// Nudge resolves with NO actionable directive but members are still
-// pending → fall back to Delegating(pending), NOT Idle.
-func TestTLNudging_NoDirectiveWithPending_StaysDelegating(t T) T {
+// A prose-only nudge resolution drops the FSM to Idle even when
+// members are still pending. The carry-back-to-Delegating(pending)
+// fallback was retired with the heartbeat-ladder rip-out: a still-
+// silent pending member is a delivery non-ack, and the protocol's
+// Tick driver re-escalates via Redeliver / IssueNudge / MarkAbandoned
+// on the next heartbeat — recovery is owned by the protocol path,
+// not by an ad-hoc FSM bounce.
+func TestTLNudging_NoDirectiveWithPending_GoesIdle(t T) T {
     val pending = EmptyHashSet[string]().Add("Kael")
     val s = Transition(TLNudging(Reason = "stuck", Pending = pending), TLDone(Directives = EmptyArray[Directive]()), ctxWithQA(true))
-    return s match {
-        case Delegating(p) => Eq(t, p.Size(), 1)
-        case _             => IsTrue(t, false)
-    }
+    return Eq(t, stateName(s), "Idle")
 }
 
 // Nudge resolves with no directive AND nothing pending → Idle (the

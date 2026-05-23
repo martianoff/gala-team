@@ -539,18 +539,21 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     if !canAutoRetry {
         return (persisted, NoCmd[AppMsg]())
     }
-    // Auto-retry path: latch WatchdogRetryFired, stuff the saved
-    // prompt back into the composer, and call onSubmit. onSubmit
-    // fires UserPrompted → spawns the lead and pumps. The latch
-    // prevents a follow-up watchdog fire (if the retry also hangs)
-    // from re-retrying — the second watchdog falls through to the
-    // plain Idle return above.
+    // Auto-retry path: stuff the saved prompt back into the
+    // composer and call onSubmit. onSubmit fires UserPrompted →
+    // spawns the lead and pumps. onSubmit ALSO resets
+    // WatchdogRetryFired to false as part of its normal "fresh
+    // user prompt" handling — so we set the latch on the model
+    // AFTER onSubmit returns. The latch prevents a follow-up
+    // watchdog fire (if the retry also hangs) from re-retrying:
+    // the second watchdog falls through to the plain Idle return
+    // above and lets the user take over.
     val retrying = persisted.Copy(
-        Composer           = persisted.LastUserPrompt,
-        ComposerCursor     = len(persisted.LastUserPrompt),
-        WatchdogRetryFired = true,
+        Composer       = persisted.LastUserPrompt,
+        ComposerCursor = len(persisted.LastUserPrompt),
     )
-    return onSubmit(retrying)
+    val (mAfterSubmit, cmdAfterSubmit) = onSubmit(retrying)
+    return (mAfterSubmit.Copy(WatchdogRetryFired = true), cmdAfterSubmit)
 }
 
 // pruneToasts is a typed-arg shim around ToastQueue.Prune so the

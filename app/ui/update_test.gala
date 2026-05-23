@@ -1903,6 +1903,43 @@ func TestOnSubmit_CapturesLastUserPromptAndResetsWatchdogLatch(t T) T {
     return IsTrue(t1, !m.WatchdogRetryFired)
 }
 
+// Watchdog must rotate the SessionId for each affected member so
+// the imminent respawn (auto-retry on TL states, fresh user
+// prompt on member-gated states) spawns `claude --session-id
+// <new>` instead of `claude --resume <stale-id>`. Without this,
+// auto-retry reloads the same claude-code session jsonl that just
+// hung — observed in PR #68's first deployment as the watchdog
+// firing, auto-retrying, and the retry hitting the exact same
+// synthetic-poisoning loop within seconds.
+func TestStateWatchdog_TLThinking_RotatesLeadSessionId(t T) T {
+    val seed = sampleModel()
+    val leadName = seed.Team.Lead.Name
+    val seeded = seed.Copy(
+        State          = TLThinking(),
+        StateEnteredAt = staleStateEnteredAt(),
+        SessionIds     = seed.SessionIds.Put(leadName, "STALE-SID-123"),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    // After the watchdog, SessionIds[lead] is either absent (cleared)
+    // or — if onSubmit's auto-retry path ran and ensureSession
+    // generated a fresh UUID — a new value that's NOT the stale one.
+    val sid = m.SessionIds.Get(leadName).GetOrElse("")
+    return IsTrue(t, sid != "STALE-SID-123")
+}
+
+func TestStateWatchdog_Delegating_RotatesPendingMemberSessionIds(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val seed = sampleModel()
+    val seeded = seed.Copy(
+        State          = Delegating(Pending = pending),
+        StateEnteredAt = staleStateEnteredAt(),
+        SessionIds     = seed.SessionIds.Put("Felix", "STALE-SID-456"),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    val sid = m.SessionIds.Get("Felix").GetOrElse("")
+    return IsTrue(t, sid != "STALE-SID-456")
+}
+
 // Below the ceiling the watchdog is a no-op — no premature forced exit.
 func TestStateWatchdog_TLThinking_BelowCeiling_StaysPut(t T) T {
     val seed = sampleModel().Copy(

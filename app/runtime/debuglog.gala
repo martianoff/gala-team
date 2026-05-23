@@ -81,10 +81,9 @@ val KindError             = "error"
 // ensureSession (workspace creation failed OR subprocess.Spawn failed).
 // Before this event the failure only landed in m.LastError (toast-
 // only); a member who was supposed to start producing chunks just
-// silently produced nothing. Audit log of the 0.49.0-migration
-// session showed Sable producing ZERO events after QAGate fired the
-// auto-QA spawn — no clue why. Now we can replay events.jsonl and
-// see the actual error string.
+// silently produced nothing. Past audits captured a member producing
+// ZERO events after an auto-QA spawn with no clue why; now we can
+// replay events.jsonl and see the actual error string.
 val KindSpawnFailure      = "spawn_failure"
 // stderr records each non-empty stderr line from a claude subprocess.
 // Mirrors the toast surface in onStderr but durable. Catches the
@@ -338,8 +337,8 @@ val spawnFailureCodec = json.Codec[SpawnFailurePayload](json.SnakeCase())
 
 // LogSpawnFailure emits a `spawn_failure` event for a member-spawn
 // that produced no live subprocess. Call from every ensureSession
-// failure site so the next "Sable disappeared" replay has the actual
-// error in events.jsonl, not just a transient toast.
+// failure site so the next "member disappeared" replay has the
+// actual error in events.jsonl, not just a transient toast.
 func LogSpawnFailure(member string, origin string, reason string) {
     if !DebugEnabled() { return }
     val enc = spawnFailureCodec.Encode(SpawnFailurePayload(

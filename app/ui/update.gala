@@ -719,9 +719,8 @@ func consumeDeliveryAction(
 //      the whole TurnBuffer when the TL session closes and fires
 //      EVERY directive it finds. Leaving stale @dispatch blocks
 //      from the prior turn in the buffer makes each new TL session
-//      re-fire them, producing the livelock observed in the
-//      0.49.0-migration audit (250 dispatches for Kael over 80
-//      minutes, every body byte-identical to the first turn's).
+//      re-fire them, producing a livelock (hundreds of identical
+//      dispatches over a long stretch).
 func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val lead = m.Team.Lead
     val mClosed = closeLiveSession(m, lead.Name).Copy(
@@ -2167,7 +2166,7 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
     // Durable: log every non-empty stderr line to events.jsonl
     // BEFORE branching on content. The toast surface is transient
     // (lives for 6-8 seconds); the event log is the audit trail
-    // when we're investigating "Sable produced zero events for 10
+    // when investigating "member produced zero events for many
     // hours" days later. claude's most informative exit messages
     // (rate-limit, auth, session-not-found) ride this stream.
     LogStderr(name, trimmed)
@@ -2190,11 +2189,10 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
     // Stream-json shape detection: claude-code occasionally writes
     // a stream-json envelope (`{"type":"user","message":...}`) to
     // stderr instead of stdout. The raw bytes are useless in the
-    // bottom-bar surface and just look like a UX bug to the user
-    // (past sessions surfaced the literal "Lyra: {\"type\":\"user\"
-    // ..." string under a warning icon). The full payload is in
-    // events.jsonl via LogStderr above, so the audit trail is
-    // intact — surface a clean tag instead of dumping the bytes.
+    // bottom-bar surface and just look like a UX bug to the user.
+    // The full payload is in events.jsonl via LogStderr above, so
+    // the audit trail is intact — surface a clean tag instead of
+    // dumping the bytes.
     // looksLikeStreamJson decodes a streamJsonHeader so the check
     // is a real JSON parse, not a substring heuristic that breaks
     // when claude-code reshuffles the envelope key order.
@@ -2925,13 +2923,13 @@ func finaliseMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cm
     // bumps PendingClosures so the EOF gets dropped as stale, and
     // the comment block in onSessionFailed that claimed "the FSM has
     // already advanced through MemberDone" was wrong: no path ever
-    // fired it. A live session captured a QA member (Sable) emitting
-    // a clean @finished APPROVE block; the FSM stayed in QAGate for
-    // the next 57 minutes until tui_exit because the event never
-    // fired. Firing here fixes both QA (non-engineer path
-    // through onMemberDone) and engineer paths (which arrive via
-    // onUncommittedCheckResult → finaliseMemberDone after the
-    // commit-gate / post-engineer-prompt rounds).
+    // fired it. Past audits captured a QA member emitting a clean
+    // @finished APPROVE block while the FSM stayed in QAGate
+    // until tui_exit because the event never fired. Firing here
+    // fixes both QA (non-engineer path through onMemberDone) and
+    // engineer paths (which arrive via onUncommittedCheckResult →
+    // finaliseMemberDone after the commit-gate / post-engineer-
+    // prompt rounds).
     val nextState = transitionLogged(withBody.State, MemberDone(MemberName = name, Body = body), transitionContext(withBody))
     val advanced = persistAppModel(withBody.Copy(State = nextState))
     return (setStatus(advanced, name, StIdle()), NoCmd[AppMsg]())
@@ -3667,6 +3665,13 @@ func resetMemberForRespawn(m AppModel, name string) AppModel =
 // missing) lands in LastError without further retries — we only retry
 // the same path once per crash event.
 func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
+    // wasRotated captured BEFORE ensureSession: a missing SessionIds
+    // entry means the caller (watchdog / heartbeat) just rotated, and
+    // ensureSession is about to mint a fresh UUID. On the fresh
+    // claude-code jsonl the model has zero context — "Continue your
+    // previous task." is meaningless. Replay the original dispatch
+    // body instead.
+    val wasRotated = !m.SessionIds.Get(name).IsDefined()
     return findMemberByName(m.Team.Members, name) match {
         case None() => (m, NoCmd[AppMsg]())
         case Some(mem) => ensureSession(m, mem) match {
@@ -3674,7 +3679,16 @@ func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
                 LogSpawnFailure(name, "respawn", err)
                 return (m.Copy(LastError = Some(s"respawn ${name}: ${err}")), NoCmd[AppMsg]())
             }
-            case Right(m1)  => (setStatus(m1, name, StWorking()), sendAndPumpCmd(m1, mem, "Continue your previous task."))
+            case Right(m1)  => {
+                val rescue = if (wasRotated)
+                    m1.LastDispatchedMsg.Get(name) match {
+                        case Some(msg) => s"[Your session was reset due to a timeout. Re-running the original task:]\n\n${msg.Body}"
+                        case None()    => "Continue your previous task."
+                    }
+                else
+                    "Continue your previous task."
+                return (setStatus(m1, name, StWorking()), sendAndPumpCmd(m1, mem, rescue))
+            }
         }
     }
 }

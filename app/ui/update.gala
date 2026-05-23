@@ -3667,6 +3667,13 @@ func resetMemberForRespawn(m AppModel, name string) AppModel =
 // missing) lands in LastError without further retries — we only retry
 // the same path once per crash event.
 func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
+    // wasRotated captured BEFORE ensureSession: a missing SessionIds
+    // entry means the caller (watchdog / heartbeat) just rotated, and
+    // ensureSession is about to mint a fresh UUID. On the fresh
+    // claude-code jsonl the model has zero context — "Continue your
+    // previous task." is meaningless. Replay the original dispatch
+    // body instead.
+    val wasRotated = !m.SessionIds.Get(name).IsDefined()
     return findMemberByName(m.Team.Members, name) match {
         case None() => (m, NoCmd[AppMsg]())
         case Some(mem) => ensureSession(m, mem) match {
@@ -3674,7 +3681,16 @@ func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
                 LogSpawnFailure(name, "respawn", err)
                 return (m.Copy(LastError = Some(s"respawn ${name}: ${err}")), NoCmd[AppMsg]())
             }
-            case Right(m1)  => (setStatus(m1, name, StWorking()), sendAndPumpCmd(m1, mem, "Continue your previous task."))
+            case Right(m1)  => {
+                val rescue = if (wasRotated)
+                    m1.LastDispatchedMsg.Get(name) match {
+                        case Some(msg) => s"[Your session was reset due to a timeout. Re-running the original task:]\n\n${msg.Body}"
+                        case None()    => "Continue your previous task."
+                    }
+                else
+                    "Continue your previous task."
+                return (setStatus(m1, name, StWorking()), sendAndPumpCmd(m1, mem, rescue))
+            }
         }
     }
 }

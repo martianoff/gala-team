@@ -1,0 +1,375 @@
+package ui
+
+import (
+    "os"
+    "strings"
+    "martianoff/gala/time_utils"
+    "github.com/martianoff/gala_team/app/protocol"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+    . "github.com/martianoff/gala_team/app/fsm"
+    . "github.com/martianoff/gala_team/app/policy"
+    . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/team"
+)
+
+// ============================================================================
+// app/ui/e2e_test — integration scenarios that drive Update through
+// multi-step sequences and assert end state.
+//
+// Each scenario seeds the model directly into the FSM state under test
+// (skipping the spawn path that would synchronously start a real claude
+// subprocess) and exercises the downstream behaviour with canned
+// AppMsgs. Cmds are discarded — the test feeds whatever events real
+// Cmds would have produced (ChunkArrived, SessionFailed, TickMsg)
+// directly into Update.
+//
+// Why this shape: scenarios that route through KeySubmit → onSubmit →
+// ensureSession spawn the real `claude` binary synchronously, which
+// makes them slow (~30-120s per test) and flaky in CI. Direct state
+// seeding gives the same observable behaviour without the IO.
+// ============================================================================
+
+func e2eProject() Project {
+    val dir, err = os.MkdirTemp("", "gala_team_e2e_test_")
+    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    return Project(
+        Name = "demo", Repo = dir,
+        Github = None[string](),
+        DefaultBranch = "main",
+    )
+}
+
+// Fixture names ARE allowed in test code per project conventions.
+// Iris is the lead; Felix is the lone engineer. The team has no QA
+// so scenarios involving QA gates seed an explicit QA member into
+// the model where needed.
+func e2eTeam() Team {
+    val iris = Member(
+        Name = "Iris", Role = TeamLead(),
+        Personality = "calm",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    val felix = Member(
+        Name = "Felix", Role = Engineer(),
+        Personality = "terse",
+        Model = None[string](), Extra = "",
+        Onboarding = EmptyArray[string](),
+    )
+    return Team(
+        Key                        = "main",
+        Name                       = "Skunkworks",
+        Description                = "",
+        Members                    = ArrayOf[Member](iris, felix),
+        Lead                       = iris,
+        Onboarding                 = EmptyArray[string](),
+        DangerouslySkipPermissions = false,
+    )
+}
+
+// e2eModel anchors NowAt at real wall-clock now. InitialModel uses
+// UnixEpoch, which would make any backward timeTravel push timestamps
+// negative — the watchdog's `<=0` guard treats that as "not yet
+// observed" and skips, defeating the test. Real production NowAt is
+// set on the first TickMsg; we skip the warm-up.
+func e2eModel() AppModel = InitialModel(e2eProject(), e2eTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
+    NowAt = time_utils.Now(),
+)
+
+// staleInstantSec returns "now minus secsAgo seconds" as an Instant.
+// Used to seed StateEnteredAt / LastChunkAt into the past without
+// dropping below epoch (which would trip the watchdog's
+// not-yet-observed guard).
+func staleInstantSec(secsAgo int64) time_utils.Instant {
+    val nowSec = time_utils.Now().UnixNanos() / int64(1000000000)
+    return time_utils.FromUnixSeconds(nowSec - secsAgo)
+}
+
+func stateIsIdle(m AppModel) bool = m.State match {
+    case Idle() => true
+    case _      => false
+}
+func stateIsTLThinking(m AppModel) bool = m.State match {
+    case TLThinking() => true
+    case _            => false
+}
+
+// ============================================================================
+// Watchdog scenarios — all skip the spawn path by seeding TLThinking
+// directly with a stale StateEnteredAt + optional LastChunkAt.
+// ============================================================================
+
+// Active TL with a recent chunk must NOT trip the watchdog even when
+// state-dwell is well past the ceiling. The trigger metric is silence
+// (time since last chunk), not state dwell — a productive long turn
+// must keep running.
+func TestE2E_ActiveTL_DoesNotTripWatchdog(t T) T {
+    val seed = e2eModel()
+    val leadName = seed.Team.Lead.Name
+    val staleState = seed.Copy(
+        State          = TLThinking(),
+        StateEnteredAt = staleInstantSec(int64(400)),
+        // Most recent chunk arrived just now → silence ≈ 0s.
+        LastChunkAt    = seed.LastChunkAt.Put(leadName, time_utils.Now()),
+    )
+    val (m, _) = Update(staleState, TickMsg())
+    return IsTrue(t, stateIsTLThinking(m))
+}
+
+// Genuinely silent TL (no chunks ever) DOES trip the watchdog. Falls
+// back to state-dwell because LastChunkAt has no entry for the lead.
+// FSM must hop out of TLThinking; the auto-retry path runs only when
+// LastUserPrompt is non-empty, which we DON'T seed here — so the
+// observable signal is "no longer in the original stale TLThinking
+// state with the same StateEnteredAt."
+func TestE2E_SilentTL_TripsWatchdog(t T) T {
+    val seed = e2eModel()
+    val staleEntered = staleInstantSec(int64(400))
+    val staleState = seed.Copy(
+        State          = TLThinking(),
+        StateEnteredAt = staleEntered,
+    )
+    val (m, _) = Update(staleState, TickMsg())
+    // After watchdog fire: state is Idle (no auto-retry, latch
+    // stays false). The forced-Idle path also resets StateEnteredAt
+    // to now, so the timestamp must have moved.
+    val stateMovedToIdle = stateIsIdle(m)
+    val timestampMoved = m.StateEnteredAt.UnixNanos() != staleEntered.UnixNanos()
+    return IsTrue(t, stateMovedToIdle && timestampMoved)
+}
+
+// Watchdog rotates a stale SessionId.
+func TestE2E_WatchdogRotatesSessionId(t T) T {
+    val seed = e2eModel()
+    val leadName = seed.Team.Lead.Name
+    val staleState = seed.Copy(
+        State          = TLThinking(),
+        StateEnteredAt = staleInstantSec(int64(400)),
+        SessionIds     = seed.SessionIds.Put(leadName, "STALE-LEAD-SID"),
+    )
+    val (m, _) = Update(staleState, TickMsg())
+    val sid = m.SessionIds.Get(leadName).GetOrElse("")
+    return IsTrue(t, sid != "STALE-LEAD-SID")
+}
+
+// Watchdog clears PendingClosures so the fresh respawn's first chunk
+// isn't eaten by onChunk's stale-drop.
+func TestE2E_WatchdogClearsPendingClosures(t T) T {
+    val seed = e2eModel()
+    val leadName = seed.Team.Lead.Name
+    val staleState = seed.Copy(
+        State           = TLThinking(),
+        StateEnteredAt  = staleInstantSec(int64(400)),
+        PendingClosures = seed.PendingClosures.Put(leadName, 3),
+    )
+    val (m, _) = Update(staleState, TickMsg())
+    return Eq(t, m.PendingClosures.Get(leadName).GetOrElse(0), 0)
+}
+
+// Watchdog flips member status back to StIdle so the sidebar timer
+// stops ticking.
+func TestE2E_WatchdogResetsMemberStatus(t T) T {
+    val seed = e2eModel()
+    val leadName = seed.Team.Lead.Name
+    val staleState = seed.Copy(
+        State          = TLThinking(),
+        StateEnteredAt = staleInstantSec(int64(400)),
+        Statuses       = seed.Statuses.Put(leadName, StWorking()),
+    )
+    val (m, _) = Update(staleState, TickMsg())
+    return m.Statuses.Get(leadName).GetOrElse(StWorking()) match {
+        case StIdle() => IsTrue(t, true)
+        case _        => IsTrue(t, false)
+    }
+}
+
+// Second watchdog fire with the latch already set lands cleanly in
+// Idle (no infinite retry loop).
+func TestE2E_WatchdogSecondFire_LandsInIdle(t T) T {
+    val seed = e2eModel()
+    val staleState = seed.Copy(
+        State              = TLThinking(),
+        StateEnteredAt     = staleInstantSec(int64(400)),
+        LastUserPrompt     = "previous prompt",
+        WatchdogRetryFired = true,
+    )
+    val (m, _) = Update(staleState, TickMsg())
+    return IsTrue(t, stateIsIdle(m))
+}
+
+// Idle / Approval never trip the watchdog regardless of dwell time —
+// the user is the next event there.
+func TestE2E_Idle_NeverTripsWatchdog(t T) T {
+    val seed = e2eModel()
+    val staleIdle = seed.Copy(
+        State          = Idle(),
+        StateEnteredAt = staleInstantSec(int64(400)),
+    )
+    val (m, _) = Update(staleIdle, TickMsg())
+    return IsTrue(t, stateIsIdle(m))
+}
+
+func TestE2E_Approval_NeverTripsWatchdog(t T) T {
+    val seed = e2eModel()
+    val staleApproval = seed.Copy(
+        State          = Approval(SummaryBody = "ship it"),
+        StateEnteredAt = staleInstantSec(int64(400)),
+    )
+    val (m, _) = Update(staleApproval, TickMsg())
+    return m.State match {
+        case Approval(_) => IsTrue(t, true)
+        case _           => IsTrue(t, false)
+    }
+}
+
+// ============================================================================
+// Chunk-pipeline scenario: stale-drop must not kill the read pump.
+//
+// When PendingClosures[name] > 0, the FIRST chunk is dropped as stale
+// (the killed-subprocess's straggler), but subsequent chunks must
+// flow normally. An earlier shape returned NoCmd from the stale-drop
+// path and the read pump died after one drop.
+// ============================================================================
+func TestE2E_ChunkAfterStaleDrop_ProcessesNormally(t T) T {
+    val seed = e2eModel()
+    val leadName = seed.Team.Lead.Name
+    val staleState = seed.Copy(
+        State           = TLThinking(),
+        StateEnteredAt  = time_utils.Now(),
+        PendingClosures = seed.PendingClosures.Put(leadName, 1),
+    )
+    val (m1, _) = Update(staleState, ChunkArrived(Member = leadName, Line = "stale straggler"))
+    val t1 = Eq(t, m1.PendingClosures.Get(leadName).GetOrElse(0), 0)
+    val (m2, _) = Update(m1, ChunkArrived(Member = leadName, Line = "real chunk after drop"))
+    val leadConvo = m2.Conversation.Filter((cl) => cl.Speaker == leadName)
+    return IsTrue(t1, leadConvo.Size() >= 1)
+}
+
+// ============================================================================
+// Respawn-after-rotation replays the original dispatch instead of the
+// generic "Continue your previous task." rescue prompt.
+//
+// Regression for a heartbeat-respawn shape where the engineer's
+// rotated session had no prior context — the model replied "what
+// should I work on?" and the heartbeat fired again, looping.
+// We can't introspect the outbound Cmd's prompt without a fake
+// transport, but we CAN confirm the precondition: LastDispatchedMsg
+// is preserved across respawnMember so the rescue path can consult it.
+// ============================================================================
+func TestE2E_RespawnAfterRotation_PreservesDispatchBody(t T) T {
+    val seed = e2eModel()
+    val dispatchBody = "Refactor the foo module; tests must pass."
+    val dispatchMsg = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), dispatchBody, 0)
+    val seeded = seed.Copy(
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
+        // SessionIds intentionally MISSING — simulates the post-
+        // rotation state where respawnMember is about to mint a
+        // fresh UUID via ensureSession.
+    )
+    val (m, _) = respawnMember(seeded, "Felix")
+    val bodyPreserved = m.LastDispatchedMsg.Get("Felix") match {
+        case Some(msg) => msg.Body == dispatchBody
+        case None()    => false
+    }
+    return IsTrue(t, bodyPreserved)
+}
+
+// ============================================================================
+// FSM property tests — global invariants over the (state, event) matrix.
+// These avoid KeySubmit because that path synchronously spawns a real
+// claude subprocess via ensureSession. The onSubmit/KeySubmit-related
+// contracts (LastUserPrompt capture, latch reset) are covered by the
+// existing TestOnSubmit_* cases in update_test.gala — those run more
+// slowly but already exist; we don't reproduce them here.
+// ============================================================================
+
+// Every non-terminal state with stale timestamps reaches Idle or
+// TLThinking on one Tick. (TLThinking via auto-retry; Idle otherwise.)
+func TestE2EProperty_NonTerminalStates_WatchdogReachesIdleOrTLThinking(t T) T {
+    val states = ArrayOf[AppState](
+        TLThinking(),
+        TLReview(),
+        TLNudging(Reason = "stuck", Pending = EmptyHashSet[string]().Add("Felix")),
+        Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        QAGate(Pending = EmptyHashSet[string]().Add("Felix")),
+    )
+    val seed = e2eModel()
+    val results = states.Map((st) => {
+        val m = seed.Copy(
+            State          = st,
+            StateEnteredAt = staleInstantSec(int64(700)),  // > member ceiling (600s)
+        )
+        val (m1, _) = Update(m, TickMsg())
+        return stateIsIdle(m1) || stateIsTLThinking(m1)
+    })
+    val allReached = results.FoldLeft(true, (acc, r) => acc && r)
+    return IsTrue(t, allReached)
+}
+
+// Idle and Approval are exempt from the watchdog.
+func TestE2EProperty_IdleApproval_NeverTripWatchdog(t T) T {
+    val seed = e2eModel()
+    val staleIdle = seed.Copy(
+        State          = Idle(),
+        StateEnteredAt = staleInstantSec(int64(700)),
+    )
+    val staleApproval = seed.Copy(
+        State          = Approval(SummaryBody = "ship it"),
+        StateEnteredAt = staleInstantSec(int64(700)),
+    )
+    val (mIdle, _)     = Update(staleIdle, TickMsg())
+    val (mApproval, _) = Update(staleApproval, TickMsg())
+    val idleStayed     = stateIsIdle(mIdle)
+    val approvalStayed = mApproval.State match {
+        case Approval(_) => true
+        case _           => false
+    }
+    return IsTrue(t, idleStayed && approvalStayed)
+}
+
+// stateTag is total + unique. Catches a new AppState case added
+// without updating stateTag.
+func TestE2EProperty_StateTag_IsTotalAndUnique(t T) T {
+    val states = ArrayOf[AppState](
+        Idle(),
+        TLThinking(),
+        TLReview(),
+        TLNudging(Reason = "stuck", Pending = EmptyHashSet[string]()),
+        Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        QAGate(Pending = EmptyHashSet[string]().Add("Felix")),
+        Approval(SummaryBody = "ship it"),
+    )
+    val tags = states.Map((st) => stateTag(st))
+    val allNonEmpty = tags.FoldLeft(true, (acc, tag) => acc && tag != "")
+    val allUnique = tags.Size() == tags.FoldLeft(EmptyHashSet[string](), (s, t) => s.Add(t)).Size()
+    val t1 = IsTrue(t, allNonEmpty)
+    return IsTrue(t1, allUnique)
+}
+
+// looksLikeStreamJson detects only real envelope shapes; arbitrary
+// prose and partial fragments return false.
+func TestE2EProperty_LooksLikeStreamJson_OnlyTrueForEnvelopes(t T) T {
+    val envelopes = ArrayOf[string](
+        "{\"type\":\"assistant\",\"message\":{\"content\":[]}}",
+        "{\"type\":\"user\",\"message\":{}}",
+        "{\"type\":\"result\",\"is_error\":false}",
+    )
+    val prose = ArrayOf[string](
+        "",
+        "I am working on it",
+        "{ malformed json",
+        "Failed to authenticate. API Error: 401",
+        "{\"not_type\":\"x\"}",
+    )
+    val allEnvelopesTrue = envelopes.Map((s) => looksLikeStreamJson(s)).FoldLeft(true, (acc, b) => acc && b)
+    val allProseFalse    = prose.Map((s) => !looksLikeStreamJson(s)).FoldLeft(true, (acc, b) => acc && b)
+    val t1 = IsTrue(t, allEnvelopesTrue)
+    return IsTrue(t1, allProseFalse)
+}
+
+
+// guard against unused-import warnings while the file grows.
+val _e2eUnusedImport = strings.TrimSpace("")

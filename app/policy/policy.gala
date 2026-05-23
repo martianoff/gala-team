@@ -72,32 +72,40 @@ struct Heartbeat(
     StuckAfterSeconds   int64,
     AbandonAfterSeconds int64,
     MaxRetries          int,
-    // StateWatchdogSeconds: hard ceiling on how long the FSM may sit
-    // in a non-terminal state (TLThinking / TLReview / TLNudging /
-    // Delegating / QAGate) before the orchestrator forces a recovery
-    // transition. Existed because the per-member heartbeat above
-    // covers only members in the pending set — the TL is explicitly
-    // EXCLUDED from that walk (long TLReview pauses are normal user-
-    // waiting time), so a TL whose subprocess silently stalled mid-
-    // turn had no recovery path. The watchdog is intentionally LONG
-    // (5min default for TL states, 10min for member-gated states)
-    // so it never trips on healthy long-thinks; it's a "the FSM
-    // must never freeze indefinitely" backstop, not a fast-trip
-    // wire. Approval / Idle are excluded — the user is the
-    // gating signal there.
-    StateWatchdogSeconds int64,
+    // TLStateWatchdogSeconds: hard ceiling on how long the FSM may
+    // sit in a TL state (TLThinking / TLReview / TLNudging) before
+    // the orchestrator forces a recovery to Idle. Tighter than the
+    // member-pending ceiling because (a) the TL is excluded from the
+    // per-member heartbeat walk so this is the ONLY safety net for
+    // stalled TL turns, and (b) live observation showed a 600s
+    // ceiling felt like "stuck" UX — model timeouts that take more
+    // than 5 minutes essentially never recover. After this fires
+    // the orchestrator auto-retries the last user prompt ONCE (see
+    // RecoveryRetryFired on AppModel) so the user doesn't have to
+    // re-type.
+    TLStateWatchdogSeconds int64,
+    // MemberStateWatchdogSeconds: hard ceiling on Delegating /
+    // QAGate — looser than the TL ceiling because member work can
+    // legitimately take longer (build + test cycle, big refactor).
+    // The per-member heartbeat already escalates individually
+    // stuck members; this is the "every pending member is silent
+    // and the heartbeat-driven nudges aren't reaching anyone"
+    // backstop. NO auto-retry — the recovery is "bounce to Idle
+    // so the user can decide", not "re-fire the same dispatch".
+    MemberStateWatchdogSeconds int64,
 )
 
 // DefaultHeartbeat returns the design defaults — gentle 30s slow
 // nudge, escalate-to-TL after 2min, abandon at 5min, two crash retries,
-// 10min hard FSM-state ceiling so a silently-stalled TL turn can never
-// park the FSM forever.
+// 5min hard ceiling on TL-state stalls + auto-retry, 10min ceiling on
+// member-gated states.
 func DefaultHeartbeat() Heartbeat = Heartbeat(
-    SlowAfterSeconds     = int64(30),
-    StuckAfterSeconds    = int64(120),
-    AbandonAfterSeconds  = int64(300),
-    MaxRetries           = 2,
-    StateWatchdogSeconds = int64(600),
+    SlowAfterSeconds           = int64(30),
+    StuckAfterSeconds          = int64(120),
+    AbandonAfterSeconds        = int64(300),
+    MaxRetries                 = 2,
+    TLStateWatchdogSeconds     = int64(300),
+    MemberStateWatchdogSeconds = int64(600),
 )
 
 // Guardrails carries the §5.4 "block this PR if X" toggles. Defaults

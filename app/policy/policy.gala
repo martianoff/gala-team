@@ -72,33 +72,15 @@ struct Heartbeat(
     StuckAfterSeconds   int64,
     AbandonAfterSeconds int64,
     MaxRetries          int,
-    // TLStateWatchdogSeconds: hard ceiling on how long the FSM may
-    // sit in a TL state (TLThinking / TLReview / TLNudging) before
-    // the orchestrator forces a recovery to Idle. Tighter than the
-    // member-pending ceiling because (a) the TL is excluded from the
-    // per-member heartbeat walk so this is the ONLY safety net for
-    // stalled TL turns, and (b) live observation showed a 600s
-    // ceiling felt like "stuck" UX — model timeouts that take more
-    // than 5 minutes essentially never recover. After this fires
-    // the orchestrator auto-retries the last user prompt ONCE (see
-    // RecoveryRetryFired on AppModel) so the user doesn't have to
-    // re-type.
-    TLStateWatchdogSeconds int64,
-    // MemberStateWatchdogSeconds: hard ceiling on Delegating /
-    // QAGate — looser than the TL ceiling because member work can
-    // legitimately take longer (build + test cycle, big refactor).
-    // The per-member heartbeat already escalates individually
-    // stuck members; this is the "every pending member is silent
-    // and the heartbeat-driven nudges aren't reaching anyone"
-    // backstop. NO auto-retry — the recovery is "bounce to Idle
-    // so the user can decide", not "re-fire the same dispatch".
+    // FSM-state ceilings: forces recovery to Idle when a state is
+    // held past these. TL ceiling is tighter (only safety net for
+    // TLThinking / TLReview / TLNudging — TL is excluded from the
+    // per-member heartbeat). Member ceiling is looser (per-member
+    // heartbeat already escalates individuals; this is the
+    // all-silent backstop).
+    TLStateWatchdogSeconds     int64,
     MemberStateWatchdogSeconds int64,
 )
-
-// DefaultHeartbeat returns the design defaults — gentle 30s slow
-// nudge, escalate-to-TL after 2min, abandon at 5min, two crash retries,
-// 5min hard ceiling on TL-state stalls + auto-retry, 10min ceiling on
-// member-gated states.
 func DefaultHeartbeat() Heartbeat = Heartbeat(
     SlowAfterSeconds           = int64(30),
     StuckAfterSeconds          = int64(120),

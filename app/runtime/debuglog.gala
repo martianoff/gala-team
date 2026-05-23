@@ -98,26 +98,7 @@ val KindStderr            = "stderr"
 // distinguishes a slow-but-eventual completion from a hang that
 // would otherwise look identical in the absence of telemetry.
 val KindSubprocessTimeout = "subprocess_timeout"
-// session_rotated records a deliberate SessionId rotation — emitted
-// when the FSM watchdog (or any other recovery path) drops a
-// member's saved claude-code session id and forces the next spawn
-// to use `--session-id <fresh-uuid>` instead of `--resume <stale>`.
-// Triage value: a hung session that the orchestrator gives up on
-// gets one event marking the boundary, instead of leaving the
-// operator to grep for "why did Vesper start fresh after the
-// watchdog fired?" Carries the old + new SIDs for traceability —
-// the old SID points at claude-code's poisoned jsonl, the new one
-// at the fresh one that's about to be created.
 val KindSessionRotated    = "session_rotated"
-// watchdog_diag records the diagnostic snapshot emitted alongside
-// the WatchdogExpired fsm_transition: for each affected member,
-// total chunks received in this state vs visible chunks (chunks
-// that actually carried text), elapsed since last visible chunk,
-// and the SID being rotated. This is the "what was happening
-// during the silent 5 minutes?" answer — without it the operator
-// only sees that the FSM hopped to Idle, not WHY the model went
-// quiet (no chunks at all vs many dropped chunks vs a final real
-// chunk that never produced a result envelope).
 val KindWatchdogDiag      = "watchdog_diag"
 
 // LogEvent appends one event to events.jsonl. No-op when
@@ -423,14 +404,10 @@ func LogSubprocessTimeout(cmd string, argv string, timeoutMs int64) {
     LogEvent(KindSubprocessTimeout, "", enc.Get())
 }
 
-// SessionRotatedPayload records a deliberate SessionId rotation.
-// Reason is the trigger tag — "watchdog_tl" / "watchdog_member" /
-// "stale_session_id_error" / etc. — so the operator can grep for
-// "why did this member get a fresh session?" OldSid is "" when
-// no SessionId was registered (first spawn). NewSid is the
-// freshly-minted UUID the next spawn will use; "" when the rotator
-// just dropped the SID and left ensureSession to generate the new
-// one on the next spawn.
+// Reason is a trigger tag (e.g. "watchdog_tl", "watchdog_member",
+// "heartbeat_respawn"). OldSid is "" when no SID was registered.
+// NewSid is "" when the rotator dropped the SID and left
+// ensureSession to mint the next one on spawn.
 struct SessionRotatedPayload(
     Reason string,
     OldSid string,
@@ -449,16 +426,12 @@ func LogSessionRotated(member string, reason string, oldSid string, newSid strin
     LogEvent(KindSessionRotated, member, enc.Get())
 }
 
-// WatchdogDiagPayload is the diagnostic snapshot emitted right
-// before the WatchdogExpired fsm_transition. ElapsedSec is the
-// state-level dwell time (== threshold or larger). State is the
-// pre-recovery state tag. AffectedMembers is the comma-joined list
-// of members whose subprocess is being killed (lead for TL states,
-// pending set for Delegating / QAGate). AutoRetry says whether
-// onSubmit will be re-fired with LastUserPrompt. LastVisibleChunkAt
-// is the wall-clock of the most recent non-dropped chunk from ANY
-// affected member, ISO-8601 — gives the operator a "model went
-// silent at X" anchor.
+// Emitted alongside the WatchdogExpired fsm_transition. State is
+// the pre-recovery state tag, ElapsedSec is dwell time (>=
+// threshold), AutoRetry is whether onSubmit will re-fire with
+// LastUserPrompt, LastVisibleChunkAt is "Ns" (seconds since the
+// most recent chunk from any affected member; "-1s" if no chunk
+// ever arrived).
 struct WatchdogDiagPayload(
     State              string,
     ElapsedSec         int64,

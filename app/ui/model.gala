@@ -367,32 +367,16 @@ struct AppModel(
     // Reset on every new turn open (onSubmit / spawnDispatchedMembers
     // / spawnQAReview / spawnTLNudge / @consult relay).
     TurnVisibleChunks HashMap[string, int],
-    // Most recent user prompt text. Stored so the TL-state watchdog
-    // can auto-retry it once on recovery: when the watchdog forces
-    // TLThinking → Idle, the orchestrator re-fires UserPrompted
-    // with this text so the user doesn't have to re-type — observed
-    // UX before this was "send task, 5min later watchdog fires,
-    // user has to remember and re-type the original ask." Empty
-    // when no user prompt has fired yet this session.
+    // Most recent user prompt; the TL-state watchdog re-fires
+    // UserPrompted with this on recovery so the user doesn't
+    // have to re-type. Empty before the first submit this session.
     LastUserPrompt string,
-    // Tracks whether the current LastUserPrompt has already been
-    // auto-retried by the watchdog. Reset to false on every fresh
-    // user_input. Set to true after a watchdog-triggered auto-
-    // retry. Capped at 1 to prevent loops on prompts that
-    // reliably hang the model.
+    // One-shot latch per LastUserPrompt: reset on onSubmit, set
+    // after a watchdog auto-retry so a prompt that reliably hangs
+    // the model can't loop forever.
     WatchdogRetryFired bool,
-    // Per-member counter of CONSECUTIVE claude-code synthetic assistant
-    // envelopes (message.model == "<synthetic>") received since the
-    // last real chunk. Real assistant chunks reset this to 0; each
-    // synthetic increments it. When it crosses the poison threshold the
-    // liveRespawnMember path rotates SessionIds[name] so the respawn
-    // spawns with --session-id (fresh jsonl) instead of --resume (the
-    // poisoned one). Without this, a stuck-in-synthetic-loop session
-    // (observed in past sessions: hundreds of synthetic envelopes
-    // accumulating across resumes until the model started parroting
-    // their "No response requested." text back from real API calls)
-    // looks alive to LastChunkAt-based liveness and the QA gate
-    // parks indefinitely.
+    // Per-member count of consecutive synthetic ("<synthetic>")
+    // assistant envelopes seen on stdout. Reset on any real chunk.
     SyntheticOnlyChunks HashMap[string, int],
     // Toggles the help overlay. Bound to `?` and to a clickable `?`
     // button in the header (DESIGN.md §8.5). The overlay is a

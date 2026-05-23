@@ -388,30 +388,10 @@ func resumeInFlight(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // The bandFor / livenessStatus helpers below take the typed Heartbeat
 // argument so threshold tweaks per-team take effect on the next tick.
 
-// SyntheticPoisonThreshold is the number of consecutive synthetic
-// (model:"<synthetic>") claude-code assistant envelopes that, by the
-// time a protocol Redeliver decides to respawn a silent member, makes
-// us drop SessionIds[name] before the respawn so ensureSession spawns
-// a fresh claude-code jsonl rather than --resume into the poisoned
-// one. Three keeps the rotation conservative — a one-off synthetic
-// from a single resume cycle won't trip it, but a session that has
-// only ever produced synthetics across multiple heartbeat windows
-// will. Counter resets to 0 on any real chunk (see applyChunkVisible)
-// and on every resetMemberState (fresh dispatch or respawn).
-// Function (not `val`) so test files can use the literal int in
-// arithmetic / HashMap.Put / Eq without an Immutable[int]→int
-// coercion error from the gala-to-Go test compilation pass.
+// Function (not `val`) so tests can use the literal int in
+// arithmetic without an Immutable[int]→int coercion error.
 func SyntheticPoisonThreshold() int = 3
 
-// rotateSessionIfSyntheticPoisoned decides whether the imminent
-// respawn must drop the saved SessionId for `name`. When the per-
-// member synthetic counter has hit the poison threshold, --resume
-// on the existing id will just reload claude-code's poisoned jsonl
-// and the synthetic loop continues — we instead drop the id so
-// ensureSession spawns with --session-id <fresh>, generating a
-// new jsonl with no poison. Returns the updated model, a bool
-// signalling whether rotation happened (for caller logging), and
-// the synthetic count observed (for the LastError message).
 func rotateSessionIfSyntheticPoisoned(m AppModel, name string) Tuple3[AppModel, bool, int] {
     val synthCount = m.SyntheticOnlyChunks.Get(name).GetOrElse(0)
     if synthCount < SyntheticPoisonThreshold() {
@@ -443,54 +423,25 @@ func onTick(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (m3, batchAll(cmds.Append(watchdogCmd)))
 }
 
-// enforceStateWatchdog is the FSM-must-never-stick backstop. Every
-// non-Idle / non-Approval state has a hard ceiling: when
-// `now - StateEnteredAt` exceeds `Policy.Heartbeat.StateWatchdogSeconds`
-// (default 600s = 10min), the orchestrator forcibly:
-//
-//   1. closes any live claude subprocess for the lead (TL states) or
-//      every pending member (member-gated states) — the read pump may
-//      be wedged on a hung subprocess that won't EOF cleanly (observed
-//      on Windows: Stop-Process -Force terminated the child but the
-//      parent's ReadLine never returned, leaving onSessionFailed un-
-//      fired and the FSM frozen),
-//   2. forces State = Idle() directly — bypasses the normal FSM
-//      transition table because the whole point is "the FSM is
-//      stuck; route it home unconditionally",
-//   3. logs a synthetic `WatchdogExpired` fsm_transition so
-//      events.jsonl carries audit-trail evidence of the forced exit,
-//   4. surfaces a toast + LastError so the user sees what happened.
-//
-// The watchdog cannot loop: forcing State = Idle resets StateEnteredAt
-// via the Update wrapper at line 56, and Idle is explicitly excluded
-// here.
-//
-// Idle / Approval are excluded: in Idle the user is the next event
-// (no orchestrator-side progress to time); in Approval the user must
-// approve/reject and any timeout would silently lose work.
+// enforceStateWatchdog forces State → Idle when a non-terminal
+// state has been held past its ceiling. Bypasses the normal FSM
+// transition table — the whole point is "the FSM is stuck; route
+// it home unconditionally." Idle / Approval are excluded: the
+// user is the next event there.
 func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cmd[AppMsg]] {
     val tag = stateTag(m.State)
     if tag == "Idle" || tag == "Approval" {
         return (m, NoCmd[AppMsg]())
     }
-    // Per-class threshold: TL states get a tighter ceiling (TL is
-    // excluded from the per-member heartbeat so this is its only
-    // safety net + a long TL stall feels "stuck" sooner from the
-    // user's seat). Member-gated states have the per-member
-    // heartbeat in parallel, so the state-level watchdog is a
-    // looser backstop.
     val isTLState = tag == "TLThinking" || tag == "TLReview" || tag == "TLNudging"
     val threshold = if (isTLState) m.Policy.Heartbeat.TLStateWatchdogSeconds
                     else            m.Policy.Heartbeat.MemberStateWatchdogSeconds
     if threshold <= int64(0) {
         return (m, NoCmd[AppMsg]())
     }
-    // StateEnteredAt == UnixEpoch means "this state hasn't been
-    // entered through the normal Update wrapper yet" — either
-    // fresh startup before the first FSM transition, or a test
-    // fixture that seeded the State without setting the timestamp.
-    // Treat both as "not observed yet" so the watchdog doesn't
-    // trip pathologically on a synthetic 56-year gap.
+    // StateEnteredAt == UnixEpoch ⇒ state not yet entered through
+    // the Update wrapper (fresh startup or unset by a test
+    // fixture); skip so the watchdog doesn't trip on a 56-year gap.
     if m.StateEnteredAt.UnixNanos() <= int64(0) {
         return (m, NoCmd[AppMsg]())
     }
@@ -499,13 +450,6 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         return (m, NoCmd[AppMsg]())
     }
     val leadName = m.Team.Lead.Name
-    // affected = members whose live subprocess gets reaped AND whose
-    // per-member status gets flipped back to StIdle. Without the
-    // status reset the sidebar keeps showing the member as
-    // "working" with a per-member timer ticking up indefinitely
-    // (user-reported "Vesper 72:09" still visible an hour after the
-    // watchdog forced the FSM to Idle), which reads as "still
-    // stuck" even though the FSM is, in fact, idle.
     val affected = m.State match {
         case TLThinking()    => ArrayOf(leadName)
         case TLReview()      => ArrayOf(leadName)
@@ -514,68 +458,36 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         case QAGate(p)       => setToArray(p)
         case _               => EmptyArray[string]()
     }
-    // Kill any live subprocess for each affected member AND clear
-    // the PendingClosures budget. closeLiveSession bumps that
-    // counter by 1 so the inevitable SessionFailed/last-chunk
-    // straggler from the killed subprocess is recognised as stale
-    // and dropped. That's correct on a happy-path kill — but the
-    // watchdog only fires after a subprocess has been silent past
-    // the ceiling, meaning it's hung and won't emit a stale
-    // straggler. The budget never drains, the fresh subprocess's
-    // FIRST real chunk gets eaten by the stale-drop in onChunk
-    // (which returns NoCmd and kills the read pump), and the
-    // orchestrator receives zero further events from the fresh
-    // subprocess — observed live in PR #69's deployment as the
-    // auto-retry spawn producing exactly 0 chunks in the 300s
-    // before the second watchdog fired. Clearing the budget
-    // after the kill restores the invariant "PC>0 ⇒ a real
-    // stale event is expected" so the fresh subprocess's chunks
-    // flow normally.
+    // Clear PendingClosures after the kill: closeLiveSession bumps
+    // it expecting a stale straggler, but a watchdog-killed
+    // subprocess is already hung and won't emit one. Without the
+    // clear, the fresh respawn's first chunk gets eaten by
+    // onChunk's stale-drop (NoCmd return ⇒ pump dies).
     val mClosed = affected.FoldLeft(m, (acc, name) => {
         val killed = closeLiveSession(acc, name)
         return killed.Copy(PendingClosures = killed.PendingClosures.Remove(name))
     })
-    // Rotate the SessionId for each affected member. Without this,
-    // the next ensureSession spawns `claude --resume <sid>` against
-    // the SAME claude-code session jsonl that just hung — observed
-    // live in PR #68's first deployment: the watchdog correctly
-    // hopped to Idle and auto-retried, but the auto-retry hit the
-    // exact same synthetic-poisoning loop (claude-code's session
-    // jsonl carried the auto-emitted `model:"<synthetic>"`
-    // envelope at the head, model never ran on the retry prompt).
-    // Clearing SessionIds[name] makes ensureSession generate a
-    // fresh UUID and spawn with `--session-id <new>` — fresh
-    // claude-code jsonl, no poison carry-forward. Each rotation
-    // gets its own session_rotated debug event so operators can
-    // map "this member started fresh because the watchdog reaped
-    // their poisoned session at <ts>" without cross-referencing
-    // claude-code's session jsonl.
+    // Rotate SessionIds so the next ensureSession spawns with
+    // --session-id <new> instead of --resume <stale>. Otherwise
+    // claude-code reloads the same poisoned session jsonl and the
+    // synthetic-envelope loop repeats on the fresh subprocess.
     val rotateReason = if (isTLState) "watchdog_tl" else "watchdog_member"
     val mRotated = affected.FoldLeft(mClosed, (acc, name) => {
         val oldSid = acc.SessionIds.Get(name).GetOrElse("")
         LogSessionRotated(name, rotateReason, oldSid, "")
         return acc.Copy(SessionIds = acc.SessionIds.Remove(name))
     })
-    // Auto-retry decision: ONLY on TL-state watchdog (member-gated
-    // states are already in a recovery flow and re-firing a member
-    // dispatch from here would side-step the QA / TL routing). The
-    // retry latch (`WatchdogRetryFired`) is per-user-prompt and
-    // capped at 1, so a prompt that reliably hangs the model can't
-    // loop forever — the second watchdog leaves the FSM in Idle
-    // and the user takes over.
+    // Auto-retry is TL-only: re-firing a dispatch from a member-
+    // gated state watchdog would side-step QA / TL routing.
+    // WatchdogRetryFired caps retries at 1 per user-prompt.
     val canAutoRetry = isTLState && m.LastUserPrompt != "" && !m.WatchdogRetryFired
     val baseReason = s"FSM watchdog: ${tag} for ${elapsedSec}s past ${threshold}s ceiling"
     val reason = if (canAutoRetry) s"${baseReason} — rotating session and auto-retrying last prompt"
                  else                s"${baseReason} — rotating session, forcing recovery to Idle"
     val toast = mRotated.Toasts.PushError(reason, now, time_utils.Seconds(int64(10)))
-    // Watchdog-diag snapshot before the FSM hop. lastVisibleChunkSec
-    // is "seconds since the most recent chunk from any affected
-    // member" (-1 when no chunk ever arrived — the most common
-    // shape: subprocess spawned, never produced output). Lets the
-    // operator distinguish "model went silent mid-stream" (a low
-    // positive number, e.g. 240s of 300s window) from "subprocess
-    // never produced output at all" (-1) without cross-referencing
-    // claude-code's session jsonl.
+    // lastVisibleSec: seconds since the most recent chunk from any
+    // affected member; -1 when no chunk ever arrived. Distinguishes
+    // "model went silent mid-stream" from "subprocess never spoke."
     val lastVisibleChunkAt = affected.FoldLeft(time_utils.UnixEpoch(), (best, name) =>
         mRotated.LastChunkAt.Get(name) match {
             case None()    => best
@@ -597,15 +509,8 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     if !canAutoRetry {
         return (persisted, NoCmd[AppMsg]())
     }
-    // Auto-retry path: stuff the saved prompt back into the
-    // composer and call onSubmit. onSubmit fires UserPrompted →
-    // spawns the lead and pumps. onSubmit ALSO resets
-    // WatchdogRetryFired to false as part of its normal "fresh
-    // user prompt" handling — so we set the latch on the model
-    // AFTER onSubmit returns. The latch prevents a follow-up
-    // watchdog fire (if the retry also hangs) from re-retrying:
-    // the second watchdog falls through to the plain Idle return
-    // above and lets the user take over.
+    // Latch must be set AFTER onSubmit returns — onSubmit resets
+    // it on every fresh user prompt as part of its normal flow.
     val retrying = persisted.Copy(
         Composer       = persisted.LastUserPrompt,
         ComposerCursor = len(persisted.LastUserPrompt),
@@ -3644,42 +3549,18 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
         }
         case Some(_) => {
             val mClosed = closeLiveSession(m, name)
-            // Clear PendingClosures (same reasoning as the state
-            // watchdog's clear): the heartbeat only escalates after
-            // AbandonAfterSeconds of silence, meaning the killed
-            // subprocess is hung and won't emit a stale straggler.
-            // Without this clear, the fresh respawn's first chunk
-            // gets eaten by onChunk's stale-drop (NoCmd return,
-            // kills the read pump), exactly the bug PR #70 fixed
-            // for the state-watchdog path.
+            // Heartbeat-killed subprocess is hung (that's the trigger
+            // — AbandonAfterSeconds of silence) and won't emit a
+            // stale straggler. Clear PendingClosures so the fresh
+            // respawn's first chunk isn't eaten by onChunk's
+            // stale-drop (NoCmd return ⇒ pump dies). Rotate the
+            // SessionId so the respawn spawns with --session-id
+            // <new> instead of --resume <stale> — otherwise
+            // claude-code reloads the same hung jsonl.
             val mDrained = mClosed.Copy(PendingClosures = mClosed.PendingClosures.Remove(name))
-            // Unconditionally rotate the SessionId. The original
-            // rotateSessionIfSyntheticPoisoned gated on a counter
-            // that's bumped via stdout chunks — but observed live,
-            // claude-code's synthetic envelopes never reach stdout
-            // (they only land in claude-code's internal session
-            // jsonl). The counter stayed at 0, the rotation never
-            // fired, and Lyra+Kael got --resume'd into the same
-            // poisoned jsonl on every heartbeat respawn (3 Lyra +
-            // 3 Kael MemberStuck cycles observed between 05:43 and
-            // 06:21, none producing output). The heartbeat
-            // escalating to liveRespawnMember IS the signal we
-            // need: AbandonAfterSeconds of silence means the
-            // session is hung; rotate unconditionally to get a
-            // fresh claude-code jsonl.
             val oldSid = mDrained.SessionIds.Get(name).GetOrElse("")
             LogSessionRotated(name, "heartbeat_respawn", oldSid, "")
             val mPrepared = mDrained.Copy(SessionIds = mDrained.SessionIds.Remove(name))
-            // Same unified respawn reset as the crash path
-            // (freshTask = false): buffers cleared, LastChunkAt reset
-            // to now (so the heartbeat does not instantly re-mark the
-            // fresh subprocess stuck against the silent one's stale
-            // timestamp), PostPromptSent preserved, RetryCount bumped
-            // from `retries` to `retries + 1` == the `attempt` the
-            // caller computed. `attempt` is kept for the message +
-            // StRecovering only. resetMemberForRespawn also clears
-            // SyntheticOnlyChunks[name] so the next cycle starts
-            // from a clean counter.
             val reset = resetMemberForRespawn(mPrepared, name)
             val errMsg = s"${name}: silent past heartbeat — rotating session, respawn ${attempt}/${max}"
             val recovering = reset.Copy(LastError = Some(errMsg))

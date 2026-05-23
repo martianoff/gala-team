@@ -109,6 +109,42 @@ gala_go_test(
 )
 
 gala_go_test(
+    name = "e2e_test",
+    srcs = ["e2e_test.gala"],
+    pkg = "ui",
+    lib_srcs = [
+        "model.gala",
+        "update.gala",
+        "view.gala",
+    ],
+    gala_deps = [
+        "@gala_tui//:gala_tui",
+    ],
+    deps = [
+        "//app/consult",
+        "//app/directive",
+        "//app/fsm",
+        "//app/guidance",
+        "//app/headless",
+        "//app/onboarding",
+        "//app/policy",
+        "//app/project",
+        "//app/protocol",
+        "//app/runtime",
+        "//app/session",
+        "//app/team",
+        "//app/version",
+        "//app/view",
+        "@gala//collection_immutable",
+        "@gala//concurrent",
+        "@gala//go_interop",
+        "@gala//json",
+        "@gala//subprocess",
+        "@gala//time_utils",
+    ],
+)
+
+gala_go_test(
     name = "pump_characterization_test",
     srcs = ["pump_characterization_test.gala"],
     pkg = "ui",

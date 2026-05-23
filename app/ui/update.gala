@@ -515,6 +515,27 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         case _               => EmptyArray[string]()
     }
     val mClosed = affected.FoldLeft(m, (acc, name) => closeLiveSession(acc, name))
+    // Rotate the SessionId for each affected member. Without this,
+    // the next ensureSession spawns `claude --resume <sid>` against
+    // the SAME claude-code session jsonl that just hung — observed
+    // live in PR #68's first deployment: the watchdog correctly
+    // hopped to Idle and auto-retried, but the auto-retry hit the
+    // exact same synthetic-poisoning loop (claude-code's session
+    // jsonl carried the auto-emitted `model:"<synthetic>"`
+    // envelope at the head, model never ran on the retry prompt).
+    // Clearing SessionIds[name] makes ensureSession generate a
+    // fresh UUID and spawn with `--session-id <new>` — fresh
+    // claude-code jsonl, no poison carry-forward. Each rotation
+    // gets its own session_rotated debug event so operators can
+    // map "this member started fresh because the watchdog reaped
+    // their poisoned session at <ts>" without cross-referencing
+    // claude-code's session jsonl.
+    val rotateReason = if (isTLState) "watchdog_tl" else "watchdog_member"
+    val mRotated = affected.FoldLeft(mClosed, (acc, name) => {
+        val oldSid = acc.SessionIds.Get(name).GetOrElse("")
+        LogSessionRotated(name, rotateReason, oldSid, "")
+        return acc.Copy(SessionIds = acc.SessionIds.Remove(name))
+    })
     // Auto-retry decision: ONLY on TL-state watchdog (member-gated
     // states are already in a recovery flow and re-firing a member
     // dispatch from here would side-step the QA / TL routing). The
@@ -524,11 +545,28 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     // and the user takes over.
     val canAutoRetry = isTLState && m.LastUserPrompt != "" && !m.WatchdogRetryFired
     val baseReason = s"FSM watchdog: ${tag} for ${elapsedSec}s past ${threshold}s ceiling"
-    val reason = if (canAutoRetry) s"${baseReason} — auto-retrying last prompt"
-                 else                s"${baseReason} — forcing recovery to Idle"
-    val toast = mClosed.Toasts.PushError(reason, now, time_utils.Seconds(int64(10)))
-    LogFsmTransition(tag, "WatchdogExpired", s"elapsed=${elapsedSec}s auto_retry=${canAutoRetry}", "Idle")
-    val withReset = affected.FoldLeft(mClosed, (acc, name) => setStatus(acc, name, StIdle()))
+    val reason = if (canAutoRetry) s"${baseReason} — rotating session and auto-retrying last prompt"
+                 else                s"${baseReason} — rotating session, forcing recovery to Idle"
+    val toast = mRotated.Toasts.PushError(reason, now, time_utils.Seconds(int64(10)))
+    // Watchdog-diag snapshot before the FSM hop. lastVisibleChunkSec
+    // is "seconds since the most recent chunk from any affected
+    // member" (-1 when no chunk ever arrived — the most common
+    // shape: subprocess spawned, never produced output). Lets the
+    // operator distinguish "model went silent mid-stream" (a low
+    // positive number, e.g. 240s of 300s window) from "subprocess
+    // never produced output at all" (-1) without cross-referencing
+    // claude-code's session jsonl.
+    val lastVisibleChunkAt = affected.FoldLeft(time_utils.UnixEpoch(), (best, name) =>
+        mRotated.LastChunkAt.Get(name) match {
+            case None()    => best
+            case Some(at)  => if (at.UnixNanos() > best.UnixNanos()) at else best
+        }
+    )
+    val lastVisibleSec = if (lastVisibleChunkAt.UnixNanos() <= int64(0)) int64(-1)
+                         else                                              (now.UnixNanos() - lastVisibleChunkAt.UnixNanos()) / int64(1000000000)
+    LogWatchdogDiag(tag, elapsedSec, affected.MkString(","), canAutoRetry, s"${lastVisibleSec}s")
+    LogFsmTransition(tag, "WatchdogExpired", s"elapsed=${elapsedSec}s auto_retry=${canAutoRetry} affected=${affected.MkString(",")} last_visible=${lastVisibleSec}s", "Idle")
+    val withReset = affected.FoldLeft(mRotated, (acc, name) => setStatus(acc, name, StIdle()))
     val forced = withReset.Copy(
         State          = Idle(),
         StateEnteredAt = now,

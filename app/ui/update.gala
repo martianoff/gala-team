@@ -3644,7 +3644,32 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
         }
         case Some(_) => {
             val mClosed = closeLiveSession(m, name)
-            val (mPrepared, poisoned, synthCount) = rotateSessionIfSyntheticPoisoned(mClosed, name)
+            // Clear PendingClosures (same reasoning as the state
+            // watchdog's clear): the heartbeat only escalates after
+            // AbandonAfterSeconds of silence, meaning the killed
+            // subprocess is hung and won't emit a stale straggler.
+            // Without this clear, the fresh respawn's first chunk
+            // gets eaten by onChunk's stale-drop (NoCmd return,
+            // kills the read pump), exactly the bug PR #70 fixed
+            // for the state-watchdog path.
+            val mDrained = mClosed.Copy(PendingClosures = mClosed.PendingClosures.Remove(name))
+            // Unconditionally rotate the SessionId. The original
+            // rotateSessionIfSyntheticPoisoned gated on a counter
+            // that's bumped via stdout chunks — but observed live,
+            // claude-code's synthetic envelopes never reach stdout
+            // (they only land in claude-code's internal session
+            // jsonl). The counter stayed at 0, the rotation never
+            // fired, and Lyra+Kael got --resume'd into the same
+            // poisoned jsonl on every heartbeat respawn (3 Lyra +
+            // 3 Kael MemberStuck cycles observed between 05:43 and
+            // 06:21, none producing output). The heartbeat
+            // escalating to liveRespawnMember IS the signal we
+            // need: AbandonAfterSeconds of silence means the
+            // session is hung; rotate unconditionally to get a
+            // fresh claude-code jsonl.
+            val oldSid = mDrained.SessionIds.Get(name).GetOrElse("")
+            LogSessionRotated(name, "heartbeat_respawn", oldSid, "")
+            val mPrepared = mDrained.Copy(SessionIds = mDrained.SessionIds.Remove(name))
             // Same unified respawn reset as the crash path
             // (freshTask = false): buffers cleared, LastChunkAt reset
             // to now (so the heartbeat does not instantly re-mark the
@@ -3656,10 +3681,7 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
             // SyntheticOnlyChunks[name] so the next cycle starts
             // from a clean counter.
             val reset = resetMemberForRespawn(mPrepared, name)
-            val errMsg = if (poisoned)
-                s"${name}: synthetic-only stream (${synthCount}) — rotating session, respawn ${attempt}/${max}"
-            else
-                s"${name}: silent past heartbeat — respawn ${attempt}/${max}"
+            val errMsg = s"${name}: silent past heartbeat — rotating session, respawn ${attempt}/${max}"
             val recovering = reset.Copy(LastError = Some(errMsg))
             val withStatus = setStatus(recovering, name, StRecovering(attempt, max))
             return respawnMember(withStatus, name)

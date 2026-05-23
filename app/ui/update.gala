@@ -473,7 +473,15 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     if tag == "Idle" || tag == "Approval" {
         return (m, NoCmd[AppMsg]())
     }
-    val threshold = m.Policy.Heartbeat.StateWatchdogSeconds
+    // Per-class threshold: TL states get a tighter ceiling (TL is
+    // excluded from the per-member heartbeat so this is its only
+    // safety net + a long TL stall feels "stuck" sooner from the
+    // user's seat). Member-gated states have the per-member
+    // heartbeat in parallel, so the state-level watchdog is a
+    // looser backstop.
+    val isTLState = tag == "TLThinking" || tag == "TLReview" || tag == "TLNudging"
+    val threshold = if (isTLState) m.Policy.Heartbeat.TLStateWatchdogSeconds
+                    else            m.Policy.Heartbeat.MemberStateWatchdogSeconds
     if threshold <= int64(0) {
         return (m, NoCmd[AppMsg]())
     }
@@ -491,34 +499,61 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         return (m, NoCmd[AppMsg]())
     }
     val leadName = m.Team.Lead.Name
-    val mClosed = m.State match {
-        case TLThinking()    => closeLiveSession(m, leadName)
-        case TLReview()      => closeLiveSession(m, leadName)
-        case TLNudging(_, _) => closeLiveSession(m, leadName)
-        case Delegating(p)   => closeLiveSessionsForPending(m, p)
-        case QAGate(p)       => closeLiveSessionsForPending(m, p)
-        case _               => m
+    // affected = members whose live subprocess gets reaped AND whose
+    // per-member status gets flipped back to StIdle. Without the
+    // status reset the sidebar keeps showing the member as
+    // "working" with a per-member timer ticking up indefinitely
+    // (user-reported "Vesper 72:09" still visible an hour after the
+    // watchdog forced the FSM to Idle), which reads as "still
+    // stuck" even though the FSM is, in fact, idle.
+    val affected = m.State match {
+        case TLThinking()    => ArrayOf(leadName)
+        case TLReview()      => ArrayOf(leadName)
+        case TLNudging(_, _) => ArrayOf(leadName)
+        case Delegating(p)   => setToArray(p)
+        case QAGate(p)       => setToArray(p)
+        case _               => EmptyArray[string]()
     }
-    val reason = s"FSM watchdog: ${tag} for ${elapsedSec}s past ${threshold}s ceiling — forcing recovery to Idle"
+    val mClosed = affected.FoldLeft(m, (acc, name) => closeLiveSession(acc, name))
+    // Auto-retry decision: ONLY on TL-state watchdog (member-gated
+    // states are already in a recovery flow and re-firing a member
+    // dispatch from here would side-step the QA / TL routing). The
+    // retry latch (`WatchdogRetryFired`) is per-user-prompt and
+    // capped at 1, so a prompt that reliably hangs the model can't
+    // loop forever — the second watchdog leaves the FSM in Idle
+    // and the user takes over.
+    val canAutoRetry = isTLState && m.LastUserPrompt != "" && !m.WatchdogRetryFired
+    val baseReason = s"FSM watchdog: ${tag} for ${elapsedSec}s past ${threshold}s ceiling"
+    val reason = if (canAutoRetry) s"${baseReason} — auto-retrying last prompt"
+                 else                s"${baseReason} — forcing recovery to Idle"
     val toast = mClosed.Toasts.PushError(reason, now, time_utils.Seconds(int64(10)))
-    LogFsmTransition(tag, "WatchdogExpired", s"elapsed=${elapsedSec}s", "Idle")
-    val forced = mClosed.Copy(
+    LogFsmTransition(tag, "WatchdogExpired", s"elapsed=${elapsedSec}s auto_retry=${canAutoRetry}", "Idle")
+    val withReset = affected.FoldLeft(mClosed, (acc, name) => setStatus(acc, name, StIdle()))
+    val forced = withReset.Copy(
         State          = Idle(),
         StateEnteredAt = now,
         Toasts         = toast,
         LastError      = Some(reason),
     )
-    return (persistAppModel(forced), NoCmd[AppMsg]())
-}
-
-// closeLiveSessionsForPending kills any in-flight claude subprocess
-// for every member in the pending set. Used by the FSM watchdog
-// when Delegating / QAGate trips: hung member subprocesses don't
-// get a chance to wedge a respawn against the freshly-reset Idle
-// state — the watchdog reaps them all in one pass.
-func closeLiveSessionsForPending(m AppModel, pending HashSet[string]) AppModel {
-    val names = setToArray(pending)
-    return names.FoldLeft(m, (acc, name) => closeLiveSession(acc, name))
+    val persisted = persistAppModel(forced)
+    if !canAutoRetry {
+        return (persisted, NoCmd[AppMsg]())
+    }
+    // Auto-retry path: stuff the saved prompt back into the
+    // composer and call onSubmit. onSubmit fires UserPrompted →
+    // spawns the lead and pumps. onSubmit ALSO resets
+    // WatchdogRetryFired to false as part of its normal "fresh
+    // user prompt" handling — so we set the latch on the model
+    // AFTER onSubmit returns. The latch prevents a follow-up
+    // watchdog fire (if the retry also hangs) from re-retrying:
+    // the second watchdog falls through to the plain Idle return
+    // above and lets the user take over.
+    val retrying = persisted.Copy(
+        Composer       = persisted.LastUserPrompt,
+        ComposerCursor = len(persisted.LastUserPrompt),
+    )
+    val (mAfterSubmit, cmdAfterSubmit) = onSubmit(retrying)
+    return (mAfterSubmit.Copy(WatchdogRetryFired = true), cmdAfterSubmit)
 }
 
 // pruneToasts is a typed-arg shim around ToastQueue.Prune so the
@@ -1844,19 +1879,26 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     LogUserInput(prompt)
     val ctx = transitionContext(mClean)
     val nextState = transitionLogged(mClean.State, UserPrompted(), ctx)
+    // Capture the prompt so the TL-state watchdog can auto-retry it
+    // once on recovery, and reset the per-prompt retry latch so
+    // each fresh user submit gets its own one-shot retry budget.
+    val mCleanWithLast = mClean.Copy(
+        LastUserPrompt     = prompt,
+        WatchdogRetryFired = false,
+    )
     // Plan survives ONLY when this submit is the orchestrator's own
     // plan-step continuation (onPrCreated set PlanContinuing). A
     // genuine user prompt still wipes the plan — typing something new
     // overrides a pending multi-PR plan, as before. Either way the
     // one-shot flag is consumed here.
-    val planContinuation = mClean.PlanContinuing
-    val nextPlan        = if (planContinuation) mClean.Plan        else EmptyArray[string]()
-    val nextPlanShipped = if (planContinuation) mClean.PlanShipped else 0
-    val withState = mClean.Copy(
+    val planContinuation = mCleanWithLast.PlanContinuing
+    val nextPlan        = if (planContinuation) mCleanWithLast.Plan        else EmptyArray[string]()
+    val nextPlanShipped = if (planContinuation) mCleanWithLast.PlanShipped else 0
+    val withState = mCleanWithLast.Copy(
         State = nextState,
         Composer = "",
         ComposerCursor = 0,
-        Conversation = mClean.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt, At = time_utils.Now().UnixNanos())),
+        Conversation = mCleanWithLast.Conversation.Append(session.ConversationLine(Speaker = "you", Text = prompt, At = time_utils.Now().UnixNanos())),
         // Sending a new message means the user is acting "now" — re-stick
         // to the bottom of the conversation so they see their own line
         // and the incoming response without having to press End.

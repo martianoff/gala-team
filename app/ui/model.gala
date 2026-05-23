@@ -367,6 +367,20 @@ struct AppModel(
     // Reset on every new turn open (onSubmit / spawnDispatchedMembers
     // / spawnQAReview / spawnTLNudge / @consult relay).
     TurnVisibleChunks HashMap[string, int],
+    // Most recent user prompt text. Stored so the TL-state watchdog
+    // can auto-retry it once on recovery: when the watchdog forces
+    // TLThinking → Idle, the orchestrator re-fires UserPrompted
+    // with this text so the user doesn't have to re-type — observed
+    // UX before this was "send task, 5min later watchdog fires,
+    // user has to remember and re-type the original ask." Empty
+    // when no user prompt has fired yet this session.
+    LastUserPrompt string,
+    // Tracks whether the current LastUserPrompt has already been
+    // auto-retried by the watchdog. Reset to false on every fresh
+    // user_input. Set to true after a watchdog-triggered auto-
+    // retry. Capped at 1 to prevent loops on prompts that
+    // reliably hang the model.
+    WatchdogRetryFired bool,
     // Per-member counter of CONSECUTIVE claude-code synthetic assistant
     // envelopes (message.model == "<synthetic>") received since the
     // last real chunk. Real assistant chunks reset this to 0; each
@@ -611,6 +625,8 @@ func InitialModelWithTeams(
     MemberBlockedReasons  = EmptyHashMap[string, string](),
     PostPromptSent        = EmptyHashSet[string](),
     TurnVisibleChunks     = EmptyHashMap[string, int](),
+    LastUserPrompt        = "",
+    WatchdogRetryFired    = false,
     SyntheticOnlyChunks   = EmptyHashMap[string, int](),
     HelpVisible           = false,
     ProjectInfoOpen       = false,

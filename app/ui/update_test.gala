@@ -1940,6 +1940,31 @@ func TestStateWatchdog_Delegating_RotatesPendingMemberSessionIds(t T) T {
     return IsTrue(t, sid != "STALE-SID-456")
 }
 
+// Watchdog must clear PendingClosures[name] after closing the
+// hung subprocess. closeLiveSession bumps PendingClosures by 1
+// to swallow ONE inevitable stale event from the killed subprocess
+// — but the watchdog only fires after a subprocess has been silent
+// past the ceiling, so it's hung and won't emit a stale straggler.
+// If the budget isn't cleared, the fresh subprocess's first real
+// chunk gets eaten by the stale-drop in onChunk (which returns
+// NoCmd, killing the read pump). Observed live in PR #69 as the
+// auto-retry spawn producing 0 chunks for 300s.
+func TestStateWatchdog_TLThinking_PastCeiling_ClearsPendingClosures(t T) T {
+    val seed = sampleModel()
+    val leadName = seed.Team.Lead.Name
+    val seeded = seed.Copy(
+        State          = TLThinking(),
+        StateEnteredAt = staleStateEnteredAt(),
+        // Pre-seed PendingClosures to simulate prior closeLiveSession
+        // bumps that didn't drain (the hung-subprocess case).
+        PendingClosures = seed.PendingClosures.Put(leadName, 3),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    // After the watchdog fires, PendingClosures[lead] must be 0
+    // (or absent) so the fresh subprocess's chunks flow normally.
+    return Eq(t, m.PendingClosures.Get(leadName).GetOrElse(0), 0)
+}
+
 // Below the ceiling the watchdog is a no-op — no premature forced exit.
 func TestStateWatchdog_TLThinking_BelowCeiling_StaysPut(t T) T {
     val seed = sampleModel().Copy(

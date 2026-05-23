@@ -514,7 +514,27 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         case QAGate(p)       => setToArray(p)
         case _               => EmptyArray[string]()
     }
-    val mClosed = affected.FoldLeft(m, (acc, name) => closeLiveSession(acc, name))
+    // Kill any live subprocess for each affected member AND clear
+    // the PendingClosures budget. closeLiveSession bumps that
+    // counter by 1 so the inevitable SessionFailed/last-chunk
+    // straggler from the killed subprocess is recognised as stale
+    // and dropped. That's correct on a happy-path kill — but the
+    // watchdog only fires after a subprocess has been silent past
+    // the ceiling, meaning it's hung and won't emit a stale
+    // straggler. The budget never drains, the fresh subprocess's
+    // FIRST real chunk gets eaten by the stale-drop in onChunk
+    // (which returns NoCmd and kills the read pump), and the
+    // orchestrator receives zero further events from the fresh
+    // subprocess — observed live in PR #69's deployment as the
+    // auto-retry spawn producing exactly 0 chunks in the 300s
+    // before the second watchdog fired. Clearing the budget
+    // after the kill restores the invariant "PC>0 ⇒ a real
+    // stale event is expected" so the fresh subprocess's chunks
+    // flow normally.
+    val mClosed = affected.FoldLeft(m, (acc, name) => {
+        val killed = closeLiveSession(acc, name)
+        return killed.Copy(PendingClosures = killed.PendingClosures.Remove(name))
+    })
     // Rotate the SessionId for each affected member. Without this,
     // the next ensureSession spawns `claude --resume <sid>` against
     // the SAME claude-code session jsonl that just hung — observed

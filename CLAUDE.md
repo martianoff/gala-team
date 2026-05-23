@@ -15,6 +15,7 @@ These categories MUST NOT appear anywhere in the source tree (code, comments, te
 | Specific commit SHAs in comments (`commit 221fecf`, `cb26777`) | Same as PR numbers. | Drop. |
 | References to private docs (`docs/private/...`, internal wiki URLs, GitHub private comment URLs) | The directory is gitignored — readers can't open the file. | Drop, or move the substantive content inline into the source comment / public docs. |
 | Real session IDs, claude session IDs, real GitHub issue / discussion IDs | Leaks operational data. | Use placeholders (`<session-id>`, `00000000-0000-0000-0000-000000000000`). |
+| Live team-member names from observed sessions (`Vesper said…`, `Lyra got stuck…`, `Sable produced…`, `Kael cycled…`). Test fixture names (`Iris`, `Felix`, `Theo`) ARE fine in test code; the ban is on real session participants in **comments**, **PR descriptions**, and **commit-message bodies**. | The names are user-chosen team-config values, not repo facts. They rot when the user re-names the team, and they expose what the maintainer was working on in private. | Replace with the role or shape: `the TL`, `an engineer`, `a QA member`, `the affected member`, `pending members`. |
 
 ### What CAN go in comments
 

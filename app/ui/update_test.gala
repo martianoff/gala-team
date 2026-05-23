@@ -1636,6 +1636,39 @@ func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T)
     return Eq(t2, m.RetryCount.Get("Felix").GetOrElse(0), 1)
 }
 
+// liveRespawnMember must rotate the SessionId AND clear
+// PendingClosures unconditionally. Without rotation the
+// hung session's poisoned jsonl gets reloaded on every
+// `--resume` (live observation: Lyra + Kael cycled 3 times
+// each between 05:43 and 06:21 without producing output);
+// without clearing PendingClosures the fresh subprocess's
+// first chunk is eaten by onChunk's stale-drop and the read
+// pump dies.
+func TestOnTick_LivenessSilence_RotatesSessionAndDrainsPendingClosures(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val seed = sampleModel()
+    val nowNanos     = int(time_utils.Now().UnixNanos())
+    val stuckBandAt  = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
+    val dispatchMsg  = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
+    val seeded = seed.Copy(
+        State             = Delegating(Pending = pending),
+        Statuses          = seed.Statuses.Put("Felix", StWorking()),
+        DeliveryStates    = seed.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = stuckBandAt, Attempt = 1)),
+        LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
+        SessionIds        = seed.SessionIds.Put("Felix", "STALE-FELIX-SID"),
+        PendingClosures   = seed.PendingClosures.Put("Felix", 2),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    // SessionIds[Felix] either absent (rotated by liveRespawnMember
+    // before ensureSession reused it) or — if ensureSession ran and
+    // minted a fresh UUID — different from the stale one.
+    val sid = m.SessionIds.Get("Felix").GetOrElse("")
+    val t1 = IsTrue(t, sid != "STALE-FELIX-SID")
+    // PendingClosures[Felix] must be 0 (cleared) so the fresh
+    // subprocess's first real chunk isn't eaten by the stale-drop.
+    return Eq(t1, m.PendingClosures.Get("Felix").GetOrElse(0), 0)
+}
+
 // Once the respawn budget is exhausted (RetryCount == MaxRetries
 // at the moment the heartbeat fires), the next silence escalation
 // genuinely abandons the member: status flips to StFailed and the

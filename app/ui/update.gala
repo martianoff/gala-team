@@ -423,11 +423,15 @@ func onTick(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (m3, batchAll(cmds.Append(watchdogCmd)))
 }
 
-// enforceStateWatchdog forces State → Idle when a non-terminal
-// state has been held past its ceiling. Bypasses the normal FSM
-// transition table — the whole point is "the FSM is stuck; route
-// it home unconditionally." Idle / Approval are excluded: the
-// user is the next event there.
+// enforceStateWatchdog forces State → Idle when an affected
+// member has been silent past the ceiling. "Silent" means no
+// chunks arrived for `threshold` seconds — measured against
+// LastChunkAt, NOT state dwell. State-dwell-based triggering
+// kills actively-producing turns that happen to span 5min;
+// silence-based triggering only catches genuine stalls. When no
+// chunk ever arrived (subprocess never spoke), falls back to
+// state-dwell. Idle / Approval are excluded: the user is the
+// next event there.
 func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cmd[AppMsg]] {
     val tag = stateTag(m.State)
     if tag == "Idle" || tag == "Approval" {
@@ -445,10 +449,6 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     if m.StateEnteredAt.UnixNanos() <= int64(0) {
         return (m, NoCmd[AppMsg]())
     }
-    val elapsedSec = (now.UnixNanos() - m.StateEnteredAt.UnixNanos()) / int64(1000000000)
-    if elapsedSec < threshold {
-        return (m, NoCmd[AppMsg]())
-    }
     val leadName = m.Team.Lead.Name
     val affected = m.State match {
         case TLThinking()    => ArrayOf(leadName)
@@ -458,6 +458,22 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         case QAGate(p)       => setToArray(p)
         case _               => EmptyArray[string]()
     }
+    // Silence trigger: time since the MOST recent chunk from any
+    // affected member. Falls back to state-dwell when no chunk has
+    // ever arrived (subprocess spawned but never spoke).
+    val mostRecentChunkAt = affected.FoldLeft(time_utils.UnixEpoch(), (best, name) =>
+        m.LastChunkAt.Get(name) match {
+            case None()    => best
+            case Some(at)  => if (at.UnixNanos() > best.UnixNanos()) at else best
+        }
+    )
+    val stateDwellSec = (now.UnixNanos() - m.StateEnteredAt.UnixNanos()) / int64(1000000000)
+    val silenceSec = if (mostRecentChunkAt.UnixNanos() <= int64(0)) stateDwellSec
+                     else                                            (now.UnixNanos() - mostRecentChunkAt.UnixNanos()) / int64(1000000000)
+    if silenceSec < threshold {
+        return (m, NoCmd[AppMsg]())
+    }
+    val elapsedSec = silenceSec
     // Clear PendingClosures after the kill: closeLiveSession bumps
     // it expecting a stale straggler, but a watchdog-killed
     // subprocess is already hung and won't emit one. Without the
@@ -485,19 +501,11 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     val reason = if (canAutoRetry) s"${baseReason} — rotating session and auto-retrying last prompt"
                  else                s"${baseReason} — rotating session, forcing recovery to Idle"
     val toast = mRotated.Toasts.PushError(reason, now, time_utils.Seconds(int64(10)))
-    // lastVisibleSec: seconds since the most recent chunk from any
-    // affected member; -1 when no chunk ever arrived. Distinguishes
-    // "model went silent mid-stream" from "subprocess never spoke."
-    val lastVisibleChunkAt = affected.FoldLeft(time_utils.UnixEpoch(), (best, name) =>
-        mRotated.LastChunkAt.Get(name) match {
-            case None()    => best
-            case Some(at)  => if (at.UnixNanos() > best.UnixNanos()) at else best
-        }
-    )
-    val lastVisibleSec = if (lastVisibleChunkAt.UnixNanos() <= int64(0)) int64(-1)
-                         else                                              (now.UnixNanos() - lastVisibleChunkAt.UnixNanos()) / int64(1000000000)
-    LogWatchdogDiag(tag, elapsedSec, affected.MkString(","), canAutoRetry, s"${lastVisibleSec}s")
-    LogFsmTransition(tag, "WatchdogExpired", s"elapsed=${elapsedSec}s auto_retry=${canAutoRetry} affected=${affected.MkString(",")} last_visible=${lastVisibleSec}s", "Idle")
+    // lastVisibleSec carries the "no chunk ever" signal (-1) for
+    // triage; silenceSec is what tripped the threshold.
+    val lastVisibleSec = if (mostRecentChunkAt.UnixNanos() <= int64(0)) int64(-1) else silenceSec
+    LogWatchdogDiag(tag, silenceSec, affected.MkString(","), canAutoRetry, s"${lastVisibleSec}s")
+    LogFsmTransition(tag, "WatchdogExpired", s"silence=${silenceSec}s state_dwell=${stateDwellSec}s auto_retry=${canAutoRetry} affected=${affected.MkString(",")} last_visible=${lastVisibleSec}s", "Idle")
     val withReset = affected.FoldLeft(mRotated, (acc, name) => setStatus(acc, name, StIdle()))
     val forced = withReset.Copy(
         State          = Idle(),

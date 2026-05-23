@@ -2011,6 +2011,26 @@ func TestStateWatchdog_TLThinking_BelowCeiling_StaysPut(t T) T {
     }
 }
 
+// Active session — StateEnteredAt is stale but LastChunkAt for the
+// affected member is recent — must NOT trip the watchdog. The
+// watchdog trigger is silence (time since last chunk), not state
+// dwell, so a productive turn that happens to span the threshold
+// keeps running.
+func TestStateWatchdog_TLThinking_RecentLastChunkAt_DoesNotFire(t T) T {
+    val seed = sampleModel()
+    val leadName = seed.Team.Lead.Name
+    val seeded = seed.Copy(
+        State          = TLThinking(),
+        StateEnteredAt = staleStateEnteredAt(),
+        LastChunkAt    = seed.LastChunkAt.Put(leadName, time_utils.Now()),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    return m.State match {
+        case TLThinking() => IsTrue(t, true)
+        case _            => IsTrue(t, false)
+    }
+}
+
 // (TestMerged_ResetsAllMembersToIdle removed: merge is no longer an
 // app action, so there is no merge event to reset statuses on. Status
 // reset on a fresh user prompt is covered elsewhere.)

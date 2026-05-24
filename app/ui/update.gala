@@ -2253,7 +2253,22 @@ func closeLiveSession(m AppModel, name string) AppModel {
 // after responding, so there's never a live process to reuse —
 // every prompt is a fresh subprocess threading conversation
 // context across turns via the per-member session id.
+//
+// Test seam: when SpawnDisabledForTest() is true, the spawn is
+// skipped — SessionIds + LastChunkAt are updated as if the spawn
+// succeeded, but Sessions is left untouched. Downstream
+// sendAndPumpCmd returns NoCmd for any member without a Sessions
+// entry, so the test sees a clean "no real subprocess" Update
+// without changing any production code path.
 func ensureSession(m AppModel, member Member) Either[string, AppModel] {
+    if SpawnDisabledForTest() {
+        val existingSid = m.SessionIds.Get(member.Name)
+        val sid = existingSid.GetOrElse(NewSessionId())
+        return Right[string, AppModel](m.Copy(
+            SessionIds  = m.SessionIds.Put(member.Name, sid),
+            LastChunkAt = m.LastChunkAt.Put(member.Name, time_utils.Now()),
+        ))
+    }
     return EnsureWorkspace(m.Project, member, m.Policy.WorkspaceMode) match {
         case Failure(e)  => Left[string, AppModel](s"workspace ${member.Name}: ${e.Error()}")
         case Success(ws) => {

@@ -509,6 +509,16 @@ func TestE2EProperty_LooksLikeStreamJson_OnlyTrueForEnvelopes(t T) T {
         "{\"type\":\"assistant\",\"message\":{\"content\":[]}}",
         "{\"type\":\"user\",\"message\":{}}",
         "{\"type\":\"result\",\"is_error\":false}",
+        // Multi-envelope: claude occasionally dumps two newline-joined
+        // stream-json lines into one stderr write. First line still
+        // parses; the second-line tail used to break the strict
+        // decoder and leak raw JSON into LastError.
+        "{\"type\":\"user\",\"message\":{}}\n{\"type\":\"user\",\"message\":{}}",
+        // Truncated mid-envelope (claude write got cut off). The bytes
+        // are still recognisably a stream-json envelope; the prefix
+        // heuristic catches it so the user sees the friendly tag
+        // instead of the raw JSON.
+        "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01abc",
     )
     val prose = ArrayOf[string](
         "",
@@ -516,6 +526,11 @@ func TestE2EProperty_LooksLikeStreamJson_OnlyTrueForEnvelopes(t T) T {
         "{ malformed json",
         "Failed to authenticate. API Error: 401",
         "{\"not_type\":\"x\"}",
+        // Important: a plain object that doesn't start with
+        // {"type":"..." must NOT match — otherwise we'd suppress
+        // legitimate JSON-looking content like config blocks the
+        // user pasted.
+        "{\"foo\":\"bar\"}",
     )
     val allEnvelopesTrue = envelopes.Map((s) => looksLikeStreamJson(s)).FoldLeft(true, (acc, b) => acc && b)
     val allProseFalse    = prose.Map((s) => !looksLikeStreamJson(s)).FoldLeft(true, (acc, b) => acc && b)

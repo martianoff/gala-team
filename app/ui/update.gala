@@ -4655,10 +4655,34 @@ val streamJsonHeaderCodec = json.Codec[streamJsonHeader](json.SnakeCase())
 func looksLikeStreamJson(s string) bool {
     val trimmed = strings.TrimSpace(s)
     if !strings.HasPrefix(trimmed, "{") { return false }
-    return streamJsonHeaderCodec.Decode(trimmed) match {
+    // Fast path: full decode. Works for clean single envelopes.
+    val decoded = streamJsonHeaderCodec.Decode(trimmed) match {
         case Success(h) => h.Type != ""
         case Failure(_) => false
     }
+    if decoded { return true }
+    // Decode failed. Two common reasons claude-code dumps a string
+    // starting with `{` but the codec rejects: (a) the payload is a
+    // multi-envelope newline-joined chunk (only the first object
+    // parses cleanly), (b) the payload is truncated mid-object. In
+    // both cases the leading bytes are recognisably an envelope —
+    // catch them so the user sees the friendly tag instead of the
+    // raw bytes leaking into LastError / toasts.
+    //
+    // Try the first line in isolation — handles the multi-envelope
+    // dump shape.
+    val parts = strings.SplitN(trimmed, "\n", 2)
+    val firstLineDecoded = if (len(parts) == 0) false
+                           else streamJsonHeaderCodec.Decode(strings.TrimSpace(parts[0])) match {
+                               case Success(h) => h.Type != ""
+                               case Failure(_) => false
+                           }
+    if firstLineDecoded { return true }
+    // Fallback: leading-bytes substring check. claude's envelopes
+    // always carry `"type":"<kind>"` early in the object, so a string
+    // that starts with `{"type":"` is almost certainly a (possibly
+    // truncated) envelope even when the JSON tail is malformed.
+    return strings.HasPrefix(trimmed, "{\"type\":\"")
 }
 
 // ClaudeChunk is the parsed shape of one stream-json line.

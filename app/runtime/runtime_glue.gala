@@ -98,6 +98,20 @@ func SpawnSession(
 ) Try[MemberSession] =
     SpawnSessionWith(NewClaudeProcessTransport(), proj, m, workspace, dangerouslySkipPermissions, sessionId, isNewSession)
 
+// spawnDisabledForTest is the test seam ensureSession consults to
+// skip the real subprocess spawn. Production code never touches this;
+// tests call SetSpawnDisabledForTest(true) in setup to make
+// KeySubmit / respawnMember / heartbeat respawn paths short-circuit.
+// Sessions stays unset → sendAndPumpCmd returns NoCmd → no real
+// claude.exe is launched.
+var spawnDisabledForTest = false
+
+func SpawnDisabledForTest() bool = spawnDisabledForTest
+
+func SetSpawnDisabledForTest(b bool) {
+    spawnDisabledForTest = b
+}
+
 // SpawnSessionWith is the transport injection point: a future remote
 // agent supplies a different AgentTransport and nothing else in the
 // orchestrator changes. `proj` is unused today but kept to mirror

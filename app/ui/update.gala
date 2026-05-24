@@ -723,12 +723,18 @@ func consumeDeliveryAction(
 //      dispatches over a long stretch).
 func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val lead = m.Team.Lead
+    // Preserve LastDispatchedMsg across the TL nudge: the pending
+    // dispatches are still semantically active (the very reason for
+    // the nudge), and if a member's session is rotated by a later
+    // watchdog/heartbeat, respawnMember consults LastDispatchedMsg to
+    // replay the original task. Clearing it here made the rotated
+    // member wake up with only the generic "Continue your previous
+    // task." rescue prompt — they had no idea what task to resume.
     val mClosed = closeLiveSession(m, lead.Name).Copy(
         TurnBuffer        = "",
         ConsultsFired     = 0,
         Ledger            = protocol.EmptyLedger(),
         DeliveryStates    = EmptyHashMap[string, protocol.DeliveryState](),
-        LastDispatchedMsg = EmptyHashMap[string, protocol.Message](),
     )
     return ensureSession(mClosed, lead) match {
         case Left(err) => {
@@ -3580,13 +3586,19 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
             // claude-code reloads the same hung jsonl.
             val mDrained = mClosed.Copy(PendingClosures = mClosed.PendingClosures.Remove(name))
             val oldSid = mDrained.SessionIds.Get(name).GetOrElse("")
-            LogSessionRotated(name, "heartbeat_respawn", oldSid, "")
             val mPrepared = mDrained.Copy(SessionIds = mDrained.SessionIds.Remove(name))
             val reset = resetMemberForRespawn(mPrepared, name)
             val errMsg = s"${name}: silent past heartbeat — rotating session, respawn ${attempt}/${max}"
             val recovering = reset.Copy(LastError = Some(errMsg))
             val withStatus = setStatus(recovering, name, StRecovering(attempt, max))
-            return respawnMember(withStatus, name)
+            val (afterRespawn, cmd) = respawnMember(withStatus, name)
+            // Log AFTER respawnMember so new_sid reflects the freshly
+            // minted SessionId — logging before ensureSession ran always
+            // produced new_sid="" and broke log-replay correlation
+            // (rotation_event -> new_session_id).
+            val newSid = afterRespawn.SessionIds.Get(name).GetOrElse("")
+            LogSessionRotated(name, "heartbeat_respawn", oldSid, newSid)
+            return (afterRespawn, cmd)
         }
     }
 }
@@ -3695,9 +3707,16 @@ func respawnMember(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
                 return (m.Copy(LastError = Some(s"respawn ${name}: ${err}")), NoCmd[AppMsg]())
             }
             case Right(m1)  => {
+                // After rotation the new claude session has no prior
+                // jsonl — meta-framing the dispatch body ("[Your session
+                // was reset...] <body>") made the model treat the body
+                // as historical context and respond "I don't have
+                // context on a previous task." Send the body verbatim
+                // instead: it IS the task to perform now, on a fresh
+                // session, with no inherited state.
                 val rescue = if (wasRotated)
                     m1.LastDispatchedMsg.Get(name) match {
-                        case Some(msg) => s"[Your session was reset due to a timeout. Re-running the original task:]\n\n${msg.Body}"
+                        case Some(msg) => msg.Body
                         case None()    => "Continue your previous task."
                     }
                 else

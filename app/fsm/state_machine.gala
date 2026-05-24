@@ -197,9 +197,17 @@ func onQAGate(pending HashSet[string], event Event, ctx TransitionContext) AppSt
     memberCompletion(event, pending, ctx, false) match {
         case Some(s) => s
         case None()  => event match {
-            case QADone()     => TLReview()
-            case TLDone(dirs) => afterTLDoneInQaGate(dirs, pending, ctx)
-            case _            => QAGate(Pending = pending)
+            case QADone()                  => TLReview()
+            case TLDone(dirs)              => afterTLDoneInQaGate(dirs, pending, ctx)
+            // Mirror onDelegating: a stuck/help-requesting pending
+            // member routes through the lead. Without this, the
+            // heartbeat re-fired MemberStuck against the same QA
+            // member every cycle (~2 min) and the catch-all dropped
+            // it back to QAGate — observable as a QAGate→QAGate
+            // self-loop livelock with a fresh TL nudge each round.
+            case MemberStuck(_)            => TLNudging(Reason = "stuck", Pending = pending)
+            case MemberHelpRequested(_, _) => TLNudging(Reason = "help", Pending = pending)
+            case _                         => QAGate(Pending = pending)
         }
     }
 

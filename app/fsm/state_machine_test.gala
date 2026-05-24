@@ -338,6 +338,28 @@ func TestDelegating_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
     }
 }
 
+// Same shape from QAGate: a stuck QA member must route through the
+// lead, NOT self-loop. Without this, the heartbeat re-fires
+// MemberStuck every cycle (~2 min) — live audit caught this as a
+// QAGate→QAGate livelock with a fresh TL nudge each round.
+func TestQAGate_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
+    val pending = EmptyHashSet[string]().Add("Sable").Add("Theo")
+    val s = Transition(QAGate(Pending = pending), MemberStuck(MemberName = "Sable"), ctxWithQA(true))
+    return s match {
+        case TLNudging(reason, p) => IsTrue(t, reason == "stuck" && p.Size() == 2)
+        case _                    => IsTrue(t, false)
+    }
+}
+
+func TestQAGate_OnMemberHelpRequested_CarriesPendingIntoTLNudging(t T) T {
+    val pending = EmptyHashSet[string]().Add("Sable")
+    val s = Transition(QAGate(Pending = pending), MemberHelpRequested(MemberName = "Sable", Question = "What's the contract?"), ctxWithQA(true))
+    return s match {
+        case TLNudging(reason, p) => IsTrue(t, reason == "help" && p.Contains("Sable"))
+        case _                    => IsTrue(t, false)
+    }
+}
+
 // A prose-only nudge resolution drops the FSM to Idle even when
 // members are still pending. The carry-back-to-Delegating(pending)
 // fallback was retired with the heartbeat-ladder rip-out: a still-

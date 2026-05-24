@@ -330,6 +330,107 @@ func TestE2E_DispatchThenNudgeThenRotation_ReplaysOriginalBody(t T) T {
 }
 
 // ============================================================================
+// No-status-directive nudge: a member's session ending without
+// @finished / @help / @blocked must NOT silently drain the pending
+// set. Live audits saw rotated members reply with plain prose ("I
+// don't have context...") and exit; the prior orchestrator marked
+// them MemberDone with empty body. Now we nudge and bump RetryCount;
+// after maxRetries escalations the member lands in StFailed.
+// ============================================================================
+
+// Plain-prose EOF: member's buffer holds only chat — no directive,
+// no malformation. FSM must stay in Delegating with Felix still
+// pending; status flips to StWorking (the nudge respawn fired).
+func TestE2E_SessionFailed_NoStatusDirective_NudgesNotMemberDone(t T) T {
+    SetSpawnDisabledForTest(true)
+    defer SetSpawnDisabledForTest(false)
+    val base = e2eModel()
+    val seeded = base.Copy(
+        State         = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        MemberBuffers = base.MemberBuffers.Put("Felix", "I'm not sure what you'd like me to work on."),
+    )
+    val (m, _) = Update(seeded, SessionFailed(Member = "Felix", ErrText = "EOF"))
+    val stillPending = m.State match {
+        case Delegating(p) => p.Contains("Felix")
+        case _             => false
+    }
+    val nudgeBumped = m.RetryCount.Get("Felix").GetOrElse(0) == 1
+    val noMemberDoneBody = !m.MemberDoneBodies.Contains("Felix")
+    val t1 = IsTrue(t,  stillPending)
+    val t2 = IsTrue(t1, nudgeBumped)
+    return IsTrue(t2, noMemberDoneBody)
+}
+
+// Empty-buffer EOF: member spawned, never spoke, then session ended.
+// Same shape as above — the member did NOT complete the work; nudge
+// them.
+func TestE2E_SessionFailed_EmptyBuffer_NudgesNotMemberDone(t T) T {
+    SetSpawnDisabledForTest(true)
+    defer SetSpawnDisabledForTest(false)
+    val base = e2eModel()
+    val seeded = base.Copy(
+        State = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+    )
+    val (m, _) = Update(seeded, SessionFailed(Member = "Felix", ErrText = "EOF"))
+    val stillPending = m.State match {
+        case Delegating(p) => p.Contains("Felix")
+        case _             => false
+    }
+    return IsTrue(t, stillPending)
+}
+
+// After maxRetries no-directive nudges, the member is StFailed and
+// the FSM no longer wastes cycles re-nudging. State stays Delegating
+// (the TL still needs to learn about the failure via a relay).
+func TestE2E_SessionFailed_NoStatusDirective_PastMaxNudges_Escalates(t T) T {
+    SetSpawnDisabledForTest(true)
+    defer SetSpawnDisabledForTest(false)
+    val base = e2eModel()
+    val maxNudges = maxAutoRetriesOf(base)
+    val seeded = base.Copy(
+        State         = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        MemberBuffers = base.MemberBuffers.Put("Felix", "still no idea"),
+        // Already exhausted the nudge budget — next EOF must escalate.
+        RetryCount    = base.RetryCount.Put("Felix", maxNudges),
+    )
+    val (m, _) = Update(seeded, SessionFailed(Member = "Felix", ErrText = "EOF"))
+    val felixFailed = m.Statuses.Get("Felix") match {
+        case Some(StFailed(_)) => true
+        case _                 => false
+    }
+    val noMemberDoneBody = !m.MemberDoneBodies.Contains("Felix")
+    val t1 = IsTrue(t,  felixFailed)
+    return IsTrue(t1, noMemberDoneBody)
+}
+
+// Regression for the EOF-after-@finished path: when MemberDoneBodies
+// already has an entry (finaliseMemberDone fired inline from chunk
+// parsing), the trailing EOF must remain a no-op — NOT a nudge.
+func TestE2E_SessionFailed_AlreadyFiredMemberDone_NoNudge(t T) T {
+    SetSpawnDisabledForTest(true)
+    defer SetSpawnDisabledForTest(false)
+    val base = e2eModel()
+    val seeded = base.Copy(
+        State            = TLReview(),
+        MemberDoneBodies = base.MemberDoneBodies.Put("Felix", "shipped"),
+        Statuses         = base.Statuses.Put("Felix", StWorking()),
+    )
+    val (m, _) = Update(seeded, SessionFailed(Member = "Felix", ErrText = "EOF"))
+    val stillTLReview = m.State match {
+        case TLReview() => true
+        case _          => false
+    }
+    val statusIdle = m.Statuses.Get("Felix") match {
+        case Some(StIdle()) => true
+        case _              => false
+    }
+    val noNudgeBump = m.RetryCount.Get("Felix").GetOrElse(0) == 0
+    val t1 = IsTrue(t,  stillTLReview)
+    val t2 = IsTrue(t1, statusIdle)
+    return IsTrue(t2, noNudgeBump)
+}
+
+// ============================================================================
 // FSM property tests — global invariants over the (state, event) matrix.
 // These avoid KeySubmit because that path synchronously spawns a real
 // claude subprocess via ensureSession. The onSubmit/KeySubmit-related

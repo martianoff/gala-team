@@ -3515,10 +3515,34 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         if alreadyFired {
             return (setStatus(cleaned, name, StIdle()), NoCmd[AppMsg]())
         }
-        val body = cleaned.MemberDoneBodies.Get(name).GetOrElse("")
-        val nextState = transitionLogged(cleaned.State, MemberDone(MemberName = name, Body = body), transitionContext(cleaned))
-        // Save AFTER the transition; see persistAppModel.
-        return (setStatus(persistAppModel(cleaned.Copy(State = nextState)), name, StIdle()), NoCmd[AppMsg]())
+        // No status directive case: the member's turn ended without
+        // emitting @finished / @help / @blocked AND the buffer didn't
+        // even look malformed (no directive fingerprint). Previously
+        // we fired MemberDone with body="", silently draining the
+        // pending set as if the work was complete. Live audits caught
+        // this: after a heartbeat-rotated respawn the member said
+        // "I don't have context on a previous task." and exited cleanly
+        // — the orchestrator marked them done, the TL never knew, the
+        // FSM cascaded forward as if engineering had finished. A member
+        // is NOT done until they say so; nudge them to emit a status
+        // directive instead. After maxRetries nudges the member is
+        // escalated to StFailed so the user / TL can intervene.
+        val maxNudges = maxAutoRetriesOf(cleaned)
+        val nudges    = cleaned.RetryCount.Get(name).GetOrElse(0)
+        if nudges >= maxNudges {
+            val reason = s"${name}: turn ended without @finished / @help / @blocked after ${nudges} nudges"
+            val withFailure = setStatus(
+                cleaned.Copy(LastError = Some(reason)),
+                name,
+                StFailed(Reason = "no status directive after repeated nudges"),
+            )
+            return (withFailure, NoCmd[AppMsg]())
+        }
+        val bumped = cleaned.Copy(RetryCount = cleaned.RetryCount.Put(name, nudges + 1))
+        return mem match {
+            case None()   => (bumped, NoCmd[AppMsg]())
+            case Some(mm) => sendMemberNudge(bumped, mm, "Your turn ended without emitting any status directive. If your work is complete, emit @finished <one-line summary> @end. If you can't proceed, emit @blocked <reason> @end. If you need clarification, emit @help <question> @end. Plain prose alone is not enough — the orchestrator can't advance the FSM without a directive.")
+        }
     }
     val maxRetries = maxAutoRetriesOf(m)
     val retries = m.RetryCount.Get(name).GetOrElse(0)

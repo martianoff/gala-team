@@ -277,6 +277,58 @@ func TestE2E_RespawnAfterRotation_PreservesDispatchBody(t T) T {
     return IsTrue(t, bodyPreserved)
 }
 
+// spawnTLNudge fires when the TL needs to address stuck members
+// (heartbeat aggregate nudge, malformed dispatch, etc). It MUST NOT
+// wipe LastDispatchedMsg — those entries are how respawnMember
+// reconstructs the original task when a downstream watchdog rotates
+// a still-pending member. Live audit showed rotated members waking
+// up with no context after a TL nudge had cleared the map.
+func TestE2E_SpawnTLNudge_PreservesLastDispatchedMsg(t T) T {
+    SetSpawnDisabledForTest(true)
+    defer SetSpawnDisabledForTest(false)
+    val base = e2eModel()
+    val dispatchBody = "Refactor the foo module; tests must pass."
+    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), dispatchBody, 0)
+    val seeded = base.Copy(
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
+    )
+    val (m, _) = spawnTLNudge(seeded, "stuck-batch", "Felix has been silent")
+    val felixPreserved = m.LastDispatchedMsg.Get("Felix") match {
+        case Some(msg) => msg.Body == dispatchBody
+        case None()    => false
+    }
+    return IsTrue(t, felixPreserved)
+}
+
+// End-to-end: dispatch → TL nudge (which used to wipe dispatch) →
+// rotation → assert respawnMember can still find the original body
+// for the rescue prompt. The prior bug shape was: silent member →
+// fireAggregateNudge → spawnTLNudge clears LastDispatchedMsg →
+// watchdog rotates member → respawnMember's LastDispatchedMsg.Get(name)
+// returns None → fallback rescue "Continue your previous task." sent
+// → fresh claude session has zero context → "I don't have context."
+func TestE2E_DispatchThenNudgeThenRotation_ReplaysOriginalBody(t T) T {
+    SetSpawnDisabledForTest(true)
+    defer SetSpawnDisabledForTest(false)
+    val base = e2eModel()
+    val dispatchBody = "Refactor the foo module; tests must pass."
+    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), dispatchBody, 0)
+    val seeded = base.Copy(
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
+    )
+    val (afterNudge, _) = spawnTLNudge(seeded, "stuck-batch", "Felix has been silent")
+    // Now simulate the rotation: drop Felix's SessionId.
+    val rotated = afterNudge.Copy(SessionIds = afterNudge.SessionIds.Remove("Felix"))
+    val (afterRespawn, _) = respawnMember(rotated, "Felix")
+    val bodyStillThere = afterRespawn.LastDispatchedMsg.Get("Felix") match {
+        case Some(msg) => msg.Body == dispatchBody
+        case None()    => false
+    }
+    return IsTrue(t, bodyStillThere)
+}
+
 // ============================================================================
 // FSM property tests — global invariants over the (state, event) matrix.
 // These avoid KeySubmit because that path synchronously spawns a real

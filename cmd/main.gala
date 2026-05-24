@@ -377,8 +377,12 @@ func scanStaleWorktrees(proj Project, tm Team) {
     val wtDir = filepath.Join(proj.Repo, ".gala_team", "worktrees")
     val entries = fs.ReadDir(wtDir).GetOrElse(EmptyArray[fs.FileInfo]())
     val memberNames = tm.Members.Map((m) => m.Name)
+    // `_lead` is the TL's special worktree path, NOT a member name. The
+    // onboarding workspace resolver hard-codes it for every TL
+    // regardless of the lead's actual name (see onboarding.WorkspacePathFor),
+    // so it always exists on disk and would always read as stale here.
     entries.ForEach((info) => {
-        if info.IsDir && !memberNames.Contains(info.Name) {
+        if info.IsDir && info.Name != "_lead" && !memberNames.Contains(info.Name) {
             runtime.LogStaleWorktree(info.Name, filepath.Join(wtDir, info.Name))
         }
     })

@@ -4,6 +4,7 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/directive"
+    . "github.com/martianoff/gala_team/app/util"
 )
 
 // ============================================================================
@@ -261,7 +262,7 @@ func afterTLDone(dirs Array[Directive], ctx TransitionContext) AppState = firstS
     case None()     => {
         val targets = directiveTargets(dirs)
         if (targets.IsEmpty()) Idle()
-        else                   Delegating(Pending = arrayToHashSet(targets))
+        else                   Delegating(Pending = ArrayToHashSet(targets))
     }
 }
 
@@ -281,7 +282,7 @@ func afterMemberDone(
         return QAGate(Pending = rest)
     }
     if inDelegating && ctx.QARequired && !ctx.QAMembers.IsEmpty() {
-        return QAGate(Pending = arrayToHashSet(ctx.QAMembers))
+        return QAGate(Pending = ArrayToHashSet(ctx.QAMembers))
     }
     return TLReview()
 }
@@ -307,5 +308,3 @@ func directiveTargets(dirs Array[Directive]) Array[string] =
         case Dispatch(target, _) => target
     })
 
-func arrayToHashSet(xs Array[string]) HashSet[string] =
-    xs.FoldLeft(EmptyHashSet[string](), (acc, s) => acc.Add(s))

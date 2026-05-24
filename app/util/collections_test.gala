@@ -1,0 +1,111 @@
+package util
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+// ---------------------------------------------------------------------------
+// ArrayToHashSet
+// ---------------------------------------------------------------------------
+
+func TestArrayToHashSet_EmptyInts(t T) T {
+    val s = ArrayToHashSet(EmptyArray[int]())
+    return IsTrue(t, s.IsEmpty())
+}
+
+func TestArrayToHashSet_SingleInt(t T) T {
+    val s = ArrayToHashSet(ArrayOf(42))
+    val t1 = Eq(t, s.Size(), 1)
+    return IsTrue(t1, s.Contains(42))
+}
+
+func TestArrayToHashSet_DedupesInts(t T) T {
+    val s = ArrayToHashSet(ArrayOf(1, 2, 2, 3, 3, 3))
+    val t1 = Eq(t, s.Size(), 3)
+    val t2 = IsTrue(t1, s.Contains(1))
+    val t3 = IsTrue(t2, s.Contains(2))
+    return IsTrue(t3, s.Contains(3))
+}
+
+func TestArrayToHashSet_EmptyStrings(t T) T {
+    val s = ArrayToHashSet(EmptyArray[string]())
+    return IsTrue(t, s.IsEmpty())
+}
+
+func TestArrayToHashSet_SingleString(t T) T {
+    val s = ArrayToHashSet(ArrayOf("Felix"))
+    val t1 = Eq(t, s.Size(), 1)
+    return IsTrue(t1, s.Contains("Felix"))
+}
+
+func TestArrayToHashSet_DedupesStrings(t T) T {
+    val s = ArrayToHashSet(ArrayOf("a", "b", "a", "c", "b"))
+    val t1 = Eq(t, s.Size(), 3)
+    val t2 = IsTrue(t1, s.Contains("a"))
+    val t3 = IsTrue(t2, s.Contains("b"))
+    return IsTrue(t3, s.Contains("c"))
+}
+
+// ---------------------------------------------------------------------------
+// SetToArray
+// ---------------------------------------------------------------------------
+
+func TestSetToArray_EmptyInts(t T) T {
+    val arr = SetToArray(EmptyHashSet[int]())
+    return IsTrue(t, arr.IsEmpty())
+}
+
+func TestSetToArray_SingleInt(t T) T {
+    val arr = SetToArray(EmptyHashSet[int]().Add(7))
+    val t1 = Eq(t, arr.Length(), 1)
+    return Eq(t1, arr.Get(0), 7)
+}
+
+func TestSetToArray_EmptyStrings(t T) T {
+    val arr = SetToArray(EmptyHashSet[string]())
+    return IsTrue(t, arr.IsEmpty())
+}
+
+func TestSetToArray_SingleString(t T) T {
+    val arr = SetToArray(EmptyHashSet[string]().Add("Felix"))
+    val t1 = Eq(t, arr.Length(), 1)
+    return Eq(t1, arr.Get(0), "Felix")
+}
+
+// HashSet iteration order is unspecified, so compare the sorted
+// array — the contract is "every element comes back once", not "in
+// the order they were inserted".
+func TestSetToArray_MultiStringsOrderTolerant(t T) T {
+    val set = EmptyHashSet[string]().Add("c").Add("a").Add("b")
+    val arr = SetToArray(set)
+    val sorted = arr.Sorted()
+    val t1 = Eq(t, sorted.Length(), 3)
+    val t2 = Eq(t1, sorted.Get(0), "a")
+    val t3 = Eq(t2, sorted.Get(1), "b")
+    return Eq(t3, sorted.Get(2), "c")
+}
+
+func TestSetToArray_MultiIntsOrderTolerant(t T) T {
+    val set = EmptyHashSet[int]().Add(3).Add(1).Add(2)
+    val sorted = SetToArray(set).Sorted()
+    val t1 = Eq(t, sorted.Length(), 3)
+    val t2 = Eq(t1, sorted.Get(0), 1)
+    val t3 = Eq(t2, sorted.Get(1), 2)
+    return Eq(t3, sorted.Get(2), 3)
+}
+
+// ---------------------------------------------------------------------------
+// Round-trip
+// ---------------------------------------------------------------------------
+
+func TestRoundTrip_StringsDedupedAndPreservedAsSet(t T) T {
+    val src = ArrayOf("Felix", "Theo", "Felix", "Iris")
+    val s = ArrayToHashSet(src)
+    val out = SetToArray(s).Sorted()
+    val t1 = Eq(t, out.Length(), 3)
+    val t2 = Eq(t1, out.Get(0), "Felix")
+    val t3 = Eq(t2, out.Get(1), "Iris")
+    return Eq(t3, out.Get(2), "Theo")
+}

@@ -1,0 +1,25 @@
+package util
+
+import (
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// app/util — generic collection helpers shared across packages.
+//
+// Cross-package callers can't reach unexported (lowercase) helpers, so the
+// same two-line folds were being redefined in each package that needed
+// them. Living here once keeps the FSM's pending-set bookkeeping and the
+// UI's snapshot codec in lockstep.
+// ============================================================================
+
+// ArrayToHashSet folds an array into a HashSet, deduplicating in O(n).
+// Element order in the source array is irrelevant; HashSet has none.
+func ArrayToHashSet[T comparable](xs Array[T]) HashSet[T] =
+    xs.FoldLeft(EmptyHashSet[T](), (acc, x) => acc.Add(x))
+
+// SetToArray drains a HashSet into an Array via Append. Element order
+// reflects iteration order of the underlying set and is therefore
+// unspecified — callers must not depend on it.
+func SetToArray[T comparable](s HashSet[T]) Array[T] =
+    s.FoldLeft(EmptyArray[T](), (a, x) => a.Append(x))

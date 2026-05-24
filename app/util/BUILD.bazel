@@ -1,0 +1,22 @@
+load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+
+gala_library(
+    name = "util",
+    srcs = ["collections.gala"],
+    importpath = "github.com/martianoff/gala_team/app/util",
+    deps = [
+        "@gala//collection_immutable",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+gala_go_test(
+    name = "collections_test",
+    srcs = ["collections_test.gala"],
+    pkg = "util",
+    lib_srcs = ["collections.gala"],
+    deps = [
+        ":util",
+        "@gala//collection_immutable",
+    ],
+)

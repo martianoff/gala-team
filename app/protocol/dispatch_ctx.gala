@@ -1,0 +1,60 @@
+package protocol
+
+import (
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// app/protocol/dispatch_ctx — per-orchestration-cycle context.
+//
+// Carries every piece of per-member state that is meaningful ONLY
+// while members are actively expected to produce output: while the
+// orchestrator is in Delegating (engineers working), QAGate (QA
+// reviewing), or TLNudging (lead handling stuck members mid-cycle).
+//
+// The struct is attached to those three AppState cases. Other states
+// (Idle / TLThinking / TLReview / Approval) structurally cannot
+// access these fields — the per-member maps live on the case class
+// itself, not on AppModel. The compiler now refuses to compile
+// "heartbeat tick a member while in TLReview" or "wipe pending
+// dispatches in spawnTLNudge" — the field doesn't exist on the
+// active AppState's case.
+//
+// Phase 1 fields (this commit):
+//   - Pending             : whose turn we're still waiting on
+//   - DeliveryStates      : protocol's per-member silence-/stuck-/abandon ladder
+//   - LastDispatchedMsg   : the dispatch body used for redelivery + rotation rescue
+//   - PendingClosures     : stale-event drop counter for post-respawn EOFs
+//   - RetryCount          : crash / nudge retry budget per member
+//
+// Phase 2 (next commit) folds in: MemberBuffers, MemberJsonBuf,
+// MemberDirectivesFired, MemberDoneBodies, MemberBlockedReasons,
+// PostPromptSent, TurnVisibleChunks, SyntheticOnlyChunks. Phase 3
+// folds in Sessions / SessionIds / LastChunkAt.
+// ============================================================================
+struct DispatchCtx(
+    Pending           HashSet[string],
+    DeliveryStates    HashMap[string, DeliveryState],
+    LastDispatchedMsg HashMap[string, Message],
+    PendingClosures   HashMap[string, int],
+    RetryCount        HashMap[string, int],
+)
+
+// EmptyDispatchCtx is the zero value used when transitioning INTO
+// Delegating / QAGate / TLNudging from a state that did not own a
+// dispatch cycle yet. Callers that already have a ctx (e.g. from a
+// prior Delegating) should thread that through unchanged, NOT use
+// this — otherwise the pending set and delivery ladder reset
+// silently.
+func EmptyDispatchCtx() DispatchCtx = DispatchCtx(
+    Pending           = EmptyHashSet[string](),
+    DeliveryStates    = EmptyHashMap[string, DeliveryState](),
+    LastDispatchedMsg = EmptyHashMap[string, Message](),
+    PendingClosures   = EmptyHashMap[string, int](),
+    RetryCount        = EmptyHashMap[string, int](),
+)
+
+// WithPending returns a fresh ctx with the pending set replaced.
+// Used by FSM transitions that drain a member from pending.
+func (ctx DispatchCtx) WithPending(pending HashSet[string]) DispatchCtx =
+    ctx.Copy(Pending = pending)

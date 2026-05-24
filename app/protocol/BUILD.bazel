@@ -5,6 +5,7 @@ gala_library(
     srcs = [
         "decode.gala",
         "delivery.gala",
+        "dispatch_ctx.gala",
         "message.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/protocol",
@@ -30,6 +31,7 @@ gala_go_test(
     lib_srcs = [
         "decode.gala",
         "delivery.gala",
+        "dispatch_ctx.gala",
         "message.gala",
     ],
     deps = [

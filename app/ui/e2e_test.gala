@@ -330,6 +330,85 @@ func TestE2E_DispatchThenNudgeThenRotation_ReplaysOriginalBody(t T) T {
 }
 
 // ============================================================================
+// Heartbeat must NOT tick member liveness outside Delegating/QAGate.
+// Live audit caught this as a TLReview self-loop livelock: every ~2
+// minutes the heartbeat re-fired MemberStuck(<silent member>) from
+// TLReview → TLReview, AND spawned a fresh TL nudge each time —
+// clobbering the lead's actual review turn.
+// ============================================================================
+
+// TLReview state with a stale DeliveryState entry for a non-pending
+// member: heartbeat must be a no-op. State must stay TLReview, no
+// FSM transition fires.
+func TestE2E_Heartbeat_InTLReview_NoMemberStuckRefires(t T) T {
+    SetSpawnDisabledForTest(true)
+    defer SetSpawnDisabledForTest(false)
+    val base = e2eModel()
+    val staleNanos = int(base.NowAt.UnixNanos()) - int(time_utils.Seconds(int64(600)).ToNanos())
+    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), "old task", 0)
+    val seeded = base.Copy(
+        State             = TLReview(),
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = staleNanos, Attempt = 1)),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    return m.State match {
+        case TLReview() => IsTrue(t, true)
+        case _          => IsTrue(t, false)
+    }
+}
+
+// Same for Idle: the user is the next event, no member should be
+// nudged regardless of how stale their delivery state is.
+func TestE2E_Heartbeat_InIdle_NoMemberStuckRefires(t T) T {
+    SetSpawnDisabledForTest(true)
+    defer SetSpawnDisabledForTest(false)
+    val base = e2eModel()
+    val staleNanos = int(base.NowAt.UnixNanos()) - int(time_utils.Seconds(int64(600)).ToNanos())
+    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), "old task", 0)
+    val seeded = base.Copy(
+        State             = Idle(),
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = staleNanos, Attempt = 1)),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    return IsTrue(t, stateIsIdle(m))
+}
+
+// Delegating is the canonical active state — heartbeat MUST tick
+// here (regression in case the skip logic accidentally over-broadens).
+// Seed: dispatch in the Stuck band (120-300s old) AND retry budget
+// already spent (Attempt > MaxRetries=2) so escalate() returns
+// IssueNudge instead of Redeliver. AggregateNudges then fires
+// MemberStuck → TLNudging(reason="stuck", ...).
+func TestE2E_Heartbeat_InDelegating_StillFiresMemberStuck(t T) T {
+    SetSpawnDisabledForTest(true)
+    defer SetSpawnDisabledForTest(false)
+    val base = e2eModel()
+    val staleNanos = int(base.NowAt.UnixNanos()) - int(time_utils.Seconds(int64(200)).ToNanos())
+    val dispatchMsg = protocol.WithAttempt(
+        protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), "old task", 0),
+        3,  // > MaxRetries=2
+    )
+    val seeded = base.Copy(
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        Statuses          = base.Statuses.Put("Felix", StWorking()),
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = staleNanos, Attempt = 3)),
+        // Don't seed StateEnteredAt as stale — we don't want the
+        // state-dwell watchdog to fire; we want the per-member
+        // heartbeat to fire MemberStuck through AggregateNudges.
+        StateEnteredAt    = base.NowAt,
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    val movedToNudging = m.State match {
+        case TLNudging(reason, _) => reason == "stuck"
+        case _                    => false
+    }
+    return IsTrue(t, movedToNudging)
+}
+
+// ============================================================================
 // No-status-directive nudge: a member's session ending without
 // @finished / @help / @blocked must NOT silently drain the pending
 // set. Live audits saw rotated members reply with plain prose ("I

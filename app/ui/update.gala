@@ -551,18 +551,25 @@ func updateLivenessStatuses(
     m AppModel, members Array[Member], now time_utils.Instant,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
     val leadName = m.Team.Lead.Name
-    // Skip the liveness walk entirely while a stuck nudge is in
-    // flight. TLNudging(reason="stuck", pending) means a TL turn has
-    // already been dispatched to address these stuck members and is
-    // awaiting its TLDone. Re-Ticking would re-batch the same Silent
-    // members into another IssueNudge every heartbeat — TLNudging →
-    // TLNudging self-loops with no semantic change. The nudge's
-    // TLDone is the right resolution boundary; let it land.
-    val inStuckNudge = m.State match {
-        case TLNudging(reason, _) => reason == "stuck"
-        case _                    => false
+    // Only tick member liveness in states where members are actively
+    // expected to produce output: Delegating (engineers working) and
+    // QAGate (QA reviewing). In every other state — Idle, TLThinking
+    // (lead-only turn), TLReview (lead consolidating member output
+    // that already arrived), TLNudging (lead handling a prior batch),
+    // Approval (user deciding) — the heartbeat must NOT fire
+    // IssueNudge against members whose DeliveryStates still read
+    // Silent from a finished or abandoned dispatch.
+    //
+    // Live audit caught this as a TLReview self-loop livelock: every
+    // ~2 minutes the heartbeat re-fired MemberStuck(<silent member>),
+    // hitting the TLReview→TLReview no-op transition AND spawning a
+    // fresh TL nudge that clobbered the lead's actual review turn.
+    val activeFsm = m.State match {
+        case Delegating(_) => true
+        case QAGate(_)     => true
+        case _             => false
     }
-    if inStuckNudge { return (m, EmptyArray[Cmd[AppMsg]]()) }
+    if !activeFsm { return (m, EmptyArray[Cmd[AppMsg]]()) }
     val nowNanos = int(now.UnixNanos())
     val policy   = protocol.PolicyFromHeartbeat(
         m.Policy.Heartbeat.SlowAfterSeconds,

@@ -3324,7 +3324,9 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             //     FIRST Base; applyPlanDirective the FIRST Plan; FSM
             //     afterTLDone the FIRST Summary or all Dispatch
             //     targets) don't depend on inter-kind source order.
-            val protocolDirs = FromMessages(protocol.Decode(cleaned.TurnBuffer, protocol.TLDecodeContext(0)))
+            val decodeResult = protocol.DecodeWithIssues(cleaned.TurnBuffer, protocol.TLDecodeContext(0))
+            val protocolDirs = FromMessages(decodeResult.Messages)
+            val decodeIssues = decodeResult.Issues
             val controlDirs  = ParseBaseAndPlan(cleaned.TurnBuffer)
             val rawDirs = controlDirs.AppendAll(protocolDirs)
             // Capture @base from the lead's turn so the eventual
@@ -3377,12 +3379,21 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                     val saved = persistConversation(cleanedB, nextConvo)
                     return (setStatus(saved, name, StIdle()), NoCmd[AppMsg]())
                 }
-                val malformedReason = detectMalformedDispatch(cleanedB.TurnBuffer, cleanedB.Team)
-                if malformedReason != "" {
+                // Parser-level issues (unclosed @dispatch / @summary /
+                // @consult, multi-target @dispatch) come from
+                // protocol.DecodeWithIssues. UI-heuristic issues (arrow
+                // notation, bold headings, @plan / @base without @end)
+                // come from detectMalformedDispatch — the parser can't
+                // see them because they're either decorative prose or
+                // owned by a different parser package.
+                val issueReason =
+                    if (!decodeIssues.IsEmpty()) formatDecodeIssues(decodeIssues)
+                    else                         detectMalformedDispatch(cleanedB.TurnBuffer, cleanedB.Team)
+                if issueReason != "" {
                     val (m1, nudgeCmds) = spawnTLNudge(
                         setStatus(cleanedB, name, StIdle()),
                         "malformed-dispatch",
-                        buildMalformedDispatchPrompt(malformedReason, cleanedB.Team),
+                        buildMalformedDispatchPrompt(issueReason, cleanedB.Team),
                     )
                     return (m1, batchAll(nudgeCmds))
                 }
@@ -4400,40 +4411,68 @@ func isDuplicateOfLastConvoLine(convo Array[session.ConversationLine], speaker s
         case Some(last) => last.Speaker == speaker && last.Text == text
     }
 
-// detectMalformedDispatch scans the TL's turn buffer for fingerprints
-// of an attempted-but-invalid dispatch. Returns a short human-readable
-// reason describing what was seen, or "" when nothing looks malformed.
-// Used after the inbound decoder returns zero directives — if there
-// are clear signs the TL TRIED to dispatch (named members in headings, used
-// arrow notation, used multi-target @dispatch), the orchestrator
-// nudges them back to the protocol instead of silently dropping the
-// turn.
-//
-// Patterns we flag:
-//   - `→ <MemberName>:` / `-> <MemberName>:` — arrow notation
-//   - `**<MemberName>:**` — bold heading
-//   - `@dispatch(<Name>, <Name>)` — multi-target (parser only takes first)
-//   - `@dispatch(<Name>)` without a matching `@end` line below
-//   - Member name on its own line followed by `:` — probable header
-func detectMalformedDispatch(buffer string, tm Team) string {
-    if buffer == "" { return "" }
-    // (1) Multi-target @dispatch — has a comma inside the args.
-    if strings.Contains(buffer, "@dispatch(") {
-        val afterTag = strings.SplitN(buffer, "@dispatch(", 2)
-        if len(afterTag) == 2 {
-            val argsAndRest = strings.SplitN(afterTag[1], ")", 2)
-            if len(argsAndRest) == 2 && strings.Contains(argsAndRest[0], ",") {
-                // The parser takes only the first comma-separated target;
-                // a comma inside the args is the multi-target shape.
-                return "@dispatch(...) with multiple comma-separated names — only the first is dispatched. Open a separate @dispatch(...)...@end block for each engineer."
-            }
+// formatDecodeIssues maps the parser-level diagnostics returned by
+// protocol.DecodeWithIssues to the same human-readable nudge text the
+// old detectMalformedDispatch returned. Only the first issue is
+// surfaced — one targeted nudge per turn keeps the TL on the
+// fast-feedback path; if the next turn still has multiple issues, the
+// next-most-pressing one fires.
+func formatDecodeIssues(issues Array[protocol.DecodeIssue]) string {
+    if issues.IsEmpty() { return "" }
+    val first = issues.Get(0)
+    val tag = protocol.IssueTag(first)
+    if tag == "unclosed_block" {
+        val kind = protocol.IssueUnclosedKind(first)
+        if kind == "summary" {
+            return "@summary block without a matching @end line. The @summary body becomes the PR description; close it with @end on its own line so the orchestrator can surface the approval dialog."
         }
-        // (2) @dispatch without a matching @end.
-        if !strings.Contains(buffer, "\n@end") && !strings.HasSuffix(strings.TrimSpace(buffer), "@end") {
+        if kind == "consult" {
+            return "@consult(...) block without a matching @end line. Close it with @end on its own line so the orchestrator can dispatch the cross-team consult."
+        }
+        if kind == "dispatch" {
             return "@dispatch(...) opening tag without a matching @end line. Each directive must close with @end on its own line."
         }
+        return s"@${kind} block without a matching @end line. Each directive must close with @end on its own line."
     }
-    // (3) / (4) Arrow notation + markdown heading naming a member.
+    if tag == "multi_target_dispatch" {
+        val names = protocol.IssueMultiTargetNames(first)
+        return s"@dispatch(${names}) with multiple comma-separated names — only the first is dispatched. Open a separate @dispatch(...)...@end block for each engineer."
+    }
+    return ""
+}
+
+// detectMalformedDispatch scans the TL's turn buffer for UI-level
+// fingerprints of an attempted-but-invalid dispatch that the protocol
+// parser cannot see. Returns a short human-readable reason, or "" when
+// nothing looks malformed. Called after the parser's own DecodeIssue
+// list is exhausted — issues the parser can detect (unclosed
+// @dispatch / @summary / @consult, multi-target @dispatch) belong to
+// protocol.DecodeWithIssues, not here.
+//
+// Patterns we still flag here:
+//   - `@plan` / `@base` without `@end` — owned by app/directive, not
+//     the agent-to-agent protocol parser.
+//   - `→ <MemberName>:` / `-> <MemberName>:` — arrow notation; the
+//     parser has no way to know <MemberName> is meaningful.
+//   - `**<MemberName>:**` — bold heading; same reason.
+func detectMalformedDispatch(buffer string, tm Team) string {
+    if buffer == "" { return "" }
+    val hasEnd = strings.Contains(buffer, "\n@end") || strings.HasSuffix(strings.TrimSpace(buffer), "@end")
+    // @plan / @base unclosed — these openers live in app/directive's
+    // narrowly-scoped control reader, not in the protocol parser, so
+    // their close-with-@end rule is enforced here.
+    if !hasEnd {
+        if strings.Contains(buffer, "@plan") {
+            return "@plan block without a matching @end line. Close it with @end on its own line so the orchestrator can queue the multi-PR sequence."
+        }
+        if strings.Contains(buffer, "@base ") {
+            return "@base directive without a matching @end. Even @base is a block: emit `@base <ref>\\n@end` (two lines)."
+        }
+    }
+    // Arrow notation + markdown heading naming a member. Both are
+    // decorative prose the TL sometimes substitutes for a real
+    // @dispatch(...)...@end block; the parser has no member-name
+    // knowledge so it can't detect these.
     val members = tm.Members.Map((m) => m.Name)
     val anyArrow = members.Find((n) =>
         strings.Contains(buffer, s"→ ${n}:") || strings.Contains(buffer, s"-> ${n}:")

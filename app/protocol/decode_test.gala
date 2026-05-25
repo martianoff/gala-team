@@ -1,6 +1,7 @@
 package protocol
 
 import (
+    "martianoff/gala/strings"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
 )
@@ -50,6 +51,75 @@ func TestDecode_ConsultTarget(t T) T {
 func TestDecode_UnclosedBlockDropped(t T) T {
     val msgs = Decode("@dispatch(Felix) still streaming", tl(0))
     return Eq(t, msgs.Length(), 0)
+}
+
+// ----- DecodeIssue (parser-level diagnostics) -------------------------------
+//
+// Decode silently drops unclosed blocks; DecodeWithIssues surfaces them
+// so the UI can nudge the TL instead of routing through Idle with no
+// surfaced cause. Past sessions saw a long @summary asking the user to
+// decide A/B vanish because the TL never typed the closing @end — the
+// FSM landed in Idle and the approval dialog never showed.
+
+func TestDecodeIssues_UnclosedSummary(t T) T {
+    val res = DecodeWithIssues("@summary\nlong body asking the user to pick A or B", tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    val t2 = Eq(t1, res.Issues.Length(), 1)
+    return res.Issues.Get(0) match {
+        case UnclosedBlock(k) => Eq(t2, k, "summary")
+        case _                => IsTrue(t2, false)
+    }
+}
+
+func TestDecodeIssues_UnclosedConsult(t T) T {
+    val res = DecodeWithIssues("@consult(other-team)\nplease advise on this approach", tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    return res.Issues.Get(0) match {
+        case UnclosedBlock(k) => Eq(t1, k, "consult")
+        case _                => IsTrue(t1, false)
+    }
+}
+
+func TestDecodeIssues_UnclosedDispatch(t T) T {
+    val res = DecodeWithIssues("@dispatch(Felix) build parser", tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    return res.Issues.Get(0) match {
+        case UnclosedBlock(k) => Eq(t1, k, "dispatch")
+        case _                => IsTrue(t1, false)
+    }
+}
+
+// A closed @summary produces a Message and no issue — the happy path
+// stays clean (no spurious nudges).
+func TestDecodeIssues_ClosedSummaryNoIssue(t T) T {
+    val res = DecodeWithIssues("@summary\nshipped\n@end", tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 1)
+    return Eq(t1, res.Issues.Length(), 0)
+}
+
+// Multi-target dispatch: the parser still emits the first target as a
+// Message (current behaviour) but surfaces an issue listing every name
+// so the UI can nudge the TL to open one block per engineer.
+func TestDecodeIssues_MultiTargetDispatch(t T) T {
+    val res = DecodeWithIssues("@dispatch(Felix, Mira)\nshared task\n@end", tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 1)
+    val t2 = Eq(t1, res.Messages.Get(0).Recipient, "Felix")
+    val t3 = Eq(t2, res.Issues.Length(), 1)
+    return res.Issues.Get(0) match {
+        case MultiTargetDispatch(n) => {
+            val a = IsTrue(t3, strings.Contains(n, "Felix"))
+            return IsTrue(a, strings.Contains(n, "Mira"))
+        }
+        case _ => IsTrue(t3, false)
+    }
+}
+
+// kwarg-style trailing args (project="/x") are NOT multi-target — the
+// parser still ignores them for identity and surfaces no issue.
+func TestDecodeIssues_ConsultWithKwargNotMultiTarget(t T) T {
+    val res = DecodeWithIssues("@consult(transpiler, project=\"/x\") repro\n@end", tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 1)
+    return Eq(t1, res.Issues.Length(), 0)
 }
 
 // ----- idempotency under a re-emitted chunk --------------------------------

@@ -84,14 +84,81 @@ func MemberDecodeContext(member string, epoch int) DecodeContext = DecodeContext
     LeadView  = false,
 )
 
+// DecodeIssue is a parser-level problem the decoder surfaces instead of
+// silently dropping. Currently:
+//
+//   UnclosedBlock(kind)        — an opener (@dispatch / @consult /
+//                                 @summary) had no matching bare `@end`.
+//                                 collectBody would otherwise drop the
+//                                 trailing block, leaving the FSM stuck
+//                                 because nothing parsed (a long @summary
+//                                 asking the user to decide vanished
+//                                 without surfacing the approval dialog).
+//   MultiTargetDispatch(names) — `@dispatch(A, B)` shape; the parser
+//                                 takes only the first target so the
+//                                 remaining engineers never spawn.
+//
+// The UI maps DecodeIssue values to nudge prompts. Keeping the structural
+// rule ("each directive closes with @end on its own line") here, next to
+// the parser that enforces it, means a new bodied directive only has to
+// be taught to the parser and the UI keeps consuming issues unchanged.
+sealed type DecodeIssue {
+    case UnclosedBlock(Kind string)
+    case MultiTargetDispatch(Names string)
+}
+
+// IssueTag projects a DecodeIssue to a stable lowercase token so
+// callers in other packages can dispatch by string compare. Gala's
+// pattern match binds positional variables on a qualified constructor
+// (`protocol.UnclosedBlock(kind)` would bind `protocol` and `kind`),
+// so a tag-plus-accessor pair is the cleanest cross-package shape.
+func IssueTag(i DecodeIssue) string = i match {
+    case UnclosedBlock(_)       => "unclosed_block"
+    case MultiTargetDispatch(_) => "multi_target_dispatch"
+}
+
+// IssueUnclosedKind returns the directive kind of an UnclosedBlock
+// (e.g. "summary" / "consult" / "dispatch"). Returns "" for any other
+// issue variant — callers should gate on IssueTag first.
+func IssueUnclosedKind(i DecodeIssue) string = i match {
+    case UnclosedBlock(k) => k
+    case _                => ""
+}
+
+// IssueMultiTargetNames returns the comma-separated target list of a
+// MultiTargetDispatch issue. Returns "" for any other variant.
+func IssueMultiTargetNames(i DecodeIssue) string = i match {
+    case MultiTargetDispatch(n) => n
+    case _                      => ""
+}
+
+// DecodeResult is what DecodeWithIssues returns: the parsed messages
+// plus any parser-level issues the buffer carried. Decode (the existing
+// callers' entry point) discards Issues — only code that wants to nudge
+// the agent should reach for DecodeWithIssues.
+struct DecodeResult(
+    Messages Array[Message],
+    Issues   Array[DecodeIssue],
+)
+
 // Decode is the pure inbound decoder. Returns every protocol Message
 // the buffer carries, in source order, deduplicated by content-hash Id.
-func Decode(buffer string, ctx DecodeContext) Array[Message] {
+// Thin wrapper over DecodeWithIssues that discards parser issues — most
+// callers (delivery loop, headless driver, terminal-detection probes)
+// only want the messages.
+func Decode(buffer string, ctx DecodeContext) Array[Message] =
+    DecodeWithIssues(buffer, ctx).Messages
+
+// DecodeWithIssues is the inbound decoder with parser-level diagnostics
+// included. The UI uses this at the TL turn-buffer boundary so it can
+// nudge the TL when an opener never closed (instead of routing through
+// Idle with no surfaced cause).
+func DecodeWithIssues(buffer string, ctx DecodeContext) DecodeResult {
     val lines = strings.Split(buffer, "\n")
-    val raw =
+    val (raw, issues) =
         if (ctx.LeadView) extractLeadDirectives(lines, ctx)
-        else              extractMemberTerminal(lines, ctx)
-    return dedupById(raw)
+        else              (extractMemberTerminal(lines, ctx), EmptyArray[DecodeIssue]())
+    return DecodeResult(Messages = dedupById(raw), Issues = issues)
 }
 
 // dedupById keeps the first occurrence of each Id, preserving order.
@@ -117,16 +184,24 @@ func dedupById(msgs Array[Message]) Array[Message] {
 // Message per CLOSED @dispatch / @consult / @summary block. Closed-only
 // is deliberate: acting on a half-streamed directive is never correct,
 // and it keeps Decode idempotent — the same closed block re-emitted is
-// the same content hash. An unclosed trailing block is left for a
-// later, larger buffer to close.
-func extractLeadDirectives(lines Array[string], ctx DecodeContext) Array[Message] {
+// the same content hash. An unclosed trailing block is recorded as an
+// UnclosedBlock issue so the UI can nudge the TL to close it.
+// Multi-target dispatch (`@dispatch(A, B)`) is also surfaced as an
+// issue: the parser still emits A as a Message (current behaviour), but
+// the issue lets the UI nudge the TL to open a separate block for B.
+func extractLeadDirectives(lines Array[string], ctx DecodeContext) Tuple[Array[Message], Array[DecodeIssue]] {
     var out = EmptyArray[Message]()
+    var issues = EmptyArray[DecodeIssue]()
     var i = 0
     val n = lines.Length()
     for i < n {
         parseOpeningTag(lines.Get(i)) match {
             case Some(o) => {
                 if (isLeadKind(o.Kind)) {
+                    if (!o.ExtraTargets.IsEmpty()) {
+                        val joined = o.Target + ", " + o.ExtraTargets.MkString(", ")
+                        issues = issues.Append(MultiTargetDispatch(Names = joined))
+                    }
                     val (body, next, closed) = collectBody(lines, i, n, o.SameLineRest)
                     if (closed) {
                         buildLeadMessage(o, body, ctx) match {
@@ -135,6 +210,7 @@ func extractLeadDirectives(lines Array[string], ctx DecodeContext) Array[Message
                         }
                         i = next
                     } else {
+                        issues = issues.Append(UnclosedBlock(Kind = o.Kind))
                         i = n
                     }
                 } else {
@@ -144,7 +220,7 @@ func extractLeadDirectives(lines Array[string], ctx DecodeContext) Array[Message
             case None() => i = i + 1
         }
     }
-    return out
+    return (out, issues)
 }
 
 // buildLeadMessage maps a TL opener + body to a routed Message. The
@@ -273,10 +349,17 @@ func bodyBetween(lines Array[string], openIdx int, endIdx int, sameLineRest stri
 //                   finished | help | blocked.
 //   Target       — member / team name for dispatch / consult; "" else.
 //   SameLineRest — body text after the tag on the same line.
+//   ExtraTargets — additional comma-separated targets after Target,
+//                   excluding key=value kwargs (so
+//                   `@consult(team, project="/x")` has none). Non-empty
+//                   means the TL emitted a multi-target shape; the
+//                   parser still extracts only Target (current
+//                   behaviour) but the caller surfaces an issue.
 struct openingTag(
     Kind         string,
     Target       string,
     SameLineRest string,
+    ExtraTargets Array[string],
 )
 
 // parseOpeningTag normalises @finished / @review / @done to the single
@@ -318,22 +401,30 @@ func bodyOnly(kind string, afterTag string) Option[openingTag] = Some[openingTag
     Kind         = kind,
     Target       = "",
     SameLineRest = strings.TrimLeft(afterTag, " \t"),
+    ExtraTargets = EmptyArray[string](),
 ))
 
 // parseTargeted handles @dispatch( / @consult( — splits at the first
 // ")" to separate the target from the same-line body. The target is
-// the first comma-separated arg (a project=... tail, if any, is the
-// TL's concern and is not part of the protocol identity).
+// the first comma-separated arg; remaining bare comma-separated names
+// (no `=`) populate ExtraTargets so the caller can surface a
+// MultiTargetDispatch issue. `key=value` tail args (e.g. `project="/x"`)
+// are kwargs, not extra targets, and are ignored for identity.
 func parseTargeted(kind string, afterOpen string) Option[openingTag] {
     val parts = strings.SplitN(afterOpen, ")", 2)
     if (parts.Length() < 2) { return None[openingTag]() }
-    val argHead = strings.SplitN(parts.Get(0), ",", 2)
-    val target = strings.TrimSpace(argHead.Get(0))
+    val allArgs = strings.Split(parts.Get(0), ",")
+    val target = strings.TrimSpace(allArgs.Get(0))
     if (target == "") { return None[openingTag]() }
+    val extras = allArgs
+        .Drop(1)
+        .Map((s) => strings.TrimSpace(s))
+        .Filter((s) => s != "" && !strings.Contains(s, "="))
     return Some[openingTag](openingTag(
         Kind         = kind,
         Target       = target,
         SameLineRest = strings.TrimLeft(parts.Get(1), " \t"),
+        ExtraTargets = extras,
     ))
 }
 

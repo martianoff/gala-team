@@ -453,6 +453,21 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         case QAGate(p)       => SetToArray(p)
         case _               => EmptyArray[string]()
     }
+    // Pause-during-subagent: if ANY affected member has at least one
+    // outstanding Task tool_use (assistant chunk emitted `tool_use`
+    // for `name:"Task"`, matching `tool_result` not yet seen), skip
+    // the watchdog this tick. The parent claude-code subprocess goes
+    // synchronously silent on stdout for the entire duration of a
+    // Task subagent run, so silence is expected (not a hang) until
+    // the subagent reports back. Past sessions saw a 5-minute Explore
+    // subagent on a large codebase get killed twice in a row before
+    // the orchestrator gave up.
+    val anyOutstanding = affected.Exists((n) =>
+        m.OutstandingTaskTools.Get(n).GetOrElse(EmptyHashSet[string]()).Size() > 0
+    )
+    if anyOutstanding {
+        return (m, NoCmd[AppMsg]())
+    }
     // Silence trigger: time since the MOST recent chunk from any
     // affected member. Falls back to state-dwell when no chunk has
     // ever arrived (subprocess spawned but never spoke).
@@ -2327,6 +2342,29 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
     }
 }
 
+// trackTaskTool updates m.OutstandingTaskTools[name] from one chunk's
+// TaskToolUseId / TaskToolResultId markers. Add on a Task tool_use
+// open, remove on the matching tool_result. Removing a never-tracked
+// id is a no-op — the set only matters for the watchdog gate, and the
+// gate just asks "non-empty?" so phantom adds / removes never harm.
+//
+// We do NOT clear the set on respawn / rotation / SessionFailed. A
+// killed subprocess can never deliver the outstanding tool_result, so
+// in principle the entry would leak; in practice ensureSession (for a
+// fresh session id) resets the model's per-member fields and the
+// stale set is replaced. If a watchdog rotation leaves an orphaned
+// entry in the set, the worst case is the NEXT watchdog tick skips
+// the silence check once and then the fresh subprocess catches up.
+func trackTaskTool(m AppModel, name string, chunk ClaudeChunk) AppModel {
+    if chunk.TaskToolUseId == "" && chunk.TaskToolResultId == "" {
+        return m
+    }
+    val cur = m.OutstandingTaskTools.Get(name).GetOrElse(EmptyHashSet[string]())
+    val afterAdd = if (chunk.TaskToolUseId == "") cur else cur.Add(chunk.TaskToolUseId)
+    val afterRemove = if (chunk.TaskToolResultId == "") afterAdd else afterAdd.Remove(chunk.TaskToolResultId)
+    return m.Copy(OutstandingTaskTools = m.OutstandingTaskTools.Put(name, afterRemove))
+}
+
 // recordChunkArrival stamps both the silence-clock origin (LastChunkAt)
 // and the protocol delivery state (any chunk → Working via OnChunk;
 // Acked / Abandoned terminals are sticky). One bundle so every onChunk
@@ -2413,16 +2451,18 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     val isAllProse = trimmedLine != "" && hasNoJsonShapes && !hasControlBytes && priorBufQuick == ""
     if isAllProse {
         val proseChunk = ClaudeChunk(
-            Visible         = line,
-            ErrorText       = "",
-            LiveTurn        = None[ClaudeUsage](),
-            FinalTurn       = None[ClaudeUsage](),
-            CostUsd         = 0.0,
-            AskQuestionId   = "",
-            AskQuestionText = "",
-            TurnEnded       = false,
-            IsToolActivity  = false,
-            IsSynthetic     = false,
+            Visible          = line,
+            ErrorText        = "",
+            LiveTurn         = None[ClaudeUsage](),
+            FinalTurn        = None[ClaudeUsage](),
+            CostUsd          = 0.0,
+            AskQuestionId    = "",
+            AskQuestionText  = "",
+            TurnEnded        = false,
+            IsToolActivity   = false,
+            IsSynthetic      = false,
+            TaskToolUseId    = "",
+            TaskToolResultId = "",
         )
         val (m1, c) = applyChunkVisible(m, name, proseChunk)
         val pumpCmd = m1.Sessions.Get(name) match {
@@ -2520,13 +2560,22 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
         val curr = m.SyntheticOnlyChunks.Get(name).GetOrElse(0)
         return (m.Copy(SyntheticOnlyChunks = m.SyntheticOnlyChunks.Put(name, curr + 1)), NoCmd[AppMsg]())
     }
+    // Track Task subagent lifecycles for the watchdog. An assistant
+    // chunk that opened a Task tool_use adds the id to
+    // OutstandingTaskTools[name]; the matching user-envelope
+    // tool_result removes it. While the set is non-empty for an
+    // affected member, enforceStateWatchdog skips silence-based
+    // killing for that member — the parent claude-code goes silent
+    // synchronously while a subagent runs, and a long Explore / Plan
+    // would otherwise trip the 5-minute TL watchdog.
+    val mTracked = trackTaskTool(m, name, chunk)
     // Any real chunk resets the synthetic counter. LastChunkAt is
     // bumped by the caller (onChunk) so it lands AFTER setStatus's
     // own LastChunkAt write on the non-working→working transition
     // (setStatus stamps m.NowAt onto LastChunkAt as part of the
     // work-start accounting; bumping LastChunkAt here would just
     // get clobbered downstream).
-    val mAccrued = accrueTokens(m.Copy(SyntheticOnlyChunks = m.SyntheticOnlyChunks.Remove(name)), name, chunk)
+    val mAccrued = accrueTokens(mTracked.Copy(SyntheticOnlyChunks = mTracked.SyntheticOnlyChunks.Remove(name)), name, chunk)
     val displayText = chunk.Visible
     // Stale-session-id recovery: claude returns "No conversation found
     // with session ID …" when --resume points at an id claude doesn't
@@ -4782,20 +4831,39 @@ struct ClaudeChunk(
     // can tell a poisoned session (stdout flowing, no model output)
     // apart from a healthy silent one.
     IsSynthetic bool,
+    // TaskToolUseId is the tool_use id of a Task tool spawn the
+    // assistant just emitted (name="Task" tool_use block). Non-empty
+    // means a subagent run just started; applyChunkVisible adds the id
+    // to m.OutstandingTaskTools[name] so enforceStateWatchdog can
+    // pause the silence-based kill while the subagent runs (the parent
+    // claude-code goes synchronously silent on stdout until the
+    // subagent reports back, which can legitimately take >5 minutes
+    // for Explore / Plan on a large codebase).
+    TaskToolUseId string,
+    // TaskToolResultId is the tool_use_id of a tool_result the parent
+    // just emitted in a type:"user" envelope. Non-empty means a Task
+    // subagent finished; applyChunkVisible removes the id from
+    // OutstandingTaskTools so the watchdog resumes. Set
+    // unconditionally for any tool_result we see — the OutstandingTaskTools
+    // set is the source of truth for which ids matter, so removing a
+    // never-tracked id is a harmless no-op.
+    TaskToolResultId string,
 )
 
 // emptyChunk is the "drop this line" marker.
 func emptyChunk() ClaudeChunk = ClaudeChunk(
-    Visible         = "",
-    ErrorText       = "",
-    LiveTurn        = None[ClaudeUsage](),
-    FinalTurn       = None[ClaudeUsage](),
-    CostUsd         = 0.0,
-    AskQuestionId   = "",
-    AskQuestionText = "",
-    TurnEnded       = false,
-    IsToolActivity  = false,
-    IsSynthetic     = false,
+    Visible          = "",
+    ErrorText        = "",
+    LiveTurn         = None[ClaudeUsage](),
+    FinalTurn        = None[ClaudeUsage](),
+    CostUsd          = 0.0,
+    AskQuestionId    = "",
+    AskQuestionText  = "",
+    TurnEnded        = false,
+    IsToolActivity   = false,
+    IsSynthetic      = false,
+    TaskToolUseId    = "",
+    TaskToolResultId = "",
 )
 
 // syntheticChunk marks a claude-code synthetic envelope. The caller
@@ -4803,16 +4871,18 @@ func emptyChunk() ClaudeChunk = ClaudeChunk(
 // synthetic counter without bumping LastChunkAt — the rest of the
 // pipeline treats it as a no-op.
 func syntheticChunk() ClaudeChunk = ClaudeChunk(
-    Visible         = "",
-    ErrorText       = "",
-    LiveTurn        = None[ClaudeUsage](),
-    FinalTurn       = None[ClaudeUsage](),
-    CostUsd         = 0.0,
-    AskQuestionId   = "",
-    AskQuestionText = "",
-    TurnEnded       = false,
-    IsToolActivity  = false,
-    IsSynthetic     = true,
+    Visible          = "",
+    ErrorText        = "",
+    LiveTurn         = None[ClaudeUsage](),
+    FinalTurn        = None[ClaudeUsage](),
+    CostUsd          = 0.0,
+    AskQuestionId    = "",
+    AskQuestionText  = "",
+    TurnEnded        = false,
+    IsToolActivity   = false,
+    IsSynthetic      = true,
+    TaskToolUseId    = "",
+    TaskToolResultId = "",
 )
 
 // filterClaudeStreamJsonFor is the chunk classifier. The `member`
@@ -4908,9 +4978,39 @@ func filterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
         TraceClaudeLine(member, envelope, chunk.Visible, chunk.ErrorText, dropped, reason)
         return chunk
     }
+    // type:"user" envelopes carry tool_result blocks the parent
+    // claude-code emits when one of its tools completes. We don't
+    // surface them anywhere, but we DO extract the tool_use_id so
+    // applyChunkVisible can remove it from OutstandingTaskTools when
+    // a Task subagent finishes — that's what un-pauses the silence
+    // watchdog. Other tool kinds' tool_use_ids are harmless to record
+    // (the remove on a never-tracked id is a no-op).
+    if kind == "user" {
+        val toolResultId = extractFirstToolUseId(trimmed)
+        TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${kind}")
+        val chunk = emptyChunk().Copy(TaskToolResultId = toolResultId)
+        return chunk
+    }
     val typeStr = if (kind == "") "<no type>" else kind
     TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${typeStr}")
     return emptyChunk()
+}
+
+// extractFirstToolUseId scans `envelope` (a type:"user" stream-json
+// line) for the first `"tool_use_id":"<id>"` field. Used to detect
+// when a Task subagent's tool_result has landed, so the orchestrator
+// can remove the id from OutstandingTaskTools and resume the watchdog.
+// Returns "" when the field is absent. String-scan rather than a typed
+// codec because tool_result blocks ship with mixed inner schemas
+// depending on the source tool — we only need this one stable key.
+func extractFirstToolUseId(envelope string) string {
+    val needle = "\"tool_use_id\":\""
+    val parts = strings.SplitN(envelope, needle, 2)
+    if len(parts) < 2 { return "" }
+    val rest = parts[1]
+    val tail = strings.SplitN(rest, "\"", 2)
+    if len(tail) < 2 { return "" }
+    return tail[0]
 }
 
 // extractJsonField pulls the value of `"<key>":"<value>"` out of a
@@ -4955,16 +5055,18 @@ func rateLimitEventChunk(envelope string) ClaudeChunk {
     val limitLabel = if (limitType == "") "" else s" (${limitType})"
     val msg = s"Claude API rate limit ${status}${limitLabel}"
     return ClaudeChunk(
-        Visible         = "",
-        ErrorText       = msg,
-        LiveTurn        = None[ClaudeUsage](),
-        FinalTurn       = None[ClaudeUsage](),
-        CostUsd         = 0.0,
-        AskQuestionId   = "",
-        AskQuestionText = "",
-        TurnEnded       = false,
-        IsToolActivity  = false,
-        IsSynthetic     = false,
+        Visible          = "",
+        ErrorText        = msg,
+        LiveTurn         = None[ClaudeUsage](),
+        FinalTurn        = None[ClaudeUsage](),
+        CostUsd          = 0.0,
+        AskQuestionId    = "",
+        AskQuestionText  = "",
+        TurnEnded        = false,
+        IsToolActivity   = false,
+        IsSynthetic      = false,
+        TaskToolUseId    = "",
+        TaskToolResultId = "",
     )
 }
 
@@ -5139,17 +5241,20 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
     // spamming the chat.
     val visibleText = texts.MkString("\n")
     val isToolActivity = visibleText == "" && askId == "" && hasAnyToolUse(evt.Message.Content)
+    val taskToolUseId = firstTaskToolUseId(evt.Message.Content)
     return ClaudeChunk(
-        Visible         = visibleText,
-        ErrorText       = "",
-        LiveTurn        = Some(evt.Message.Usage),
-        FinalTurn       = None[ClaudeUsage](),
-        CostUsd         = 0.0,
-        AskQuestionId   = askId,
-        AskQuestionText = askText,
-        TurnEnded       = false,
-        IsToolActivity  = isToolActivity,
-        IsSynthetic     = false,
+        Visible          = visibleText,
+        ErrorText        = "",
+        LiveTurn         = Some(evt.Message.Usage),
+        FinalTurn        = None[ClaudeUsage](),
+        CostUsd          = 0.0,
+        AskQuestionId    = askId,
+        AskQuestionText  = askText,
+        TurnEnded        = false,
+        IsToolActivity   = isToolActivity,
+        IsSynthetic      = false,
+        TaskToolUseId    = taskToolUseId,
+        TaskToolResultId = "",
     )
 }
 
@@ -5181,6 +5286,29 @@ func firstAskUserQuestionId(parts Array[ClaudePart]) string {
     for i < n {
         val p = parts.Get(i)
         if p.Type == "tool_use" && p.Name == "AskUserQuestion" && p.Id != "" {
+            return p.Id
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// firstTaskToolUseId walks content[] and returns the `id` of the first
+// Task tool_use block, or "" when none is present. The Task tool spawns
+// a subagent that claude-code waits for synchronously; while the
+// subagent runs the parent's stdout is silent. The orchestrator records
+// the returned id in OutstandingTaskTools so the watchdog can pause
+// the silence-based kill until the matching tool_result arrives. One
+// id per assistant envelope is enough: claude-code emits Task tool_use
+// blocks one at a time in practice, and even when it fans out, each
+// envelope still bumps OutstandingTaskTools by one id which is
+// sufficient to keep the watchdog paused.
+func firstTaskToolUseId(parts Array[ClaudePart]) string {
+    var i = 0
+    val n = parts.Size()
+    for i < n {
+        val p = parts.Get(i)
+        if p.Type == "tool_use" && p.Name == "Task" && p.Id != "" {
             return p.Id
         }
         i = i + 1
@@ -5242,16 +5370,18 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
     if evt.IsError {
         val msg = if (evt.Result == "") "claude reported an error" else evt.Result
         return ClaudeChunk(
-            Visible         = "",
-            ErrorText       = msg,
-            LiveTurn        = None[ClaudeUsage](),
-            FinalTurn       = tokens,
-            CostUsd         = evt.TotalCostUsd,
-            AskQuestionId   = "",
-            AskQuestionText = "",
-            TurnEnded       = true,
-            IsToolActivity  = false,
-            IsSynthetic     = false,
+            Visible          = "",
+            ErrorText        = msg,
+            LiveTurn         = None[ClaudeUsage](),
+            FinalTurn        = tokens,
+            CostUsd          = evt.TotalCostUsd,
+            AskQuestionId    = "",
+            AskQuestionText  = "",
+            TurnEnded        = true,
+            IsToolActivity   = false,
+            IsSynthetic      = false,
+            TaskToolUseId    = "",
+            TaskToolResultId = "",
         )
     }
     // Render the `result` field as visible text on a clean turn. Two
@@ -5271,16 +5401,18 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
     // is the lesser evil vs. silent drop in case (b) — DESIGN.md says
     // "we'd rather under-format than under-render".
     return ClaudeChunk(
-        Visible         = evt.Result,
-        ErrorText       = "",
-        LiveTurn        = None[ClaudeUsage](),
-        FinalTurn       = tokens,
-        CostUsd         = evt.TotalCostUsd,
-        AskQuestionId   = "",
-        AskQuestionText = "",
-        TurnEnded       = true,
-        IsToolActivity  = false,
-        IsSynthetic     = false,
+        Visible          = evt.Result,
+        ErrorText        = "",
+        LiveTurn         = None[ClaudeUsage](),
+        FinalTurn        = tokens,
+        CostUsd          = evt.TotalCostUsd,
+        AskQuestionId    = "",
+        AskQuestionText  = "",
+        TurnEnded        = true,
+        IsToolActivity   = false,
+        IsSynthetic      = false,
+        TaskToolUseId    = "",
+        TaskToolResultId = "",
     )
 }
 

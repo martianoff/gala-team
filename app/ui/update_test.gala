@@ -6123,3 +6123,51 @@ func TestUserPrompted_FromApproval_StaysInApproval(t T) T {
         case _           => IsTrue(t, false)
     }
 }
+
+// ----------------------------------------------------------------------------
+// detectMalformedDispatch — TL emitted a multi-line directive but
+// forgot the @end closer. Live audit caught a TL emitting a long
+// @summary body with no @end: the parser silently dropped the block,
+// dirs was empty, FSM landed in Idle and the user saw chat with no
+// approval dialog. detectMalformedDispatch must surface this so the
+// orchestrator can nudge the TL to close the block.
+// ----------------------------------------------------------------------------
+
+func TestDetectMalformedDispatch_SummaryWithoutEnd_DetectsSummary(t T) T {
+    val buf = "@summary\n\nLong PR body explaining what changed and why; missing the closing @end on its own line."
+    val reason = detectMalformedDispatch(buf, sampleTeam())
+    return IsTrue(t, strings.Contains(reason, "@summary block without a matching @end"))
+}
+
+func TestDetectMalformedDispatch_SummaryWithEnd_NoFalsePositive(t T) T {
+    val buf = "@summary\n\nshipped\n@end"
+    val reason = detectMalformedDispatch(buf, sampleTeam())
+    return Eq(t, reason, "")
+}
+
+func TestDetectMalformedDispatch_ConsultWithoutEnd_DetectsConsult(t T) T {
+    val buf = "@consult(other-team)\nplease advise on this approach"
+    val reason = detectMalformedDispatch(buf, sampleTeam())
+    return IsTrue(t, strings.Contains(reason, "@consult"))
+}
+
+func TestDetectMalformedDispatch_PlanWithoutEnd_DetectsPlan(t T) T {
+    val buf = "@plan\nstep one\nstep two"
+    val reason = detectMalformedDispatch(buf, sampleTeam())
+    return IsTrue(t, strings.Contains(reason, "@plan"))
+}
+
+func TestDetectMalformedDispatch_BaseWithoutEnd_DetectsBase(t T) T {
+    val buf = "@base previous\nnow lets dispatch"
+    val reason = detectMalformedDispatch(buf, sampleTeam())
+    return IsTrue(t, strings.Contains(reason, "@base"))
+}
+
+// Plain chat with no directive markers must NOT match — that's a
+// legitimate "TL replied with prose" turn and the FSM should route
+// through afterTLDone → Idle, not nudge.
+func TestDetectMalformedDispatch_PlainChat_NoFalsePositive(t T) T {
+    val buf = "I think the request is ambiguous. Could you clarify whether you want option A or option B before I dispatch?"
+    val reason = detectMalformedDispatch(buf, sampleTeam())
+    return Eq(t, reason, "")
+}

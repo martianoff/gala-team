@@ -4417,6 +4417,7 @@ func isDuplicateOfLastConvoLine(convo Array[session.ConversationLine], speaker s
 //   - Member name on its own line followed by `:` — probable header
 func detectMalformedDispatch(buffer string, tm Team) string {
     if buffer == "" { return "" }
+    val hasEnd = strings.Contains(buffer, "\n@end") || strings.HasSuffix(strings.TrimSpace(buffer), "@end")
     // (1) Multi-target @dispatch — has a comma inside the args.
     if strings.Contains(buffer, "@dispatch(") {
         val afterTag = strings.SplitN(buffer, "@dispatch(", 2)
@@ -4429,8 +4430,29 @@ func detectMalformedDispatch(buffer string, tm Team) string {
             }
         }
         // (2) @dispatch without a matching @end.
-        if !strings.Contains(buffer, "\n@end") && !strings.HasSuffix(strings.TrimSpace(buffer), "@end") {
+        if !hasEnd {
             return "@dispatch(...) opening tag without a matching @end line. Each directive must close with @end on its own line."
+        }
+    }
+    // (2b) Same check for the other TL-only multi-line directives.
+    // Live audit caught a TL emitting a long @summary body with no
+    // @end — the parser silently dropped the unclosed block, dirs
+    // was empty, FSM landed in Idle and the user saw chat with no
+    // approval dialog (the @summary was meant to ask them to decide).
+    // @base is single-line (`@base <ref> @end` on one line) but the
+    // tail @end is still required; bundle it with the multi-line set.
+    if !hasEnd {
+        if strings.Contains(buffer, "@summary") {
+            return "@summary block without a matching @end line. The @summary body becomes the PR description; close it with @end on its own line so the orchestrator can surface the approval dialog."
+        }
+        if strings.Contains(buffer, "@consult(") {
+            return "@consult(...) block without a matching @end line. Close it with @end on its own line so the orchestrator can dispatch the cross-team consult."
+        }
+        if strings.Contains(buffer, "@plan") {
+            return "@plan block without a matching @end line. Close it with @end on its own line so the orchestrator can queue the multi-PR sequence."
+        }
+        if strings.Contains(buffer, "@base ") {
+            return "@base directive without a matching @end. Even @base is a block: emit `@base <ref>\\n@end` (two lines)."
         }
     }
     // (3) / (4) Arrow notation + markdown heading naming a member.

@@ -2195,17 +2195,18 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
         return (m1, pumpCmd)
     }
     // Stream-json shape detection: claude-code occasionally writes
-    // a stream-json envelope (`{"type":"user","message":...}`) to
-    // stderr instead of stdout. The raw bytes are useless in the
-    // bottom-bar surface and just look like a UX bug to the user.
-    // The full payload is in events.jsonl via LogStderr above, so
-    // the audit trail is intact — surface a clean tag instead of
-    // dumping the bytes.
-    // looksLikeStreamJson decodes a streamJsonHeader so the check
-    // is a real JSON parse, not a substring heuristic that breaks
-    // when claude-code reshuffles the envelope key order.
-    val short = if (looksLikeStreamJson(trimmed)) "stream-json envelope on stderr (see events.jsonl)"
-                else                                truncateForToast(trimmed)
+    // a stream-json envelope (`{"type":"user","message":...}` —
+    // typically a tool_result from a Task subagent) to stderr
+    // instead of stdout. This is a known claude-code stream-routing
+    // quirk; there is nothing for the user to do about it. The full
+    // payload is in events.jsonl via LogStderr above, so the audit
+    // trail is intact — silently absorb the line. Surfacing it on
+    // the LastError red footer and a warn toast was alarmist for a
+    // benign event the user could not act on.
+    if looksLikeStreamJson(trimmed) {
+        return (m, pumpCmd)
+    }
+    val short = truncateForToast(trimmed)
     val toast = m.Toasts.PushWarn(s"${name} (stderr): ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
     val m1 = m.Copy(
         Toasts    = toast,

@@ -821,7 +821,6 @@ func MsgMember(msg Msg) string = msg match {
 // their browser; the alternative `gh pr view --web` would bypass the
 // audit trail of "what summary did the team agree to".
 func GhPrCreateFuture(proj Project, body string, baseRef Option[string], forceBranch Option[string] = None[string]()) concurrent.Future[Msg] {
-    val title = GhTitle(body)
     val bodyWithFooter = body + "\n\n---\n🍎 orchestrated by [Gala Team](https://github.com/martianoff/gala-team)"
     val leadBranch = LeadBranchFor(proj)
     val leadWtPath = LeadWorktreePath(proj)
@@ -846,6 +845,18 @@ func GhPrCreateFuture(proj Project, body string, baseRef Option[string], forceBr
         if pushResult != "" {
             return RtPrFailed(Err = errors.New(s"git push pr branch failed: ${pushResult}"))
         }
+        // Title source priority: the first commit subject on the PR
+        // branch since the base ref. Reflects the actual work the
+        // engineer(s) did and is already a one-line summary by
+        // convention. Falls back to GhTitle(body) when the git log
+        // is empty or fails (no commits, base ref missing locally,
+        // git not installed) — the old code path. capTitleAtWordBoundary
+        // bounds the commit subject the same way GhTitle does so a
+        // long commit subject doesn't overflow GitHub's title field.
+        val base = baseRef.GetOrElse(proj.DefaultBranch)
+        val commitSubject = firstCommitSubjectSinceBase(leadWtPath, base, prBranch)
+        val title = if (commitSubject != "") capTitleAtWordBoundary(commitSubject, 70)
+                    else                     GhTitle(body)
         // Existing-PR detection: before calling `gh pr create`, ask gh
         // whether an open PR already targets this branch. Two cases
         // hit this path:
@@ -943,6 +954,45 @@ func readShortSha(cwd string, ref string) string {
             line match {
                 case Failure(_)  => ""
                 case Success(s)  => strings.TrimSpace(s)
+            }
+        }
+    }
+}
+
+// firstCommitSubjectSinceBase returns the subject line of the OLDEST
+// commit on `branch` since it forked from `base`. Used as the PR title
+// source — it captures the original intent of the work (engineer's
+// first commit message) rather than whatever heading the TL happened
+// to put first in the @summary body. Empty string on any failure
+// (branch missing locally, base ref missing, git not installed, no
+// commits since base) — caller falls back to deriving from the body.
+//
+// --reverse + first-line read gives the oldest commit's subject; the
+// newest-first default would have us reading the tail. For a single-
+// commit PR the two are identical.
+func firstCommitSubjectSinceBase(cwd string, base string, branch string) string {
+    val revRange = base + ".." + branch
+    val opts = subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("log", "--reverse", "--format=%s", revRange).ToGoSlice(),
+        SliceEmpty[string](),
+        cwd,
+    )
+    return subprocess.Spawn(opts) match {
+        case Failure(_) => ""
+        case Success(p) => {
+            val line = p.ReadLine()
+            // Drain so the process exits cleanly even if there are
+            // more commits we won't use (--reverse streams oldest →
+            // newest, and we only want the first).
+            for {
+                val more = p.ReadLine()
+                if more.IsFailure() { break }
+            }
+            val _ = p.Wait()
+            line match {
+                case Failure(_) => ""
+                case Success(s) => strings.TrimSpace(s)
             }
         }
     }

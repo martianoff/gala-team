@@ -378,3 +378,92 @@ func TestGhTitle_BoldWrapAndLongTitleRegression(t T) T {
     return t3
 }
 
+// ----------------------------------------------------------------------------
+// firstCommitSubjectSinceBase — PR title source. The orchestrator
+// previously derived the PR title from the first non-empty line of
+// the @summary body, which produced titles like "## What" whenever
+// the TL wrote a structured `## What / ## Why` body. Now the title
+// comes from the engineer's first commit on the branch since base,
+// which is already a one-line summary by convention.
+// ----------------------------------------------------------------------------
+
+// Happy path: a single commit on the branch since base. Subject
+// returned verbatim.
+func TestFirstCommitSubjectSinceBase_SingleCommit(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_first_commit_single_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "init"))
+    runGitInDir(dir, ArrayOf("checkout", "-q", "-b", "feature"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "fix(ui): silently absorb stream-json envelopes on stderr"))
+    return Eq(t, firstCommitSubjectSinceBase(dir, "main", "feature"),
+                  "fix(ui): silently absorb stream-json envelopes on stderr")
+}
+
+// Multi-commit branch: the OLDEST commit's subject is returned.
+// --reverse + read-first-line gets the original-intent commit, not
+// the most recent tweak.
+func TestFirstCommitSubjectSinceBase_PicksOldest(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_first_commit_oldest_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "init"))
+    runGitInDir(dir, ArrayOf("checkout", "-q", "-b", "feature"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "feat: add the new helper"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "test: cover the new helper"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "docs: explain the new helper"))
+    return Eq(t, firstCommitSubjectSinceBase(dir, "main", "feature"),
+                  "feat: add the new helper")
+}
+
+// No commits on the branch since base — empty string. The caller
+// then falls back to GhTitle(body).
+func TestFirstCommitSubjectSinceBase_NoCommits_ReturnsEmpty(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_first_commit_empty_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "init"))
+    runGitInDir(dir, ArrayOf("branch", "feature"))
+    return Eq(t, firstCommitSubjectSinceBase(dir, "main", "feature"), "")
+}
+
+// Missing base ref / branch — also empty (no panic, caller falls back).
+func TestFirstCommitSubjectSinceBase_MissingRef_ReturnsEmpty(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_first_commit_missing_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "init"))
+    return Eq(t, firstCommitSubjectSinceBase(dir, "main", "no-such-branch"), "")
+}
+
+// Long commit subject is capped at the word boundary (defence-in-
+// depth; engineer might write a 200-char subject and GitHub will
+// refuse it). Bounded by the same capTitleAtWordBoundary that
+// GhTitle uses, via the GhPrCreateFuture wiring — this test pins
+// the helper's raw return; the cap test belongs to capTitleAtWordBoundary.
+func TestFirstCommitSubjectSinceBase_LongSubject_ReturnedVerbatim(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_first_commit_long_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "init"))
+    runGitInDir(dir, ArrayOf("checkout", "-q", "-b", "feature"))
+    val subject = "feat: a very long commit subject that goes well past seventy characters to test capping"
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", subject))
+    return Eq(t, firstCommitSubjectSinceBase(dir, "main", "feature"), subject)
+}
+

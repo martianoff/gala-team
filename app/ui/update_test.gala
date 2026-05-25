@@ -4672,18 +4672,34 @@ func TestApplyChunkVisible_StreamJsonErrorText_SuppressedTag(t T) T {
 // the bytes so the warning conveys intent ("stream-json on stderr")
 // without leaking JSON into the visible surface; the full payload
 // still lands in events.jsonl via LogStderr.
-func TestOnStderr_StreamJsonShape_SuppressedTag(t T) T {
+func TestOnStderr_StreamJsonShape_SilentlyAbsorbed(t T) T {
     val dir = setupDebugRepo("on_stderr_streamjson")
     defer os.RemoveAll(dir)
     val m = sampleModel()
     val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01abc\",\"type\":\"tool_result\",\"content\":\"ok\"}]}}"
     val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = envelope))
+    // No LastError set, no toast pushed — the envelope is a known
+    // claude-code stream-routing quirk the user can't act on. The
+    // audit trail is preserved in events.jsonl via LogStderr.
+    val t1 = m1.LastError match {
+        case None()    => IsTrue(t, true)
+        case Some(_)   => IsTrue(t, false)
+    }
+    return Eq(t1, m1.Toasts.Items.Length(), m.Toasts.Items.Length())
+}
+
+// Regression guard: a non-envelope stderr line (anything that isn't
+// a stream-json envelope) still surfaces on LastError + warn toast.
+// Without this, the silent-absorb path could grow to swallow real
+// auth / rate-limit messages too.
+func TestOnStderr_NonEnvelopeLine_StillSurfaces(t T) T {
+    val dir = setupDebugRepo("on_stderr_nonenvelope")
+    defer os.RemoveAll(dir)
+    val m = sampleModel()
+    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = "Error: rate limit hit, retry in 60s"))
     return m1.LastError match {
         case None()    => IsTrue(t, false)
-        case Some(err) => {
-            val t1 = IsTrue(t, strings.Contains(err, "stream-json"))
-            return IsTrue(t1, !strings.Contains(err, "\"type\":\"user\""))
-        }
+        case Some(err) => IsTrue(t, strings.Contains(err, "rate limit"))
     }
 }
 

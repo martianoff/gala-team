@@ -378,6 +378,18 @@ struct AppModel(
     // Per-member count of consecutive synthetic ("<synthetic>")
     // assistant envelopes seen on stdout. Reset on any real chunk.
     SyntheticOnlyChunks HashMap[string, int],
+    // Per-member set of outstanding Task tool_use ids — the parent
+    // claude-code subprocess has emitted a tool_use of name="Task" but
+    // not yet emitted the matching tool_result. While ANY id is
+    // outstanding for a member, the silence-based watchdog skips that
+    // member: claude-code goes synchronously quiet on stdout for the
+    // entire duration of a Task subagent run, so silence is expected
+    // (not a hang) until the subagent reports back. Past sessions saw
+    // the 5-minute watchdog kill the TL twice in a row when its Explore
+    // subagent legitimately took >5 minutes to map a large codebase.
+    // Key: member name; Value: set of currently outstanding tool_use
+    // ids attributed to that member's stream.
+    OutstandingTaskTools HashMap[string, HashSet[string]],
     // Toggles the help overlay. Bound to `?` and to a clickable `?`
     // button in the header (DESIGN.md §8.5). The overlay is a
     // floating modal that auto-renders the key + mouse parity matrix.
@@ -612,6 +624,7 @@ func InitialModelWithTeams(
     LastUserPrompt        = "",
     WatchdogRetryFired    = false,
     SyntheticOnlyChunks   = EmptyHashMap[string, int](),
+    OutstandingTaskTools  = EmptyHashMap[string, HashSet[string]](),
     HelpVisible           = false,
     ProjectInfoOpen       = false,
     GuidanceOpen          = false,

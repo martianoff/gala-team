@@ -1808,6 +1808,80 @@ func TestStateWatchdog_Approval_NeverFires(t T) T {
     }
 }
 
+// Watchdog pauses while the TL has an outstanding Task subagent. The
+// parent claude-code goes synchronously silent on stdout for the
+// duration of a Task spawn, so silence is expected (not a hang) until
+// the subagent reports back. Past sessions saw an Explore subagent
+// "Map directive parser & protocol package" get killed twice in a
+// row at 5 minutes because the 5-minute TL watchdog didn't know
+// about the in-flight subagent.
+func TestStateWatchdog_TLThinking_PausesWhileTaskOutstanding(t T) T {
+    val leadName = sampleTeam().Lead.Name
+    val seed = sampleModel().Copy(
+        State                = TLThinking(),
+        StateEnteredAt       = staleStateEnteredAt(),
+        OutstandingTaskTools = EmptyHashMap[string, HashSet[string]]()
+            .Put(leadName, EmptyHashSet[string]().Add("toolu_explore_01")),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    // State must remain TLThinking — the watchdog skipped the silence
+    // check because a Task subagent is in flight.
+    return m.State match {
+        case TLThinking() => IsTrue(t, true)
+        case _            => IsTrue(t, false)
+    }
+}
+
+// Regression guard: once the Task subagent's tool_result lands and
+// OutstandingTaskTools clears, the watchdog resumes its silence-based
+// kill. Without this, a leaked outstanding-id entry would permanently
+// disable the watchdog for the lead.
+func TestStateWatchdog_TLThinking_ResumesAfterTaskCleared(t T) T {
+    val leadName = sampleTeam().Lead.Name
+    val seed = sampleModel().Copy(
+        State                = TLThinking(),
+        StateEnteredAt       = staleStateEnteredAt(),
+        OutstandingTaskTools = EmptyHashMap[string, HashSet[string]]()
+            .Put(leadName, EmptyHashSet[string]()),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
+// trackTaskTool unit test: a chunk carrying TaskToolUseId adds the id;
+// a chunk carrying TaskToolResultId removes it. Empty-string fields
+// are no-ops.
+func TestTrackTaskTool_AddRemoveAndNoOps(t T) T {
+    val m0 = sampleModel()
+    val openChunk = emptyChunk().Copy(TaskToolUseId = "toolu_x")
+    val m1 = trackTaskTool(m0, "Vesper", openChunk)
+    val sz1 = m1.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
+    val t1 = Eq(t, sz1, 1)
+    val closeChunk = emptyChunk().Copy(TaskToolResultId = "toolu_x")
+    val m2 = trackTaskTool(m1, "Vesper", closeChunk)
+    val sz2 = m2.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
+    val t2 = Eq(t1, sz2, 0)
+    // No-op chunk (both ids blank) does not touch state.
+    val noopChunk = emptyChunk()
+    val m3 = trackTaskTool(m2, "Vesper", noopChunk)
+    return Eq(t2, m3.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size(), 0)
+}
+
+// extractFirstToolUseId returns the tool_use_id from a type:"user"
+// envelope's tool_result block.
+func TestExtractFirstToolUseId_FromUserEnvelope(t T) T {
+    val env = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_abc123\",\"type\":\"tool_result\",\"content\":\"done\"}]}}"
+    return Eq(t, extractFirstToolUseId(env), "toolu_abc123")
+}
+
+func TestExtractFirstToolUseId_AbsentReturnsEmpty(t T) T {
+    val env = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[]}}"
+    return Eq(t, extractFirstToolUseId(env), "")
+}
+
 // The watchdog must also flip the affected members' Status back to
 // StIdle. Without this, the sidebar keeps showing the member as
 // "working" with a per-member timer ticking up indefinitely —

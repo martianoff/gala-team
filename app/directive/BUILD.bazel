@@ -4,7 +4,6 @@ gala_library(
     name = "directive",
     srcs = [
         "adapter.gala",
-        "control.gala",
         "directive.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/directive",
@@ -23,24 +22,6 @@ gala_go_test(
     pkg = "directive",
     lib_srcs = [
         "adapter.gala",
-        "control.gala",
-        "directive.gala",
-    ],
-    deps = [
-        "//app/protocol",
-        "@gala//collection_immutable",
-        "@gala//go_interop",
-        "@gala//strings",
-    ],
-)
-
-gala_go_test(
-    name = "control_test",
-    srcs = ["control_test.gala"],
-    pkg = "directive",
-    lib_srcs = [
-        "adapter.gala",
-        "control.gala",
         "directive.gala",
     ],
     deps = [

@@ -88,15 +88,24 @@ func MemberDecodeContext(member string, epoch int) DecodeContext = DecodeContext
 // silently dropping. Currently:
 //
 //   UnclosedBlock(kind)        — an opener (@dispatch / @consult /
-//                                 @summary) had no matching bare `@end`.
-//                                 collectBody would otherwise drop the
-//                                 trailing block, leaving the FSM stuck
-//                                 because nothing parsed (a long @summary
+//                                 @summary / @base / @plan) had no
+//                                 matching bare `@end`. collectBody
+//                                 would otherwise drop the trailing
+//                                 block, leaving the FSM stuck because
+//                                 nothing parsed (a long @summary
 //                                 asking the user to decide vanished
 //                                 without surfacing the approval dialog).
 //   MultiTargetDispatch(names) — `@dispatch(A, B)` shape; the parser
 //                                 takes only the first target so the
 //                                 remaining engineers never spawn.
+//   EmptyBody(directive)       — `@plan ... @end` / `@base ... @end`
+//                                 with an empty body. Without surfacing
+//                                 this, the directive would silently
+//                                 no-op (no Base ref to apply, no Plan
+//                                 items to queue) and the TL would never
+//                                 learn the directive vanished.
+//                                 `directive` is the literal token
+//                                 ("@plan" / "@base") for the nudge.
 //
 // The UI maps DecodeIssue values to nudge prompts. Keeping the structural
 // rule ("each directive closes with @end on its own line") here, next to
@@ -105,6 +114,7 @@ func MemberDecodeContext(member string, epoch int) DecodeContext = DecodeContext
 sealed type DecodeIssue {
     case UnclosedBlock(Kind string)
     case MultiTargetDispatch(Names string)
+    case EmptyBody(Directive string)
 }
 
 // IssueTag projects a DecodeIssue to a stable lowercase token so
@@ -115,6 +125,7 @@ sealed type DecodeIssue {
 func IssueTag(i DecodeIssue) string = i match {
     case UnclosedBlock(_)       => "unclosed_block"
     case MultiTargetDispatch(_) => "multi_target_dispatch"
+    case EmptyBody(_)           => "empty_body"
 }
 
 // IssueUnclosedKind returns the directive kind of an UnclosedBlock
@@ -130,6 +141,13 @@ func IssueUnclosedKind(i DecodeIssue) string = i match {
 func IssueMultiTargetNames(i DecodeIssue) string = i match {
     case MultiTargetDispatch(n) => n
     case _                      => ""
+}
+
+// IssueEmptyBodyDirective returns the literal directive token of an
+// EmptyBody issue ("@plan" / "@base"). Returns "" for any other variant.
+func IssueEmptyBodyDirective(i DecodeIssue) string = i match {
+    case EmptyBody(d) => d
+    case _            => ""
 }
 
 // DecodeResult is what DecodeWithIssues returns: the parsed messages
@@ -181,14 +199,17 @@ func dedupById(msgs Array[Message]) Array[Message] {
 // ----------------------------------------------------------------------------
 
 // extractLeadDirectives walks the buffer front-to-back and emits one
-// Message per CLOSED @dispatch / @consult / @summary block. Closed-only
-// is deliberate: acting on a half-streamed directive is never correct,
-// and it keeps Decode idempotent — the same closed block re-emitted is
-// the same content hash. An unclosed trailing block is recorded as an
-// UnclosedBlock issue so the UI can nudge the TL to close it.
-// Multi-target dispatch (`@dispatch(A, B)`) is also surfaced as an
-// issue: the parser still emits A as a Message (current behaviour), but
-// the issue lets the UI nudge the TL to open a separate block for B.
+// Message per CLOSED @dispatch / @consult / @summary / @base / @plan
+// block. Closed-only is deliberate: acting on a half-streamed directive
+// is never correct, and it keeps Decode idempotent — the same closed
+// block re-emitted is the same content hash. An unclosed trailing block
+// is recorded as an UnclosedBlock issue so the UI can nudge the TL to
+// close it. Multi-target dispatch (`@dispatch(A, B)`) is also surfaced
+// as an issue: the parser still emits A as a Message (current
+// behaviour), but the issue lets the UI nudge the TL to open a separate
+// block for B. Empty-body @plan / @base produce an EmptyBody issue
+// instead of silently dropping — without the nudge the TL never learns
+// the directive vanished.
 func extractLeadDirectives(lines Array[string], ctx DecodeContext) Tuple[Array[Message], Array[DecodeIssue]] {
     var out = EmptyArray[Message]()
     var issues = EmptyArray[DecodeIssue]()
@@ -204,9 +225,13 @@ func extractLeadDirectives(lines Array[string], ctx DecodeContext) Tuple[Array[M
                     }
                     val (body, next, closed) = collectBody(lines, i, n, o.SameLineRest)
                     if (closed) {
-                        buildLeadMessage(o, body, ctx) match {
-                            case Some(msg) => out = out.Append(msg)
-                            case None()    => {}
+                        if (requiresNonEmptyBody(o.Kind) && body == "") {
+                            issues = issues.Append(EmptyBody(Directive = "@" + o.Kind))
+                        } else {
+                            buildLeadMessage(o, body, ctx) match {
+                                case Some(msg) => out = out.Append(msg)
+                                case None()    => {}
+                            }
                         }
                         i = next
                     } else {
@@ -225,7 +250,10 @@ func extractLeadDirectives(lines Array[string], ctx DecodeContext) Tuple[Array[M
 
 // buildLeadMessage maps a TL opener + body to a routed Message. The
 // recipient comes from the directive's own target for dispatch /
-// consult; @summary is addressed to the user.
+// consult; @summary / @base / @plan are TL→orchestrator side-channels
+// addressed to the user (the same address @summary uses, since neither
+// kind is routed to a member — Kind is what discriminates them in the
+// content hash and downstream filter).
 func buildLeadMessage(o openingTag, body string, ctx DecodeContext) Option[Message] {
     if (o.Kind == "dispatch") {
         if (o.Target == "") { return None[Message]() }
@@ -238,11 +266,26 @@ func buildLeadMessage(o openingTag, body string, ctx DecodeContext) Option[Messa
     if (o.Kind == "summary") {
         return Some[Message](NewMessage(ctx.Sender, UserAddr(), Summary(), body, ctx.Epoch))
     }
+    if (o.Kind == "base") {
+        return Some[Message](NewMessage(ctx.Sender, UserAddr(), Base(), body, ctx.Epoch))
+    }
+    if (o.Kind == "plan") {
+        return Some[Message](NewMessage(ctx.Sender, UserAddr(), Plan(), body, ctx.Epoch))
+    }
     return None[Message]()
 }
 
 func isLeadKind(kind string) bool =
-    kind == "dispatch" || kind == "consult" || kind == "summary"
+    kind == "dispatch" || kind == "consult" || kind == "summary" ||
+    kind == "base"     || kind == "plan"
+
+// requiresNonEmptyBody marks the kinds whose semantics collapse if the
+// body is empty (@plan with no items is a no-op; @base with no ref
+// can't pick a branch). @dispatch / @consult / @summary are allowed
+// through with an empty body — current behaviour, and a zero-body
+// @summary still legitimately opens the approval modal.
+func requiresNonEmptyBody(kind string) bool =
+    kind == "base" || kind == "plan"
 
 // ----------------------------------------------------------------------------
 // Member-terminal extraction (replaces directive.MemberTerminal)
@@ -379,6 +422,12 @@ func parseOpeningTag(line string) Option[openingTag] {
     if (strings.HasPrefix(trimmed, "@summary")) {
         return bodyOnly("summary", strings.TrimPrefix(trimmed, "@summary"))
     }
+    if (strings.HasPrefix(trimmed, "@base")) {
+        return bodyOnly("base", strings.TrimPrefix(trimmed, "@base"))
+    }
+    if (strings.HasPrefix(trimmed, "@plan")) {
+        return bodyOnly("plan", strings.TrimPrefix(trimmed, "@plan"))
+    }
     if (strings.HasPrefix(trimmed, "@finished")) {
         return bodyOnly("finished", strings.TrimPrefix(trimmed, "@finished"))
     }
@@ -456,6 +505,8 @@ func tokenToKind(token string) Option[MessageKind] {
     if (token == "finished") { return Some[MessageKind](Finished()) }
     if (token == "help")     { return Some[MessageKind](HelpRequested()) }
     if (token == "blocked")  { return Some[MessageKind](Blocked()) }
+    if (token == "base")     { return Some[MessageKind](Base()) }
+    if (token == "plan")     { return Some[MessageKind](Plan()) }
     return None[MessageKind]()
 }
 

@@ -1609,7 +1609,7 @@ func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T)
     val stuckBandAt  = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
     val dispatchMsg  = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seeded = seed.Copy(
-        State             = Delegating(Pending = pending),
+        State             = Delegating(Pending = pending, Dispatched = pending),
         Statuses          = seed.Statuses.Put("Felix", StWorking()),
         DeliveryStates    = seed.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = stuckBandAt, Attempt = 1)),
         LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
@@ -1627,7 +1627,7 @@ func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T)
     val t1 = IsTrue(t, statusOk)
     // FSM still in Delegating with Felix pending — NOT advanced past.
     val fsmOk = m.State match {
-        case Delegating(p) => p.Contains("Felix")
+        case Delegating(p, _) => p.Contains("Felix")
         case _             => false
     }
     val t2 = IsTrue(t1, fsmOk)
@@ -1652,7 +1652,7 @@ func TestOnTick_LivenessSilence_RotatesSessionAndDrainsPendingClosures(t T) T {
     val stuckBandAt  = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
     val dispatchMsg  = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seeded = seed.Copy(
-        State             = Delegating(Pending = pending),
+        State             = Delegating(Pending = pending, Dispatched = pending),
         Statuses          = seed.Statuses.Put("Felix", StWorking()),
         DeliveryStates    = seed.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = stuckBandAt, Attempt = 1)),
         LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
@@ -1688,7 +1688,7 @@ func TestOnTick_LivenessSilence_AfterMaxRetries_FiresMemberAbandoned(t T) T {
     // Delegating with the last pending drained advances to TLReview.
     val dispatchMsg = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seeded = seed.Copy(
-        State             = Delegating(Pending = pending),
+        State             = Delegating(Pending = pending, Dispatched = pending),
         DeliveryStates    = seed.DeliveryStates.Put("Felix", protocol.Silent(SinceNanos = 0, Attempt = 1)),
         LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
     )
@@ -1740,7 +1740,7 @@ func TestStateWatchdog_TLReview_PastCeiling_ForcesIdle(t T) T {
 func TestStateWatchdog_TLNudging_PastCeiling_ForcesIdle(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel().Copy(
-        State          = TLNudging(Reason = "stuck", Pending = pending),
+        State          = TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending),
         StateEnteredAt = staleStateEnteredAt(),
     )
     val (m, _) = Update(seed, TickMsg())
@@ -1753,7 +1753,7 @@ func TestStateWatchdog_TLNudging_PastCeiling_ForcesIdle(t T) T {
 func TestStateWatchdog_Delegating_PastCeiling_ForcesIdle(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel().Copy(
-        State          = Delegating(Pending = pending),
+        State          = Delegating(Pending = pending, Dispatched = pending),
         StateEnteredAt = staleStateEnteredAt(),
     )
     val (m, _) = Update(seed, TickMsg())
@@ -1766,7 +1766,7 @@ func TestStateWatchdog_Delegating_PastCeiling_ForcesIdle(t T) T {
 func TestStateWatchdog_QAGate_PastCeiling_ForcesIdle(t T) T {
     val pending = EmptyHashSet[string]().Add("Sable")
     val seed = sampleModel().Copy(
-        State          = QAGate(Pending = pending),
+        State          = QAGate(Pending = pending, Dispatched = pending),
         StateEnteredAt = staleStateEnteredAt(),
     )
     val (m, _) = Update(seed, TickMsg())
@@ -1957,7 +1957,7 @@ func TestStateWatchdog_Delegating_PastCeiling_ResetsPendingMemberStatuses(t T) T
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel()
     val seeded = seed.Copy(
-        State          = Delegating(Pending = pending),
+        State          = Delegating(Pending = pending, Dispatched = pending),
         StateEnteredAt = staleStateEnteredAt(),
         Statuses       = seed.Statuses.Put("Felix", StWorking()),
     )
@@ -2038,7 +2038,7 @@ func TestStateWatchdog_TLThinking_EmptyLastPrompt_NoRetry(t T) T {
 func TestStateWatchdog_Delegating_AutoRetriesWithRespawn(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel().Copy(
-        State              = Delegating(Pending = pending),
+        State              = Delegating(Pending = pending, Dispatched = pending),
         StateEnteredAt     = staleStateEnteredAt(),
         LastUserPrompt     = "do the thing",
         WatchdogRetryFired = false,
@@ -2060,7 +2060,7 @@ func TestStateWatchdog_Delegating_AutoRetriesWithRespawn(t T) T {
 func TestStateWatchdog_Delegating_SecondFire_FallsBackToIdle(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel().Copy(
-        State              = Delegating(Pending = pending),
+        State              = Delegating(Pending = pending, Dispatched = pending),
         StateEnteredAt     = staleStateEnteredAt(),
         LastUserPrompt     = "do the thing",
         WatchdogRetryFired = true,
@@ -2075,7 +2075,7 @@ func TestStateWatchdog_Delegating_SecondFire_FallsBackToIdle(t T) T {
 func TestStateWatchdog_Delegating_NoLastUserPrompt_FallsBackToIdle(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel().Copy(
-        State              = Delegating(Pending = pending),
+        State              = Delegating(Pending = pending, Dispatched = pending),
         StateEnteredAt     = staleStateEnteredAt(),
         LastUserPrompt     = "",
         WatchdogRetryFired = false,
@@ -2129,7 +2129,7 @@ func TestStateWatchdog_Delegating_RotatesPendingMemberSessionIds(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel()
     val seeded = seed.Copy(
-        State          = Delegating(Pending = pending),
+        State          = Delegating(Pending = pending, Dispatched = pending),
         StateEnteredAt = staleStateEnteredAt(),
         SessionIds     = seed.SessionIds.Put("Felix", "STALE-SID-456"),
     )
@@ -2777,8 +2777,8 @@ func TestKeyApprove_InEveryNonApprovalState_NoOp(t T) T {
         Idle(),
         TLThinking(),
         TLReview(),
-        Delegating(Pending = EmptyHashSet[string]()),
-        QAGate(Pending = EmptyHashSet[string]()),
+        Delegating(Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()),
+        QAGate(Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()),
     )
     return states.FoldLeft(t, (acc, st) => {
         val (m, _) = Update(sampleModel().Copy(State = st), KeyApprove())
@@ -2793,8 +2793,8 @@ func TestKeyReject_InEveryNonApprovalState_NoOp(t T) T {
         Idle(),
         TLThinking(),
         TLReview(),
-        Delegating(Pending = EmptyHashSet[string]()),
-        QAGate(Pending = EmptyHashSet[string]()),
+        Delegating(Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()),
+        QAGate(Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()),
     )
     return states.FoldLeft(t, (acc, st) => {
         val (m, _) = Update(sampleModel().Copy(State = st), KeyReject())
@@ -4455,7 +4455,7 @@ func TestTurnEnd_WithPendingQuestion_FinalizesAndKeepsAnswerable(t T) T {
     // Turn finalized — the @dispatch was parsed, FSM is no longer
     // frozen in TLThinking.
     val t1 = m.State match {
-        case Delegating(p) => IsTrue(t, p.Contains("Felix"))
+        case Delegating(p, _) => IsTrue(t, p.Contains("Felix"))
         case _             => IsTrue(t, false)
     }
     // The pending question survived turn-end — the user can still
@@ -4516,7 +4516,7 @@ func TestTurnEnd_PendingNoDirectives_LandsIdleNotFrozen(t T) T {
 // Delegating loop. After the fix only one transition is emitted.
 func TestDispatchBugs_NoDuplicateMemberDoneOnEofAfterAtDone(t T) T {
     val seed = sampleModel().Copy(
-        State            = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State            = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
         MemberDoneBodies = EmptyHashMap[string, string]().Put("Felix", "shipped"),
     )
     val before = pendingSizeOf(seed.State)
@@ -4533,7 +4533,7 @@ func TestDispatchBugs_NoDuplicateMemberDoneOnEofAfterAtDone(t T) T {
 // -1 when the state isn't Delegating. Test helper for the duplicate-
 // MemberDone assertion.
 func pendingSizeOf(s AppState) int = s match {
-    case Delegating(pending) => pending.Size()
+    case Delegating(pending, _) => pending.Size()
     case _                   => -1
 }
 
@@ -4891,7 +4891,7 @@ func TestHeartbeat_QAGateAbandonedMember_DrainsToTLReview(t T) T {
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
     val dispatchMsg = protocol.NewMessage(team.Lead.Name, "Sable", protocol.Dispatch(), "review", 0)
     val seed = base.Copy(
-        State             = QAGate(Pending = EmptyHashSet[string]().Add("Sable")),
+        State             = QAGate(Pending = EmptyHashSet[string]().Add("Sable"), Dispatched = EmptyHashSet[string]().Add("Sable")),
         Statuses          = base.Statuses.Put("Sable", StWorking()),
         LastChunkAt       = base.LastChunkAt.Put("Sable", stale),
         // Protocol-driven: Silent past abandon threshold + Attempt past
@@ -4946,7 +4946,7 @@ func TestSpawnQAReview_ReturnsImmediatelyForQATeam(t T) T {
     )
     val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
     val seed = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy()).Copy(
-        State    = QAGate(Pending = EmptyHashSet[string]()),
+        State    = QAGate(Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StIdle()),
     )
     val (m, _) = spawnQAReview(seed)
@@ -4971,7 +4971,7 @@ func TestApplyQAPromptReady_FlipsQAToWorking(t T) T {
     )
     val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
     val seed = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy()).Copy(
-        State    = QAGate(Pending = EmptyHashSet[string]()),
+        State    = QAGate(Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StIdle()),
     )
     val (m, _) = applyQAPromptReady(seed, "synthetic review prompt")
@@ -5031,14 +5031,14 @@ func TestQaGateStuck_RepromptsReviewer_NotTL(t T) T {
     val stale = time_utils.FromUnixSeconds(int64(9800))
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
     val seed  = base.Copy(
-        State       = QAGate(Pending = EmptyHashSet[string]().Add("Sable")),
+        State       = QAGate(Pending = EmptyHashSet[string]().Add("Sable"), Dispatched = EmptyHashSet[string]().Add("Sable")),
         Statuses    = base.Statuses.Put("Sable", StWorking()),
         LastChunkAt = base.LastChunkAt.Put("Sable", stale),
     )
     val (m, _) = updateLivenessStatuses(seed, team.Members, now)
     // FSM still parked in QAGate — NOT bounced to TLNudging.
     val t1 = m.State match {
-        case QAGate(_) => IsTrue(t, true)
+        case QAGate(_, _) => IsTrue(t, true)
         case _         => IsTrue(t, false)
     }
     // The lead was never woken. The old path (spawnAggregatedStuck-
@@ -5104,7 +5104,7 @@ func TestHeartbeat_AbandonedMember_PersistsPostTransitionState(t T) T {
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
     val dispatchMsg = protocol.NewMessage(team.Lead.Name, "Felix", protocol.Dispatch(), "work", 0)
     val seed = base.Copy(
-        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         Statuses          = base.Statuses.Put("Felix", StWorking()),
         LastChunkAt       = base.LastChunkAt.Put("Felix", stale),
         // Protocol-driven: Silent past abandon threshold + Attempt past
@@ -5141,14 +5141,14 @@ func TestHeartbeat_SkipsWalkWhileStuckNudgeInFlight(t T) T {
     val stale = time_utils.FromUnixSeconds(int64(9500))  // 500s ago, past AbandonAfterSeconds=300
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
     val seed = base.Copy(
-        State       = TLNudging(Reason = "stuck", Pending = EmptyHashSet[string]().Add("Felix")),
+        State       = TLNudging(Reason = "stuck", Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         Statuses    = base.Statuses.Put("Felix", StStuck()),
         LastChunkAt = base.LastChunkAt.Put("Felix", stale),
     )
     val (m, _) = updateLivenessStatuses(seed, team.Members, now)
     // FSM is unchanged — no MemberAbandoned, no MemberStuck.
     val stateOk = m.State match {
-        case TLNudging(reason, pending) => reason == "stuck" && pending.Contains("Felix")
+        case TLNudging(reason, pending, _) => reason == "stuck" && pending.Contains("Felix")
         case _                          => false
     }
     return IsTrue(t, stateOk)
@@ -5379,7 +5379,7 @@ func TestOnMemberDone_Engineer_DefersUntilUncommittedCheckResult(t T) T {
 // FSM behaviour in TestOnUncommittedCheckResult_CleanFinalises_FsmAdvances.
 func TestOnUncommittedCheckResult_CleanFinalises_BodyLogged(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = finaliseMemberDone(seed, "Felix", "shipped it")
@@ -5391,7 +5391,7 @@ func TestOnUncommittedCheckResult_CleanFinalises_BodyLogged(t T) T {
 
 func TestOnUncommittedCheckResult_CleanFinalises_StatusIdle(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped it", Dirty = false))
@@ -5410,7 +5410,7 @@ func TestOnUncommittedCheckResult_CleanFinalises_StatusIdle(t T) T {
 // finaliseMemberDone never fired MemberDone so FSM stayed Delegating.
 func TestOnUncommittedCheckResult_CleanFinalises_FsmAdvances(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped it", Dirty = false))
@@ -5507,7 +5507,7 @@ func TestPostPrompt_SecondFinishFinalises(t T) T {
     val seed = sampleModel().Copy(
         Workflow       = workflowWithPostPrompt("/simplify"),
         PostPromptSent = ArrayToHashSet[string](ArrayOf("Felix")),
-        State          = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State          = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
         Statuses       = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = onUncommittedCheckResult(seed, "Felix", "simplified it", false)
@@ -5536,11 +5536,11 @@ func TestPostPrompt_SecondFinishFinalises(t T) T {
 func TestPostPrompt_FirstFinishKeepsMemberPending(t T) T {
     val seed = sampleModel().Copy(
         Workflow = workflowWithPostPrompt("/simplify"),
-        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
     )
     val due = postPromptDue(seed, "Felix")
     val stillPending = seed.State match {
-        case Delegating(pending) => pending.Contains("Felix")
+        case Delegating(pending, _) => pending.Contains("Felix")
         case _                   => false
     }
     return IsTrue(t, due && stillPending)
@@ -5746,7 +5746,7 @@ func TestResetMemberState_Respawn_BumpsFromAbsentToOne(t T) T {
 // budget escalated 0 -> 1.
 func TestOnSessionFailed_CrashRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
     val seed = resetSeedScratch().Copy(
-        State      = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State      = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         RetryCount = EmptyHashMap[string, int](),
     )
     val (m, _) = Update(seed, SessionFailed(Member = "Felix", ErrText = "stream closed"))
@@ -5772,7 +5772,7 @@ func TestOnTick_HeartbeatRespawn_PreservesPostPrompt_ClearsBuffers(t T) T {
     val nowNanos    = int(time_utils.Now().UnixNanos())
     val stuckBandAt = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
     val seed = base.Copy(
-        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         Statuses          = base.Statuses.Put("Felix", StWorking()),
         RetryCount        = EmptyHashMap[string, int](),
         LastChunkAt       = EmptyHashMap[string, time_utils.Instant]().Put("Felix", staleTime),
@@ -5871,10 +5871,10 @@ func TestPrBranchOverride_ManualApproveReusesActivePr(t T) T {
 // that carries a pending set — the round-trip must preserve it.
 func TestStateRoundTrip_DelegatingPreservesPending(t T) T {
     val pset = EmptyHashSet[string]().Add("Kael").Add("Lyra")
-    val st = Delegating(Pending = pset)
+    val st = Delegating(Pending = pset, Dispatched = pset)
     val back = stateFromSnap(stateTag(st), statePendingList(st), stateReasonOf(st), stateSummaryOf(st))
     return back match {
-        case Delegating(p) => {
+        case Delegating(p, _) => {
             val t1 = IsTrue(t, p.Contains("Kael"))
             return IsTrue(t1, p.Contains("Lyra"))
         }
@@ -5970,7 +5970,7 @@ func TestRehydrateOrchestration_RestoresPostPromptSent(t T) T {
 // resumeTargets: pending workers for Delegating, nobody for Idle.
 func TestResumeTargets_DelegatingVsIdle(t T) T {
     val pset = EmptyHashSet[string]().Add("Kael")
-    val mDel = sampleModel().Copy(State = Delegating(Pending = pset))
+    val mDel = sampleModel().Copy(State = Delegating(Pending = pset, Dispatched = pset))
     val t1 = Eq(t, resumeTargets(mDel).Size(), 1)
     val mIdle = sampleModel().Copy(State = Idle())
     return IsTrue(t1, resumeTargets(mIdle).IsEmpty())
@@ -6076,7 +6076,7 @@ func modelWithQA() AppModel {
 // stuck in QAGate for 57 minutes until tui_exit.
 func TestFinaliseMemberDone_QAOnly_DrainsQAGateToTLReview(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable"))),
+        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable")), Dispatched = ArrayToHashSet[string](ArrayOf("Sable"))),
         Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
     )
     val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
@@ -6095,12 +6095,12 @@ func TestFinaliseMemberDone_QAGate_PartialPending_StaysInQAGate(t T) T {
         Onboarding = EmptyArray[string](),
     )
     val seed = modelWithQA().Copy(
-        State = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable", "Theo"))),
+        State = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable", "Theo")), Dispatched = ArrayToHashSet[string](ArrayOf("Sable", "Theo"))),
         Team  = modelWithQA().Team.Copy(Members = modelWithQA().Team.Members.Append(theo)),
     )
     val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
     return m.State match {
-        case QAGate(rest) => IsTrue(t, rest.Contains("Theo") && !rest.Contains("Sable"))
+        case QAGate(rest, _) => IsTrue(t, rest.Contains("Theo") && !rest.Contains("Sable"))
         case _            => IsTrue(t, false)
     }
 }
@@ -6116,7 +6116,7 @@ func TestFinaliseMemberDone_QAGate_PartialPending_StaysInQAGate(t T) T {
 // and finaliseMemberDone is all exercised.
 func TestEngineerFinish_NoQA_DrainsDelegatingToTLReview(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     // Synthetic UncommittedCheckResult bypasses the real git probe
@@ -6134,12 +6134,12 @@ func TestEngineerFinish_NoQA_DrainsDelegatingToTLReview(t T) T {
 // TLReview.
 func TestEngineerFinish_WithQA_DrainsDelegatingToQAGate(t T) T {
     val seed = modelWithQA().Copy(
-        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StWorking()),
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped", Dirty = false))
     return m.State match {
-        case QAGate(pending) => IsTrue(t, pending.Contains("Sable"))
+        case QAGate(pending, _) => IsTrue(t, pending.Contains("Sable"))
         case _               => IsTrue(t, false)
     }
 }
@@ -6175,12 +6175,12 @@ func TestEofAfterAtFinished_DoesNotDoubleFireMemberDone(t T) T {
 // the @help directly; the orchestrator synthesises a relay turn.
 func TestChunkArrived_MemberHelp_AdvancesToTLNudging(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
     )
     val helpChunk = "Stuck on the API contract — should I extend the existing endpoint or add a new one?\n@help\nNeed routing guidance.\n@end"
     val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = helpChunk))
     return m.State match {
-        case TLNudging(reason, pending) => IsTrue(t, reason == "help" && pending.Contains("Felix"))
+        case TLNudging(reason, pending, _) => IsTrue(t, reason == "help" && pending.Contains("Felix"))
         case _                          => IsTrue(t, false)
     }
 }
@@ -6191,7 +6191,7 @@ func TestChunkArrived_MemberHelp_AdvancesToTLNudging(t T) T {
 // TLReview. sampleModel has no QA so we land in TLReview.
 func TestChunkArrived_MemberBlocked_DrainsToTLReview(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
     )
     val blockedChunk = "Can't proceed — the upstream dependency is broken.\n@blocked\nThird-party API is returning 500s; this is outside my scope to fix.\n@end"
     val (m, _) = Update(seed, ChunkArrived(Member = "Felix", Line = blockedChunk))
@@ -6212,7 +6212,7 @@ func TestChunkArrived_MemberBlocked_DrainsToTLReview(t T) T {
 // symptom from the live session.
 func TestChunkArrived_QAFinished_DrainsToTLReview(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable"))),
+        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable")), Dispatched = ArrayToHashSet[string](ArrayOf("Sable"))),
         Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
     )
     val approveChunk = "Reviewed the deliverables; build green; tests pass.\n@finished\nAPPROVE. Migration looks clean.\n@end"
@@ -6229,11 +6229,11 @@ func TestChunkArrived_QAFinished_DrainsToTLReview(t T) T {
 // changes but the underlying handler is correct.
 func TestOnMemberHelp_FiresMemberHelpRequested(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
     )
     val (m, _) = onMemberHelp(seed, "Felix", "Which API should I extend?")
     return m.State match {
-        case TLNudging(reason, _) => IsTrue(t, reason == "help")
+        case TLNudging(reason, _, _) => IsTrue(t, reason == "help")
         case _                    => IsTrue(t, false)
     }
 }
@@ -6242,7 +6242,7 @@ func TestOnMemberHelp_FiresMemberHelpRequested(t T) T {
 // blocked drain routes to TLReview (no QA in sampleTeam).
 func TestOnMemberBlocked_FiresMemberBlockedAndDrains(t T) T {
     val seed = sampleModel().Copy(
-        State = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
     )
     val (m, _) = onMemberBlocked(seed, "Felix", "Third-party API down")
     return m.State match {
@@ -6268,7 +6268,7 @@ func TestRejectAndIdle_AdvancesToIdle(t T) T {
 // their pending sets on a UserPrompted escape hatch.
 func TestUserPrompted_FromDelegating_LandsInTLThinking(t T) T {
     val seed = sampleModel().Copy(
-        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix"))),
+        State    = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
         Composer = "redirect: try a different approach",
     )
     val (m, _) = Update(seed, KeySubmit())
@@ -6280,7 +6280,7 @@ func TestUserPrompted_FromDelegating_LandsInTLThinking(t T) T {
 
 func TestUserPrompted_FromQAGate_LandsInTLThinking(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable"))),
+        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable")), Dispatched = ArrayToHashSet[string](ArrayOf("Sable"))),
         Composer = "wait, scrap the review",
     )
     val (m, _) = Update(seed, KeySubmit())
@@ -6306,25 +6306,13 @@ func TestUserPrompted_FromApproval_StaysInApproval(t T) T {
 }
 
 // ----------------------------------------------------------------------------
-// detectMalformedDispatch — UI-level heuristics for the directive
-// shapes the protocol parser cannot see: @plan / @base unclosed (owned
-// by app/directive's control reader), arrow-notation, bold headings.
-// Unclosed @summary / @consult / @dispatch and multi-target @dispatch
-// are now surfaced by protocol.DecodeWithIssues as DecodeIssue values;
-// their tests live in app/protocol/decode_test.gala.
+// detectMalformedDispatch — UI-level heuristics for directive shapes
+// the protocol parser cannot see: arrow-notation and bold headings
+// naming a team member. Unclosed openers (every kind) + multi-target
+// @dispatch + empty-body @plan / @base are now surfaced by
+// protocol.DecodeWithIssues as DecodeIssue values; their tests live in
+// app/protocol/decode_test.gala.
 // ----------------------------------------------------------------------------
-
-func TestDetectMalformedDispatch_PlanWithoutEnd_DetectsPlan(t T) T {
-    val buf = "@plan\nstep one\nstep two"
-    val reason = detectMalformedDispatch(buf, sampleTeam())
-    return IsTrue(t, strings.Contains(reason, "@plan"))
-}
-
-func TestDetectMalformedDispatch_BaseWithoutEnd_DetectsBase(t T) T {
-    val buf = "@base previous\nnow lets dispatch"
-    val reason = detectMalformedDispatch(buf, sampleTeam())
-    return IsTrue(t, strings.Contains(reason, "@base"))
-}
 
 // Plain chat with no directive markers must NOT match — that's a
 // legitimate "TL replied with prose" turn and the FSM should route
@@ -6337,9 +6325,10 @@ func TestDetectMalformedDispatch_PlainChat_NoFalsePositive(t T) T {
 
 // ----------------------------------------------------------------------------
 // formatDecodeIssues — UI's mapping from protocol.DecodeIssue values
-// (UnclosedBlock / MultiTargetDispatch) to nudge text. The protocol
-// tests prove the parser surfaces the right issues; these prove the UI
-// renders them with the strings the TL prompt has been tuned around.
+// (UnclosedBlock / MultiTargetDispatch / EmptyBody) to nudge text. The
+// protocol tests prove the parser surfaces the right issues; these
+// prove the UI renders them with the strings the TL prompt has been
+// tuned around.
 // ----------------------------------------------------------------------------
 
 func TestFormatDecodeIssues_UnclosedSummary(t T) T {
@@ -6360,10 +6349,34 @@ func TestFormatDecodeIssues_UnclosedDispatch(t T) T {
     return IsTrue(t, strings.Contains(reason, "@dispatch(...) opening tag without a matching @end"))
 }
 
+func TestFormatDecodeIssues_UnclosedPlan(t T) T {
+    val issues = ArrayOf[protocol.DecodeIssue](protocol.UnclosedBlock(Kind = "plan"))
+    val reason = formatDecodeIssues(issues)
+    return IsTrue(t, strings.Contains(reason, "@plan"))
+}
+
+func TestFormatDecodeIssues_UnclosedBase(t T) T {
+    val issues = ArrayOf[protocol.DecodeIssue](protocol.UnclosedBlock(Kind = "base"))
+    val reason = formatDecodeIssues(issues)
+    return IsTrue(t, strings.Contains(reason, "@base"))
+}
+
 func TestFormatDecodeIssues_MultiTarget(t T) T {
     val issues = ArrayOf[protocol.DecodeIssue](protocol.MultiTargetDispatch(Names = "Felix, Mira"))
     val reason = formatDecodeIssues(issues)
     return IsTrue(t, strings.Contains(reason, "Felix, Mira"))
+}
+
+func TestFormatDecodeIssues_EmptyBodyBase(t T) T {
+    val issues = ArrayOf[protocol.DecodeIssue](protocol.EmptyBody(Directive = "@base"))
+    val reason = formatDecodeIssues(issues)
+    return IsTrue(t, strings.Contains(reason, "@base"))
+}
+
+func TestFormatDecodeIssues_EmptyBodyPlan(t T) T {
+    val issues = ArrayOf[protocol.DecodeIssue](protocol.EmptyBody(Directive = "@plan"))
+    val reason = formatDecodeIssues(issues)
+    return IsTrue(t, strings.Contains(reason, "@plan"))
 }
 
 func TestFormatDecodeIssues_Empty(t T) T {

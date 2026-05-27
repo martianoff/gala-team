@@ -142,6 +142,7 @@ func eventTag(e Event) string = e match {
     case MemberStuck(_)              => "MemberStuck"
     case MemberAbandoned(_)          => "MemberAbandoned"
     case MemberCrashed(_, _, _)      => "MemberCrashed"
+    case DispatchComplete(_)         => "DispatchComplete"
     case QADone()                    => "QADone"
     case ApprovalAccepted()          => "ApprovalAccepted"
     case ApprovalRejected()          => "ApprovalRejected"
@@ -168,6 +169,7 @@ func eventDetail(e Event) string = e match {
     case MemberStuck(name)                  => s"member=${name}"
     case MemberAbandoned(name)              => s"member=${name}"
     case MemberCrashed(name, err, retry)    => s"member=${name} retry=${retry} err=${err}"
+    case DispatchComplete(spawned)          => s"spawned=${SetToArray(spawned).Sorted().MkString(\",\")}"
     case QADone()                           => ""
     case ApprovalAccepted()                 => ""
     case ApprovalRejected()                 => ""
@@ -193,10 +195,10 @@ func transitionLogged(state AppState, event Event, ctx TransitionContext) AppSta
 func stateTag(s AppState) string = s match {
     case Idle()         => "Idle"
     case TLThinking()   => "TLThinking"
-    case Delegating(_)  => "Delegating"
-    case QAGate(_)      => "QAGate"
+    case Delegating(_, _)  => "Delegating"
+    case QAGate(_, _)      => "QAGate"
     case TLReview()     => "TLReview"
-    case TLNudging(_, _) => "TLNudging"
+    case TLNudging(_, _, _) => "TLNudging"
     case Approval(_)    => "Approval"
 }
 
@@ -212,14 +214,14 @@ func stateTag(s AppState) string = s match {
 // ----------------------------------------------------------------------------
 
 func statePendingList(s AppState) Array[string] = s match {
-    case Delegating(p)   => SetToArray(p)
-    case QAGate(p)       => SetToArray(p)
-    case TLNudging(_, p) => SetToArray(p)
+    case Delegating(p, _)   => SetToArray(p)
+    case QAGate(p, _)       => SetToArray(p)
+    case TLNudging(_, p, _) => SetToArray(p)
     case _               => EmptyArray[string]()
 }
 
 func stateReasonOf(s AppState) string = s match {
-    case TLNudging(r, _) => r
+    case TLNudging(r, _, _) => r
     case _               => ""
 }
 
@@ -231,14 +233,22 @@ func stateSummaryOf(s AppState) string = s match {
 // stateFromSnap is the inverse of stateTag (+ payload). An unknown or
 // empty tag — including a legacy snapshot with no persisted state —
 // rebuilds as Idle, so old snapshots resume exactly as before.
+//
+// Dispatched is seeded to the full pending set on restore: a snapshot
+// only exists for a run that already cleared the dispatch fan-out
+// (DispatchComplete is fired synchronously after spawnDispatchedMembers,
+// before the next persist), so any name still in Pending was
+// successfully spawned in the prior session. Without this seed the
+// resumed FSM would treat every pending member as "never started" the
+// first time a DispatchComplete-triggered invariant ran.
 func stateFromSnap(tag string, pending Array[string], reason string, summary string) AppState {
     val pset = ArrayToHashSet[string](pending)
     return tag match {
         case "TLThinking" => TLThinking()
-        case "Delegating" => Delegating(Pending = pset)
-        case "QAGate"     => QAGate(Pending = pset)
+        case "Delegating" => Delegating(Pending = pset, Dispatched = pset)
+        case "QAGate"     => QAGate(Pending = pset, Dispatched = pset)
         case "TLReview"   => TLReview()
-        case "TLNudging"  => TLNudging(Reason = reason, Pending = pset)
+        case "TLNudging"  => TLNudging(Reason = reason, Pending = pset, Dispatched = pset)
         case "Approval"   => Approval(SummaryBody = summary)
         case _            => Idle()
     }
@@ -341,9 +351,9 @@ func resumeContinuationPrompt() string =
 // worker set; a pure lead turn (TLThinking/TLReview) means the lead
 // itself was mid-turn. Approval/Idle have nobody running by design.
 func resumeTargets(m AppModel) Array[string] = m.State match {
-    case Delegating(p)   => SetToArray(p)
-    case QAGate(p)       => SetToArray(p)
-    case TLNudging(_, p) => SetToArray(p)
+    case Delegating(p, _)   => SetToArray(p)
+    case QAGate(p, _)       => SetToArray(p)
+    case TLNudging(_, p, _) => SetToArray(p)
     case TLThinking()    => ArrayOf(m.Team.Lead.Name)
     case TLReview()      => ArrayOf(m.Team.Lead.Name)
     case _               => EmptyArray[string]()
@@ -448,9 +458,9 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     val affected = m.State match {
         case TLThinking()    => ArrayOf(leadName)
         case TLReview()      => ArrayOf(leadName)
-        case TLNudging(_, _) => ArrayOf(leadName)
-        case Delegating(p)   => SetToArray(p)
-        case QAGate(p)       => SetToArray(p)
+        case TLNudging(_, _, _) => ArrayOf(leadName)
+        case Delegating(p, _)   => SetToArray(p)
+        case QAGate(p, _)       => SetToArray(p)
         case _               => EmptyArray[string]()
     }
     // Pause-during-subagent: if ANY affected member has at least one
@@ -609,8 +619,8 @@ func updateLivenessStatuses(
     // hitting the TLReview→TLReview no-op transition AND spawning a
     // fresh TL nudge that clobbered the lead's actual review turn.
     val activeFsm = m.State match {
-        case Delegating(_) => true
-        case QAGate(_)     => true
+        case Delegating(_, _) => true
+        case QAGate(_, _)     => true
         case _             => false
     }
     if !activeFsm { return (m, EmptyArray[Cmd[AppMsg]]()) }
@@ -3929,9 +3939,9 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
     } else {
         (targets, EmptyArray[string]())
     }
-    val seed = (m, EmptyArray[Cmd[AppMsg]]())
-    val (after, cmds) = allowed.FoldLeft(seed, (acc, t) => {
-        val (curM, curCmds) = acc
+    val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyHashSet[string]())
+    val (after, cmds, spawned) = allowed.FoldLeft(seed, (acc, t) => {
+        val (curM, curCmds, curSpawned) = acc
         val (name, body) = t
         // Log every TL→engineer/QA dispatch so events.jsonl carries
         // the full intent ledger. Combined with the FSM transitions
@@ -3962,11 +3972,11 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
         // PostPromptSent and bump RetryCount instead.
         val mClosed = resetMemberForFreshDispatch(closeLiveSession(curM, name), name)
         return findMemberByName(mClosed.Team.Members, name) match {
-            case None() => (mClosed, curCmds)
+            case None() => (mClosed, curCmds, curSpawned)
             case Some(mem) => ensureSession(mClosed, mem) match {
                 case Left(err)  => {
                     LogSpawnFailure(name, "dispatch", err)
-                    return (curM.Copy(LastError = Some(s"dispatch ${name}: ${err}")), curCmds)
+                    return (curM.Copy(LastError = Some(s"dispatch ${name}: ${err}")), curCmds, curSpawned)
                 }
                 case Right(m1)  => {
                     // Pipeline upsert: append (or refresh status of)
@@ -3999,20 +4009,53 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
                         DeliveryStates    = withStatus.DeliveryStates.Put(name, protocol.Sent(AtNanos = nowNanos, Attempt = 1)),
                         LastDispatchedMsg = withStatus.LastDispatchedMsg.Put(name, dispatchMsg),
                     )
-                    return (withDelivery, curCmds.Append(cmd))
+                    return (withDelivery, curCmds.Append(cmd), curSpawned.Add(name))
                 }
             }
         }
     })
+    // Feed spawn outcomes back to the FSM. droppedQa names are folded
+    // into the addressed set so the invariant doesn't trip for the
+    // existing QA-direct-@dispatch path (which has its own dedicated
+    // nudge below); Pending \ addressed is the genuine "TL named
+    // someone who never started" set — typos and SpawnSession errors.
+    val droppedQaSet = ArrayToHashSet[string](droppedQa)
+    val addressed    = spawned.Union(droppedQaSet)
+    val advanced     = transitionLogged(after.State, DispatchComplete(Spawned = addressed), transitionContext(after))
+    val withState    = persistAppModel(after.Copy(State = advanced))
+    // When the invariant trips, the FSM lands in TLNudging; spawn a
+    // matching TL nudge turn so the lead actually gets a chance to
+    // recover (otherwise the state change is silent — no claude turn).
+    val pendingNames = after.State match {
+        case Delegating(p, _) => p
+        case _                => EmptyHashSet[string]()
+    }
+    val unspawned = pendingNames.Diff(addressed)
+    val (afterInvariant, invariantCmds) = if (!unspawned.IsEmpty()) {
+        spawnTLNudge(withState, "unspawned-dispatch", buildUnspawnedDispatchNudge(SetToArray(unspawned).Sorted()))
+    } else {
+        (withState, EmptyArray[Cmd[AppMsg]]())
+    }
     // If the lead tried to dispatch QA member(s) directly, send a
     // one-shot system nudge back so they understand for next turn.
     // Run AFTER the engineer fanout so the engineers do start (the
     // user shouldn't be blocked by Iris's protocol slip).
     if !droppedQa.IsEmpty() {
-        val (afterNudge, nudgeCmds) = spawnTLNudge(after, "qa-auto-spawn", buildQaAutoSpawnNudge(droppedQa))
-        return (afterNudge, batchAll(cmds.Append(batchAll(nudgeCmds))))
+        val (afterNudge, nudgeCmds) = spawnTLNudge(afterInvariant, "qa-auto-spawn", buildQaAutoSpawnNudge(droppedQa))
+        return (afterNudge, batchAll(cmds.AppendAll(invariantCmds).Append(batchAll(nudgeCmds))))
     }
-    return (after, batchAll(cmds))
+    return (afterInvariant, batchAll(cmds.AppendAll(invariantCmds)))
+}
+
+// buildUnspawnedDispatchNudge tells the TL their @dispatch named one
+// or more members whose spawn never happened — either a typo (no
+// matching team member) or a runtime SpawnSession failure. Names the
+// affected members so the TL can re-dispatch with corrected names,
+// route the work to someone else, or @summary out.
+func buildUnspawnedDispatchNudge(names Array[string]) string {
+    val list = names.MkString(", ")
+    val verbBe = if (names.Size() == 1) "was" else "were"
+    return s"System: I could not spawn ${list} for your @dispatch — either the name is not in the team roster or the runtime SpawnSession failed. The pending entry ${verbBe} dropped from the orchestration cycle. Re-dispatch with a corrected name, route the work to a different member, or @summary the turn if there is nothing more to do."
 }
 
 // partitionQaTargets splits dispatch targets into (allowed, droppedQaNames)
@@ -4294,15 +4337,23 @@ func qaPromptReadyCmd(m AppModel) Cmd[AppMsg] =
 // was building).
 func applyQAPromptReady(m AppModel, reviewBody string) Tuple[AppModel, Cmd[AppMsg]] {
     val inQaGate = m.State match {
-        case QAGate(_) => true
+        case QAGate(_, _) => true
         case _         => false
     }
     if !inQaGate { return (m, NoCmd[AppMsg]()) }
     val qa = MembersOf(m.Team, QA())
     if qa.IsEmpty() { return (m, NoCmd[AppMsg]()) }
-    val seed = (m, EmptyArray[Cmd[AppMsg]]())
-    val (after, cmds) = qa.FoldLeft(seed, (acc, mem) => {
-        val (curM, curCmds) = acc
+    // Seed Spawned with QA members the lead already dispatched
+    // manually (skipped below to avoid a duplicate spawn) — those
+    // sessions ARE live, just owned by the engineer-dispatch fanout,
+    // so the FSM should still count them as Dispatched when the
+    // invariant check fires.
+    val preSpawned = qa.FoldLeft(EmptyHashSet[string](), (acc, mem) =>
+        if (isCurrentlyDispatched(m, mem.Name)) acc.Add(mem.Name) else acc
+    )
+    val seed = (m, EmptyArray[Cmd[AppMsg]](), preSpawned)
+    val (after, cmds, spawned) = qa.FoldLeft(seed, (acc, mem) => {
+        val (curM, curCmds, curSpawned) = acc
         // Skip QA members the lead already dispatched in their @dispatch
         // list. Without this guard, ensureSession runs twice for the
         // same member: once via spawnDispatchedMembers (lead's manual
@@ -4312,7 +4363,7 @@ func applyQAPromptReady(m AppModel, reviewBody string) Tuple[AppModel, Cmd[AppMs
         // 128, surfacing as "dispatch <QA>: workspace … exited with
         // code 128" in the toast.
         if isCurrentlyDispatched(curM, mem.Name) {
-            return (curM, curCmds)
+            return (curM, curCmds, curSpawned)
         }
         // Log auto-QA fanout the same way as engineer @dispatch so
         // the events.jsonl ledger shows every spawn, regardless of
@@ -4323,7 +4374,7 @@ func applyQAPromptReady(m AppModel, reviewBody string) Tuple[AppModel, Cmd[AppMs
         return ensureSession(curM, mem) match {
             case Left(err)  => {
                 LogSpawnFailure(mem.Name, "qa_auto", err)
-                return (curM.Copy(LastError = Some(s"qa ${mem.Name}: ${err}")), curCmds)
+                return (curM.Copy(LastError = Some(s"qa ${mem.Name}: ${err}")), curCmds, curSpawned)
             }
             case Right(m1)  => {
                 // Pipeline upsert mirrors the engineer-dispatch path —
@@ -4336,11 +4387,29 @@ func applyQAPromptReady(m AppModel, reviewBody string) Tuple[AppModel, Cmd[AppMs
                 } else {
                     reviewBody
                 }
-                return (withStatus, curCmds.Append(sendAndPumpCmd(withStatus, mem, wrapped)))
+                return (withStatus, curCmds.Append(sendAndPumpCmd(withStatus, mem, wrapped)),
+                    curSpawned.Add(mem.Name))
             }
         }
     })
-    return (after, batchAll(cmds))
+    // Feed QA spawn outcomes back to the FSM. A QA member whose
+    // ensureSession failed leaves Pending\Dispatched non-empty,
+    // tripping the invariant → TLNudging so the lead can react,
+    // rather than waiting forever for a QADone from a session that
+    // never started.
+    val advanced  = transitionLogged(after.State, DispatchComplete(Spawned = spawned), transitionContext(after))
+    val withState = persistAppModel(after.Copy(State = advanced))
+    val pendingNames = after.State match {
+        case QAGate(p, _) => p
+        case _            => EmptyHashSet[string]()
+    }
+    val unspawned = pendingNames.Diff(spawned)
+    val (afterInvariant, invariantCmds) = if (!unspawned.IsEmpty()) {
+        spawnTLNudge(withState, "unspawned-qa", buildUnspawnedDispatchNudge(SetToArray(unspawned).Sorted()))
+    } else {
+        (withState, EmptyArray[Cmd[AppMsg]]())
+    }
+    return (afterInvariant, batchAll(cmds.AppendAll(invariantCmds)))
 }
 
 // isCurrentlyDispatched returns true when `name`'s status reflects an

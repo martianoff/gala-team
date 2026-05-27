@@ -263,7 +263,7 @@ func TestE2E_RespawnAfterRotation_PreservesDispatchBody(t T) T {
     val dispatchBody = "Refactor the foo module; tests must pass."
     val dispatchMsg = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), dispatchBody, 0)
     val seeded = seed.Copy(
-        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
         // SessionIds intentionally MISSING — simulates the post-
         // rotation state where respawnMember is about to mint a
@@ -290,7 +290,7 @@ func TestE2E_SpawnTLNudge_PreservesLastDispatchedMsg(t T) T {
     val dispatchBody = "Refactor the foo module; tests must pass."
     val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), dispatchBody, 0)
     val seeded = base.Copy(
-        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
     )
     val (m, _) = spawnTLNudge(seeded, "stuck-batch", "Felix has been silent")
@@ -315,7 +315,7 @@ func TestE2E_DispatchThenNudgeThenRotation_ReplaysOriginalBody(t T) T {
     val dispatchBody = "Refactor the foo module; tests must pass."
     val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), dispatchBody, 0)
     val seeded = base.Copy(
-        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
     )
     val (afterNudge, _) = spawnTLNudge(seeded, "stuck-batch", "Felix has been silent")
@@ -391,7 +391,7 @@ func TestE2E_Heartbeat_InDelegating_StillFiresMemberStuck(t T) T {
         3,  // > MaxRetries=2
     )
     val seeded = base.Copy(
-        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         Statuses          = base.Statuses.Put("Felix", StWorking()),
         LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
         DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = staleNanos, Attempt = 3)),
@@ -402,7 +402,7 @@ func TestE2E_Heartbeat_InDelegating_StillFiresMemberStuck(t T) T {
     )
     val (m, _) = Update(seeded, TickMsg())
     val movedToNudging = m.State match {
-        case TLNudging(reason, _) => reason == "stuck"
+        case TLNudging(reason, _, _) => reason == "stuck"
         case _                    => false
     }
     return IsTrue(t, movedToNudging)
@@ -425,12 +425,12 @@ func TestE2E_SessionFailed_NoStatusDirective_NudgesNotMemberDone(t T) T {
     defer SetSpawnDisabledForTest(false)
     val base = e2eModel()
     val seeded = base.Copy(
-        State         = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State         = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         MemberBuffers = base.MemberBuffers.Put("Felix", "I'm not sure what you'd like me to work on."),
     )
     val (m, _) = Update(seeded, SessionFailed(Member = "Felix", ErrText = "EOF"))
     val stillPending = m.State match {
-        case Delegating(p) => p.Contains("Felix")
+        case Delegating(p, _) => p.Contains("Felix")
         case _             => false
     }
     val nudgeBumped = m.RetryCount.Get("Felix").GetOrElse(0) == 1
@@ -448,11 +448,11 @@ func TestE2E_SessionFailed_EmptyBuffer_NudgesNotMemberDone(t T) T {
     defer SetSpawnDisabledForTest(false)
     val base = e2eModel()
     val seeded = base.Copy(
-        State = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
     )
     val (m, _) = Update(seeded, SessionFailed(Member = "Felix", ErrText = "EOF"))
     val stillPending = m.State match {
-        case Delegating(p) => p.Contains("Felix")
+        case Delegating(p, _) => p.Contains("Felix")
         case _             => false
     }
     return IsTrue(t, stillPending)
@@ -467,7 +467,7 @@ func TestE2E_SessionFailed_NoStatusDirective_PastMaxNudges_Escalates(t T) T {
     val base = e2eModel()
     val maxNudges = maxAutoRetriesOf(base)
     val seeded = base.Copy(
-        State         = Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
+        State         = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         MemberBuffers = base.MemberBuffers.Put("Felix", "still no idea"),
         // Already exhausted the nudge budget — next EOF must escalate.
         RetryCount    = base.RetryCount.Put("Felix", maxNudges),
@@ -524,9 +524,9 @@ func TestE2EProperty_NonTerminalStates_WatchdogReachesIdleOrTLThinking(t T) T {
     val states = ArrayOf[AppState](
         TLThinking(),
         TLReview(),
-        TLNudging(Reason = "stuck", Pending = EmptyHashSet[string]().Add("Felix")),
-        Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
-        QAGate(Pending = EmptyHashSet[string]().Add("Felix")),
+        TLNudging(Reason = "stuck", Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
+        Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
+        QAGate(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
     )
     val seed = e2eModel()
     val results = states.Map((st) => {
@@ -569,9 +569,9 @@ func TestE2EProperty_StateTag_IsTotalAndUnique(t T) T {
         Idle(),
         TLThinking(),
         TLReview(),
-        TLNudging(Reason = "stuck", Pending = EmptyHashSet[string]()),
-        Delegating(Pending = EmptyHashSet[string]().Add("Felix")),
-        QAGate(Pending = EmptyHashSet[string]().Add("Felix")),
+        TLNudging(Reason = "stuck", Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()),
+        Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
+        QAGate(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         Approval(SummaryBody = "ship it"),
     )
     val tags = states.Map((st) => stateTag(st))

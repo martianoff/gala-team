@@ -391,9 +391,9 @@ func emitError(reason string) {
 func stateName(m AppModel) string = m.State match {
     case Idle()         => "Idle"
     case TLThinking()   => "TLThinking"
-    case Delegating(_)  => "Delegating"
-    case QAGate(_)      => "QAGate"
+    case Delegating(_, _)  => "Delegating"
+    case QAGate(_, _)      => "QAGate"
     case TLReview()     => "TLReview"
-    case TLNudging(_, _) => "TLNudging"
+    case TLNudging(_, _, _) => "TLNudging"
     case Approval(_)    => "Approval"
 }

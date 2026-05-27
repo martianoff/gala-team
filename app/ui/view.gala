@@ -1361,8 +1361,8 @@ struct LivenessCounts(
 // (slow/stuck/recovering/failed), the breakdown appears.
 func livenessBanner(m AppModel) LayoutChild {
     val show = m.State match {
-        case Delegating(_) => true
-        case QAGate(_)     => true
+        case Delegating(_, _) => true
+        case QAGate(_, _)     => true
         case TLReview()    => true
         case _             => false
     }
@@ -2112,10 +2112,10 @@ func footerHints(m AppModel) string {
 func stateLabel(s AppState) string = s match {
     case Idle()           => "state: idle"
     case TLThinking()     => "state: TL thinking"
-    case Delegating(_)    => "state: delegating"
-    case QAGate(_)        => "state: QA gate"
+    case Delegating(_, _)    => "state: delegating"
+    case QAGate(_, _)        => "state: QA gate"
     case TLReview()       => "state: TL review"
-    case TLNudging(why, _) => s"state: TL nudging (${why})"
+    case TLNudging(why, _, _) => s"state: TL nudging (${why})"
     case Approval(_)      => "state: approval"
 }
 

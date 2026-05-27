@@ -18,13 +18,13 @@ func ctxNoQA() TransitionContext = TransitionContext(
 )
 
 func stateName(s AppState) string = s match {
-    case Idle()           => "Idle"
-    case TLThinking()     => "TLThinking"
-    case Delegating(_)    => "Delegating"
-    case QAGate(_)        => "QAGate"
-    case TLReview()       => "TLReview"
-    case TLNudging(_, _)  => "TLNudging"
-    case Approval(_)      => "Approval"
+    case Idle()              => "Idle"
+    case TLThinking()        => "TLThinking"
+    case Delegating(_, _)    => "Delegating"
+    case QAGate(_, _)        => "QAGate"
+    case TLReview()          => "TLReview"
+    case TLNudging(_, _, _)  => "TLNudging"
+    case Approval(_)         => "Approval"
 }
 
 func dispatchTo(name string) Directive = Dispatch(Target = name, Body = "do work")
@@ -76,27 +76,27 @@ func TestTLThinking_SummaryBeatsDispatch(t T) T {
 
 func TestDelegating_OneMemberDone_StaysDelegating(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix", Body = ""), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), MemberDone(MemberName = "Felix", Body = ""), ctxWithQA(true))
     val t1 = Eq(t, stateName(s), "Delegating")
     return s match {
-        case Delegating(rest) => Eq(t1, rest.Size(), 1)
+        case Delegating(rest, _) => Eq(t1, rest.Size(), 1)
         case _                => IsTrue(t1, false)
     }
 }
 
 func TestDelegating_AllDone_QARequired_GoesToQAGate(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix", Body = ""), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), MemberDone(MemberName = "Felix", Body = ""), ctxWithQA(true))
     val t1 = Eq(t, stateName(s), "QAGate")
     return s match {
-        case QAGate(qaPending) => Eq(t1, qaPending.Size(), 1)
+        case QAGate(qaPending, _) => Eq(t1, qaPending.Size(), 1)
         case _                 => IsTrue(t1, false)
     }
 }
 
 func TestDelegating_AllDone_NoQA_GoesToTLReview(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix", Body = ""), ctxNoQA())
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), MemberDone(MemberName = "Felix", Body = ""), ctxNoQA())
     return Eq(t, stateName(s), "TLReview")
 }
 
@@ -104,7 +104,7 @@ func TestDelegating_AllDone_NoQA_GoesToTLReview(t T) T {
 
 func TestQAGate_OnQADone_GoesToTLReview(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo")
-    val s = Transition(QAGate(Pending = pending), QADone(), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), QADone(), ctxWithQA(true))
     return Eq(t, stateName(s), "TLReview")
 }
 
@@ -177,20 +177,20 @@ func TestTLThinking_IgnoresQADone(t T) T {
 // resets to TLThinking on every fresh user prompt.
 func TestDelegating_UserPromptedResetsToTLThinking(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
-    val s = Transition(Delegating(Pending = pending), UserPrompted(), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), UserPrompted(), ctxWithQA(true))
     return Eq(t, stateName(s), "TLThinking")
 }
 
 func TestDelegating_IgnoresQADone(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
-    val s = Transition(Delegating(Pending = pending), QADone(), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), QADone(), ctxWithQA(true))
     return Eq(t, stateName(s), "Delegating")
 }
 
 func TestDelegating_IgnoresTLDone(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val dirs = ArrayOf[Directive](dispatchTo("Felix"))
-    val s = Transition(Delegating(Pending = pending), TLDone(Directives = dirs), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), TLDone(Directives = dirs), ctxWithQA(true))
     return Eq(t, stateName(s), "Delegating")  // mid-flight TLDone is ignored
 }
 
@@ -198,17 +198,17 @@ func TestDelegating_IgnoresTLDone(t T) T {
 // removing one should keep us in QAGate with the rest.
 func TestQAGate_OneQADone_StaysQAGateWithRest(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo").Add("Mira")
-    val s = Transition(QAGate(Pending = pending), MemberDone(MemberName = "Theo", Body = ""), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), MemberDone(MemberName = "Theo", Body = ""), ctxWithQA(true))
     val t1 = Eq(t, stateName(s), "QAGate")
     return s match {
-        case QAGate(rest) => Eq(t1, rest.Size(), 1)
+        case QAGate(rest, _) => Eq(t1, rest.Size(), 1)
         case _            => IsTrue(t1, false)
     }
 }
 
 func TestQAGate_LastQADone_GoesToTLReview(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo")
-    val s = Transition(QAGate(Pending = pending), MemberDone(MemberName = "Theo", Body = ""), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), MemberDone(MemberName = "Theo", Body = ""), ctxWithQA(true))
     return Eq(t, stateName(s), "TLReview")
 }
 
@@ -217,7 +217,7 @@ func TestQAGate_LastQADone_GoesToTLReview(t T) T {
 // rationale.
 func TestQAGate_UserPromptedResetsToTLThinking(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo")
-    val s = Transition(QAGate(Pending = pending), UserPrompted(), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), UserPrompted(), ctxWithQA(true))
     return Eq(t, stateName(s), "TLThinking")
 }
 
@@ -236,7 +236,7 @@ func TestQAGate_UserPromptedResetsToTLThinking(t T) T {
 func TestQAGate_TLDoneWithSummary_GoesToApproval(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo")
     val dirs = ArrayOf[Directive](summary("## Decision required\nPick one of (1) (2) (3)."))
-    val s = Transition(QAGate(Pending = pending), TLDone(Directives = dirs), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), TLDone(Directives = dirs), ctxWithQA(true))
     val t1 = Eq(t, stateName(s), "Approval")
     return s match {
         case Approval(body) => Eq(t1, body, "## Decision required\nPick one of (1) (2) (3).")
@@ -247,10 +247,10 @@ func TestQAGate_TLDoneWithSummary_GoesToApproval(t T) T {
 func TestQAGate_TLDoneEmpty_StaysQAGateWithPending(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo")
     val dirs = EmptyArray[Directive]()
-    val s = Transition(QAGate(Pending = pending), TLDone(Directives = dirs), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), TLDone(Directives = dirs), ctxWithQA(true))
     val t1 = Eq(t, stateName(s), "QAGate")
     return s match {
-        case QAGate(rest) => Eq(t1, rest.Contains("Theo"), true)
+        case QAGate(rest, _) => Eq(t1, rest.Contains("Theo"), true)
         case _            => IsTrue(t1, false)
     }
 }
@@ -263,10 +263,10 @@ func TestQAGate_TLDoneEmpty_StaysQAGateWithPending(t T) T {
 func TestQAGate_TLDoneWithDispatchOnly_StaysQAGateWithPending(t T) T {
     val pending = EmptyHashSet[string]().Add("Theo")
     val dirs = ArrayOf[Directive](dispatchTo("Felix"))
-    val s = Transition(QAGate(Pending = pending), TLDone(Directives = dirs), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), TLDone(Directives = dirs), ctxWithQA(true))
     val t1 = Eq(t, stateName(s), "QAGate")
     return s match {
-        case QAGate(rest) => Eq(t1, rest.Contains("Theo"), true)
+        case QAGate(rest, _) => Eq(t1, rest.Contains("Theo"), true)
         case _            => IsTrue(t1, false)
     }
 }
@@ -293,7 +293,7 @@ func TestApproval_IgnoresTLDone(t T) T {
 func TestDelegating_QARequiredButNoQAMembers_GoesToTLReview(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val ctx = TransitionContext(QAMembers = EmptyArray[string](), QARequired = true)
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Felix", Body = ""), ctx)
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), MemberDone(MemberName = "Felix", Body = ""), ctx)
     return Eq(t, stateName(s), "TLReview")
 }
 
@@ -313,9 +313,9 @@ func TestTLThinking_MultipleSummaries_TakesFirst(t T) T {
 // Delegating's pending set — Remove of a missing key is idempotent.
 func TestDelegating_MemberDone_UnknownMember_StaysWithFullPending(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
-    val s = Transition(Delegating(Pending = pending), MemberDone(MemberName = "Ghost", Body = ""), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), MemberDone(MemberName = "Ghost", Body = ""), ctxWithQA(true))
     return s match {
-        case Delegating(rest) => Eq(t, rest.Size(), 2)
+        case Delegating(rest, _) => Eq(t, rest.Size(), 2)
         case _                => IsTrue(t, false)
     }
 }
@@ -331,9 +331,9 @@ func TestDelegating_MemberDone_UnknownMember_StaysWithFullPending(t T) T {
 // (so the nudge resolution knows who we're still waiting on).
 func TestDelegating_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
     val pending = EmptyHashSet[string]().Add("Kael").Add("Lyra")
-    val s = Transition(Delegating(Pending = pending), MemberStuck(MemberName = "Kael"), ctxWithQA(true))
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), MemberStuck(MemberName = "Kael"), ctxWithQA(true))
     return s match {
-        case TLNudging(_, p) => Eq(t, p.Size(), 2)
+        case TLNudging(_, p, _) => Eq(t, p.Size(), 2)
         case _               => IsTrue(t, false)
     }
 }
@@ -344,18 +344,18 @@ func TestDelegating_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
 // QAGate→QAGate livelock with a fresh TL nudge each round.
 func TestQAGate_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
     val pending = EmptyHashSet[string]().Add("Sable").Add("Theo")
-    val s = Transition(QAGate(Pending = pending), MemberStuck(MemberName = "Sable"), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), MemberStuck(MemberName = "Sable"), ctxWithQA(true))
     return s match {
-        case TLNudging(reason, p) => IsTrue(t, reason == "stuck" && p.Size() == 2)
+        case TLNudging(reason, p, _) => IsTrue(t, reason == "stuck" && p.Size() == 2)
         case _                    => IsTrue(t, false)
     }
 }
 
 func TestQAGate_OnMemberHelpRequested_CarriesPendingIntoTLNudging(t T) T {
     val pending = EmptyHashSet[string]().Add("Sable")
-    val s = Transition(QAGate(Pending = pending), MemberHelpRequested(MemberName = "Sable", Question = "What's the contract?"), ctxWithQA(true))
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), MemberHelpRequested(MemberName = "Sable", Question = "What's the contract?"), ctxWithQA(true))
     return s match {
-        case TLNudging(reason, p) => IsTrue(t, reason == "help" && p.Contains("Sable"))
+        case TLNudging(reason, p, _) => IsTrue(t, reason == "help" && p.Contains("Sable"))
         case _                    => IsTrue(t, false)
     }
 }
@@ -369,14 +369,14 @@ func TestQAGate_OnMemberHelpRequested_CarriesPendingIntoTLNudging(t T) T {
 // not by an ad-hoc FSM bounce.
 func TestTLNudging_NoDirectiveWithPending_GoesIdle(t T) T {
     val pending = EmptyHashSet[string]().Add("Kael")
-    val s = Transition(TLNudging(Reason = "stuck", Pending = pending), TLDone(Directives = EmptyArray[Directive]()), ctxWithQA(true))
+    val s = Transition(TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending), TLDone(Directives = EmptyArray[Directive]()), ctxWithQA(true))
     return Eq(t, stateName(s), "Idle")
 }
 
 // Nudge resolves with no directive AND nothing pending → Idle (the
 // pre-existing chat behaviour is preserved when it's actually safe).
 func TestTLNudging_NoDirectiveNoPending_GoesIdle(t T) T {
-    val s = Transition(TLNudging(Reason = "stuck", Pending = EmptyHashSet[string]()), TLDone(Directives = EmptyArray[Directive]()), ctxWithQA(true))
+    val s = Transition(TLNudging(Reason = "stuck", Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()), TLDone(Directives = EmptyArray[Directive]()), ctxWithQA(true))
     return Eq(t, stateName(s), "Idle")
 }
 
@@ -385,7 +385,7 @@ func TestTLNudging_NoDirectiveNoPending_GoesIdle(t T) T {
 // the empty case.
 func TestTLNudging_SummaryStillShips(t T) T {
     val pending = EmptyHashSet[string]().Add("Kael")
-    val s = Transition(TLNudging(Reason = "stuck", Pending = pending), TLDone(Directives = ArrayOf[Directive](summary("## Done"))), ctxWithQA(true))
+    val s = Transition(TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending), TLDone(Directives = ArrayOf[Directive](summary("## Done"))), ctxWithQA(true))
     return Eq(t, stateName(s), "Approval")
 }
 
@@ -394,9 +394,184 @@ func TestTLNudging_SummaryStillShips(t T) T {
 // lost into TLNudging).
 func TestTLNudging_MemberDoneDuringNudge_Drains(t T) T {
     val pending = EmptyHashSet[string]().Add("Kael").Add("Lyra")
-    val s = Transition(TLNudging(Reason = "stuck", Pending = pending), MemberDone(MemberName = "Kael", Body = ""), ctxWithQA(true))
+    val s = Transition(TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending), MemberDone(MemberName = "Kael", Body = ""), ctxWithQA(true))
     return s match {
-        case Delegating(rest) => Eq(t, rest.Size(), 1)
+        case Delegating(rest, _) => Eq(t, rest.Size(), 1)
         case _                => IsTrue(t, false)
+    }
+}
+
+// ----- Pending ⊆ Dispatched invariant ---------------------------------------
+//
+// A TL turn that names a member who never actually spawns — typo
+// against the team roster, or runtime SpawnSession failure — must
+// not deadlock the Delegating drain waiting for a MemberDone that
+// will never arrive. DispatchComplete carries the names whose spawn
+// succeeded; any name in Pending but not in (Dispatched ∪ Spawned)
+// is unspawned. The FSM routes to TLNudging("<name> never started")
+// so the lead can recover via the next turn.
+
+// Typo: TL said @dispatch(Typo) for a name that has no team member.
+// The caller emits DispatchComplete with an empty Spawned set;
+// Pending still contains the typo'd name → trip invariant → nudge.
+func TestDelegating_DispatchCompleteUnspawnedTypo_GoesToTLNudging(t T) T {
+    val pending = EmptyHashSet[string]().Add("Typo")
+    val s = Transition(
+        Delegating(Pending = pending, Dispatched = EmptyHashSet[string]()),
+        DispatchComplete(Spawned = EmptyHashSet[string]()),
+        ctxWithQA(true),
+    )
+    val t1 = Eq(t, stateName(s), "TLNudging")
+    return s match {
+        case TLNudging(reason, p, _) => IsTrue(t1, reason == "Typo never started" && p.Contains("Typo"))
+        case _                       => IsTrue(t1, false)
+    }
+}
+
+// Real member name, runtime SpawnSession failure: TL dispatched two
+// members; one spawn succeeded, the other failed. DispatchComplete
+// carries only the successful name; the failed one stays unspawned.
+func TestDelegating_DispatchCompletePartialSpawn_GoesToTLNudging(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
+    val spawned = EmptyHashSet[string]().Add("Felix")
+    val s = Transition(
+        Delegating(Pending = pending, Dispatched = EmptyHashSet[string]()),
+        DispatchComplete(Spawned = spawned),
+        ctxWithQA(true),
+    )
+    val t1 = Eq(t, stateName(s), "TLNudging")
+    return s match {
+        case TLNudging(reason, p, d) =>
+            IsTrue(t1, reason == "Mira never started" && p.Size() == 2 && d.Contains("Felix"))
+        case _ => IsTrue(t1, false)
+    }
+}
+
+// Happy path: every Pending name spawns successfully; DispatchComplete
+// merges all of them into Dispatched and the FSM stays in Delegating
+// so the run can drain via MemberDone exactly like before.
+func TestDelegating_DispatchCompleteAllSpawned_StaysDelegating(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
+    val s = Transition(
+        Delegating(Pending = pending, Dispatched = EmptyHashSet[string]()),
+        DispatchComplete(Spawned = pending),
+        ctxWithQA(true),
+    )
+    val t1 = Eq(t, stateName(s), "Delegating")
+    return s match {
+        case Delegating(p, d) => IsTrue(t1, p.Size() == 2 && d.Size() == 2 && d.Contains("Felix") && d.Contains("Mira"))
+        case _                => IsTrue(t1, false)
+    }
+}
+
+// After a successful DispatchComplete, the normal MemberDone drain
+// still routes through QAGate / TLReview just like before — the
+// invariant adds a guard, it doesn't change the happy-path shape.
+func TestDelegating_HappyPath_DispatchCompleteThenDrainsToQAGate(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val afterSpawn = Transition(
+        Delegating(Pending = pending, Dispatched = EmptyHashSet[string]()),
+        DispatchComplete(Spawned = pending),
+        ctxWithQA(true),
+    )
+    val afterDone = Transition(afterSpawn, MemberDone(MemberName = "Felix", Body = ""), ctxWithQA(true))
+    return Eq(t, stateName(afterDone), "QAGate")
+}
+
+func TestDelegating_HappyPath_DispatchCompleteThenDrainsToTLReview(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val afterSpawn = Transition(
+        Delegating(Pending = pending, Dispatched = EmptyHashSet[string]()),
+        DispatchComplete(Spawned = pending),
+        ctxNoQA(),
+    )
+    val afterDone = Transition(afterSpawn, MemberDone(MemberName = "Felix", Body = ""), ctxNoQA())
+    return Eq(t, stateName(afterDone), "TLReview")
+}
+
+// Multiple unspawned names: the lexicographically first name is
+// surfaced in the reason so the message is deterministic across
+// runs (HashSet iteration order is unspecified). The TL can address
+// the rest in the same nudge turn.
+func TestDelegating_DispatchCompleteMultipleUnspawned_NamesFirstAlphabetically(t T) T {
+    val pending = EmptyHashSet[string]().Add("Zeta").Add("Alpha").Add("Mira")
+    val s = Transition(
+        Delegating(Pending = pending, Dispatched = EmptyHashSet[string]()),
+        DispatchComplete(Spawned = EmptyHashSet[string]()),
+        ctxWithQA(true),
+    )
+    return s match {
+        case TLNudging(reason, _, _) => Eq(t, reason, "Alpha never started")
+        case _                       => IsTrue(t, false)
+    }
+}
+
+// QAGate has its own DispatchComplete reducer (the auto-QA fan-out
+// fires once engineers complete). Same shape: a QA member whose
+// spawn fails trips the invariant and routes to TLNudging instead
+// of waiting forever for a QADone.
+func TestQAGate_DispatchCompleteUnspawned_GoesToTLNudging(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo")
+    val s = Transition(
+        QAGate(Pending = pending, Dispatched = EmptyHashSet[string]()),
+        DispatchComplete(Spawned = EmptyHashSet[string]()),
+        ctxWithQA(true),
+    )
+    val t1 = Eq(t, stateName(s), "TLNudging")
+    return s match {
+        case TLNudging(reason, p, _) => IsTrue(t1, reason == "Theo never started" && p.Contains("Theo"))
+        case _                       => IsTrue(t1, false)
+    }
+}
+
+func TestQAGate_DispatchCompleteAllSpawned_StaysQAGate(t T) T {
+    val pending = EmptyHashSet[string]().Add("Theo")
+    val s = Transition(
+        QAGate(Pending = pending, Dispatched = EmptyHashSet[string]()),
+        DispatchComplete(Spawned = pending),
+        ctxWithQA(true),
+    )
+    val t1 = Eq(t, stateName(s), "QAGate")
+    return s match {
+        case QAGate(p, d) => IsTrue(t1, p.Contains("Theo") && d.Contains("Theo"))
+        case _            => IsTrue(t1, false)
+    }
+}
+
+// A nudge turn can itself emit a fresh @dispatch (TL recovering
+// from an earlier unspawned-name nudge). The new dispatch's
+// DispatchComplete fires while still in TLNudging; an unspawned
+// name there must trip the invariant too, otherwise a TL stuck in
+// a typo loop would silently never recover.
+func TestTLNudging_DispatchCompleteUnspawned_StaysTLNudgingWithNewReason(t T) T {
+    val pending = EmptyHashSet[string]().Add("Typo2")
+    val s = Transition(
+        TLNudging(Reason = "stuck", Pending = pending, Dispatched = EmptyHashSet[string]()),
+        DispatchComplete(Spawned = EmptyHashSet[string]()),
+        ctxWithQA(true),
+    )
+    val t1 = Eq(t, stateName(s), "TLNudging")
+    return s match {
+        case TLNudging(reason, _, _) => Eq(t1, reason, "Typo2 never started")
+        case _                       => IsTrue(t1, false)
+    }
+}
+
+// DispatchComplete after a partial in-flight Dispatched (e.g. a
+// nudge that already had some names dispatched from the original
+// fanout): the merge of the existing Dispatched with the new
+// Spawned set is what's checked against Pending.
+func TestDelegating_DispatchCompleteMergesWithExistingDispatched(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix").Add("Mira")
+    val alreadyDispatched = EmptyHashSet[string]().Add("Felix")
+    val s = Transition(
+        Delegating(Pending = pending, Dispatched = alreadyDispatched),
+        DispatchComplete(Spawned = EmptyHashSet[string]().Add("Mira")),
+        ctxWithQA(true),
+    )
+    val t1 = Eq(t, stateName(s), "Delegating")
+    return s match {
+        case Delegating(_, d) => IsTrue(t1, d.Contains("Felix") && d.Contains("Mira"))
+        case _                => IsTrue(t1, false)
     }
 }

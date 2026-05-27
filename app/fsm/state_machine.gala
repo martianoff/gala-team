@@ -31,11 +31,20 @@ import (
 // ============================================================================
 
 // AppState is the top-level orchestration state.
+//
+// `Dispatched` on Delegating/QAGate/TLNudging is the subset of
+// `Pending` whose runtime spawn has been confirmed via a
+// DispatchComplete event. A name appearing in Pending but missing from
+// Dispatched means the spawn never happened — either the TL named
+// someone not in the team roster (typo) or SpawnSession failed —
+// and the FSM treats it as unrecoverable for the current cycle
+// rather than waiting forever for a MemberDone that will never
+// arrive. The invariant is Dispatched ⊆ Pending throughout a cycle.
 sealed type AppState {
     case Idle
     case TLThinking
-    case Delegating(Pending HashSet[string])
-    case QAGate(Pending HashSet[string])
+    case Delegating(Pending HashSet[string], Dispatched HashSet[string])
+    case QAGate(Pending HashSet[string], Dispatched HashSet[string])
     case TLReview
     // TLNudging is a system-driven TL turn, distinct from TLThinking
     // (user-driven) and TLReview (post-delegation pre-summary).
@@ -50,7 +59,7 @@ sealed type AppState {
     // into Idle and its deliverable was discarded. Keeping Pending
     // lets the nudge resolution fall back to Delegating(Pending) and
     // lets a member that completes DURING the nudge still drain.
-    case TLNudging(Reason string, Pending HashSet[string])
+    case TLNudging(Reason string, Pending HashSet[string], Dispatched HashSet[string])
     case Approval(SummaryBody string)
 }
 
@@ -84,6 +93,15 @@ sealed type Event {
     // crosses Policy.MaxRetries the member becomes StFailed and the
     // FSM advances same as MemberAbandoned.
     case MemberCrashed(MemberName string, Err string, RetryCount int)
+    // DispatchComplete fires once the caller layer has finished
+    // walking a Delegating/QAGate spawn fan-out. `Spawned` is the
+    // subset of names whose runtime spawn succeeded — typos and
+    // SpawnSession errors are absent. The FSM uses this to detect a
+    // Pending name with no live session (Pending \ Dispatched
+    // non-empty after merging Spawned) and route to TLNudging so
+    // the TL can recover, instead of waiting forever for a
+    // MemberDone that will never come.
+    case DispatchComplete(Spawned HashSet[string])
     case QADone
     case ApprovalAccepted
     case ApprovalRejected
@@ -117,13 +135,13 @@ func Transition(state AppState, event Event, ctx TransitionContext) AppState {
         return TLThinking()
     }
     return state match {
-        case Idle()                => onIdle(event)
-        case TLThinking()          => onTLThinking(event, ctx)
-        case Delegating(pending)   => onDelegating(pending, event, ctx)
-        case QAGate(pending)       => onQAGate(pending, event, ctx)
-        case TLReview()            => onTLReview(event, ctx)
-        case TLNudging(reason, pending) => onTLNudging(reason, pending, event, ctx)
-        case Approval(_)           => onApproval(state, event)
+        case Idle()                            => onIdle(event)
+        case TLThinking()                      => onTLThinking(event, ctx)
+        case Delegating(pending, dispatched)   => onDelegating(pending, dispatched, event, ctx)
+        case QAGate(pending, dispatched)       => onQAGate(pending, dispatched, event, ctx)
+        case TLReview()                        => onTLReview(event, ctx)
+        case TLNudging(reason, pending, dispatched) => onTLNudging(reason, pending, dispatched, event, ctx)
+        case Approval(_)                       => onApproval(state, event)
     }
 }
 
@@ -164,21 +182,23 @@ func onTLReview(event Event, ctx TransitionContext) AppState = event match {
 // so each dispatcher handles its own remaining cases. `inDelegating`
 // is true for Delegating + TLNudging (a nudge interrupts Delegating),
 // false for QAGate.
-func memberCompletion(event Event, pending HashSet[string], ctx TransitionContext, inDelegating bool) Option[AppState] = event match {
-    case MemberDone(name, _)       => Some[AppState](afterMemberDone(pending, name, ctx, inDelegating))
-    case MemberAbandoned(name)     => Some[AppState](afterMemberDone(pending, name, ctx, inDelegating))
-    case MemberCrashed(name, _, _) => Some[AppState](afterMemberDone(pending, name, ctx, inDelegating))
-    case MemberBlocked(name, _)    => Some[AppState](afterMemberDone(pending, name, ctx, inDelegating))
+func memberCompletion(event Event, pending HashSet[string], dispatched HashSet[string], ctx TransitionContext, inDelegating bool) Option[AppState] = event match {
+    case MemberDone(name, _)       => Some[AppState](afterMemberDone(pending, dispatched, name, ctx, inDelegating))
+    case MemberAbandoned(name)     => Some[AppState](afterMemberDone(pending, dispatched, name, ctx, inDelegating))
+    case MemberCrashed(name, _, _) => Some[AppState](afterMemberDone(pending, dispatched, name, ctx, inDelegating))
+    case MemberBlocked(name, _)    => Some[AppState](afterMemberDone(pending, dispatched, name, ctx, inDelegating))
     case _                         => None[AppState]()
 }
 
-func onDelegating(pending HashSet[string], event Event, ctx TransitionContext) AppState =
-    memberCompletion(event, pending, ctx, true) match {
+func onDelegating(pending HashSet[string], dispatched HashSet[string], event Event, ctx TransitionContext) AppState =
+    memberCompletion(event, pending, dispatched, ctx, true) match {
         case Some(s) => s
         case None()  => event match {
-            case MemberStuck(_)            => TLNudging(Reason = "stuck", Pending = pending)
-            case MemberHelpRequested(_, _) => TLNudging(Reason = "help", Pending = pending)
-            case _                         => Delegating(Pending = pending)
+            case MemberStuck(_)            => TLNudging(Reason = "stuck", Pending = pending, Dispatched = dispatched)
+            case MemberHelpRequested(_, _) => TLNudging(Reason = "help", Pending = pending, Dispatched = dispatched)
+            case DispatchComplete(spawned) => checkSpawnInvariant(pending, dispatched.Union(spawned),
+                                                  (p, d) => Delegating(Pending = p, Dispatched = d))
+            case _                         => Delegating(Pending = pending, Dispatched = dispatched)
         }
     }
 
@@ -194,21 +214,23 @@ func onDelegating(pending HashSet[string], event Event, ctx TransitionContext) A
 // on. Route @summary through Approval so it reaches the user; for
 // anything else (plain prose, partial @dispatch) keep QAGate so the
 // pending QA review isn't torn down.
-func onQAGate(pending HashSet[string], event Event, ctx TransitionContext) AppState =
-    memberCompletion(event, pending, ctx, false) match {
+func onQAGate(pending HashSet[string], dispatched HashSet[string], event Event, ctx TransitionContext) AppState =
+    memberCompletion(event, pending, dispatched, ctx, false) match {
         case Some(s) => s
         case None()  => event match {
             case QADone()                  => TLReview()
-            case TLDone(dirs)              => afterTLDoneInQaGate(dirs, pending, ctx)
+            case TLDone(dirs)              => afterTLDoneInQaGate(dirs, pending, dispatched, ctx)
             // Mirror onDelegating: a stuck/help-requesting pending
             // member routes through the lead. Without this, the
             // heartbeat re-fired MemberStuck against the same QA
             // member every cycle (~2 min) and the catch-all dropped
             // it back to QAGate — observable as a QAGate→QAGate
             // self-loop livelock with a fresh TL nudge each round.
-            case MemberStuck(_)            => TLNudging(Reason = "stuck", Pending = pending)
-            case MemberHelpRequested(_, _) => TLNudging(Reason = "help", Pending = pending)
-            case _                         => QAGate(Pending = pending)
+            case MemberStuck(_)            => TLNudging(Reason = "stuck", Pending = pending, Dispatched = dispatched)
+            case MemberHelpRequested(_, _) => TLNudging(Reason = "help", Pending = pending, Dispatched = dispatched)
+            case DispatchComplete(spawned) => checkSpawnInvariant(pending, dispatched.Union(spawned),
+                                                  (p, d) => QAGate(Pending = p, Dispatched = d))
+            case _                         => QAGate(Pending = pending, Dispatched = dispatched)
         }
     }
 
@@ -219,10 +241,10 @@ func onQAGate(pending HashSet[string], event Event, ctx TransitionContext) AppSt
 // modal takes precedence over a still-running QA review. Everything
 // else self-loops, preserving the pending set so QA can drain on its
 // own.
-func afterTLDoneInQaGate(dirs Array[Directive], pending HashSet[string], ctx TransitionContext) AppState =
+func afterTLDoneInQaGate(dirs Array[Directive], pending HashSet[string], dispatched HashSet[string], ctx TransitionContext) AppState =
     afterTLDone(dirs, ctx) match {
         case Approval(body) => Approval(SummaryBody = body)
-        case _              => QAGate(Pending = pending)
+        case _              => QAGate(Pending = pending, Dispatched = dispatched)
     }
 
 // onTLNudging routes nudge-turn TL responses. A nudge interrupts a
@@ -242,12 +264,14 @@ func afterTLDoneInQaGate(dirs Array[Directive], pending HashSet[string], ctx Tra
 //   - A member that completes / blocks / crashes DURING the nudge
 //     turn drains `pending` via memberCompletion exactly like
 //     onDelegating, so a finish that races the nudge isn't lost.
-func onTLNudging(reason string, pending HashSet[string], event Event, ctx TransitionContext) AppState =
-    memberCompletion(event, pending, ctx, true) match {
+func onTLNudging(reason string, pending HashSet[string], dispatched HashSet[string], event Event, ctx TransitionContext) AppState =
+    memberCompletion(event, pending, dispatched, ctx, true) match {
         case Some(s) => s
         case None()  => event match {
-            case TLDone(dirs) => afterTLDone(dirs, ctx)
-            case _            => TLNudging(Reason = reason, Pending = pending)
+            case TLDone(dirs)              => afterTLDone(dirs, ctx)
+            case DispatchComplete(spawned) => checkSpawnInvariant(pending, dispatched.Union(spawned),
+                                                  (p, d) => TLNudging(Reason = reason, Pending = p, Dispatched = d))
+            case _                         => TLNudging(Reason = reason, Pending = pending, Dispatched = dispatched)
         }
     }
 
@@ -263,21 +287,27 @@ func onApproval(state AppState, event Event) AppState = event match {
 
 // afterTLDone routes a TL response based on what directives it contained.
 //   1. @summary → Approval (summary takes precedence)
-//   2. @dispatch → Delegating(set of dispatched member names)
+//   2. @dispatch → Delegating(set of dispatched member names; Dispatched
+//      starts empty — the caller layer will emit DispatchComplete once
+//      runtime spawns finish, at which point the invariant is checked)
 //   3. otherwise → Idle (TL had nothing to dispatch / summarise)
 func afterTLDone(dirs Array[Directive], ctx TransitionContext) AppState = firstSummary(dirs) match {
     case Some(body) => Approval(SummaryBody = body)
     case None()     => {
         val targets = directiveTargets(dirs)
         if (targets.IsEmpty()) Idle()
-        else                   Delegating(Pending = ArrayToHashSet(targets))
+        else                   Delegating(Pending = ArrayToHashSet(targets), Dispatched = EmptyHashSet[string]())
     }
 }
 
 // afterMemberDone removes the named member from the Pending set; once the
 // set is empty, advances to either QAGate (if applicable) or TLReview.
+// Dispatched stays as-is when the cycle continues in the same state;
+// transitioning to QAGate begins a fresh spawn cycle (QA gets its own
+// DispatchComplete from the auto-QA fan-out), so Dispatched resets.
 func afterMemberDone(
     pending HashSet[string],
+    dispatched HashSet[string],
     name string,
     ctx TransitionContext,
     inDelegating bool,
@@ -285,14 +315,39 @@ func afterMemberDone(
     val rest = pending.Remove(name)
     if !rest.IsEmpty() {
         if inDelegating {
-            return Delegating(Pending = rest)
+            return Delegating(Pending = rest, Dispatched = dispatched)
         }
-        return QAGate(Pending = rest)
+        return QAGate(Pending = rest, Dispatched = dispatched)
     }
     if inDelegating && ctx.QARequired && !ctx.QAMembers.IsEmpty() {
-        return QAGate(Pending = ArrayToHashSet(ctx.QAMembers))
+        return QAGate(Pending = ArrayToHashSet(ctx.QAMembers), Dispatched = EmptyHashSet[string]())
     }
     return TLReview()
+}
+
+// checkSpawnInvariant is the shared DispatchComplete reducer used by
+// onDelegating/onQAGate/onTLNudging. It computes Pending \ Dispatched
+// and either keeps the current state (via `keep`) or routes to
+// TLNudging with a "<name> never started" reason. The unspawned name
+// is taken from a sorted projection so the reason is deterministic
+// across runs (HashSet iteration order is unspecified). When more
+// than one name is missing, the lexicographically first is named —
+// the TL can address the rest in the same nudge turn.
+func checkSpawnInvariant(
+    pending    HashSet[string],
+    dispatched HashSet[string],
+    keep func(HashSet[string], HashSet[string]) AppState,
+) AppState {
+    val missing = pending.Diff(dispatched)
+    if missing.IsEmpty() {
+        return keep(pending, dispatched)
+    }
+    val name = missing.Sorted().HeadOption().GetOrElse("?")
+    return TLNudging(
+        Reason     = s"${name} never started",
+        Pending    = pending,
+        Dispatched = dispatched,
+    )
 }
 
 // firstSummary returns the body of the first @summary directive in dirs,

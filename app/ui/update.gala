@@ -3401,23 +3401,16 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         //   - Other member → MemberDone(name, body). FSM drains the
         //     pending set and advances to QAGate / TLReview / relay.
         if name == cleaned.Team.Lead.Name {
-            // Lead-buffer directives split across two paths now:
-            //   - @dispatch / @consult / @summary route through the
-            //     protocol decoder (content-hash identity + Ledger
-            //     dedup) and the Message → Directive adapter.
-            //   - @base / @plan are TL-only orchestrator control
-            //     directives, not agent-to-agent messages, so they
-            //     come from the narrowly-scoped ParseBaseAndPlan
-            //     reader. Concatenated into one Array[Directive]; the
-            //     downstream filters (applyBaseDirective takes the
-            //     FIRST Base; applyPlanDirective the FIRST Plan; FSM
-            //     afterTLDone the FIRST Summary or all Dispatch
-            //     targets) don't depend on inter-kind source order.
+            // All five lead-buffer directive kinds (@dispatch / @consult
+            // / @summary / @base / @plan) flow through the protocol
+            // decoder (content-hash identity + Ledger dedup) and the
+            // Message → Directive adapter. Downstream filters
+            // (applyBaseDirective takes the FIRST Base; applyPlanDirective
+            // the FIRST Plan; FSM afterTLDone the FIRST Summary or all
+            // Dispatch targets) don't depend on inter-kind source order.
             val decodeResult = protocol.DecodeWithIssues(cleaned.TurnBuffer, protocol.TLDecodeContext(0))
-            val protocolDirs = FromMessages(decodeResult.Messages)
+            val rawDirs      = FromMessages(decodeResult.Messages)
             val decodeIssues = decodeResult.Issues
-            val controlDirs  = ParseBaseAndPlan(cleaned.TurnBuffer)
-            val rawDirs = controlDirs.AppendAll(protocolDirs)
             // Capture @base from the lead's turn so the eventual
             // gh pr create can pass --base. First Base directive wins:
             // the TL is expected to declare the base ref ONCE near the
@@ -3468,13 +3461,12 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                     val saved = persistConversation(cleanedB, nextConvo)
                     return (setStatus(saved, name, StIdle()), NoCmd[AppMsg]())
                 }
-                // Parser-level issues (unclosed @dispatch / @summary /
-                // @consult, multi-target @dispatch) come from
+                // Parser-level issues (unclosed openers, multi-target
+                // @dispatch, empty-body @base / @plan) come from
                 // protocol.DecodeWithIssues. UI-heuristic issues (arrow
-                // notation, bold headings, @plan / @base without @end)
-                // come from detectMalformedDispatch — the parser can't
-                // see them because they're either decorative prose or
-                // owned by a different parser package.
+                // notation, bold headings naming a member) come from
+                // detectMalformedDispatch — the parser can't see them
+                // because they're decorative prose.
                 val issueReason =
                     if (!decodeIssues.IsEmpty()) formatDecodeIssues(decodeIssues)
                     else                         detectMalformedDispatch(cleanedB.TurnBuffer, cleanedB.Team)
@@ -4564,11 +4556,27 @@ func formatDecodeIssues(issues Array[protocol.DecodeIssue]) string {
         if kind == "dispatch" {
             return "@dispatch(...) opening tag without a matching @end line. Each directive must close with @end on its own line."
         }
+        if kind == "plan" {
+            return "@plan block without a matching @end line. Close it with @end on its own line so the orchestrator can queue the multi-PR sequence."
+        }
+        if kind == "base" {
+            return "@base directive without a matching @end. Even @base is a block: emit `@base <ref>\\n@end` (two lines)."
+        }
         return s"@${kind} block without a matching @end line. Each directive must close with @end on its own line."
     }
     if tag == "multi_target_dispatch" {
         val names = protocol.IssueMultiTargetNames(first)
         return s"@dispatch(${names}) with multiple comma-separated names — only the first is dispatched. Open a separate @dispatch(...)...@end block for each engineer."
+    }
+    if tag == "empty_body" {
+        val dir = protocol.IssueEmptyBodyDirective(first)
+        if dir == "@base" {
+            return "@base ... @end with an empty body — the orchestrator needs a branch name. Emit `@base <ref>` (e.g. `@base previous`, `@base main`, or a literal branch name)."
+        }
+        if dir == "@plan" {
+            return "@plan ... @end with an empty body — the multi-PR queue has nothing to ship. List one item per line (markdown bullets accepted) inside the block."
+        }
+        return s"${dir} ... @end with an empty body — give it a body or omit the directive."
     }
     return ""
 }
@@ -4577,30 +4585,17 @@ func formatDecodeIssues(issues Array[protocol.DecodeIssue]) string {
 // fingerprints of an attempted-but-invalid dispatch that the protocol
 // parser cannot see. Returns a short human-readable reason, or "" when
 // nothing looks malformed. Called after the parser's own DecodeIssue
-// list is exhausted — issues the parser can detect (unclosed
-// @dispatch / @summary / @consult, multi-target @dispatch) belong to
-// protocol.DecodeWithIssues, not here.
+// list is exhausted — issues the parser can detect (unclosed @dispatch
+// / @consult / @summary / @base / @plan, multi-target @dispatch,
+// empty-body @base / @plan) belong to protocol.DecodeWithIssues, not
+// here.
 //
 // Patterns we still flag here:
-//   - `@plan` / `@base` without `@end` — owned by app/directive, not
-//     the agent-to-agent protocol parser.
 //   - `→ <MemberName>:` / `-> <MemberName>:` — arrow notation; the
 //     parser has no way to know <MemberName> is meaningful.
 //   - `**<MemberName>:**` — bold heading; same reason.
 func detectMalformedDispatch(buffer string, tm Team) string {
     if buffer == "" { return "" }
-    val hasEnd = strings.Contains(buffer, "\n@end") || strings.HasSuffix(strings.TrimSpace(buffer), "@end")
-    // @plan / @base unclosed — these openers live in app/directive's
-    // narrowly-scoped control reader, not in the protocol parser, so
-    // their close-with-@end rule is enforced here.
-    if !hasEnd {
-        if strings.Contains(buffer, "@plan") {
-            return "@plan block without a matching @end line. Close it with @end on its own line so the orchestrator can queue the multi-PR sequence."
-        }
-        if strings.Contains(buffer, "@base ") {
-            return "@base directive without a matching @end. Even @base is a block: emit `@base <ref>\\n@end` (two lines)."
-        }
-    }
     // Arrow notation + markdown heading naming a member. Both are
     // decorative prose the TL sometimes substitutes for a real
     // @dispatch(...)...@end block; the parser has no member-name

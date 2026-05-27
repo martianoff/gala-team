@@ -4,6 +4,7 @@ import (
     "martianoff/gala/strings"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
 )
 
 // These are the lighter, structural decode tests. The authoritative
@@ -120,6 +121,82 @@ func TestDecodeIssues_ConsultWithKwargNotMultiTarget(t T) T {
     val res = DecodeWithIssues("@consult(transpiler, project=\"/x\") repro\n@end", tl(0))
     val t1 = Eq(t, res.Messages.Length(), 1)
     return Eq(t1, res.Issues.Length(), 0)
+}
+
+// ----- @base / @plan (TL-side control directives) --------------------------
+
+// @base with a non-empty ref decodes to a Base message routed to the
+// user-addr side-channel (TL → orchestrator, not member). Body carries
+// the raw ref text — the adapter does the first-token strip.
+func TestDecode_BaseRef(t T) T {
+    val msgs = Decode("@base previous\n@end", tl(0))
+    val t1 = Eq(t, msgs.Length(), 1)
+    val m = msgs.Get(0)
+    val t2 = Eq(t1, KindTag(m.Kind), "base")
+    val t3 = Eq(t2, m.Recipient, UserAddr())
+    return Eq(t3, m.Body, "previous")
+}
+
+// @plan with mixed list styles passes through — the decoder doesn't
+// strip bullets, the adapter does. Body retains source whitespace so
+// the adapter can split.
+func TestDecode_PlanMixedListStyles(t T) T {
+    val buf = "@plan\n- dashed\n* starred\n1. numbered\nplain line\n@end"
+    val msgs = Decode(buf, tl(0))
+    val t1 = Eq(t, msgs.Length(), 1)
+    return Eq(t1, KindTag(msgs.Get(0).Kind), "plan")
+}
+
+// Empty-body @base surfaces an EmptyBody issue (the directive carries
+// "@base") and emits NO message — the orchestrator must nudge instead
+// of silently dropping the directive.
+func TestDecodeIssues_EmptyBodyBase(t T) T {
+    val res = DecodeWithIssues("@base\n@end", tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    val t2 = Eq(t1, res.Issues.Length(), 1)
+    return res.Issues.Get(0) match {
+        case EmptyBody(d) => Eq(t2, d, "@base")
+        case _            => IsTrue(t2, false)
+    }
+}
+
+// Empty-body @plan surfaces an EmptyBody issue — same shape, different
+// directive token. A pure-whitespace body collapses to empty after
+// joinBody trims, so it also counts as empty.
+func TestDecodeIssues_EmptyBodyPlan(t T) T {
+    val res = DecodeWithIssues("@plan\n   \n\t\n@end", tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    val t2 = Eq(t1, res.Issues.Length(), 1)
+    return res.Issues.Get(0) match {
+        case EmptyBody(d) => Eq(t2, d, "@plan")
+        case _            => IsTrue(t2, false)
+    }
+}
+
+// Unclosed @base surfaces as UnclosedBlock("base") — same path as the
+// other lead-kinds (the EmptyBody rule only fires for CLOSED blocks).
+func TestDecodeIssues_UnclosedBase(t T) T {
+    val res = DecodeWithIssues("@base previous", tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    return res.Issues.Get(0) match {
+        case UnclosedBlock(k) => Eq(t1, k, "base")
+        case _                => IsTrue(t1, false)
+    }
+}
+
+// Interleaved sequence of all five lead-kinds in source order — proves
+// the unified scanner walks one buffer once and emits each directive
+// kind alongside the others without dropping any.
+func TestDecode_InterleavedAllFiveKinds(t T) T {
+    val buf = "@base previous\n@end\n\n" +
+        "@plan\n- one\n- two\n@end\n\n" +
+        "@dispatch(Felix) build the parser\n@end\n\n" +
+        "@consult(transpiler) repro inside\n@end\n\n" +
+        "@summary\nshipped\n@end"
+    val msgs = Decode(buf, tl(0))
+    val t1 = Eq(t, msgs.Length(), 5)
+    val tags = msgs.Map((m) => KindTag(m.Kind)).MkString(",")
+    return Eq(t1, tags, "base,plan,dispatch,consult,summary")
 }
 
 // ----- idempotency under a re-emitted chunk --------------------------------

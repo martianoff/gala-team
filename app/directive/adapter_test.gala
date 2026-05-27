@@ -89,6 +89,54 @@ func TestFromMessage_NudgeAndAck_AreNone(t T) T {
     return IsNone(tn, FromMessage(msg(protocol.LeadAddr(), protocol.Ack(), "")))
 }
 
+// @base with a same-line ref maps to Directive.Base(Ref).
+func TestFromMessage_Base_SameLineRef(t T) T {
+    return FromMessage(msg(protocol.UserAddr(), protocol.Base(), "previous")) match {
+        case Some(d) => d match {
+            case Base(ref) => Eq(t, ref, "previous")
+            case _         => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+// @base with the ref on a separate line — the adapter takes the FIRST
+// non-empty token of the body (post-trim).
+func TestFromMessage_Base_SeparateLineRef(t T) T {
+    return FromMessage(msg(protocol.UserAddr(), protocol.Base(), "main")) match {
+        case Some(d) => d match {
+            case Base(ref) => Eq(t, ref, "main")
+            case _         => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+// @plan mixed-list bodies — bullets are stripped, blank lines dropped.
+func TestFromMessage_Plan_MixedListStyles(t T) T {
+    val body = "- dashed\n* starred\n1. numbered\nplain line"
+    return FromMessage(msg(protocol.UserAddr(), protocol.Plan(), body)) match {
+        case Some(d) => d match {
+            case Plan(items) => {
+                val t1 = Eq(t, items.Length(), 4)
+                val t2 = Eq(t1, items.Get(0), "dashed")
+                val t3 = Eq(t2, items.Get(1), "starred")
+                val t4 = Eq(t3, items.Get(2), "numbered")
+                return Eq(t4, items.Get(3), "plain line")
+            }
+            case _ => IsTrue(t, false)
+        }
+        case None() => IsTrue(t, false)
+    }
+}
+
+// A @plan body that strips to zero items (only blank bullets) maps to
+// None — the FSM can't ship an empty queue. The protocol decoder
+// surfaces a truly-empty body as EmptyBody upstream; this is the
+// post-bullet-strip degenerate case.
+func TestFromMessage_Plan_AllBulletsBlankIsNone(t T) T =
+    IsNone(t, FromMessage(msg(protocol.UserAddr(), protocol.Plan(), "- \n- \n")))
+
 // FromMessages preserves source order and drops the None (Nudge/Ack)
 // kinds so the result is exactly the FSM-consumable directive stream.
 func TestFromMessages_PreservesOrderDropsNone(t T) T {

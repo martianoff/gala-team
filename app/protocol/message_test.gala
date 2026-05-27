@@ -84,5 +84,7 @@ func TestKindTag_AllVariants(t T) T {
     val t5 = Eq(t4, KindTag(Nudge()),         "nudge")
     val t6 = Eq(t5, KindTag(Ack()),           "ack")
     val t7 = Eq(t6, KindTag(Summary()),       "summary")
-    return    Eq(t7, KindTag(Consult()),      "consult")
+    val t8 = Eq(t7, KindTag(Consult()),       "consult")
+    val t9 = Eq(t8, KindTag(Base()),          "base")
+    return    Eq(t9, KindTag(Plan()),         "plan")
 }

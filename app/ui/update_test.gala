@@ -6306,25 +6306,13 @@ func TestUserPrompted_FromApproval_StaysInApproval(t T) T {
 }
 
 // ----------------------------------------------------------------------------
-// detectMalformedDispatch — UI-level heuristics for the directive
-// shapes the protocol parser cannot see: @plan / @base unclosed (owned
-// by app/directive's control reader), arrow-notation, bold headings.
-// Unclosed @summary / @consult / @dispatch and multi-target @dispatch
-// are now surfaced by protocol.DecodeWithIssues as DecodeIssue values;
-// their tests live in app/protocol/decode_test.gala.
+// detectMalformedDispatch — UI-level heuristics for directive shapes
+// the protocol parser cannot see: arrow-notation and bold headings
+// naming a team member. Unclosed openers (every kind) + multi-target
+// @dispatch + empty-body @plan / @base are now surfaced by
+// protocol.DecodeWithIssues as DecodeIssue values; their tests live in
+// app/protocol/decode_test.gala.
 // ----------------------------------------------------------------------------
-
-func TestDetectMalformedDispatch_PlanWithoutEnd_DetectsPlan(t T) T {
-    val buf = "@plan\nstep one\nstep two"
-    val reason = detectMalformedDispatch(buf, sampleTeam())
-    return IsTrue(t, strings.Contains(reason, "@plan"))
-}
-
-func TestDetectMalformedDispatch_BaseWithoutEnd_DetectsBase(t T) T {
-    val buf = "@base previous\nnow lets dispatch"
-    val reason = detectMalformedDispatch(buf, sampleTeam())
-    return IsTrue(t, strings.Contains(reason, "@base"))
-}
 
 // Plain chat with no directive markers must NOT match — that's a
 // legitimate "TL replied with prose" turn and the FSM should route
@@ -6337,9 +6325,10 @@ func TestDetectMalformedDispatch_PlainChat_NoFalsePositive(t T) T {
 
 // ----------------------------------------------------------------------------
 // formatDecodeIssues — UI's mapping from protocol.DecodeIssue values
-// (UnclosedBlock / MultiTargetDispatch) to nudge text. The protocol
-// tests prove the parser surfaces the right issues; these prove the UI
-// renders them with the strings the TL prompt has been tuned around.
+// (UnclosedBlock / MultiTargetDispatch / EmptyBody) to nudge text. The
+// protocol tests prove the parser surfaces the right issues; these
+// prove the UI renders them with the strings the TL prompt has been
+// tuned around.
 // ----------------------------------------------------------------------------
 
 func TestFormatDecodeIssues_UnclosedSummary(t T) T {
@@ -6360,10 +6349,34 @@ func TestFormatDecodeIssues_UnclosedDispatch(t T) T {
     return IsTrue(t, strings.Contains(reason, "@dispatch(...) opening tag without a matching @end"))
 }
 
+func TestFormatDecodeIssues_UnclosedPlan(t T) T {
+    val issues = ArrayOf[protocol.DecodeIssue](protocol.UnclosedBlock(Kind = "plan"))
+    val reason = formatDecodeIssues(issues)
+    return IsTrue(t, strings.Contains(reason, "@plan"))
+}
+
+func TestFormatDecodeIssues_UnclosedBase(t T) T {
+    val issues = ArrayOf[protocol.DecodeIssue](protocol.UnclosedBlock(Kind = "base"))
+    val reason = formatDecodeIssues(issues)
+    return IsTrue(t, strings.Contains(reason, "@base"))
+}
+
 func TestFormatDecodeIssues_MultiTarget(t T) T {
     val issues = ArrayOf[protocol.DecodeIssue](protocol.MultiTargetDispatch(Names = "Felix, Mira"))
     val reason = formatDecodeIssues(issues)
     return IsTrue(t, strings.Contains(reason, "Felix, Mira"))
+}
+
+func TestFormatDecodeIssues_EmptyBodyBase(t T) T {
+    val issues = ArrayOf[protocol.DecodeIssue](protocol.EmptyBody(Directive = "@base"))
+    val reason = formatDecodeIssues(issues)
+    return IsTrue(t, strings.Contains(reason, "@base"))
+}
+
+func TestFormatDecodeIssues_EmptyBodyPlan(t T) T {
+    val issues = ArrayOf[protocol.DecodeIssue](protocol.EmptyBody(Directive = "@plan"))
+    val reason = formatDecodeIssues(issues)
+    return IsTrue(t, strings.Contains(reason, "@plan"))
 }
 
 func TestFormatDecodeIssues_Empty(t T) T {

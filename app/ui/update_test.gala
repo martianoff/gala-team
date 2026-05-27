@@ -2060,7 +2060,7 @@ func TestStateWatchdog_Delegating_AutoRetriesWithRespawn(t T) T {
 func TestStateWatchdog_Delegating_SecondFire_FallsBackToIdle(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel().Copy(
-        State              = Delegating(Pending = pending),
+        State              = Delegating(Pending = pending, Dispatched = pending),
         StateEnteredAt     = staleStateEnteredAt(),
         LastUserPrompt     = "do the thing",
         WatchdogRetryFired = true,
@@ -2075,7 +2075,7 @@ func TestStateWatchdog_Delegating_SecondFire_FallsBackToIdle(t T) T {
 func TestStateWatchdog_Delegating_NoLastUserPrompt_FallsBackToIdle(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel().Copy(
-        State              = Delegating(Pending = pending),
+        State              = Delegating(Pending = pending, Dispatched = pending),
         StateEnteredAt     = staleStateEnteredAt(),
         LastUserPrompt     = "",
         WatchdogRetryFired = false,

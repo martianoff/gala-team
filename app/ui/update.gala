@@ -2726,7 +2726,17 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
         LogMemberOutput(name, displayText)
         withAsk.Conversation.Append(session.ConversationLine(Speaker = name, Text = displayText, At = time_utils.Now().UnixNanos()))
     }
-    val withLastSeen = withAsk.Copy(RetryCount = withAsk.RetryCount.Remove(name))
+    // A visible chunk from `name` is proof the member has recovered
+    // from any prior heartbeat-respawn round. Clear RetryCount AND
+    // the stale "silent past heartbeat" notice on LastError so the
+    // persistent red footer disappears when the member is healthy
+    // again. Non-heartbeat LastError values (auth failures, PR
+    // errors) are preserved — clearHeartbeatNoticeFor matches only
+    // the per-member heartbeat prefix.
+    val withLastSeen = withAsk.Copy(
+        RetryCount = withAsk.RetryCount.Remove(name),
+        LastError  = clearHeartbeatNoticeFor(withAsk.LastError, name),
+    )
     val current = withLastSeen.Statuses.Get(name).GetOrElse(StIdle())
     val nextStatus = if (isStickyStatus(current)) current else StWorking()
     val withLine = setStatus(persistConversation(withLastSeen, nextConvo), name, nextStatus)
@@ -3709,7 +3719,7 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
             val oldSid = mDrained.SessionIds.Get(name).GetOrElse("")
             val mPrepared = mDrained.Copy(SessionIds = mDrained.SessionIds.Remove(name))
             val reset = resetMemberForRespawn(mPrepared, name)
-            val errMsg = s"${name}: silent past heartbeat — rotating session, respawn ${attempt}/${max}"
+            val errMsg = heartbeatRespawnNotice(name, attempt, max)
             val recovering = reset.Copy(LastError = Some(errMsg))
             val withStatus = setStatus(recovering, name, StRecovering(attempt, max))
             val (afterRespawn, cmd) = respawnMember(withStatus, name)
@@ -3722,6 +3732,49 @@ func liveRespawnMember(m AppModel, name string, attempt int, max int) Tuple[AppM
             return (afterRespawn, cmd)
         }
     }
+}
+
+// heartbeatNoticePrefix is the stable per-member prefix of the
+// LastError string set by liveRespawnMember. clearHeartbeatNoticeFor
+// matches on this prefix to decide whether the next visible chunk
+// from `name` should clear LastError as a recovery signal.
+func heartbeatNoticePrefix(name string) string = s"${name}: silent past heartbeat"
+
+// heartbeatRespawnNotice renders the "we just respawned because the
+// member was silent" message. The previous wording was
+// "rotating session, respawn N/M" which read like a fraction and was
+// alarming when N > M (a possible UI/protocol counter drift the
+// retry-counter unification task tracks separately). The new shape
+// keeps the same information but spells it out and explicitly flags
+// the "last retry" and "over budget" edges. Readable at a glance:
+//
+//   "Kael silent past heartbeat — respawn 1 of 2"
+//   "Kael silent past heartbeat — respawn 2 of 2 (last retry)"
+//   "Kael silent past heartbeat — respawn 3 over 2-retry budget"
+//
+// The prefix `${name}: silent past heartbeat` is shared with
+// heartbeatNoticePrefix so the recovery path can recognise and clear
+// this message when chunks resume.
+func heartbeatRespawnNotice(name string, attempt int, max int) string {
+    val tail = if (attempt > max) {
+        s"respawn ${attempt} over ${max}-retry budget"
+    } else if (attempt == max && max > 0) {
+        s"respawn ${attempt} of ${max} (last retry)"
+    } else {
+        s"respawn ${attempt} of ${max}"
+    }
+    return s"${heartbeatNoticePrefix(name)} — ${tail}"
+}
+
+// clearHeartbeatNoticeFor returns None when `cur` is a "silent past
+// heartbeat" notice for `name` (the member's chunks are flowing again,
+// so the persistent red footer is stale). Otherwise returns `cur`
+// unchanged — we deliberately do NOT clear other LastError surfaces
+// (auth failures, PR-create errors, etc.) on a member chunk; those
+// belong to different events and the user still needs to see them.
+func clearHeartbeatNoticeFor(cur Option[string], name string) Option[string] = cur match {
+    case None()    => cur
+    case Some(s)   => if (strings.HasPrefix(s, heartbeatNoticePrefix(name))) None[string]() else cur
 }
 
 // resetMemberState is the SINGLE place that prepares a member's

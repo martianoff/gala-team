@@ -1882,6 +1882,56 @@ func TestExtractFirstToolUseId_AbsentReturnsEmpty(t T) T {
     return Eq(t, extractFirstToolUseId(env), "")
 }
 
+// ---------------------------------------------------------------------------
+// heartbeatRespawnNotice — readable wording for the silent-past-heartbeat
+// LastError surface. Previous "${name}: silent past heartbeat —
+// rotating session, respawn N/M" read like a fraction (e.g. "3/2"
+// looked like overflow). New form spells "respawn N of M" with edges
+// for "last retry" and "over budget".
+// ---------------------------------------------------------------------------
+
+func TestHeartbeatRespawnNotice_NormalAttempt(t T) T =
+    Eq(t, heartbeatRespawnNotice("Kael", 1, 2),
+            "Kael: silent past heartbeat — respawn 1 of 2")
+
+func TestHeartbeatRespawnNotice_LastRetry(t T) T =
+    Eq(t, heartbeatRespawnNotice("Kael", 2, 2),
+            "Kael: silent past heartbeat — respawn 2 of 2 (last retry)")
+
+func TestHeartbeatRespawnNotice_OverBudget(t T) T =
+    Eq(t, heartbeatRespawnNotice("Kael", 3, 2),
+            "Kael: silent past heartbeat — respawn 3 over 2-retry budget")
+
+// clearHeartbeatNoticeFor only clears LastError when it's the
+// heartbeat-respawn shape for THIS member. Other LastError values
+// (auth failures, PR errors, other members' heartbeat) are preserved.
+
+func TestClearHeartbeatNoticeFor_ClearsOwnNotice(t T) T {
+    val cur = Some[string]("Kael: silent past heartbeat — respawn 2 of 2 (last retry)")
+    return IsNone(t, clearHeartbeatNoticeFor(cur, "Kael"))
+}
+
+func TestClearHeartbeatNoticeFor_PreservesOtherMembersNotice(t T) T {
+    val cur = Some[string]("Lyra: silent past heartbeat — respawn 1 of 2")
+    val result = clearHeartbeatNoticeFor(cur, "Kael")
+    return result match {
+        case Some(s) => Eq(t, s, "Lyra: silent past heartbeat — respawn 1 of 2")
+        case None()  => IsTrue(t, false)
+    }
+}
+
+func TestClearHeartbeatNoticeFor_PreservesUnrelatedError(t T) T {
+    val cur = Some[string]("Kael: Failed to authenticate. API Error: 401")
+    val result = clearHeartbeatNoticeFor(cur, "Kael")
+    return result match {
+        case Some(s) => IsTrue(t, strings.Contains(s, "Failed to authenticate"))
+        case None()  => IsTrue(t, false)
+    }
+}
+
+func TestClearHeartbeatNoticeFor_NoneStaysNone(t T) T =
+    IsNone(t, clearHeartbeatNoticeFor(None[string](), "Kael"))
+
 // The watchdog must also flip the affected members' Status back to
 // StIdle. Without this, the sidebar keeps showing the member as
 // "working" with a per-member timer ticking up indefinitely —

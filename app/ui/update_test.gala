@@ -1851,12 +1851,12 @@ func TestStateWatchdog_TLThinking_ResumesAfterTaskCleared(t T) T {
     }
 }
 
-// trackTaskTool unit test: a chunk carrying TaskToolUseId adds the id;
-// a chunk carrying TaskToolResultId removes it. Empty-string fields
-// are no-ops.
+// trackTaskTool unit test: a chunk carrying TaskToolUseIds adds the
+// ids; a chunk carrying TaskToolResultId removes it. No-op chunks
+// (empty ids array + empty result) leave state untouched.
 func TestTrackTaskTool_AddRemoveAndNoOps(t T) T {
     val m0 = sampleModel()
-    val openChunk = emptyChunk().Copy(TaskToolUseId = "toolu_x")
+    val openChunk = emptyChunk().Copy(TaskToolUseIds = ArrayOf("toolu_x"))
     val m1 = trackTaskTool(m0, "Vesper", openChunk)
     val sz1 = m1.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
     val t1 = Eq(t, sz1, 1)
@@ -1864,10 +1864,62 @@ func TestTrackTaskTool_AddRemoveAndNoOps(t T) T {
     val m2 = trackTaskTool(m1, "Vesper", closeChunk)
     val sz2 = m2.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
     val t2 = Eq(t1, sz2, 0)
-    // No-op chunk (both ids blank) does not touch state.
+    // No-op chunk (empty ids + empty result) does not touch state.
     val noopChunk = emptyChunk()
     val m3 = trackTaskTool(m2, "Vesper", noopChunk)
     return Eq(t2, m3.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size(), 0)
+}
+
+// Regression: a single assistant envelope opens THREE parallel Task
+// subagents (claude commonly batches parallel tool calls into one
+// content[] array). All three ids must enter OutstandingTaskTools so
+// the watchdog stays paused until the LAST subagent reports back —
+// not just the first. Past sessions saw a TL emit "research three
+// axes in parallel via Explore agents"; with the previous singular
+// TaskToolUseId tracking, the first tool_result emptied the set and
+// the watchdog killed the TL 5 minutes later while two more
+// subagents were still running.
+func TestTrackTaskTool_ParallelTasks_AllTracked(t T) T {
+    val m0 = sampleModel()
+    val openChunk = emptyChunk().Copy(TaskToolUseIds = ArrayOf("toolu_a", "toolu_b", "toolu_c"))
+    val m1 = trackTaskTool(m0, "Vesper", openChunk)
+    val sz1 = m1.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
+    val t1 = Eq(t, sz1, 3)
+    // First subagent finishes — only toolu_a removed; b and c still in flight.
+    val close1 = emptyChunk().Copy(TaskToolResultId = "toolu_a")
+    val m2 = trackTaskTool(m1, "Vesper", close1)
+    val sz2 = m2.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
+    val t2 = Eq(t1, sz2, 2)
+    val remaining = m2.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]())
+    val t3 = IsTrue(t2, remaining.Contains("toolu_b"))
+    return IsTrue(t3, remaining.Contains("toolu_c"))
+}
+
+// allTaskToolUseIds returns every Task tool_use id in source order
+// and ignores non-Task tool_use blocks (Read, Edit, Bash, etc.).
+func TestAllTaskToolUseIds_ParallelTasks(t T) T {
+    val parts = ArrayOf[ClaudePart](
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_a", Name = "Task"),
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_b", Name = "Task"),
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_c", Name = "Task"),
+    )
+    val ids = allTaskToolUseIds(parts)
+    val t1 = Eq(t, ids.Length(), 3)
+    val t2 = Eq(t1, ids.Get(0), "toolu_a")
+    val t3 = Eq(t2, ids.Get(1), "toolu_b")
+    return Eq(t3, ids.Get(2), "toolu_c")
+}
+
+func TestAllTaskToolUseIds_IgnoresNonTaskTools(t T) T {
+    val parts = ArrayOf[ClaudePart](
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_read", Name = "Read"),
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_task", Name = "Task"),
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_edit", Name = "Edit"),
+        ClaudePart(Type = "text",     Text = "narration", Id = "", Name = ""),
+    )
+    val ids = allTaskToolUseIds(parts)
+    val t1 = Eq(t, ids.Length(), 1)
+    return Eq(t1, ids.Get(0), "toolu_task")
 }
 
 // extractFirstToolUseId returns the tool_use_id from a type:"user"

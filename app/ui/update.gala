@@ -2400,11 +2400,11 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 // entry in the set, the worst case is the NEXT watchdog tick skips
 // the silence check once and then the fresh subprocess catches up.
 func trackTaskTool(m AppModel, name string, chunk ClaudeChunk) AppModel {
-    if chunk.TaskToolUseId == "" && chunk.TaskToolResultId == "" {
+    if chunk.TaskToolUseIds.IsEmpty() && chunk.TaskToolResultId == "" {
         return m
     }
     val cur = m.OutstandingTaskTools.Get(name).GetOrElse(EmptyHashSet[string]())
-    val afterAdd = if (chunk.TaskToolUseId == "") cur else cur.Add(chunk.TaskToolUseId)
+    val afterAdd = chunk.TaskToolUseIds.FoldLeft(cur, (acc, id) => acc.Add(id))
     val afterRemove = if (chunk.TaskToolResultId == "") afterAdd else afterAdd.Remove(chunk.TaskToolResultId)
     return m.Copy(OutstandingTaskTools = m.OutstandingTaskTools.Put(name, afterRemove))
 }
@@ -2505,7 +2505,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
             TurnEnded        = false,
             IsToolActivity   = false,
             IsSynthetic      = false,
-            TaskToolUseId    = "",
+            TaskToolUseIds   = EmptyArray[string](),
             TaskToolResultId = "",
         )
         val (m1, c) = applyChunkVisible(m, name, proseChunk)
@@ -4982,15 +4982,15 @@ struct ClaudeChunk(
     // can tell a poisoned session (stdout flowing, no model output)
     // apart from a healthy silent one.
     IsSynthetic bool,
-    // TaskToolUseId is the tool_use id of a Task tool spawn the
-    // assistant just emitted (name="Task" tool_use block). Non-empty
-    // means a subagent run just started; applyChunkVisible adds the id
-    // to m.OutstandingTaskTools[name] so enforceStateWatchdog can
-    // pause the silence-based kill while the subagent runs (the parent
-    // claude-code goes synchronously silent on stdout until the
-    // subagent reports back, which can legitimately take >5 minutes
-    // for Explore / Plan on a large codebase).
-    TaskToolUseId string,
+    // TaskToolUseIds carries every Task tool_use id the assistant
+    // envelope opened (claude commonly batches parallel tool calls
+    // into one content[] array; past sessions saw 3 Explore Tasks
+    // emitted as parallel tool_use blocks in a single envelope).
+    // applyChunkVisible adds every id to m.OutstandingTaskTools[name]
+    // so enforceStateWatchdog keeps the silence-based kill paused as
+    // long as ANY of the spawned subagents is still running. Empty
+    // for envelopes that opened no Task subagent.
+    TaskToolUseIds Array[string],
     // TaskToolResultId is the tool_use_id of a tool_result the parent
     // just emitted in a type:"user" envelope. Non-empty means a Task
     // subagent finished; applyChunkVisible removes the id from
@@ -5013,7 +5013,7 @@ func emptyChunk() ClaudeChunk = ClaudeChunk(
     TurnEnded        = false,
     IsToolActivity   = false,
     IsSynthetic      = false,
-    TaskToolUseId    = "",
+    TaskToolUseIds   = EmptyArray[string](),
     TaskToolResultId = "",
 )
 
@@ -5032,7 +5032,7 @@ func syntheticChunk() ClaudeChunk = ClaudeChunk(
     TurnEnded        = false,
     IsToolActivity   = false,
     IsSynthetic      = true,
-    TaskToolUseId    = "",
+    TaskToolUseIds   = EmptyArray[string](),
     TaskToolResultId = "",
 )
 
@@ -5216,7 +5216,7 @@ func rateLimitEventChunk(envelope string) ClaudeChunk {
         TurnEnded        = false,
         IsToolActivity   = false,
         IsSynthetic      = false,
-        TaskToolUseId    = "",
+        TaskToolUseIds   = EmptyArray[string](),
         TaskToolResultId = "",
     )
 }
@@ -5392,7 +5392,7 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
     // spamming the chat.
     val visibleText = texts.MkString("\n")
     val isToolActivity = visibleText == "" && askId == "" && hasAnyToolUse(evt.Message.Content)
-    val taskToolUseId = firstTaskToolUseId(evt.Message.Content)
+    val taskToolUseIds = allTaskToolUseIds(evt.Message.Content)
     return ClaudeChunk(
         Visible          = visibleText,
         ErrorText        = "",
@@ -5404,7 +5404,7 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
         TurnEnded        = false,
         IsToolActivity   = isToolActivity,
         IsSynthetic      = false,
-        TaskToolUseId    = taskToolUseId,
+        TaskToolUseIds   = taskToolUseIds,
         TaskToolResultId = "",
     )
 }
@@ -5444,27 +5444,34 @@ func firstAskUserQuestionId(parts Array[ClaudePart]) string {
     return ""
 }
 
-// firstTaskToolUseId walks content[] and returns the `id` of the first
-// Task tool_use block, or "" when none is present. The Task tool spawns
-// a subagent that claude-code waits for synchronously; while the
-// subagent runs the parent's stdout is silent. The orchestrator records
-// the returned id in OutstandingTaskTools so the watchdog can pause
-// the silence-based kill until the matching tool_result arrives. One
-// id per assistant envelope is enough: claude-code emits Task tool_use
-// blocks one at a time in practice, and even when it fans out, each
-// envelope still bumps OutstandingTaskTools by one id which is
-// sufficient to keep the watchdog paused.
-func firstTaskToolUseId(parts Array[ClaudePart]) string {
+// allTaskToolUseIds walks content[] and returns the `id` of EVERY
+// Task tool_use block, in source order. The Task tool spawns a
+// subagent that claude-code waits for synchronously; while the
+// subagent runs the parent's stdout is silent. The orchestrator
+// records every returned id in OutstandingTaskTools so the watchdog
+// can pause the silence-based kill until the matching tool_results
+// arrive.
+//
+// Why every id, not just the first: claude commonly batches parallel
+// tool calls into a single assistant message content[] array. Past
+// sessions saw a TL spawn 3 Explore subagents in parallel — the
+// prior firstTaskToolUseId tracked only the first id, so when the
+// first subagent finished the OutstandingTaskTools set emptied even
+// though two more subagents were still running. The watchdog
+// resumed and killed the TL 5 minutes later while it was still
+// legitimately waiting on the other two.
+func allTaskToolUseIds(parts Array[ClaudePart]) Array[string] {
+    var out = EmptyArray[string]()
     var i = 0
     val n = parts.Size()
     for i < n {
         val p = parts.Get(i)
         if p.Type == "tool_use" && p.Name == "Task" && p.Id != "" {
-            return p.Id
+            out = out.Append(p.Id)
         }
         i = i + 1
     }
-    return ""
+    return out
 }
 
 // extractFirstQuestionText pulls the first `"question":"..."` value
@@ -5531,7 +5538,7 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
             TurnEnded        = true,
             IsToolActivity   = false,
             IsSynthetic      = false,
-            TaskToolUseId    = "",
+            TaskToolUseIds   = EmptyArray[string](),
             TaskToolResultId = "",
         )
     }
@@ -5562,7 +5569,7 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
         TurnEnded        = true,
         IsToolActivity   = false,
         IsSynthetic      = false,
-        TaskToolUseId    = "",
+        TaskToolUseIds   = EmptyArray[string](),
         TaskToolResultId = "",
     )
 }

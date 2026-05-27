@@ -503,18 +503,52 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         LogSessionRotated(name, rotateReason, oldSid, "")
         return acc.Copy(SessionIds = acc.SessionIds.Remove(name))
     })
-    // Auto-retry is TL-only: re-firing a dispatch from a member-
-    // gated state watchdog would side-step QA / TL routing.
-    // WatchdogRetryFired caps retries at 1 per user-prompt.
-    val canAutoRetry = isTLState && m.LastUserPrompt != "" && !m.WatchdogRetryFired
+    // Auto-retry policy:
+    //   - TL state: re-issue the last user prompt via onSubmit.
+    //   - Member state (Delegating / QAGate): respawn each affected
+    //     member with their original dispatch body (the existing
+    //     respawnMember wasRotated-replays-dispatch path). The FSM
+    //     stays in Delegating / QAGate so the pending set is
+    //     preserved — a kill that just forced Idle (the prior
+    //     behaviour) left the member's straggler @blocked arriving
+    //     against an Idle FSM as a silent no-op, and the user saw
+    //     the orchestrator park with no clear cause.
+    //
+    // WatchdogRetryFired caps either retry path at one auto-action
+    // per user-prompt cycle so a member that never recovers can't
+    // loop the orchestrator forever — the second watchdog firing
+    // falls through to "give up, force Idle".
+    val canAutoRetry = m.LastUserPrompt != "" && !m.WatchdogRetryFired
     val baseReason = s"FSM watchdog: ${tag} for ${elapsedSec}s past ${threshold}s ceiling"
-    val reason = if (canAutoRetry) s"${baseReason} — rotating session and auto-retrying last prompt"
-                 else                s"${baseReason} — rotating session, forcing recovery to Idle"
+    val reason = if (!canAutoRetry) {
+        s"${baseReason} — rotating session, forcing recovery to Idle"
+    } else if (isTLState) {
+        s"${baseReason} — rotating session and auto-retrying last prompt"
+    } else {
+        s"${baseReason} — rotating session, re-dispatching ${affected.MkString(\", \")}"
+    }
     val toast = mRotated.Toasts.PushError(reason, now, time_utils.Seconds(int64(10)))
     // lastVisibleSec carries the "no chunk ever" signal (-1) for
     // triage; silenceSec is what tripped the threshold.
     val lastVisibleSec = if (mostRecentChunkAt.UnixNanos() <= int64(0)) int64(-1) else silenceSec
     LogWatchdogDiag(tag, silenceSec, affected.MkString(","), canAutoRetry, s"${lastVisibleSec}s")
+    // Member-state auto-retry: respawn each affected member with
+    // the original dispatch body. Stay in the current FSM state so
+    // the pending set survives. respawnMember reads
+    // LastDispatchedMsg via the wasRotated branch (SessionId was
+    // removed above) and sends msg.Body as the rescue prompt — the
+    // same PR #76 fix that the heartbeat-respawn path uses.
+    if canAutoRetry && !isTLState {
+        LogFsmTransition(tag, "WatchdogExpired", s"silence=${silenceSec}s state_dwell=${stateDwellSec}s auto_retry=${canAutoRetry} affected=${affected.MkString(",")} last_visible=${lastVisibleSec}s mode=respawn", tag)
+        val seed = (mRotated.Copy(Toasts = toast, LastError = Some(reason)), EmptyArray[Cmd[AppMsg]]())
+        val (afterRespawn, cmds) = affected.FoldLeft(seed, (acc, name) => {
+            val (curM, curCmds) = acc
+            val (next, c) = respawnMember(curM, name)
+            return (next, curCmds.Append(c))
+        })
+        val withFlag = afterRespawn.Copy(WatchdogRetryFired = true)
+        return (persistAppModel(withFlag), batchAll(cmds))
+    }
     LogFsmTransition(tag, "WatchdogExpired", s"silence=${silenceSec}s state_dwell=${stateDwellSec}s auto_retry=${canAutoRetry} affected=${affected.MkString(",")} last_visible=${lastVisibleSec}s", "Idle")
     val withReset = affected.FoldLeft(mRotated, (acc, name) => setStatus(acc, name, StIdle()))
     val forced = withReset.Copy(

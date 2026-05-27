@@ -1977,10 +1977,15 @@ func TestStateWatchdog_TLThinking_EmptyLastPrompt_NoRetry(t T) T {
     }
 }
 
-// Member-gated state watchdog never auto-retries — it forces Idle
-// and lets the user decide. Auto-retrying a dispatch from a fired
-// member-watchdog would side-step the QA / TL routing layer.
-func TestStateWatchdog_Delegating_NeverAutoRetries(t T) T {
+// Member-state watchdog now auto-respawns the affected members with
+// their original dispatch body (the same PR #76 fix used by the
+// heartbeat-respawn path) and STAYS in Delegating / QAGate so the
+// pending set survives. Past sessions saw the orchestrator park
+// forever in Idle after a member-watchdog kill because the @blocked
+// straggler that followed arrived against an Idle FSM and was
+// silently no-op'd. WatchdogRetryFired still latches to one auto-
+// action per user-prompt cycle.
+func TestStateWatchdog_Delegating_AutoRetriesWithRespawn(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel().Copy(
         State              = Delegating(Pending = pending),
@@ -1989,11 +1994,46 @@ func TestStateWatchdog_Delegating_NeverAutoRetries(t T) T {
         WatchdogRetryFired = false,
     )
     val (m, _) = Update(seed, TickMsg())
-    // Latch stays false — we didn't auto-retry.
-    val t1 = IsTrue(t, !m.WatchdogRetryFired)
+    // Latch flips to true so the second watchdog tick won't re-fire.
+    val t1 = IsTrue(t, m.WatchdogRetryFired)
+    // FSM stays in Delegating — pending set is preserved.
     return m.State match {
-        case Idle() => IsTrue(t1, true)
-        case _      => IsTrue(t1, false)
+        case Delegating(_) => IsTrue(t1, true)
+        case _             => IsTrue(t1, false)
+    }
+}
+
+// Once WatchdogRetryFired latches (or LastUserPrompt is empty), the
+// member-state watchdog falls back to the original "force Idle"
+// behaviour so a member that never recovers can't loop the
+// orchestrator forever.
+func TestStateWatchdog_Delegating_SecondFire_FallsBackToIdle(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val seed = sampleModel().Copy(
+        State              = Delegating(Pending = pending),
+        StateEnteredAt     = staleStateEnteredAt(),
+        LastUserPrompt     = "do the thing",
+        WatchdogRetryFired = true,
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
+func TestStateWatchdog_Delegating_NoLastUserPrompt_FallsBackToIdle(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val seed = sampleModel().Copy(
+        State              = Delegating(Pending = pending),
+        StateEnteredAt     = staleStateEnteredAt(),
+        LastUserPrompt     = "",
+        WatchdogRetryFired = false,
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
     }
 }
 

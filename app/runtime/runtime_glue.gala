@@ -845,16 +845,23 @@ func GhPrCreateFuture(proj Project, body string, baseRef Option[string], forceBr
         if pushResult != "" {
             return RtPrFailed(Err = errors.New(s"git push pr branch failed: ${pushResult}"))
         }
-        // Title source priority: the first commit subject on the PR
-        // branch since the base ref. Reflects the actual work the
-        // engineer(s) did and is already a one-line summary by
-        // convention. Falls back to GhTitle(body) when the git log
-        // is empty or fails (no commits, base ref missing locally,
-        // git not installed) — the old code path. capTitleAtWordBoundary
-        // bounds the commit subject the same way GhTitle does so a
-        // long commit subject doesn't overflow GitHub's title field.
+        // Title source priority: the first commit subject on the
+        // lead branch since the base ref. The lead branch is the
+        // local source pushSnapshotBranch just copied to
+        // refs/heads/<prBranch> on origin — content-identical, and
+        // it exists locally (the remote-only PR branch name does
+        // not, which silently broke the prior call against
+        // `prBranch` directly: `git log master..<prBranch>` failed
+        // with `unknown revision`, the function returned "", and
+        // every orchestrator PR fell back to GhTitle(body) producing
+        // titles like "## What" from the @summary heading).
+        //
+        // Falls back to GhTitle(body) when the git log is empty or
+        // fails (no commits, base ref missing locally, git not
+        // installed). capTitleAtWordBoundary bounds the commit
+        // subject the same way GhTitle does.
         val base = baseRef.GetOrElse(proj.DefaultBranch)
-        val commitSubject = firstCommitSubjectSinceBase(leadWtPath, base, prBranch)
+        val commitSubject = firstCommitSubjectSinceBase(leadWtPath, base, leadBranch)
         val title = if (commitSubject != "") capTitleAtWordBoundary(commitSubject, 70)
                     else                     GhTitle(body)
         // Existing-PR detection: before calling `gh pr create`, ask gh

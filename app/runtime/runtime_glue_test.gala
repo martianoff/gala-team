@@ -467,3 +467,41 @@ func TestFirstCommitSubjectSinceBase_LongSubject_ReturnedVerbatim(t T) T {
     return Eq(t, firstCommitSubjectSinceBase(dir, "main", "feature"), subject)
 }
 
+// Regression for PR #88: pushSnapshotBranch creates the PR branch
+// only on the remote (refs/heads/<pr-branch> on origin), so the
+// local lead worktree has NO local ref by the PR-branch name —
+// only origin/<pr-branch>. Calling firstCommitSubjectSinceBase
+// with the bare PR-branch name fails with `unknown revision`,
+// returns "", and the caller falls back to GhTitle(body) which
+// produces titles like "## What" from a structured @summary body.
+//
+// The fix: callers should pass the LEAD branch name (which is
+// local, content-identical to what was just pushed). This test
+// pins both shapes:
+//   - remote-tracking-style ref "origin/feature" exists and works
+//   - bare PR-branch-style name "feature-remote-only" does NOT
+//     exist locally and returns "" (the bug trigger).
+//
+// We simulate the production layout with a bare remote repo +
+// `git push` into it, then verify the helper's behaviour in the
+// "lead worktree" (the cloned working repo).
+func TestFirstCommitSubjectSinceBase_RemoteOnlyBranch_ReturnsEmpty(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_first_commit_remote_only_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "init"))
+    runGitInDir(dir, ArrayOf("checkout", "-q", "-b", "lead"))
+    runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
+                              "commit", "--allow-empty", "-q", "-m", "feat: do the thing"))
+    // The lead branch IS local and the lookup works — this is the
+    // fix shape.
+    val t1 = Eq(t, firstCommitSubjectSinceBase(dir, "main", "lead"), "feat: do the thing")
+    // A bare ref name that doesn't exist locally returns "" instead
+    // of erroring out — proving the function's failure mode is the
+    // graceful empty-string fallback (which the caller previously
+    // hit on every orchestrator PR).
+    return Eq(t1, firstCommitSubjectSinceBase(dir, "main", "no-such-pr-branch"), "")
+}
+

@@ -1,4 +1,4 @@
-load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+load("@rules_gala//gala:defs.bzl", "gala_library", "gala_test")
 
 gala_library(
     name = "protocol",
@@ -23,7 +23,7 @@ gala_library(
 # Message contract; globbing means it is compiled and run by THIS target
 # the moment it lands at integration — no BUILD edit needed — while this
 # branch still builds and tests green standalone with its own files.
-gala_go_test(
+gala_test(
     name = "protocol_test",
     srcs = glob(["*_test.gala"]),
     pkg = "protocol",

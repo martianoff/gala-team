@@ -2,6 +2,12 @@ common --enable_bzlmod
 common --noenable_workspace
 build --enable_runfiles
 
+# Resolve the rules_gala module from the registry hosted in
+# github.com/martianoff/rules-gala. Order matters — list this first
+# so it wins for the rules_gala module name.
+common --registry=https://raw.githubusercontent.com/martianoff/rules-gala/main/
+common --registry=https://bcr.bazel.build
+
 # Pass GOROOT and PATH to genrules so the transpiler can use go/importer to
 # resolve Go package types (function signatures, struct fields, method
 # sets, etc.). Required for cross-language type inference.

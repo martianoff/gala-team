@@ -1,4 +1,4 @@
-load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+load("@rules_gala//gala:defs.bzl", "gala_library", "gala_test")
 
 gala_library(
     name = "fsm",
@@ -12,7 +12,7 @@ gala_library(
     visibility = ["//visibility:public"],
 )
 
-gala_go_test(
+gala_test(
     name = "state_machine_test",
     srcs = ["state_machine_test.gala"],
     pkg = "fsm",

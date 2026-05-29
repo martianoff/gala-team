@@ -1,4 +1,4 @@
-load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+load("@rules_gala//gala:defs.bzl", "gala_library", "gala_test")
 
 gala_library(
     name = "ui",
@@ -37,7 +37,7 @@ gala_library(
     visibility = ["//visibility:public"],
 )
 
-gala_go_test(
+gala_test(
     name = "update_test",
     srcs = ["update_test.gala"],
     pkg = "ui",
@@ -74,7 +74,7 @@ gala_go_test(
     ],
 )
 
-gala_go_test(
+gala_test(
     name = "view_test",
     srcs = ["view_test.gala"],
     pkg = "ui",
@@ -111,7 +111,7 @@ gala_go_test(
     ],
 )
 
-gala_go_test(
+gala_test(
     name = "e2e_test",
     srcs = ["e2e_test.gala"],
     pkg = "ui",
@@ -148,7 +148,7 @@ gala_go_test(
     ],
 )
 
-gala_go_test(
+gala_test(
     name = "pump_characterization_test",
     srcs = ["pump_characterization_test.gala"],
     pkg = "ui",

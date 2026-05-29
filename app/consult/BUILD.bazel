@@ -1,4 +1,4 @@
-load("@gala//:gala.bzl", "gala_go_test", "gala_library")
+load("@rules_gala//gala:defs.bzl", "gala_library", "gala_test")
 
 gala_library(
     name = "consult",
@@ -25,7 +25,7 @@ gala_library(
     visibility = ["//visibility:public"],
 )
 
-gala_go_test(
+gala_test(
     name = "registry_test",
     srcs = ["registry_test.gala"],
     pkg = "consult",
@@ -50,7 +50,7 @@ gala_go_test(
     ],
 )
 
-gala_go_test(
+gala_test(
     name = "runner_test",
     srcs = ["runner_test.gala"],
     pkg = "consult",
@@ -75,7 +75,7 @@ gala_go_test(
     ],
 )
 
-gala_go_test(
+gala_test(
     name = "dispatch_test",
     srcs = ["dispatch_test.gala"],
     pkg = "consult",

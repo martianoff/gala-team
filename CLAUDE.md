@@ -32,4 +32,4 @@ When in doubt: read the comment back as if you'd never seen this codebase. Does 
 ## Other conventions
 
 - **Testing on Windows**: when `bazel test` fails with `__COMPAT_LAYER` / `requires elevation` for `*_test.exe`, run the binary directly with `__COMPAT_LAYER=RUNASINVOKER` set. The test binary itself works; only Windows's "this looks like an installer" heuristic blocks the bazel runner.
-- **Internal-package tests** (`package <name>` matching the lib package): the BUILD `gala_go_test` target needs `pkg = "<name>"` + `lib_srcs = [...]` listing every source file from the lib. Without that, the test binary can't see the lib's symbols and fails with `undefined: <Symbol>` errors.
+- **Internal-package tests** (`package <name>` matching the lib package): the BUILD `gala_test` target needs `pkg = "<name>"` + `lib_srcs = [...]` listing every source file from the lib. Without that, the test binary can't see the lib's symbols and fails with `undefined: <Symbol>` errors.

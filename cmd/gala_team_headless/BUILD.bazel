@@ -1,4 +1,4 @@
-load("@gala//:gala.bzl", "gala_binary")
+load("@rules_gala//gala:defs.bzl", "gala_binary")
 
 # x_defs mirrors //cmd:gala_team — same STABLE_* keys from
 # tools/workspace_status.sh. Both binaries report the same version /

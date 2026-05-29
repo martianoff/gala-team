@@ -2223,6 +2223,16 @@ func TotalTokenUsage(m AppModel) ClaudeUsage {
 // Empty / pure-whitespace lines are skipped (claude periodically
 // flushes them). The pump is re-armed on every line so we keep
 // draining until the subprocess closes.
+//
+// Liveness side effect: every non-empty stderr line bumps
+// LastChunkAt via recordChunkArrival. The silence watchdog's "is
+// the subprocess alive" signal is stream-agnostic — stderr output
+// is still evidence that claude has not hung — even though stderr
+// content never reaches user-facing transcript / token surfaces.
+// Without this, a long Task subagent that intermittently flushes
+// only stderr (auth/setup notices, claude-code-misrouted
+// stream-json) leaves stdout silent past the 5-minute TL threshold
+// and the watchdog kills + retries a live subprocess.
 func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
     val trimmed = strings.TrimSpace(line)
     val pumpCmd = m.Sessions.Get(name) match {
@@ -2237,6 +2247,10 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
     // hours" days later. claude's most informative exit messages
     // (rate-limit, auth, session-not-found) ride this stream.
     LogStderr(name, trimmed)
+    // Liveness signal: any non-empty stderr line bumps LastChunkAt
+    // up front so every branch below inherits it without having to
+    // remember.
+    val mAlive = recordChunkArrival(m, name)
     // "No conversation found with session ID..." means our recorded
     // SessionId is stale (claude restarted or session expired). The
     // best we can do is forget the id so the next dispatch starts a
@@ -2245,10 +2259,10 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
     // permanently broken until the user erases the session.
     if strings.Contains(trimmed, "No conversation found with session ID") {
         val short = truncateForToast(trimmed)
-        val toast = m.Toasts.PushWarn(s"${name}: stale session id, will respawn fresh", time_utils.Now(), time_utils.Seconds(int64(6)))
-        val m1 = m.Copy(
+        val toast = mAlive.Toasts.PushWarn(s"${name}: stale session id, will respawn fresh", time_utils.Now(), time_utils.Seconds(int64(6)))
+        val m1 = mAlive.Copy(
             Toasts     = toast,
-            SessionIds = m.SessionIds.Remove(name),
+            SessionIds = mAlive.SessionIds.Remove(name),
             LastError  = Some(s"${name}: ${short}"),
         )
         return (m1, pumpCmd)
@@ -2262,12 +2276,22 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
     // trail is intact — silently absorb the line. Surfacing it on
     // the LastError red footer and a warn toast was alarmist for a
     // benign event the user could not act on.
+    //
+    // Watchdog side effect: route the envelope through the same
+    // filter the stdout pump uses to extract the Task tool_use_id
+    // / tool_result_id, then call trackTaskTool so OutstandingTaskTools
+    // stays consistent regardless of which stream the envelope was
+    // misrouted to. Visible text / transcript append / token accrual
+    // are intentionally NOT triggered — a tool_result on stderr is
+    // not model output and must never land in the conversation.
     if looksLikeStreamJson(trimmed) {
-        return (m, pumpCmd)
+        val chunk = filterClaudeStreamJsonFor(name, trimmed)
+        val mTracked = trackTaskTool(mAlive, name, chunk)
+        return (mTracked, pumpCmd)
     }
     val short = truncateForToast(trimmed)
-    val toast = m.Toasts.PushWarn(s"${name} (stderr): ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
-    val m1 = m.Copy(
+    val toast = mAlive.Toasts.PushWarn(s"${name} (stderr): ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
+    val m1 = mAlive.Copy(
         Toasts    = toast,
         LastError = Some(s"${name} stderr: ${short}"),
     )

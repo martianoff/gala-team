@@ -4920,6 +4920,76 @@ func TestOnStderr_NonEnvelopeLine_StillSurfaces(t T) T {
     }
 }
 
+// onStderr bumps LastChunkAt for any non-empty line so the silence
+// watchdog treats stderr output as evidence of liveness. Without
+// this, a long Task subagent whose only periodic output is
+// stderr-side (claude-code-misrouted stream-json, auth/setup notices)
+// leaves stdout silent past the 5-minute TL threshold and the
+// watchdog kills + auto-retries a live subprocess.
+func TestOnStderr_BumpsLastChunkAt(t T) T {
+    val dir = setupDebugRepo("on_stderr_alive")
+    defer os.RemoveAll(dir)
+    val m = sampleModel()
+    val t1 = m.LastChunkAt.Get("Lyra") match {
+        case None()    => IsTrue(t, true)
+        case Some(_)   => IsTrue(t, false)
+    }
+    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = "Error: rate limit hit, retry in 60s"))
+    return m1.LastChunkAt.Get("Lyra") match {
+        case None()    => IsTrue(t1, false)
+        case Some(_)   => IsTrue(t1, true)
+    }
+}
+
+// onStderr bumps LastChunkAt even when the line is a misrouted
+// stream-json envelope (the silent-absorb branch). The "is it alive"
+// signal is stream-agnostic.
+func TestOnStderr_StreamJsonShape_BumpsLastChunkAt(t T) T {
+    val dir = setupDebugRepo("on_stderr_alive_json")
+    defer os.RemoveAll(dir)
+    val m = sampleModel()
+    val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_xyz\",\"type\":\"tool_result\",\"content\":\"ok\"}]}}"
+    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = envelope))
+    return m1.LastChunkAt.Get("Lyra") match {
+        case None()    => IsTrue(t, false)
+        case Some(_)   => IsTrue(t, true)
+    }
+}
+
+// claude-code can route a Task subagent's tool_result onto stderr
+// instead of stdout (documented routing quirk). When that happens
+// the parent's outstanding Task tool_use_id must still be removed
+// from OutstandingTaskTools so the watchdog resumes after the
+// subagent finishes. Without this, OutstandingTaskTools leaks the
+// id permanently and the watchdog stays paused indefinitely while
+// the lead is genuinely idle.
+func TestOnStderr_StreamJsonToolResult_RemovesFromOutstandingTaskTools(t T) T {
+    val dir = setupDebugRepo("on_stderr_taskresult")
+    defer os.RemoveAll(dir)
+    val seed = sampleModel().Copy(
+        OutstandingTaskTools = EmptyHashMap[string, HashSet[string]]()
+            .Put("Lyra", EmptyHashSet[string]().Add("toolu_explore_01")),
+    )
+    val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_explore_01\",\"type\":\"tool_result\",\"content\":\"done\"}]}}"
+    val (m1, _) = Update(seed, StderrArrived(Member = "Lyra", Line = envelope))
+    return Eq(t, m1.OutstandingTaskTools.Get("Lyra").GetOrElse(EmptyHashSet[string]()).Size(), 0)
+}
+
+// Regression guard: stream-json on stderr must never reach the
+// conversation transcript even with the new tracking pipeline. A
+// tool_result on stderr is not model output; surfacing it as the
+// agent's "reply" would corrupt the transcript and could trip the
+// directive parser into spurious dispatches.
+func TestOnStderr_StreamJsonShape_DoesNotAppendToTranscript(t T) T {
+    val dir = setupDebugRepo("on_stderr_no_transcript")
+    defer os.RemoveAll(dir)
+    val m = sampleModel()
+    val before = m.Conversation.Size()
+    val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_abc\",\"type\":\"tool_result\",\"content\":\"don't surface me\"}]}}"
+    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = envelope))
+    return Eq(t, m1.Conversation.Size(), before)
+}
+
 // QAGate variant of the heartbeat-abandoned test from PR #61. A live
 // session captured Sable in QAGate(Pending={Sable}) with StWorking
 // status and LastChunkAt aged past AbandonAfterSeconds; the walk

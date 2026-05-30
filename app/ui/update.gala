@@ -3541,6 +3541,38 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
                     val saved = persistConversation(cleanedB, nextConvo)
                     return (setStatus(saved, name, StIdle()), NoCmd[AppMsg]())
                 }
+                // Outstanding-long-running-tool guard. The TL ended its
+                // turn cleanly (result envelope arrived) but a Task or
+                // Workflow tool was still in flight — the matching
+                // tool_result never landed within the turn. `claude
+                // --print` exits the subprocess at result-event time,
+                // so any tool_result the workflow eventually produces
+                // never reaches this orchestrator. Past sessions saw
+                // the TL invoke a 7-agent Workflow ("Map" + "Synthesize"
+                // phases), narrate "I'll wait for it to land", end the
+                // turn, and the FSM dropped to Idle with the workflow
+                // orphaned. User pings re-entered the same loop: the
+                // TL had no signal back and re-narrated "still waiting".
+                //
+                // Surface a system notice so the user understands the
+                // turn ended prematurely, clear the outstanding-tool
+                // set for this member so the watchdog doesn't stay
+                // paused on a tool that will never reply, and fall
+                // through to the existing Idle transition. The user
+                // can re-prompt and the TL gets a fresh turn.
+                val outstanding = cleanedB.OutstandingTaskTools.Get(name).GetOrElse(EmptyHashSet[string]())
+                if outstanding.Size() > 0 {
+                    val toolCount = outstanding.Size()
+                    val plural = if (toolCount == 1) "tool" else "tools"
+                    val notice = s"${name}: the turn ended while ${toolCount} long-running ${plural} (Task / Workflow) were still in flight. claude --print exits the subprocess at turn end, so the tool result(s) will not reach the orchestrator. Re-prompt to retry — the orchestrator has cleared the orphaned tool tracking."
+                    val nextConvo = cleanedB.Conversation.Append(
+                        session.ConversationLine(Speaker = "system", Text = notice, At = time_utils.Now().UnixNanos()),
+                    )
+                    val saved = persistConversation(cleanedB, nextConvo)
+                    val cleared = saved.Copy(OutstandingTaskTools = saved.OutstandingTaskTools.Remove(name))
+                    val nextState = transitionLogged(cleared.State, TLDone(Directives = EmptyArray[Directive]()), transitionContext(cleared))
+                    return (setStatus(persistAppModel(cleared.Copy(State = nextState)), name, StIdle()), NoCmd[AppMsg]())
+                }
                 // Parser-level issues (unclosed openers, multi-target
                 // @dispatch, empty-body @base / @plan) come from
                 // protocol.DecodeWithIssues. UI-heuristic issues (arrow

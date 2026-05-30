@@ -50,7 +50,8 @@ val headlessResultCodec    = json.Codec[HeadlessResultEvent](json.SnakeCase())
 // ExtractClaudeText classifies ONE complete `{...}` JSON envelope.
 // Returns the joined visible text (empty when nothing user-facing).
 // Caller (driveLoop) is responsible for assembling fragments via
-// extractHeadlessEnvelopes — this function only sees whole envelopes.
+// runtime.ExtractCompleteEnvelopes — this function only sees whole
+// envelopes.
 //
 // Whitelist: only `assistant` (extract content[].text) and `result`
 // (extract Result on success, drop on error) produce visible text.
@@ -77,79 +78,6 @@ func ExtractClaudeText(envelope string) string {
         }
     }
     return ""
-}
-
-// extractHeadlessEnvelopes is the headless equivalent of
-// extractCompleteEnvelopes in app/ui — same string-aware brace
-// counter that pulls every complete `{...}` object out of an
-// accumulating buffer. Returns (envelopes, leftover).
-func extractHeadlessEnvelopes(buf string) Tuple[Array[string], string] {
-    val rs = ToRunes(buf)
-    val n = len(rs)
-    var envelopes = EmptyArray[string]()
-    var i = 0
-    var start = -1
-    var depth = 0
-    var inString = false
-    var escaped = false
-    for i < n {
-        val c = rs[i]
-        if escaped {
-            escaped = false
-        } else if inString {
-            if c == '\\' {
-                escaped = true
-            } else if c == '"' {
-                inString = false
-            }
-        } else {
-            if c == '"' {
-                inString = true
-            } else if c == '{' {
-                if depth == 0 { start = i }
-                depth = depth + 1
-            } else if c == '}' {
-                depth = depth - 1
-                // Same desync recovery as the UI extractor: if depth
-                // goes negative, the buffer is out of sync (more
-                // closes than opens). Reset parser state so the next
-                // top-level `{` is treated as a clean envelope start.
-                if depth < 0 {
-                    depth = 0
-                    inString = false
-                    escaped = false
-                    start = -1
-                }
-                if depth == 0 && start >= 0 {
-                    val tail = SliceFrom(rs, start)
-                    val window = SliceTo(tail, i + 1 - start)
-                    val candidate = string(window)
-                    // Drop brace-counting false-positives that
-                    // don't have the Claude-envelope shape. See the
-                    // UI-side counterpart for the rationale —
-                    // tool_use `old_string` fragments and
-                    // tool_result blobs can balance braces but
-                    // aren't valid envelopes.
-                    if looksLikeHeadlessEnvelope(candidate) {
-                        envelopes = envelopes.Append(candidate)
-                    }
-                    start = -1
-                }
-            }
-        }
-        i = i + 1
-    }
-    val leftover = if (start < 0) "" else string(SliceFrom(rs, start))
-    return (envelopes, leftover)
-}
-
-// looksLikeHeadlessEnvelope mirrors the UI's looksLikeClaudeEnvelope.
-// Local copy rather than a shared helper because app/headless and
-// app/ui have no shared utility module yet — duplicating one short
-// predicate is cheaper than introducing a dep.
-func looksLikeHeadlessEnvelope(s string) bool {
-    val t = strings.TrimSpace(s)
-    return strings.HasPrefix(t, "{\"type\":")
 }
 
 // ============================================================================
@@ -279,12 +207,13 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
                 // have leftover means the prior chunk was truncated
                 // upstream. Drop the corrupt leftover so the brace
                 // counter doesn't glue half + whole into garbage.
-                if priorBufBeforeAppend != "" && looksLikeHeadlessEnvelope(strings.TrimSpace(line)) {
+                if priorBufBeforeAppend != "" && LooksLikeClaudeEnvelope(strings.TrimSpace(line)) {
                     jsonBuf = ""
                 }
                 jsonBuf = jsonBuf + line + "\n"
-                val (envs, leftover) = extractHeadlessEnvelopes(jsonBuf)
-                jsonBuf = leftover
+                val extracted = ExtractCompleteEnvelopes(jsonBuf)
+                val envs = extracted.Envelopes
+                jsonBuf = extracted.Leftover
                 val hasNoJsonShapesHl = !strings.Contains(line, "{") &&
                                         !strings.Contains(line, "\"") &&
                                         !strings.Contains(line, "\\")

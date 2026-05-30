@@ -1846,16 +1846,16 @@ func TestStateWatchdog_TLThinking_ResumesAfterTaskCleared(t T) T {
 // (empty ids array + empty result) leave state untouched.
 func TestTrackTaskTool_AddRemoveAndNoOps(t T) T {
     val m0 = sampleModel()
-    val openChunk = emptyChunk().Copy(TaskToolUseIds = ArrayOf("toolu_x"))
+    val openChunk = EmptyClaudeChunk().Copy(TaskToolUseIds = ArrayOf("toolu_x"))
     val m1 = trackTaskTool(m0, "Vesper", openChunk)
     val sz1 = m1.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
     val t1 = Eq(t, sz1, 1)
-    val closeChunk = emptyChunk().Copy(TaskToolResultId = "toolu_x")
+    val closeChunk = EmptyClaudeChunk().Copy(TaskToolResultId = "toolu_x")
     val m2 = trackTaskTool(m1, "Vesper", closeChunk)
     val sz2 = m2.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
     val t2 = Eq(t1, sz2, 0)
     // No-op chunk (empty ids + empty result) does not touch state.
-    val noopChunk = emptyChunk()
+    val noopChunk = EmptyClaudeChunk()
     val m3 = trackTaskTool(m2, "Vesper", noopChunk)
     return Eq(t2, m3.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size(), 0)
 }
@@ -1871,12 +1871,12 @@ func TestTrackTaskTool_AddRemoveAndNoOps(t T) T {
 // subagents were still running.
 func TestTrackTaskTool_ParallelTasks_AllTracked(t T) T {
     val m0 = sampleModel()
-    val openChunk = emptyChunk().Copy(TaskToolUseIds = ArrayOf("toolu_a", "toolu_b", "toolu_c"))
+    val openChunk = EmptyClaudeChunk().Copy(TaskToolUseIds = ArrayOf("toolu_a", "toolu_b", "toolu_c"))
     val m1 = trackTaskTool(m0, "Vesper", openChunk)
     val sz1 = m1.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
     val t1 = Eq(t, sz1, 3)
     // First subagent finishes — only toolu_a removed; b and c still in flight.
-    val close1 = emptyChunk().Copy(TaskToolResultId = "toolu_a")
+    val close1 = EmptyClaudeChunk().Copy(TaskToolResultId = "toolu_a")
     val m2 = trackTaskTool(m1, "Vesper", close1)
     val sz2 = m2.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
     val t2 = Eq(t1, sz2, 2)
@@ -1885,7 +1885,7 @@ func TestTrackTaskTool_ParallelTasks_AllTracked(t T) T {
     return IsTrue(t3, remaining.Contains("toolu_c"))
 }
 
-// allTaskToolUseIds returns every Task tool_use id in source order
+// AllClaudeTaskToolUseIds returns every Task tool_use id in source order
 // and ignores non-Task tool_use blocks (Read, Edit, Bash, etc.).
 func TestAllTaskToolUseIds_ParallelTasks(t T) T {
     val parts = ArrayOf[ClaudePart](
@@ -1893,7 +1893,7 @@ func TestAllTaskToolUseIds_ParallelTasks(t T) T {
         ClaudePart(Type = "tool_use", Text = "", Id = "toolu_b", Name = "Task"),
         ClaudePart(Type = "tool_use", Text = "", Id = "toolu_c", Name = "Task"),
     )
-    val ids = allTaskToolUseIds(parts)
+    val ids = AllClaudeTaskToolUseIds(parts)
     val t1 = Eq(t, ids.Length(), 3)
     val t2 = Eq(t1, ids.Get(0), "toolu_a")
     val t3 = Eq(t2, ids.Get(1), "toolu_b")
@@ -1907,7 +1907,7 @@ func TestAllTaskToolUseIds_IgnoresNonTaskTools(t T) T {
         ClaudePart(Type = "tool_use", Text = "", Id = "toolu_edit", Name = "Edit"),
         ClaudePart(Type = "text",     Text = "narration", Id = "", Name = ""),
     )
-    val ids = allTaskToolUseIds(parts)
+    val ids = AllClaudeTaskToolUseIds(parts)
     val t1 = Eq(t, ids.Length(), 1)
     return Eq(t1, ids.Get(0), "toolu_task")
 }
@@ -1923,14 +1923,14 @@ func TestAllTaskToolUseIds_IncludesWorkflow(t T) T {
     val parts = ArrayOf[ClaudePart](
         ClaudePart(Type = "tool_use", Text = "", Id = "toolu_workflow", Name = "Workflow"),
     )
-    val ids = allTaskToolUseIds(parts)
+    val ids = AllClaudeTaskToolUseIds(parts)
     val t1 = Eq(t, ids.Length(), 1)
     return Eq(t1, ids.Get(0), "toolu_workflow")
 }
 
 // A single assistant content[] array may carry a mix of long-running
 // tool_uses (Task + Workflow) plus short tool_uses (Read/Edit/Bash)
-// plus narration. allTaskToolUseIds collects ONLY the long-running
+// plus narration. AllClaudeTaskToolUseIds collects ONLY the long-running
 // ones, preserving source order, so OutstandingTaskTools stays
 // non-empty until BOTH long-running tools return.
 func TestAllTaskToolUseIds_MixedTaskWorkflowShortTools(t T) T {
@@ -1940,7 +1940,7 @@ func TestAllTaskToolUseIds_MixedTaskWorkflowShortTools(t T) T {
         ClaudePart(Type = "tool_use", Text = "", Id = "toolu_read",     Name = "Read"),
         ClaudePart(Type = "tool_use", Text = "", Id = "toolu_task",     Name = "Task"),
     )
-    val ids = allTaskToolUseIds(parts)
+    val ids = AllClaudeTaskToolUseIds(parts)
     val t1 = Eq(t, ids.Length(), 2)
     val t2 = Eq(t1, ids.Get(0), "toolu_workflow")
     return Eq(t2, ids.Get(1), "toolu_task")
@@ -3930,7 +3930,7 @@ func TestJsonExtract_SplitToolResult_TailDoesNotLeakAsProse(t T) T {
 }
 
 func TestJsonExtract_BraceCountedExtraction_PullsCompleteEnvelope(t T) T {
-    val ext = extractCompleteEnvelopes("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}\n")
+    val ext = ExtractCompleteEnvelopes("{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"cache_read_input_tokens\":0}}}\n")
     val t1 = Eq(t, ext.Envelopes.Size(), 1)
     return Eq(t1, ext.Leftover, "")
 }
@@ -3938,7 +3938,7 @@ func TestJsonExtract_BraceCountedExtraction_PullsCompleteEnvelope(t T) T {
 func TestJsonExtract_PartialEnvelope_HeldInLeftover(t T) T {
     // Open envelope, no close — should produce zero envelopes and
     // hold the entire input as leftover for the next chunk.
-    val ext = extractCompleteEnvelopes("{\"type\":\"assistant\",\"message\":{\"content\":[{")
+    val ext = ExtractCompleteEnvelopes("{\"type\":\"assistant\",\"message\":{\"content\":[{")
     val t1 = Eq(t, ext.Envelopes.Size(), 0)
     return IsTrue(t1, len(ext.Leftover) > 0)
 }
@@ -3946,16 +3946,16 @@ func TestJsonExtract_PartialEnvelope_HeldInLeftover(t T) T {
 func TestJsonExtract_BraceInsideString_DoesNotConfuseCounter(t T) T {
     // Content string contains literal `{` and `}` — must NOT be
     // counted by the brace tracker. Use a real Claude-shape
-    // envelope (`{"type":...}` prefix) since looksLikeClaudeEnvelope
+    // envelope (`{"type":...}` prefix) since LooksLikeClaudeEnvelope
     // now drops anything else as buffer-state garbage.
-    val ext = extractCompleteEnvelopes("{\"type\":\"assistant\",\"x\":\"{nested}\"}\n")
+    val ext = ExtractCompleteEnvelopes("{\"type\":\"assistant\",\"x\":\"{nested}\"}\n")
     return Eq(t, ext.Envelopes.Size(), 1)
 }
 
 func TestJsonExtract_EscapedQuoteInsideString_StillTracksProperly(t T) T {
     // Escaped quote inside a string must NOT close the string.
     // Use Claude-shape envelope to satisfy the shape gate.
-    val ext = extractCompleteEnvelopes("{\"type\":\"assistant\",\"x\":\"a\\\"b\"}\n")
+    val ext = ExtractCompleteEnvelopes("{\"type\":\"assistant\",\"x\":\"a\\\"b\"}\n")
     return Eq(t, ext.Envelopes.Size(), 1)
 }
 
@@ -4081,19 +4081,19 @@ func TestAskUserQuestion_Dismiss_ClearsPending(t T) T {
     return IsTrue(t2, strings.Contains(systemLines.Get(systemLines.Size() - 1).Text, "dismissed"))
 }
 
-// extractFirstQuestionText pulls the first `"question":"…"` value out
+// ExtractFirstClaudeQuestionText pulls the first `"question":"…"` value out
 // of a raw stream-json envelope. Used by the AskUserQuestion parser
 // to surface the question body in the conversation log. JSON
 // string-escape rules: `\"` inside a string must NOT close the
 // string; `\n` decodes back to a literal newline.
 func TestExtractFirstQuestionText_SimpleQuestion(t T) T {
     val env = askUserQuestionEnvelope
-    return IsTrue(t, strings.Contains(extractFirstQuestionText(env), "Should the new fs/streaming.gala"))
+    return IsTrue(t, strings.Contains(ExtractFirstClaudeQuestionText(env), "Should the new fs/streaming.gala"))
 }
 
 func TestExtractFirstQuestionText_NoQuestionKey_ReturnsEmpty(t T) T {
     val env = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}"
-    return Eq(t, extractFirstQuestionText(env), "")
+    return Eq(t, ExtractFirstClaudeQuestionText(env), "")
 }
 
 func TestExtractFirstQuestionText_EscapedQuoteInsideQuestion(t T) T {
@@ -4102,7 +4102,7 @@ func TestExtractFirstQuestionText_EscapedQuoteInsideQuestion(t T) T {
     // like `"Should I rename \"Foo\" to \"Bar\"?"`.
     val env = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"x\",\"name\":\"AskUserQuestion\"," +
               "\"input\":{\"questions\":[{\"question\":\"Should I rename \\\"Foo\\\" to \\\"Bar\\\"?\"}]}}]}}"
-    val got = extractFirstQuestionText(env)
+    val got = ExtractFirstClaudeQuestionText(env)
     return IsTrue(t, strings.Contains(got, "Foo"))
 }
 
@@ -5302,7 +5302,7 @@ func TestHeartbeat_SkipsWalkWhileStuckNudgeInFlight(t T) T {
 // toast surface isn't spammed.
 func TestRateLimitEventChunk_AllowedStatusDropsSilently(t T) T {
     val envelope = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":1779179400,\"rateLimitType\":\"five_hour\"},\"uuid\":\"x\",\"session_id\":\"y\"}"
-    val chunk = rateLimitEventChunk(envelope)
+    val chunk = RateLimitEventChunk(envelope)
     val t1 = Eq(t, chunk.Visible, "")
     return Eq(t1, chunk.ErrorText, "")
 }
@@ -5313,25 +5313,25 @@ func TestRateLimitEventChunk_AllowedStatusDropsSilently(t T) T {
 // conversation as the agent's reply.
 func TestRateLimitEventChunk_ApproachingStatusSetsErrorText(t T) T {
     val envelope = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"approaching\",\"resetsAt\":1779179400,\"rateLimitType\":\"five_hour\"}}"
-    val chunk = rateLimitEventChunk(envelope)
+    val chunk = RateLimitEventChunk(envelope)
     val t1 = Eq(t, chunk.Visible, "")
     val t2 = IsTrue(t1, strings.Contains(chunk.ErrorText, "approaching"))
     return IsTrue(t2, strings.Contains(chunk.ErrorText, "five_hour"))
 }
 
 // Classifier integration: the rate_limit_event branch in
-// filterClaudeStreamJsonFor wires the chunk into the per-member
+// FilterClaudeStreamJsonFor wires the chunk into the per-member
 // chunk pipeline. An allowed event drops silently (no error); a
 // non-allowed event produces ErrorText.
 func TestFilterClaudeStreamJson_RateLimitAllowed_Drops(t T) T {
     val envelope = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":1,\"rateLimitType\":\"five_hour\"}}"
-    val chunk = filterClaudeStreamJsonFor("Felix", envelope)
+    val chunk = FilterClaudeStreamJsonFor("Felix", envelope)
     return Eq(t, chunk.ErrorText, "")
 }
 
 func TestFilterClaudeStreamJson_RateLimitApproaching_SurfacesErrorText(t T) T {
     val envelope = "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"rejected\",\"resetsAt\":1,\"rateLimitType\":\"five_hour\"}}"
-    val chunk = filterClaudeStreamJsonFor("Felix", envelope)
+    val chunk = FilterClaudeStreamJsonFor("Felix", envelope)
     return IsTrue(t, strings.Contains(chunk.ErrorText, "rejected"))
 }
 
@@ -5357,11 +5357,11 @@ func syntheticAssistantEnvelope() string =
 func realAssistantEnvelope(text string) string =
     s"{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-7\",\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"${text}\"}],\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"cache_read_input_tokens\":0}}}"
 
-// filterClaudeStreamJsonFor on a synthetic envelope returns a chunk
+// FilterClaudeStreamJsonFor on a synthetic envelope returns a chunk
 // flagged IsSynthetic with empty Visible/AskQuestionId. Without this,
 // "No response requested." would render in the transcript.
 func TestFilterClaudeStreamJson_SyntheticEnvelope_FlagsAndDropsText(t T) T {
-    val chunk = filterClaudeStreamJsonFor("Sable", syntheticAssistantEnvelope())
+    val chunk = FilterClaudeStreamJsonFor("Sable", syntheticAssistantEnvelope())
     val t1 = IsTrue(t, chunk.IsSynthetic)
     val t2 = Eq(t1, chunk.Visible, "")
     return Eq(t2, chunk.AskQuestionId, "")
@@ -5370,7 +5370,7 @@ func TestFilterClaudeStreamJson_SyntheticEnvelope_FlagsAndDropsText(t T) T {
 // A real (non-synthetic) assistant envelope still classifies normally
 // — IsSynthetic stays false and Visible carries the model's text.
 func TestFilterClaudeStreamJson_RealAssistantEnvelope_NotSynthetic(t T) T {
-    val chunk = filterClaudeStreamJsonFor("Sable", realAssistantEnvelope("hello"))
+    val chunk = FilterClaudeStreamJsonFor("Sable", realAssistantEnvelope("hello"))
     val t1 = IsTrue(t, !chunk.IsSynthetic)
     return Eq(t1, chunk.Visible, "hello")
 }

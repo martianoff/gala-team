@@ -450,6 +450,16 @@ struct AppModel(
     // construction in cmd/main's gen output. None[PendingSummary]
     // sidesteps the issue since PendingSummary is local to ui.
     PendingSummaryDirs Option[PendingSummary],
+    // TransportAuthErrorMembers carries the set of members whose
+    // transport surfaced an authentication failure during the current
+    // turn. Populated by onTransportAuthError when the typed
+    // RtTransportAuthError event lands; checked by onSessionFailed at
+    // turn end to decide whether to suppress the TLDone transition
+    // and surface the "authentication failed, run /login" notice.
+    // Cleared when the next prompt succeeds (the credentials are
+    // assumed to have been refreshed once a real assistant chunk
+    // arrives).
+    TransportAuthErrorMembers HashSet[string],
 )
 
 // PendingSummary wraps the parsed TL directives so AppModel's
@@ -634,6 +644,7 @@ func InitialModelWithTeams(
     ApprovalFocus         = ApproveFocus(),
     PendingQuestion       = None[PendingQuestion](),
     PendingSummaryDirs    = None[PendingSummary](),
+    TransportAuthErrorMembers = EmptyHashSet[string](),
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +
@@ -844,6 +855,14 @@ sealed type AppMsg {
     // the session is still alive — matches the stdout pump shape.
     case StderrArrived(Member string, Line string)
     case StderrEnded(Member string)
+    // TransportAuthError fires when the agent transport surfaced an
+    // authentication failure (rejected OAuth token, billing-blocked
+    // credentials, etc.). Carried as a typed event so the FSM can
+    // suppress the TLDone transition at turn end and the user sees a
+    // recovery notice — without this, the substring scan of
+    // LastError was the only way to recover the same signal at
+    // onSessionFailed time.
+    case TransportAuthError(Member string, Text string)
     // AskUserQuestion fires when the chunk pump sees a tool_use
     // block in `Member`'s stream with name=AskUserQuestion. Sets
     // m.PendingQuestion so composer Enter routes to the tool_result

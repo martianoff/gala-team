@@ -107,12 +107,12 @@ func classifyReadFailure(e error) AgentEvent =
 // setup / health notices)". The UI's onStderr handler surfaces them
 // as a toast + LastError without touching the conversation.
 func classifyClaudeRead(r Try[string]) AgentEvent = r match {
-    case Success(line) => if (LooksLikeTransportAuthError(line)) AgentDiagnostic(Text = line) else AgentChunk(Text = line)
+    case Success(line) => if (LooksLikeTransportAuthError(line)) AgentTransportAuthError(Text = line) else AgentChunk(Text = line)
     case Failure(e)    => classifyReadFailure(e)
 }
 
 func classifyClaudeDiagnostic(r Try[string]) AgentEvent = r match {
-    case Success(line) => AgentDiagnostic(Text = line)
+    case Success(line) => if (LooksLikeTransportAuthError(line)) AgentTransportAuthError(Text = line) else AgentDiagnostic(Text = line)
     case Failure(e)    => classifyReadFailure(e)
 }
 

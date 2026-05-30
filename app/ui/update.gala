@@ -862,6 +862,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case WriteSent(_)                => (m, NoCmd[AppMsg]())
     case StderrArrived(name, ln)     => onStderr(m, name, ln)
     case StderrEnded(_)              => (m, NoCmd[AppMsg]())
+    case TransportAuthError(name, t) => onTransportAuthError(m, name, t)
     case PreMergeHooksPassed(body)   => onPreMergeHooksPassed(m, body)
     case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
     case PrCreated(url, branch)      => onPrCreated(m, url, branch)
@@ -2234,6 +2235,46 @@ func TotalTokenUsage(m AppModel) ClaudeUsage {
 // only stderr (auth/setup notices, claude-code-misrouted
 // stream-json) leaves stdout silent past the 5-minute TL threshold
 // and the watchdog kills + retries a live subprocess.
+// onTransportAuthError handles a typed AgentTransportAuthError event:
+// the runtime classifier saw an auth-failure line (rejected OAuth
+// token / billing-blocked / 401 / 403) on either the stdout or
+// stderr pump. Two side effects:
+//
+//   1. Surface as a warn toast + LastError on the bottom-bar.
+//      Mirrors what AgentDiagnostic used to do for the same line
+//      (the substring-match in onSessionFailed was the only typed
+//      consumer of the signal; everything else just rendered the
+//      line as a generic diagnostic).
+//   2. Add `name` to TransportAuthErrorMembers so onSessionFailed
+//      can pattern-match the set membership instead of substring-
+//      scanning LastError text. The set is cleared on the next
+//      successful ChunkArrived for the member (in onChunk), so
+//      a successful retry after `/login` re-arms the FSM.
+//
+// Liveness side effect: every typed event bumps LastChunkAt — the
+// runtime sub-process is alive enough to have emitted the line; the
+// silence watchdog should not also kill it on top of the auth
+// failure. Audit log entry goes through LogStderr so the trace
+// captures the literal line independent of the toast lifetime.
+func onTransportAuthError(m AppModel, name string, text string) Tuple[AppModel, Cmd[AppMsg]] {
+    val trimmed = strings.TrimSpace(text)
+    val pumpCmd = m.Sessions.Get(name) match {
+        case Some(s) => runtimeFutureToCmd(NextChunkFuture(s))
+        case None()  => NoCmd[AppMsg]()
+    }
+    if trimmed == "" { return (m, pumpCmd) }
+    LogStderr(name, trimmed)
+    val mAlive = recordChunkArrival(m, name)
+    val short = truncateForToast(trimmed)
+    val toast = mAlive.Toasts.PushWarn(s"${name}: ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
+    val m1 = mAlive.Copy(
+        Toasts                    = toast,
+        LastError                 = Some(s"${name}: ${short}"),
+        TransportAuthErrorMembers = mAlive.TransportAuthErrorMembers.Add(name),
+    )
+    return (m1, pumpCmd)
+}
+
 func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] {
     val trimmed = strings.TrimSpace(line)
     val pumpCmd = m.Sessions.Get(name) match {
@@ -3473,26 +3514,27 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             //      Iris's reply and decides what to do next.
             // Either way, no Delegating, no auto-QA.
             if dirs.IsEmpty() {
-                // Transport-auth-failure guard. When the claude-code
-                // subprocess exits because its OAuth token was
-                // rejected, the stdout error line is already routed
-                // through ErrorText by onChunk (see
-                // looksLikeTransportAuthError), so the TurnBuffer is
-                // empty and we end up here with dirs.IsEmpty(). If we
-                // fire TLDone now the FSM steps TLThinking → Idle and
-                // the prior QAGate's pending question is forgotten —
-                // the user re-launches the TUI, types "continue", and
-                // gets nothing because the orchestrator's view of the
-                // world is "Idle, no work pending." Instead: leave
-                // the FSM untouched, surface a clear system notice
-                // telling the user how to recover, and let the next
-                // UserPrompted (after they re-run /login) re-dispatch
-                // the lead from whichever state we were in. The
-                // session save in persistAppModel below picks up the
-                // notice; no FSM event is emitted.
-                val lastErr = cleanedB.LastError.GetOrElse("")
-                if LooksLikeTransportAuthError(lastErr) {
-                    val notice = s"${name}: Claude Code authentication failed (the OAuth token was rejected). Run `/login` in your terminal, then re-prompt to retry. The orchestrator has not advanced state; the prior turn's pending question (if any) is preserved."
+                // Transport-auth-failure guard. When the agent
+                // subprocess exits because its credentials were
+                // rejected, the typed AgentTransportAuthError event
+                // fired earlier in the turn (see onTransportAuthError)
+                // and added `name` to TransportAuthErrorMembers. The
+                // TurnBuffer is empty (no model output reached the
+                // protocol decoder) and dirs.IsEmpty() lands us here.
+                // If we fire TLDone now the FSM steps TLThinking →
+                // Idle and the prior QAGate's pending question is
+                // forgotten — the user re-launches the TUI, types
+                // "continue", and gets nothing because the
+                // orchestrator's view of the world is "Idle, no work
+                // pending." Instead: leave the FSM untouched, surface
+                // a clear system notice telling the user how to
+                // recover, and let the next UserPrompted (after they
+                // refresh credentials) re-dispatch the lead from
+                // whichever state we were in. The session save in
+                // persistAppModel below picks up the notice; no FSM
+                // event is emitted.
+                if cleanedB.TransportAuthErrorMembers.Contains(name) {
+                    val notice = s"${name}: agent authentication failed (the transport-layer credentials were rejected). Refresh credentials (e.g. `/login` for the local claude CLI), then re-prompt to retry. The orchestrator has not advanced state; the prior turn's pending question (if any) is preserved."
                     val nextConvo = cleanedB.Conversation.Append(
                         session.ConversationLine(Speaker = "system", Text = notice, At = time_utils.Now().UnixNanos()),
                     )
@@ -5793,14 +5835,15 @@ func runtimeFutureToCmd(fut concurrent.Future[Msg]) Cmd[AppMsg] =
 // PrFailed carry an error at the runtime boundary; we materialize the
 // message here so AppMsg stays string-only.
 func runtimeToAppMsg(rm Msg) AppMsg = rm match {
-    case RtChunkArrived(name, line) => ChunkArrived(Member = name, Line = line)
-    case RtSessionFailed(name, err) => SessionFailed(Member = name, ErrText = err.Error())
-    case RtWriteSent(name)          => WriteSent(Member = name)
-    case RtStderrArrived(name, line) => StderrArrived(Member = name, Line = line)
-    case RtStderrEnded(name)        => StderrEnded(Member = name)
-    case RtPrCreated(url, branch)   => PrCreated(Url = url, Branch = branch)
-    case RtPrFailed(err)            => PrFailed(ErrText = err.Error())
-    case RtWorktreesWiped()         => WorktreesWiped()
+    case RtChunkArrived(name, line)       => ChunkArrived(Member = name, Line = line)
+    case RtSessionFailed(name, err)       => SessionFailed(Member = name, ErrText = err.Error())
+    case RtWriteSent(name)                => WriteSent(Member = name)
+    case RtStderrArrived(name, line)      => StderrArrived(Member = name, Line = line)
+    case RtStderrEnded(name)              => StderrEnded(Member = name)
+    case RtTransportAuthError(name, text) => TransportAuthError(Member = name, Text = text)
+    case RtPrCreated(url, branch)         => PrCreated(Url = url, Branch = branch)
+    case RtPrFailed(err)                  => PrFailed(ErrText = err.Error())
+    case RtWorktreesWiped()               => WorktreesWiped()
 }
 
 // transitionContext extracts the per-team facts the FSM needs from the

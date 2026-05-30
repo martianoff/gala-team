@@ -146,6 +146,37 @@ func LooksLikeTransportAuthError(s string) bool {
            strings.Contains(lower, "api error: 403")
 }
 
+// IsLongRunningClaudeToolName names the assistant tool_use kinds
+// shipped by claude-code whose parent subprocess goes effectively
+// silent on visible-text channels for the tool's full duration.
+// Two qualify today:
+//
+//   - "Task": spawns one or more subagents that claude-code waits
+//     for synchronously; the parent emits no assistant-text chunks
+//     until the subagent reports back.
+//   - "Workflow": runs a multi-phase parallel-agent script (the
+//     claude-code Workflow tool); the parent emits
+//     `system / subtype:"task_progress"` ticks while phases run
+//     but no visible text until the workflow ends.
+//
+// Names are claude-code-specific by design — they live next to the
+// other claude-code knowledge in this file (argv flags, stream-json
+// envelopes, the IO→AgentEvent mapping) so the UI's tool-tracking
+// path stays transport-neutral against the assistant tool_use blocks
+// it sees. A future non-claude transport will own its own list of
+// long-running tool kinds.
+//
+// Exported because UI code in app/ui consumes this predicate from
+// its stream-json parser to decide which tool_use ids go into
+// OutstandingTaskTools (the silence-watchdog pause gate). Match is
+// exact and case-sensitive: claude-code emits canonical PascalCase
+// tool names and a stray lowercase variant ("workflow") is not the
+// same tool. Add a name here only when its silent-while-running
+// behaviour has been observed in a trace — every false add stops
+// legitimate hang detection for the parent member.
+func IsLongRunningClaudeToolName(name string) bool =
+    name == "Task" || name == "Workflow"
+
 // ----------------------------------------------------------------------------
 // `claude` CLI argv
 // ----------------------------------------------------------------------------

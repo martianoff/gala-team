@@ -1922,6 +1922,41 @@ func TestAllTaskToolUseIds_IgnoresNonTaskTools(t T) T {
     return Eq(t1, ids.Get(0), "toolu_task")
 }
 
+// Workflow tool_use is recognised alongside Task — claude-code's
+// Workflow tool runs a multi-phase parallel-agent script, and the
+// parent goes silent on visible-text channels for the duration. Past
+// sessions saw a TL kick off a 7-agent Workflow (6 parallel
+// `map:*` Explore phases + 1 synthesize) and the FSM treated the
+// outstanding tool_use as nothing, so the silence watchdog had no
+// hint a tool was in flight.
+func TestAllTaskToolUseIds_IncludesWorkflow(t T) T {
+    val parts = ArrayOf[ClaudePart](
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_workflow", Name = "Workflow"),
+    )
+    val ids = allTaskToolUseIds(parts)
+    val t1 = Eq(t, ids.Length(), 1)
+    return Eq(t1, ids.Get(0), "toolu_workflow")
+}
+
+// A single assistant content[] array may carry a mix of long-running
+// tool_uses (Task + Workflow) plus short tool_uses (Read/Edit/Bash)
+// plus narration. allTaskToolUseIds collects ONLY the long-running
+// ones, preserving source order, so OutstandingTaskTools stays
+// non-empty until BOTH long-running tools return.
+func TestAllTaskToolUseIds_MixedTaskWorkflowShortTools(t T) T {
+    val parts = ArrayOf[ClaudePart](
+        ClaudePart(Type = "text",     Text = "I'll run a workflow and a Task in parallel.", Id = "", Name = ""),
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_workflow", Name = "Workflow"),
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_read",     Name = "Read"),
+        ClaudePart(Type = "tool_use", Text = "", Id = "toolu_task",     Name = "Task"),
+    )
+    val ids = allTaskToolUseIds(parts)
+    val t1 = Eq(t, ids.Length(), 2)
+    val t2 = Eq(t1, ids.Get(0), "toolu_workflow")
+    return Eq(t2, ids.Get(1), "toolu_task")
+}
+
+
 // extractFirstToolUseId returns the tool_use_id from a type:"user"
 // envelope's tool_result block.
 func TestExtractFirstToolUseId_FromUserEnvelope(t T) T {

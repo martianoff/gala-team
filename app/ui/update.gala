@@ -464,14 +464,15 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         case _               => EmptyArray[string]()
     }
     // Pause-during-subagent: if ANY affected member has at least one
-    // outstanding Task tool_use (assistant chunk emitted `tool_use`
-    // for `name:"Task"`, matching `tool_result` not yet seen), skip
-    // the watchdog this tick. The parent claude-code subprocess goes
-    // synchronously silent on stdout for the entire duration of a
-    // Task subagent run, so silence is expected (not a hang) until
-    // the subagent reports back. Past sessions saw a 5-minute Explore
-    // subagent on a large codebase get killed twice in a row before
-    // the orchestrator gave up.
+    // outstanding long-running tool_use (assistant chunk emitted
+    // `tool_use` for `name:"Task"` / `name:"Workflow"`, matching
+    // `tool_result` not yet seen), skip the watchdog this tick. The
+    // parent claude-code subprocess emits only `system / task_progress`
+    // ticks (currently dropped by the filter) for the entire duration
+    // of a Task subagent or Workflow run, so visible-text silence is
+    // expected (not a hang) until the tool reports back. Past sessions
+    // saw a 5-minute Explore subagent on a large codebase get killed
+    // twice in a row before the orchestrator gave up.
     val anyOutstanding = affected.Exists((n) =>
         m.OutstandingTaskTools.Get(n).GetOrElse(EmptyHashSet[string]()).Size() > 0
     )
@@ -2411,10 +2412,13 @@ func sendAndPumpCmd(m AppModel, member Member, prompt string) Cmd[AppMsg] {
 }
 
 // trackTaskTool updates m.OutstandingTaskTools[name] from one chunk's
-// TaskToolUseId / TaskToolResultId markers. Add on a Task tool_use
-// open, remove on the matching tool_result. Removing a never-tracked
-// id is a no-op — the set only matters for the watchdog gate, and the
-// gate just asks "non-empty?" so phantom adds / removes never harm.
+// TaskToolUseIds / TaskToolResultId markers. Add on a Task or Workflow
+// tool_use open, remove on the matching tool_result. Removing a
+// never-tracked id is a no-op — the set only matters for the watchdog
+// gate, and the gate just asks "non-empty?" so phantom adds / removes
+// never harm. "TaskTool" in the field name is historical: the same
+// plumbing tracks every long-running tool whose parent goes silent on
+// stdout while it runs.
 //
 // We do NOT clear the set on respawn / rotation / SessionFailed. A
 // killed subprocess can never deliver the outstanding tool_result, so
@@ -5469,12 +5473,22 @@ func firstAskUserQuestionId(parts Array[ClaudePart]) string {
 }
 
 // allTaskToolUseIds walks content[] and returns the `id` of EVERY
-// Task tool_use block, in source order. The Task tool spawns a
-// subagent that claude-code waits for synchronously; while the
-// subagent runs the parent's stdout is silent. The orchestrator
-// records every returned id in OutstandingTaskTools so the watchdog
-// can pause the silence-based kill until the matching tool_results
-// arrive.
+// long-running tool_use block, in source order. Two tool names
+// qualify today:
+//
+//   - "Task": spawns one or more subagents that claude-code waits
+//     for synchronously; while a subagent runs the parent's stdout
+//     is silent except for occasional system events.
+//   - "Workflow": runs a multi-phase parallel-agent script (the
+//     claude-code Workflow tool); the parent emits
+//     `system / subtype:"task_progress"` ticks while phases run
+//     but no visible text until the workflow ends.
+//
+// Both share the same observed shape: the parent claude-code
+// subprocess produces no assistant-text chunks for many minutes
+// while the tool runs. The orchestrator records every returned id
+// in OutstandingTaskTools so the silence watchdog can pause until
+// the matching tool_results arrive.
 //
 // Why every id, not just the first: claude commonly batches parallel
 // tool calls into a single assistant message content[] array. Past
@@ -5490,7 +5504,7 @@ func allTaskToolUseIds(parts Array[ClaudePart]) Array[string] {
     val n = parts.Size()
     for i < n {
         val p = parts.Get(i)
-        if p.Type == "tool_use" && p.Name == "Task" && p.Id != "" {
+        if p.Type == "tool_use" && IsLongRunningClaudeToolName(p.Name) && p.Id != "" {
             out = out.Append(p.Id)
         }
         i = i + 1

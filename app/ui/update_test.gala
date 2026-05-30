@@ -169,6 +169,64 @@ func TestTransportAuthError_PopulatesFlagAndSurfaces(t T) T {
     })
 }
 
+// Outstanding-long-running-tool guard. The TL ended its turn cleanly
+// (clean EOF) but a Task / Workflow tool_use was still in flight when
+// the result envelope fired. Past sessions: TL invoked a Workflow,
+// narrated "I'll wait for it to land", the turn ended, FSM dropped to
+// Idle, user pings re-narrated the same wait. Fix: notice the user,
+// clear the orphaned tool tracking, then route to Idle so the next
+// prompt starts clean.
+func TestSessionFailed_OutstandingTool_ClearsTracking(t T) T {
+    val outstanding = EmptyHashMap[string, HashSet[string]]().Put("Iris", EmptyHashSet[string]().Add("toolu_wf"))
+    val seed = sampleModel().Copy(
+        State                = TLThinking(),
+        TurnBuffer           = "",
+        OutstandingTaskTools = outstanding,
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val remaining = m.OutstandingTaskTools.Get("Iris").GetOrElse(EmptyHashSet[string]())
+    return IsTrue(t, !remaining.Contains("toolu_wf"))
+}
+
+func TestSessionFailed_OutstandingTool_RoutesToIdle(t T) T {
+    val outstanding = EmptyHashMap[string, HashSet[string]]().Put("Iris", EmptyHashSet[string]().Add("toolu_wf"))
+    val seed = sampleModel().Copy(
+        State                = TLThinking(),
+        TurnBuffer           = "",
+        OutstandingTaskTools = outstanding,
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    return Eq(t, stateTag(m.State), "Idle")
+}
+
+// Pluralization: when EXACTLY ONE outstanding tool is in flight, the
+// notice uses "tool" (singular), not "tools".
+func TestSessionFailed_OutstandingTool_SingularPlural(t T) T {
+    val one = EmptyHashMap[string, HashSet[string]]().Put("Iris", EmptyHashSet[string]().Add("toolu_a"))
+    val seed1 = sampleModel().Copy(State = TLThinking(), TurnBuffer = "", OutstandingTaskTools = one)
+    val (m1, _) = Update(seed1, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val sz1 = m1.Conversation.Size()
+    val singular = sz1 >= 1 && strings.Contains(m1.Conversation.Get(sz1 - 1).Text, "1 long-running tool ")
+    val two = EmptyHashMap[string, HashSet[string]]().Put("Iris", EmptyHashSet[string]().Add("toolu_a").Add("toolu_b"))
+    val seed2 = sampleModel().Copy(State = TLThinking(), TurnBuffer = "", OutstandingTaskTools = two)
+    val (m2, _) = Update(seed2, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val sz2 = m2.Conversation.Size()
+    val plural = sz2 >= 1 && strings.Contains(m2.Conversation.Get(sz2 - 1).Text, "2 long-running tools ")
+    return IsTrue(IsTrue(t, singular), plural)
+}
+
+// Negative: no outstanding tools → no outstanding-tool notice. The
+// existing plain-chat → Idle path still fires (transitionLogged
+// emits the TLDone→Idle event). Conversation either stays empty or
+// only carries non-orchestration content; no "outstanding" notice.
+func TestSessionFailed_NoOutstandingTool_NoNotice(t T) T {
+    val seed = sampleModel().Copy(State = TLThinking(), TurnBuffer = "")
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val sz = m.Conversation.Size()
+    val hasNotice = sz >= 1 && strings.Contains(m.Conversation.Get(sz - 1).Text, "outstanding")
+    return IsTrue(t, !hasNotice)
+}
+
 // Save-after-FSM-transition. The pre-fix bug: latest.json was written
 // inside applyChunkVisible (per-chunk) so the snapshot captured
 // state_tag=TLThinking; the FSM TLDone→Idle transition fired ~250ms

@@ -149,3 +149,41 @@ func TestAgentDiagnosticToMsg_Mapping(t T) T {
     val t1 = IsTrue(t, arrived)
     return IsTrue(t1, ended)
 }
+
+// IsLongRunningClaudeToolName: claude-code's Task and Workflow tools
+// share the "parent goes silent on visible-text channels for the
+// tool's full duration" shape. UI tracks their tool_use ids in
+// OutstandingTaskTools to pause the silence watchdog. Lock the list
+// down so future "let's also add this name" changes are conscious —
+// every false add stops legitimate hang detection for that tool.
+
+func TestIsLongRunningClaudeToolName_Task(t T) T {
+    return IsTrue(t, IsLongRunningClaudeToolName("Task"))
+}
+
+// Workflow runs a multi-phase parallel-agent script. A real session
+// emitted 212 task_progress envelopes from one Workflow tool_use
+// while the orchestrator had no signal a tool was in flight.
+func TestIsLongRunningClaudeToolName_Workflow(t T) T {
+    return IsTrue(t, IsLongRunningClaudeToolName("Workflow"))
+}
+
+// Short / synchronous tools must NOT pause the watchdog — a real
+// hang during a Read / Bash / Edit must surface.
+func TestIsLongRunningClaudeToolName_RejectsShortTools(t T) T {
+    val t1 = IsTrue(t,  !IsLongRunningClaudeToolName("Read"))
+    val t2 = IsTrue(t1, !IsLongRunningClaudeToolName("Bash"))
+    val t3 = IsTrue(t2, !IsLongRunningClaudeToolName("Edit"))
+    return IsTrue(t3, !IsLongRunningClaudeToolName("Glob"))
+}
+
+// Case-sensitive — claude-code emits canonical PascalCase tool
+// names; a lowercase variant is NOT the same tool.
+func TestIsLongRunningClaudeToolName_CaseSensitive(t T) T {
+    val t1 = IsTrue(t,  !IsLongRunningClaudeToolName("workflow"))
+    return IsTrue(t1, !IsLongRunningClaudeToolName("task"))
+}
+
+func TestIsLongRunningClaudeToolName_RejectsEmpty(t T) T {
+    return IsTrue(t, !IsLongRunningClaudeToolName(""))
+}

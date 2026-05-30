@@ -58,7 +58,7 @@ val headlessResultCodec    = json.Codec[HeadlessResultEvent](json.SnakeCase())
 func ExtractClaudeText(envelope string) string {
     val trimmed = strings.TrimSpace(envelope)
     if trimmed == "" || !strings.HasPrefix(trimmed, "{") { return "" }
-    val kind = headlessExtractType(trimmed)
+    val kind = ExtractClaudeEnvelopeType(trimmed)
     if kind == "assistant" {
         return headlessAssistantCodec.Decode(trimmed) match {
             case Success(evt) => {
@@ -77,18 +77,6 @@ func ExtractClaudeText(envelope string) string {
         }
     }
     return ""
-}
-
-// headlessExtractType is the cheap whitelist gate — same idea as the
-// UI's extractJsonType. Avoids running the codec on envelopes we'll
-// drop unconditionally.
-func headlessExtractType(trimmed string) string {
-    val needle = "\"type\":\""
-    val parts = strings.SplitN(trimmed, needle, 2)
-    if parts.Length() < 2 { return "" }
-    val tail = strings.SplitN(parts.Get(1), "\"", 2)
-    if tail.Length() < 2 { return "" }
-    return tail.Get(0)
 }
 
 // extractHeadlessEnvelopes is the headless equivalent of

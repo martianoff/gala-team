@@ -809,24 +809,14 @@ func TestSetStatus_KeepsLastChunkAtOnWorkingToWorking(t T) T {
     }
 }
 
-// Stale-session-id detection — claude returns this when --resume
-// points at an id it doesn't recognise. Detection is case-insensitive
-// substring so wording variations across claude versions all match.
-func TestLooksLikeStaleSessionError_MatchesNoConversationFound(t T) T {
+// Stale-session-id detection lives in app/runtime; see
+// claude_stream_json_test.gala for the predicate coverage. These
+// UI-side checks verify the import wiring is intact — a build that
+// breaks the symbol fails the test before integration tests do.
+func TestLooksLikeStaleClaudeSessionError_ImportWired(t T) T {
     val err = "No conversation found with session ID: 36870845-bff8-45a6-beb8-6d93f5f6f631"
-    return IsTrue(t, looksLikeStaleSessionError(err))
-}
-
-func TestLooksLikeStaleSessionError_MatchesSessionNotFound(t T) T {
-    return IsTrue(t, looksLikeStaleSessionError("Error: session not found"))
-}
-
-func TestLooksLikeStaleSessionError_RejectsUnrelatedError(t T) T {
-    return IsTrue(t, !looksLikeStaleSessionError("rate limit exceeded"))
-}
-
-func TestLooksLikeStaleSessionError_RejectsEmpty(t T) T {
-    return IsTrue(t, !looksLikeStaleSessionError(""))
+    val t1 = IsTrue(t, LooksLikeStaleClaudeSessionError(err))
+    return IsTrue(t1, !LooksLikeStaleClaudeSessionError(""))
 }
 
 // End-to-end transport-auth error. The Claude transport reclassifies
@@ -1956,17 +1946,13 @@ func TestAllTaskToolUseIds_MixedTaskWorkflowShortTools(t T) T {
     return Eq(t2, ids.Get(1), "toolu_task")
 }
 
-
-// extractFirstToolUseId returns the tool_use_id from a type:"user"
-// envelope's tool_result block.
-func TestExtractFirstToolUseId_FromUserEnvelope(t T) T {
+// Tool-use-id extraction lives in app/runtime; see
+// claude_stream_json_test.gala for the parser coverage. This UI-side
+// check verifies the import wiring is intact.
+func TestExtractFirstClaudeToolUseId_ImportWired(t T) T {
     val env = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_abc123\",\"type\":\"tool_result\",\"content\":\"done\"}]}}"
-    return Eq(t, extractFirstToolUseId(env), "toolu_abc123")
-}
-
-func TestExtractFirstToolUseId_AbsentReturnsEmpty(t T) T {
-    val env = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[]}}"
-    return Eq(t, extractFirstToolUseId(env), "")
+    val t1 = Eq(t, ExtractFirstClaudeToolUseId(env), "toolu_abc123")
+    return Eq(t1, ExtractFirstClaudeToolUseId("{}"), "")
 }
 
 // ---------------------------------------------------------------------------

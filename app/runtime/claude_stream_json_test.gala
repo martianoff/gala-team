@@ -1,0 +1,125 @@
+package runtime
+
+import (
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+)
+
+// Canonical tests for the small claude-code stream-json helpers
+// relocated from app/ui. UI-side wiring checks (one apiece) live in
+// app/ui/update_test.gala to fail fast on import breakage during a
+// bazel UI build; the behavioral coverage owns the runtime side.
+
+// ----- LooksLikeStaleClaudeSessionError ------------------------------------
+
+// "No conversation found with session ID …" is the canonical wording
+// claude returns when --resume hits an id it doesn't know.
+func TestLooksLikeStaleClaudeSessionError_NoConversationFound(t T) T {
+    val err = "No conversation found with session ID: 00000000-0000-0000-0000-000000000000"
+    return IsTrue(t, LooksLikeStaleClaudeSessionError(err))
+}
+
+// Older claude builds use the shorter "session not found" wording —
+// the predicate has to recognise both so the same recovery path
+// (clear SessionIds, respawn fresh) fires either way.
+func TestLooksLikeStaleClaudeSessionError_SessionNotFound(t T) T {
+    return IsTrue(t, LooksLikeStaleClaudeSessionError("Error: session not found"))
+}
+
+// A third wording variant — case-insensitive match keeps it working
+// even when claude shifts capitalisation.
+func TestLooksLikeStaleClaudeSessionError_SessionIdNotFound(t T) T {
+    return IsTrue(t, LooksLikeStaleClaudeSessionError("SESSION ID NOT FOUND"))
+}
+
+// Unrelated errors (rate limits, auth, transport) must not trigger
+// the stale-session recovery — that recovery drops SessionIds and
+// would mask a different real problem.
+func TestLooksLikeStaleClaudeSessionError_RejectsUnrelated(t T) T {
+    val t1 = IsTrue(t,  !LooksLikeStaleClaudeSessionError("rate limit exceeded"))
+    val t2 = IsTrue(t1, !LooksLikeStaleClaudeSessionError("Failed to authenticate"))
+    return IsTrue(t2, !LooksLikeStaleClaudeSessionError(""))
+}
+
+// ----- LooksLikeClaudeStreamJson -------------------------------------------
+
+// Clean single-envelope inputs decode cleanly and match.
+func TestLooksLikeClaudeStreamJson_SingleEnvelope(t T) T {
+    val a = IsTrue(t, LooksLikeClaudeStreamJson("{\"type\":\"assistant\",\"message\":{\"content\":[]}}"))
+    val b = IsTrue(a, LooksLikeClaudeStreamJson("{\"type\":\"user\",\"message\":{}}"))
+    return IsTrue(b, LooksLikeClaudeStreamJson("{\"type\":\"result\",\"is_error\":false}"))
+}
+
+// Multi-envelope: claude occasionally dumps two newline-joined
+// stream-json lines into one stderr write. First line still parses;
+// the predicate must recognise the shape so the user sees the
+// friendly tag instead of raw JSON leaking into LastError.
+func TestLooksLikeClaudeStreamJson_MultiEnvelope(t T) T {
+    val buf = "{\"type\":\"user\",\"message\":{}}\n{\"type\":\"user\",\"message\":{}}"
+    return IsTrue(t, LooksLikeClaudeStreamJson(buf))
+}
+
+// Truncated mid-envelope (claude write got cut off). The bytes are
+// still recognisably a stream-json envelope; the leading-bytes
+// fallback catches it.
+func TestLooksLikeClaudeStreamJson_TruncatedEnvelope(t T) T {
+    val truncated = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01abc"
+    return IsTrue(t, LooksLikeClaudeStreamJson(truncated))
+}
+
+// Arbitrary prose must NOT match — otherwise the suppression would
+// hide legitimate model output. Empty strings, malformed braces,
+// auth error lines, and `{"key":"val"}` objects without a `type`
+// field all fail.
+func TestLooksLikeClaudeStreamJson_RejectsProse(t T) T {
+    val t1 = IsTrue(t,  !LooksLikeClaudeStreamJson(""))
+    val t2 = IsTrue(t1, !LooksLikeClaudeStreamJson("I am working on it"))
+    val t3 = IsTrue(t2, !LooksLikeClaudeStreamJson("{ malformed json"))
+    val t4 = IsTrue(t3, !LooksLikeClaudeStreamJson("Failed to authenticate. API Error: 401"))
+    val t5 = IsTrue(t4, !LooksLikeClaudeStreamJson("{\"not_type\":\"x\"}"))
+    // Important: a plain object that doesn't start with `{"type":"…`
+    // must NOT match — otherwise we'd suppress legitimate JSON-looking
+    // content like config blocks the user pasted.
+    return IsTrue(t5, !LooksLikeClaudeStreamJson("{\"foo\":\"bar\"}"))
+}
+
+// ----- ExtractClaudeEnvelopeType --------------------------------------------
+
+func TestExtractClaudeEnvelopeType_PresentInClaudeEnvelope(t T) T {
+    val env = "{\"type\":\"assistant\",\"message\":{}}"
+    return Eq(t, ExtractClaudeEnvelopeType(env), "assistant")
+}
+
+func TestExtractClaudeEnvelopeType_FirstTypeWinsWhenNested(t T) T {
+    // claude-code's outer envelope always carries the top-level type
+    // before any nested type:"…" inside content[]. The string scan
+    // returns the outer kind because it's first in source order.
+    val env = "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\"}]}}"
+    return Eq(t, ExtractClaudeEnvelopeType(env), "user")
+}
+
+func TestExtractClaudeEnvelopeType_AbsentReturnsEmpty(t T) T {
+    val t1 = Eq(t,  ExtractClaudeEnvelopeType("{\"not_type\":\"x\"}"), "")
+    return Eq(t1, ExtractClaudeEnvelopeType(""), "")
+}
+
+// ----- ExtractFirstClaudeToolUseId -----------------------------------------
+
+func TestExtractFirstClaudeToolUseId_UserEnvelope(t T) T {
+    val env = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_abc123\",\"type\":\"tool_result\",\"content\":\"done\"}]}}"
+    return Eq(t, ExtractFirstClaudeToolUseId(env), "toolu_abc123")
+}
+
+// A tool_result block may carry multiple tool_use_ids when claude
+// batches results; we only need the FIRST to mark the corresponding
+// outstanding tool as completed in OutstandingTaskTools.
+func TestExtractFirstClaudeToolUseId_FirstWhenMultiple(t T) T {
+    val env = "{\"type\":\"user\",\"message\":{\"content\":[{\"tool_use_id\":\"toolu_first\"},{\"tool_use_id\":\"toolu_second\"}]}}"
+    return Eq(t, ExtractFirstClaudeToolUseId(env), "toolu_first")
+}
+
+func TestExtractFirstClaudeToolUseId_AbsentReturnsEmpty(t T) T {
+    val env = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[]}}"
+    val t1 = Eq(t,  ExtractFirstClaudeToolUseId(env), "")
+    return Eq(t1, ExtractFirstClaudeToolUseId(""), "")
+}

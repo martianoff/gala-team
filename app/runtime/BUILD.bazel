@@ -3,6 +3,7 @@ load("@rules_gala//gala:defs.bzl", "gala_library")
 gala_library(
     name = "runtime",
     srcs = [
+        "claude_stream_json.gala",
         "claude_transport.gala",
         "debuglog.gala",
         "runtime_glue.gala",

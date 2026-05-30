@@ -2285,7 +2285,7 @@ func onStderr(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]]
     // misrouted to. Visible text / transcript append / token accrual
     // are intentionally NOT triggered — a tool_result on stderr is
     // not model output and must never land in the conversation.
-    if looksLikeStreamJson(trimmed) {
+    if LooksLikeClaudeStreamJson(trimmed) {
         val chunk = filterClaudeStreamJsonFor(name, trimmed)
         val mTracked = trackTaskTool(mAlive, name, chunk)
         return (mTracked, pumpCmd)
@@ -2660,7 +2660,7 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     // iteration spawned a member a second time with --resume against
     // an id the first spawn hadn't yet established with claude, and
     // the member blocked indefinitely on this error.
-    val mRecovered = if (looksLikeStaleSessionError(chunk.ErrorText))
+    val mRecovered = if (LooksLikeStaleClaudeSessionError(chunk.ErrorText))
         mAccrued.Copy(SessionIds = mAccrued.SessionIds.Remove(name))
     else
         mAccrued
@@ -2673,10 +2673,10 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
         // full chunk.ErrorText is already captured in events.jsonl
         // via the trace pipeline; the user-visible surfaces need a
         // shape-detected tag, not just a length-trimmed prefix.
-        // looksLikeStreamJson does an actual JSON parse via
-        // streamJsonHeaderCodec, so the check survives reshuffles of
-        // the envelope key order claude-code might emit later.
-        val short = if (looksLikeStreamJson(chunk.ErrorText)) "stream-json envelope in result.error (see events.jsonl)"
+        // LooksLikeClaudeStreamJson does an actual JSON parse via the
+        // runtime-side codec, so the check survives reshuffles of the
+        // envelope key order claude-code might emit later.
+        val short = if (LooksLikeClaudeStreamJson(chunk.ErrorText)) "stream-json envelope in result.error (see events.jsonl)"
                     else                                       truncateForToast(chunk.ErrorText)
         val toast = mRecovered.Toasts.PushError(s"${name}: ${short}", time_utils.Now(), time_utils.Seconds(int64(8)))
         mRecovered.Copy(Toasts = toast, LastError = Some(s"${name}: ${short}"))
@@ -4089,20 +4089,6 @@ func buildUnspawnedDispatchNudge(names Array[string]) string {
 // partitionQaTargets splits dispatch targets into (allowed, droppedQaNames)
 // — entries pointing at a QA team member end up in droppedQaNames; the
 // rest pass through unchanged. Used by spawnDispatchedMembers when the
-// looksLikeStaleSessionError returns true if claude's error text
-// indicates the --resume id we passed isn't recognised. Two surface
-// shapes claude has been observed to use: "No conversation found
-// with session ID …" (typical) and "session not found" (older
-// builds). Case-insensitive substring check — the message wording
-// varies across claude versions and we want every variant to trigger
-// the recovery.
-func looksLikeStaleSessionError(err string) bool {
-    if err == "" { return false }
-    val lower = strings.ToLower(err)
-    return strings.Contains(lower, "no conversation found") ||
-           strings.Contains(lower, "session not found") ||
-           strings.Contains(lower, "session id not found")
-}
 
 // workflow auto-spawns QA so we don't double-dispatch.
 func partitionQaTargets(targets Array[Tuple[string, string]], tm Team) Tuple[Array[Tuple[string, string]], Array[string]] {
@@ -4900,61 +4886,6 @@ struct ClaudeResultEvent(
 val claudeAssistantCodec = json.Codec[ClaudeAssistantEvent](json.SnakeCase())
 val claudeResultCodec    = json.Codec[ClaudeResultEvent](json.SnakeCase())
 
-// streamJsonHeader is the bare envelope shape every claude-code
-// stream-json line carries: a top-level `type` field tagging the
-// event kind ("assistant", "user", "result", "system", "tool_use",
-// "tool_use_result", "message_start", ...). Used by
-// looksLikeStreamJson to decide whether a stray bytestring (claude-
-// code stderr output, a result envelope's `result.result` field,
-// etc.) is actually a misrouted stream-json envelope rather than
-// arbitrary prose. Decoded via json.Codec so the check is a real
-// parse rather than a substring heuristic.
-struct streamJsonHeader(Type string)
-val streamJsonHeaderCodec = json.Codec[streamJsonHeader](json.SnakeCase())
-
-// looksLikeStreamJson returns true when `s` parses as a JSON object
-// with a non-empty top-level `type` field. The decode is the
-// authoritative signal: any string that round-trips through the
-// codec to a streamJsonHeader with Type != "" is a real envelope.
-// Arbitrary prose, partial fragments, and non-object JSON all fail
-// the decode and return false. Used by onStderr (to suppress
-// stream-json misrouted onto stderr) and by applyChunkVisible (to
-// suppress stream-json carried in a result envelope's `result`
-// field) so neither surface dumps raw envelope bytes into the
-// bottom-bar toast / LastError.
-func looksLikeStreamJson(s string) bool {
-    val trimmed = strings.TrimSpace(s)
-    if !strings.HasPrefix(trimmed, "{") { return false }
-    // Fast path: full decode. Works for clean single envelopes.
-    val decoded = streamJsonHeaderCodec.Decode(trimmed) match {
-        case Success(h) => h.Type != ""
-        case Failure(_) => false
-    }
-    if decoded { return true }
-    // Decode failed. Two common reasons claude-code dumps a string
-    // starting with `{` but the codec rejects: (a) the payload is a
-    // multi-envelope newline-joined chunk (only the first object
-    // parses cleanly), (b) the payload is truncated mid-object. In
-    // both cases the leading bytes are recognisably an envelope —
-    // catch them so the user sees the friendly tag instead of the
-    // raw bytes leaking into LastError / toasts.
-    //
-    // Try the first line in isolation — handles the multi-envelope
-    // dump shape.
-    val parts = strings.SplitN(trimmed, "\n", 2)
-    val firstLineDecoded = if (len(parts) == 0) false
-                           else streamJsonHeaderCodec.Decode(strings.TrimSpace(parts[0])) match {
-                               case Success(h) => h.Type != ""
-                               case Failure(_) => false
-                           }
-    if firstLineDecoded { return true }
-    // Fallback: leading-bytes substring check. claude's envelopes
-    // always carry `"type":"<kind>"` early in the object, so a string
-    // that starts with `{"type":"` is almost certainly a (possibly
-    // truncated) envelope even when the JSON tail is malformed.
-    return strings.HasPrefix(trimmed, "{\"type\":\"")
-}
-
 // ClaudeChunk is the parsed shape of one stream-json line.
 //   Visible:    the user-facing text to append to the transcript
 //               (may be "" when the line is pure orchestration noise)
@@ -5105,7 +5036,7 @@ func filterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
         TraceClaudeLine(member, envelope, "", "", true, "non-envelope reached filter")
         return emptyChunk()
     }
-    val kind = extractJsonType(trimmed)
+    val kind = ExtractClaudeEnvelopeType(trimmed)
     if kind == "assistant" {
         return claudeAssistantCodec.Decode(trimmed) match {
             case Success(evt) => {
@@ -5165,7 +5096,7 @@ func filterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
     // watchdog. Other tool kinds' tool_use_ids are harmless to record
     // (the remove on a never-tracked id is a no-op).
     if kind == "user" {
-        val toolResultId = extractFirstToolUseId(trimmed)
+        val toolResultId = ExtractFirstClaudeToolUseId(trimmed)
         TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${kind}")
         val chunk = emptyChunk().Copy(TaskToolResultId = toolResultId)
         return chunk
@@ -5173,23 +5104,6 @@ func filterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
     val typeStr = if (kind == "") "<no type>" else kind
     TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${typeStr}")
     return emptyChunk()
-}
-
-// extractFirstToolUseId scans `envelope` (a type:"user" stream-json
-// line) for the first `"tool_use_id":"<id>"` field. Used to detect
-// when a Task subagent's tool_result has landed, so the orchestrator
-// can remove the id from OutstandingTaskTools and resume the watchdog.
-// Returns "" when the field is absent. String-scan rather than a typed
-// codec because tool_result blocks ship with mixed inner schemas
-// depending on the source tool — we only need this one stable key.
-func extractFirstToolUseId(envelope string) string {
-    val needle = "\"tool_use_id\":\""
-    val parts = strings.SplitN(envelope, needle, 2)
-    if len(parts) < 2 { return "" }
-    val rest = parts[1]
-    val tail = strings.SplitN(rest, "\"", 2)
-    if len(tail) < 2 { return "" }
-    return tail[0]
 }
 
 // extractJsonField pulls the value of `"<key>":"<value>"` out of a
@@ -5247,19 +5161,6 @@ func rateLimitEventChunk(envelope string) ClaudeChunk {
         TaskToolUseIds   = EmptyArray[string](),
         TaskToolResultId = "",
     )
-}
-
-// extractJsonType returns the value of the top-level `"type":"…"`
-// field. Cheap string match used by the whitelist gate to avoid
-// running the codec on envelopes we already know we're going to drop.
-func extractJsonType(trimmed string) string {
-    val needle = "\"type\":\""
-    val parts = strings.SplitN(trimmed, needle, 2)
-    if len(parts) < 2 { return "" }
-    val rest = parts[1]
-    val tail = strings.SplitN(rest, "\"", 2)
-    if len(tail) < 2 { return "" }
-    return tail[0]
 }
 
 // ExtractedEnvelopes carries the result of one buffer-and-extract

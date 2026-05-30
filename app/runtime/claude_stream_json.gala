@@ -5,6 +5,7 @@ import (
     "martianoff/gala/json"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    . "martianoff/gala/go_interop"
 )
 
 // ============================================================================
@@ -127,4 +128,734 @@ func ExtractFirstClaudeToolUseId(envelope string) string {
     val tail = strings.SplitN(rest, "\"", 2)
     if len(tail) < 2 { return "" }
     return tail[0]
+}
+
+// ============================================================================
+// Types, codecs, and classifier — moved from app/ui/update.gala.
+//
+// Every symbol here knows claude-code's stream-json wire format. The
+// UI consumes these via the runtime dot-import; nothing about which
+// envelope kinds exist ("assistant" / "result" / "system" / "user" /
+// "rate_limit_event"), how content[] parts are shaped ("text" /
+// "tool_use" / "tool_result" / "thinking"), or how the parent emits
+// the synthetic resume-marker stub belongs in the orchestration layer.
+// ============================================================================
+
+// ----------------------------------------------------------------------------
+// Claude stream-json filtering — typed Codec[T] decode.
+//
+// We model only the shapes we care about (assistant message text,
+// result error) and let the JSON codec do the heavy lifting. Decode
+// failures land as Try.Failure which we trap into EmptyClaudeChunk() — no
+// raw-JSON leaks ever.
+//
+// We do NOT sanitise the extracted assistant text. A prior heuristic
+// scanned for envelope markers ("\"stop_reason\":", "\"usage\":",
+// etc.) and truncated everything after the first match — that
+// silently dropped legitimate response text whenever claude was asked
+// to explain its own stream-json format. We trust whatever the codec
+// returned and render it verbatim.
+//
+// We also do NOT drop pre-fragment lines based on JSON-token
+// heuristics. The only post-decode defence is a tiny tail filter for
+// lines that are just `}` or `]}` (after trim), guarding against the
+// very rare malformed line.
+//
+// Optional diagnostic: setting GALA_TEAM_TRACE_DIR=<dir> tees every
+// (raw line, parsed result) pair into per-member JSONL files. See
+// app/runtime/trace.gala for the format.
+// ----------------------------------------------------------------------------
+
+// ClaudePart is one element of an assistant message's content[]
+// array. Claude emits `text`, `tool_use`, `tool_result`, `thinking`,
+// etc. We render `text` and additionally recognise tool_use blocks
+// whose Name is `AskUserQuestion` so the orchestrator can forward
+// the question to the user instead of letting it auto-dismiss. The
+// remaining fields (Id, Name) are populated only for tool_use parts
+// — text parts decode them as empty strings, which the call sites
+// branch on safely.
+//
+// `input` is intentionally NOT decoded here: it has different shapes
+// per tool (Bash's `command`, Read's `file_path`, AskUserQuestion's
+// `questions`), and gala's codec is happiest when struct fields
+// have a single concrete type. assistantEventChunk does a targeted
+// follow-up extraction against the raw envelope when it sees an
+// AskUserQuestion part — that keeps this struct simple.
+struct ClaudePart(Type string, Text string, Id string, Name string)
+
+// ClaudeAssistantMsg is the inner `message` object. Usage is the
+// per-turn cumulative count claude attaches to every assistant
+// chunk (it grows monotonically through the turn until the result
+// event delivers the final tally). Decoding it here lets us tick
+// the header live during streaming instead of waiting for the
+// turn-end result.
+//
+// Model is the wire field that distinguishes a real model response
+// from claude-code's auto-emitted synthetic envelopes. Real
+// envelopes carry an API model id (e.g. "claude-opus-4-7"); claude-
+// code's stub reply to an isMeta resume input carries the literal
+// "<synthetic>" sentinel. assistantEventChunk reads this directly
+// instead of substring-scanning the raw envelope. Missing on the
+// wire decodes to "" which never matches "<synthetic>", so older /
+// non-synthetic envelopes pass through unchanged.
+struct ClaudeAssistantMsg(
+    Content Array[ClaudePart],
+    Usage   ClaudeUsage,
+    Model   string,
+)
+
+// ClaudeAssistantEvent is the outer event for a `type=assistant`
+// stream-json line.
+struct ClaudeAssistantEvent(Type string, Message ClaudeAssistantMsg)
+
+// ClaudeUsage is the token / cost accounting block claude attaches to
+// every result event. We tally these into AppModel.TokenUsage so the
+// header can show running totals across the team.
+struct ClaudeUsage(
+    InputTokens          int,
+    OutputTokens         int,
+    CacheReadInputTokens int,
+)
+
+// ClaudeResultEvent is the outer event for a `type=result` line.
+// IsError + Result let us surface rate-limit / max-turns errors as
+// toasts; Usage + TotalCostUsd feed the header token counter.
+struct ClaudeResultEvent(
+    Type         string,
+    IsError      bool,
+    Result       string,
+    TotalCostUsd float64,
+    Usage        ClaudeUsage,
+)
+
+// Package-level codecs. Codec[T] instances are immutable and safe to
+// share across calls; building one per chunk would just waste work.
+val ClaudeAssistantCodec = json.Codec[ClaudeAssistantEvent](json.SnakeCase())
+val ClaudeResultCodec    = json.Codec[ClaudeResultEvent](json.SnakeCase())
+
+// ClaudeChunk is the parsed shape of one stream-json line.
+//   Visible:    the user-facing text to append to the transcript
+//               (may be "" when the line is pure orchestration noise)
+//   ErrorText:  a non-empty value means claude reported an error
+//               (rate limit, max-turns exhausted, etc.) — onChunk
+//               surfaces this via toast + LastError instead of the
+//               transcript so the chat stays clean.
+//   LiveTurn:   Some(usage) when an assistant chunk landed mid-turn.
+//               Claude's assistant.message.usage is cumulative for the
+//               IN-PROGRESS turn; we mirror it into m.CurrentTurnUsage
+//               (overwrite, not add) so the header ticks live.
+//   FinalTurn:  Some(usage) on the per-turn `result` event. Commits
+//               the in-flight count to TokenUsage[name] and clears
+//               CurrentTurnUsage so the next turn starts clean.
+//   CostUsd:    running cost from result.total_cost_usd (only set on
+//               the final turn event). Summed into m.TotalCostUsd.
+struct ClaudeChunk(
+    Visible   string,
+    ErrorText string,
+    LiveTurn  Option[ClaudeUsage],
+    FinalTurn Option[ClaudeUsage],
+    CostUsd   float64,
+    // AskQuestionId is non-empty when this chunk's assistant envelope
+    // contained an `AskUserQuestion` tool_use block. Carries the
+    // tool_use_id we'll join on when sending the user's answer back as
+    // a tool_result envelope. The chunk also carries the question
+    // text (extracted from the input JSON) so the conversation log
+    // can render it cleanly even when the model's narration is sparse.
+    AskQuestionId   string,
+    AskQuestionText string,
+    // TurnEnded fires on the `result` envelope and tells onChunk it's
+    // time to close the subprocess's stdin so the per-turn process
+    // can exit. With `--input-format stream-json` claude keeps stdin
+    // open forever; without this signal the subprocess would idle
+    // after every turn.
+    TurnEnded bool,
+    // IsToolActivity is true when the assistant chunk contains only a
+    // `tool_use` part (Edit/Read/Bash/...) and no visible text — i.e.
+    // the model is silently doing work. The orchestrator uses this
+    // flag to flip the member's status back to StWorking (so the
+    // sidebar timer keeps ticking and the heartbeat doesn't escalate
+    // to Slow/Stuck) WITHOUT appending a conversation line — those
+    // "using <Tool>" lines added no value to the chat and would have
+    // spammed the transcript with one entry per tool call.
+    IsToolActivity bool,
+    // IsSynthetic flags a claude-code auto-emitted assistant envelope
+    // (message.model == "<synthetic>"). These appear when --resume
+    // input is isMeta or otherwise non-actionable and carry stub text
+    // ("No response requested.") that must NOT enter the transcript,
+    // bump LastChunkAt, or accrue tokens. applyChunkVisible
+    // short-circuits on this flag and increments
+    // m.SyntheticOnlyChunks[name] so the heartbeat / respawn paths
+    // can tell a poisoned session (stdout flowing, no model output)
+    // apart from a healthy silent one.
+    IsSynthetic bool,
+    // TaskToolUseIds carries every Task tool_use id the assistant
+    // envelope opened (claude commonly batches parallel tool calls
+    // into one content[] array; past sessions saw 3 Explore Tasks
+    // emitted as parallel tool_use blocks in a single envelope).
+    // applyChunkVisible adds every id to m.OutstandingTaskTools[name]
+    // so enforceStateWatchdog keeps the silence-based kill paused as
+    // long as ANY of the spawned subagents is still running. Empty
+    // for envelopes that opened no Task subagent.
+    TaskToolUseIds Array[string],
+    // TaskToolResultId is the tool_use_id of a tool_result the parent
+    // just emitted in a type:"user" envelope. Non-empty means a Task
+    // subagent finished; applyChunkVisible removes the id from
+    // OutstandingTaskTools so the watchdog resumes. Set
+    // unconditionally for any tool_result we see — the OutstandingTaskTools
+    // set is the source of truth for which ids matter, so removing a
+    // never-tracked id is a harmless no-op.
+    TaskToolResultId string,
+)
+
+// EmptyClaudeChunk is the "drop this line" marker.
+func EmptyClaudeChunk() ClaudeChunk = ClaudeChunk(
+    Visible          = "",
+    ErrorText        = "",
+    LiveTurn         = None[ClaudeUsage](),
+    FinalTurn        = None[ClaudeUsage](),
+    CostUsd          = 0.0,
+    AskQuestionId    = "",
+    AskQuestionText  = "",
+    TurnEnded        = false,
+    IsToolActivity   = false,
+    IsSynthetic      = false,
+    TaskToolUseIds   = EmptyArray[string](),
+    TaskToolResultId = "",
+)
+
+// SyntheticClaudeChunk marks a claude-code synthetic envelope. The caller
+// (applyChunkVisible) reads IsSynthetic and bumps the per-member
+// synthetic counter without bumping LastChunkAt — the rest of the
+// pipeline treats it as a no-op.
+func SyntheticClaudeChunk() ClaudeChunk = ClaudeChunk(
+    Visible          = "",
+    ErrorText        = "",
+    LiveTurn         = None[ClaudeUsage](),
+    FinalTurn        = None[ClaudeUsage](),
+    CostUsd          = 0.0,
+    AskQuestionId    = "",
+    AskQuestionText  = "",
+    TurnEnded        = false,
+    IsToolActivity   = false,
+    IsSynthetic      = true,
+    TaskToolUseIds   = EmptyArray[string](),
+    TaskToolResultId = "",
+)
+
+// FilterClaudeStreamJsonFor is the chunk classifier. The `member`
+// name is forwarded to the GALA_TEAM_TRACE_DIR diagnostic; pass "" if
+// you don't have one (tests, no-context callers — see the bare
+// filterClaudeStreamJson alias below).
+//
+// Plain non-JSON lines (the test harness occasionally injects bare
+// strings) pass through as Visible. JSON lines go through two attempts:
+//   1. Decode as ClaudeAssistantEvent — Codec drops unknown fields
+//      so result/system/user JSON also "succeeds" but with Type set
+//      to a non-"assistant" value. We dispatch on Type after.
+//   2. Decode as ClaudeResultEvent for is_error surfacing.
+// Anything that decodes to an unrecognised Type is silently dropped
+// (never rendered raw — stream-json metadata in the chat pane is the
+// worst possible UX).
+//
+// Trust-the-codec policy: whatever the codec returns as the joined
+// `text` parts is rendered verbatim. No post-processing. If gala's
+// JSON decoder produces dirty output, the fix is in the decoder.
+// FilterClaudeStreamJsonFor classifies ONE complete `{...}` JSON
+// envelope. The caller (onChunk via ExtractCompleteEnvelopes) is
+// responsible for assembling fragments; this function only sees
+// whole envelopes. Fragment / partial / bare-closer detection has
+// been removed entirely — those cases are eliminated upstream by
+// the buffer-and-extract pipeline.
+//
+// Whitelist: only `type:"assistant"` (extract content[].text) and
+// `type:"result"` (extract Result / ErrorText) produce visible text.
+// Every other type — system, user (tool_result), tool_use,
+// tool_use_result, rate_limit_event, control_request,
+// control_response, message_*, anything claude introduces later —
+// drops to EmptyClaudeChunk unconditionally.
+func FilterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
+    val trimmed = strings.TrimSpace(envelope)
+    if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+        // The buffer-and-extract pipeline only feeds us complete
+        // `{...}` envelopes. Anything else (empty, plain prose
+        // somehow leaking past the extractor) is dropped — the
+        // contract is "envelopes only".
+        TraceClaudeLine(member, envelope, "", "", true, "non-envelope reached filter")
+        return EmptyClaudeChunk()
+    }
+    val kind = ExtractClaudeEnvelopeType(trimmed)
+    if kind == "assistant" {
+        return ClaudeAssistantCodec.Decode(trimmed) match {
+            case Success(evt) => {
+                val chunk = assistantEventChunk(evt, trimmed)
+                val dropped = chunk.Visible == "" && chunk.AskQuestionId == ""
+                val reason = if (chunk.IsSynthetic) "synthetic claude-code resume marker"
+                             else if (dropped)     "assistant chunk with no text parts"
+                             else                   ""
+                TraceClaudeLine(member, envelope, chunk.Visible, "", dropped, reason)
+                return chunk
+            }
+            case Failure(_) => {
+                TraceClaudeLine(member, envelope, "", "", true, "assistant envelope failed to decode")
+                return EmptyClaudeChunk()
+            }
+        }
+    }
+    if kind == "result" {
+        return ClaudeResultCodec.Decode(trimmed) match {
+            case Success(evt) => {
+                val chunk = resultEventChunk(evt)
+                val dropped = chunk.Visible == "" && chunk.ErrorText == ""
+                val reason = if (dropped) "result event with no rendering payload" else ""
+                TraceClaudeLine(member, envelope, chunk.Visible, chunk.ErrorText, dropped, reason)
+                return chunk
+            }
+            case Failure(_) => {
+                TraceClaudeLine(member, envelope, "", "", true, "result envelope failed to decode")
+                return EmptyClaudeChunk()
+            }
+        }
+    }
+    if kind == "rate_limit_event" {
+        // claude-code emits rate_limit_event envelopes with shape
+        // {"type":"rate_limit_event","rate_limit_info":{
+        //    "status":"allowed|approaching|rejected|...",
+        //    "resetsAt":<unix-epoch>,
+        //    "rateLimitType":"five_hour|...",
+        //    "overageStatus":"...","isUsingOverage":bool}, ...}
+        // The mixed snake_case outer / camelCase inner means
+        // ClaudeResultCodec's SnakeCase mapper can't decode the
+        // inner block directly. We only need three signals to
+        // decide whether to surface a toast — status, rateLimitType,
+        // resetsAt — so a small string extractor is enough and
+        // skips the codec mapper-style problem entirely.
+        val chunk = RateLimitEventChunk(trimmed)
+        val dropped = chunk.Visible == "" && chunk.ErrorText == ""
+        val reason = if (dropped) "rate_limit_event status=allowed (background)" else ""
+        TraceClaudeLine(member, envelope, chunk.Visible, chunk.ErrorText, dropped, reason)
+        return chunk
+    }
+    // type:"user" envelopes carry tool_result blocks the parent
+    // claude-code emits when one of its tools completes. We don't
+    // surface them anywhere, but we DO extract the tool_use_id so
+    // applyChunkVisible can remove it from OutstandingTaskTools when
+    // a Task subagent finishes — that's what un-pauses the silence
+    // watchdog. Other tool kinds' tool_use_ids are harmless to record
+    // (the remove on a never-tracked id is a no-op).
+    if kind == "user" {
+        val toolResultId = ExtractFirstClaudeToolUseId(trimmed)
+        TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${kind}")
+        val chunk = EmptyClaudeChunk().Copy(TaskToolResultId = toolResultId)
+        return chunk
+    }
+    val typeStr = if (kind == "") "<no type>" else kind
+    TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${typeStr}")
+    return EmptyClaudeChunk()
+}
+
+// extractJsonField pulls the value of `"<key>":"<value>"` out of a
+// JSON envelope. Cheap string match used by the rate-limit classifier
+// to read a few inner-object fields without paying for codec mapper
+// dance over a mixed snake_case / camelCase payload. Returns "" when
+// the key is absent or the value isn't a quoted string.
+func extractJsonField(trimmed string, key string) string {
+    val needle = s"\"${key}\":\""
+    val parts = strings.SplitN(trimmed, needle, 2)
+    if len(parts) < 2 { return "" }
+    val rest = parts[1]
+    val tail = strings.SplitN(rest, "\"", 2)
+    if len(tail) < 2 { return "" }
+    return tail[0]
+}
+
+// RateLimitEventChunk inspects a rate_limit_event envelope and
+// returns either an empty chunk (status="allowed", the background
+// "everything's fine" tick that fires multiple times per turn — past
+// sessions saw 65 of these in one run, all benign) or a chunk with
+// ErrorText set to a human-readable toast when the status indicates
+// the team is approaching, has hit, or is being throttled by the
+// limit. The downstream applyChunkVisible surfaces ErrorText as a
+// warning toast + LastError; we deliberately do NOT route this
+// through Visible so the rate-limit warning never lands in the
+// conversation transcript as the agent's reply.
+//
+// Surface signal: <status> (the actionable cue: approaching /
+// rejected / etc.) and <rateLimitType> (which window — five_hour /
+// ...). resetsAt is a JSON number in claude-code's current payload
+// shape so extractJsonField (which only matches quoted strings)
+// returns "" — keeping the toast short and avoiding a brittle
+// numeric extractor that breaks if the schema gains a quoted ISO
+// timestamp later. The orchestrator's existing toast queue handles
+// dedup so multiple consecutive non-allowed events in one turn
+// don't spam the user.
+func RateLimitEventChunk(envelope string) ClaudeChunk {
+    val status = extractJsonField(envelope, "status")
+    if status == "" || status == "allowed" { return EmptyClaudeChunk() }
+    val limitType = extractJsonField(envelope, "rateLimitType")
+    val limitLabel = if (limitType == "") "" else s" (${limitType})"
+    val msg = s"Claude API rate limit ${status}${limitLabel}"
+    return ClaudeChunk(
+        Visible          = "",
+        ErrorText        = msg,
+        LiveTurn         = None[ClaudeUsage](),
+        FinalTurn        = None[ClaudeUsage](),
+        CostUsd          = 0.0,
+        AskQuestionId    = "",
+        AskQuestionText  = "",
+        TurnEnded        = false,
+        IsToolActivity   = false,
+        IsSynthetic      = false,
+        TaskToolUseIds   = EmptyArray[string](),
+        TaskToolResultId = "",
+    )
+}
+
+// ExtractedEnvelopes carries the result of one buffer-and-extract
+// pass on a member's stdout: every complete `{…}` JSON object found
+// in the buffer plus the un-parsed leftover (held back for the next
+// chunk to complete). PreJunk is anything that appeared BEFORE the
+// first `{` — non-JSON garbage that claude stream-json mode shouldn't
+// emit but we capture for the trace anyway. PreJunk never reaches
+// the transcript; only Envelopes are processed downstream.
+struct ExtractedEnvelopes(
+    PreJunk   string,
+    Envelopes Array[string],
+    Leftover  string,
+)
+
+// ExtractCompleteEnvelopes walks `buf` rune by rune, tracking JSON
+// brace depth (string-aware: `{` / `}` inside string literals don't
+// count, and `\"` inside a string doesn't close it). Emits each
+// complete top-level `{...}` object as a separate envelope. Anything
+// after the last complete envelope that's still inside a `{...}`
+// pair (depth > 0) becomes Leftover — held until the next chunk
+// completes it. The buffer-and-extract approach replaces the old
+// "guess if it's a fragment by substring" heuristic, which was the
+// architectural mistake the user called out: never process partial
+// envelopes, always assemble first.
+func ExtractCompleteEnvelopes(buf string) ExtractedEnvelopes {
+    val rs = ToRunes(buf)
+    val n = len(rs)
+    var envelopes = EmptyArray[string]()
+    var preJunk = ""
+    var i = 0
+    var start = -1
+    var depth = 0
+    var inString = false
+    var escaped = false
+    var preJunkEnd = -1
+    for i < n {
+        val c = rs[i]
+        if escaped {
+            escaped = false
+        } else if inString {
+            if c == '\\' {
+                escaped = true
+            } else if c == '"' {
+                inString = false
+            }
+        } else {
+            if c == '"' {
+                inString = true
+            } else if c == '{' {
+                if depth == 0 {
+                    if start < 0 {
+                        // Capture any text before the first `{` as
+                        // pre-junk on the FIRST top-level open only.
+                        if preJunkEnd < 0 { preJunkEnd = i }
+                    }
+                    start = i
+                }
+                depth = depth + 1
+            } else if c == '}' {
+                depth = depth - 1
+                // Negative depth means buffer is desynced: more
+                // closing braces seen than opens. Recover by
+                // resetting parser state (depth/inString/escaped to
+                // their empty values, start to -1) so the next
+                // top-level `{` is treated as a fresh envelope. The
+                // pre-resync byte run becomes orphaned (we don't try
+                // to reconstruct it — it's already garbage); the
+                // member buffer will be force-cleared upstream when
+                // the surrounding chunk fails to classify.
+                if depth < 0 {
+                    depth = 0
+                    inString = false
+                    escaped = false
+                    start = -1
+                }
+                if depth == 0 && start >= 0 {
+                    val tail = SliceFrom(rs, start)
+                    val window = SliceTo(tail, i + 1 - start)
+                    val candidate = string(window)
+                    // Shape-validate the envelope. Real Claude
+                    // stream-json envelopes always begin with
+                    // `{"type":` (with optional whitespace). Anything
+                    // else is buffer-state garbage — code fragments
+                    // from a tool_use's `old_string` field, partial
+                    // tool_use_result blobs, etc. — that the depth
+                    // counter happened to balance through. Drop them
+                    // here so the downstream classifier never sees
+                    // malformed JSON.
+                    if LooksLikeClaudeEnvelope(candidate) {
+                        envelopes = envelopes.Append(candidate)
+                    }
+                    start = -1
+                }
+            }
+        }
+        i = i + 1
+    }
+    if preJunkEnd > 0 {
+        preJunk = strings.TrimSpace(string(SliceTo(rs, preJunkEnd)))
+    } else if preJunkEnd < 0 && envelopes.IsEmpty() && depth == 0 {
+        preJunk = strings.TrimSpace(buf)
+    }
+    val leftover = if (start < 0) "" else string(SliceFrom(rs, start))
+    return ExtractedEnvelopes(PreJunk = preJunk, Envelopes = envelopes, Leftover = leftover)
+}
+
+// LooksLikeClaudeEnvelope tests whether `s` has the shape of a real
+// Claude stream-json envelope. Claude emits compact (non-pretty)
+// JSON with `type` always as the first key, so a real envelope
+// starts with the literal byte sequence `{"type":`. Anything else —
+// code fragments from a tool_use's `old_string` field, partial
+// tool_use_result blobs, JSON file content from a Read tool — gets
+// dropped here so the downstream JSON decoder never sees malformed
+// input (which previously surfaced as `assistant envelope failed to
+// decode` and silent content loss).
+func LooksLikeClaudeEnvelope(s string) bool {
+    val t = strings.TrimSpace(s)
+    return strings.HasPrefix(t, "{\"type\":")
+}
+
+// assistantEventChunk extracts the joined text from a complete
+// `assistant` envelope's content[]. Filters parts to `text` for the
+// visible body. tool_use / tool_result / thinking are otherwise
+// dropped (the sidebar spinner already conveys "tools are running"),
+// EXCEPT for AskUserQuestion: those carry the id needed to satisfy
+// the model's blocking tool call, so we promote them onto the
+// returned chunk as AskQuestionId / AskQuestionText. The raw
+// envelope string is passed through so we can scrape the question
+// text out of the un-decoded `input` JSON.
+func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChunk {
+    // claude-code emits a synthetic assistant envelope
+    // (message.model == "<synthetic>") in response to an isMeta input
+    // ("Continue from where you left off.") on a resumed session. The
+    // payload is a stub literal "No response requested." — the model
+    // never ran. Past sessions accumulated hundreds of these in a
+    // poisoned conversation jsonl and then started parroting the same
+    // text back from real API calls, freezing the QA gate indefinitely.
+    // Treat them as no-ops: empty Visible, no token accrual, but the
+    // IsSynthetic flag lets applyChunkVisible bump the per-member
+    // synthetic counter so liveRespawnMember can rotate the SessionId
+    // when the count crosses the poison threshold.
+    if evt.Message.Model == "<synthetic>" {
+        return SyntheticClaudeChunk()
+    }
+    val texts = evt.Message.Content.Collect({
+        case ClaudePart(kind, text, _, _) if kind == "text" => text
+    })
+    val askId = firstAskUserQuestionId(evt.Message.Content)
+    val askText = if (askId == "") "" else ExtractFirstClaudeQuestionText(rawEnvelope)
+    // Tool-activity flag: when an assistant chunk carries a tool_use
+    // part (Edit, Read, Bash, Write…) but no visible text and no
+    // AskUserQuestion, raise IsToolActivity. The chunk pump uses the
+    // flag to flip the member back to StWorking so the heartbeat
+    // doesn't escalate during a long edit run, but does NOT append
+    // a conversation line — the user gets activity signal via the
+    // sidebar timer instead of dozens of "using <Tool>" rows
+    // spamming the chat.
+    val visibleText = texts.MkString("\n")
+    val isToolActivity = visibleText == "" && askId == "" && hasAnyToolUse(evt.Message.Content)
+    val taskToolUseIds = AllClaudeTaskToolUseIds(evt.Message.Content)
+    return ClaudeChunk(
+        Visible          = visibleText,
+        ErrorText        = "",
+        LiveTurn         = Some(evt.Message.Usage),
+        FinalTurn        = None[ClaudeUsage](),
+        CostUsd          = 0.0,
+        AskQuestionId    = askId,
+        AskQuestionText  = askText,
+        TurnEnded        = false,
+        IsToolActivity   = isToolActivity,
+        IsSynthetic      = false,
+        TaskToolUseIds   = taskToolUseIds,
+        TaskToolResultId = "",
+    )
+}
+
+// hasAnyToolUse returns true when any content part is a non-empty
+// non-AskUserQuestion tool_use block. Used to flag silent tool work
+// so the heartbeat treats the chunk as "alive" without surfacing
+// per-tool lines in the user-facing transcript.
+func hasAnyToolUse(parts Array[ClaudePart]) bool {
+    var i = 0
+    val n = parts.Size()
+    for i < n {
+        val p = parts.Get(i)
+        if p.Type == "tool_use" && p.Name != "" && p.Name != "AskUserQuestion" {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+// firstAskUserQuestionId walks content[] and returns the `id` of the
+// first AskUserQuestion tool_use block, or "" when none is present.
+// We support exactly one pending question at a time today; a hypothetical
+// second tool_use in the same content[] is ignored — the user answers
+// the first question, then the model can re-ask in its next turn.
+func firstAskUserQuestionId(parts Array[ClaudePart]) string {
+    var i = 0
+    val n = parts.Size()
+    for i < n {
+        val p = parts.Get(i)
+        if p.Type == "tool_use" && p.Name == "AskUserQuestion" && p.Id != "" {
+            return p.Id
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// AllClaudeTaskToolUseIds walks content[] and returns the `id` of EVERY
+// long-running tool_use block, in source order. Two tool names
+// qualify today:
+//
+//   - "Task": spawns one or more subagents that claude-code waits
+//     for synchronously; while a subagent runs the parent's stdout
+//     is silent except for occasional system events.
+//   - "Workflow": runs a multi-phase parallel-agent script (the
+//     claude-code Workflow tool); the parent emits
+//     `system / subtype:"task_progress"` ticks while phases run
+//     but no visible text until the workflow ends.
+//
+// Both share the same observed shape: the parent claude-code
+// subprocess produces no assistant-text chunks for many minutes
+// while the tool runs. The orchestrator records every returned id
+// in OutstandingTaskTools so the silence watchdog can pause until
+// the matching tool_results arrive.
+//
+// Why every id, not just the first: claude commonly batches parallel
+// tool calls into a single assistant message content[] array. Past
+// sessions saw a TL spawn 3 Explore subagents in parallel — the
+// prior firstTaskToolUseId tracked only the first id, so when the
+// first subagent finished the OutstandingTaskTools set emptied even
+// though two more subagents were still running. The watchdog
+// resumed and killed the TL 5 minutes later while it was still
+// legitimately waiting on the other two.
+func AllClaudeTaskToolUseIds(parts Array[ClaudePart]) Array[string] {
+    var out = EmptyArray[string]()
+    var i = 0
+    val n = parts.Size()
+    for i < n {
+        val p = parts.Get(i)
+        if p.Type == "tool_use" && IsLongRunningClaudeToolName(p.Name) && p.Id != "" {
+            out = out.Append(p.Id)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ExtractFirstClaudeQuestionText pulls the first `"question":"..."` value
+// out of the raw envelope JSON. Targeted string scan rather than a
+// nested codec because the surrounding `input` object has different
+// shapes per tool — we don't want to force a generic schema on it.
+// The scan respects the JSON string-escape rules (skips `\"` etc.)
+// and returns "" when no `"question"` key is found or the value
+// can't be parsed cleanly. Worst case the modal renders without a
+// preview line and the user reads the question from the model's
+// chat text — already visible in the transcript above the prompt.
+func ExtractFirstClaudeQuestionText(envelope string) string {
+    val needle = "\"question\":\""
+    val parts = strings.SplitN(envelope, needle, 2)
+    if len(parts) < 2 { return "" }
+    val afterKey = parts[1]
+    val rs = ToRunes(afterKey)
+    val n = len(rs)
+    var out = EmptyArray[string]()
+    var i = 0
+    var escaped = false
+    for i < n {
+        val c = rs[i]
+        if escaped {
+            // Decode the common escapes we'd see in a question string
+            // (newline, quote, backslash). Everything else passes
+            // through as the literal char after the backslash so the
+            // user-visible text doesn't accumulate hex codes.
+            if c == 'n' {
+                out = out.Append("\n")
+            } else {
+                out = out.Append(string(c))
+            }
+            escaped = false
+        } else if c == '\\' {
+            escaped = true
+        } else if c == '"' {
+            return out.MkString("")
+        } else {
+            out = out.Append(string(c))
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// resultEventChunk dispatches result events: errors surface as
+// ErrorText (toast + LastError); successes drop entirely. Both paths
+// stamp FinalTurn + CostUsd so onChunk commits the in-flight turn
+// count and bumps total cost.
+func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
+    if evt.Type != "result" { return EmptyClaudeChunk() }
+    val tokens = Some(evt.Usage)
+    if evt.IsError {
+        val msg = if (evt.Result == "") "claude reported an error" else evt.Result
+        return ClaudeChunk(
+            Visible          = "",
+            ErrorText        = msg,
+            LiveTurn         = None[ClaudeUsage](),
+            FinalTurn        = tokens,
+            CostUsd          = evt.TotalCostUsd,
+            AskQuestionId    = "",
+            AskQuestionText  = "",
+            TurnEnded        = true,
+            IsToolActivity   = false,
+            IsSynthetic      = false,
+            TaskToolUseIds   = EmptyArray[string](),
+            TaskToolResultId = "",
+        )
+    }
+    // Render the `result` field as visible text on a clean turn. Two
+    // claude output shapes ship to us:
+    //   (a) Streaming: many `assistant.message.text` chunks during the
+    //       turn + a final `result` event whose Result field echoes the
+    //       full text. In this case the assistant chunks already
+    //       populated the transcript; we drop the result echo.
+    //   (b) Bulk: zero assistant chunks, only one `result` event whose
+    //       Result field IS the entire turn. Without rendering it the
+    //       transcript stays empty and the user sees no response.
+    //
+    // We can't tell (a) from (b) at this layer (the per-member
+    // streaming-text accumulator is in onChunk, not here). Render the
+    // result text whenever it's substantive AND looks like prose, not
+    // a stream-json envelope re-encoding. Duplicate display in case (a)
+    // is the lesser evil vs. silent drop in case (b) — DESIGN.md says
+    // "we'd rather under-format than under-render".
+    return ClaudeChunk(
+        Visible          = evt.Result,
+        ErrorText        = "",
+        LiveTurn         = None[ClaudeUsage](),
+        FinalTurn        = tokens,
+        CostUsd          = evt.TotalCostUsd,
+        AskQuestionId    = "",
+        AskQuestionText  = "",
+        TurnEnded        = true,
+        IsToolActivity   = false,
+        IsSynthetic      = false,
+        TaskToolUseIds   = EmptyArray[string](),
+        TaskToolResultId = "",
+    )
 }

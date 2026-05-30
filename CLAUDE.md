@@ -1,5 +1,9 @@
 # gala-team — Claude Code instructions
 
+## Must read
+
+- **[docs/architecture.md](docs/architecture.md)** — component map + layering invariants. Skim it before editing across package boundaries. The orchestrator has a transport-neutral agent port; the layer rules in that doc keep claude-code-specific knowledge out of `app/fsm`, `app/protocol`, and `app/ui`.
+
 ## NEVER commit private artifacts
 
 These categories MUST NOT appear anywhere in the source tree (code, comments, tests, docs, scripts, fixtures, README). The repo is public; readers don't share our working environment, our git history, or our local debug logs.

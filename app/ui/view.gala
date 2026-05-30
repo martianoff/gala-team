@@ -1278,7 +1278,7 @@ func buildSidebarRightFields(m AppModel, members Array[Member]) HashMap[string, 
 // help-waiting show their static labels.
 func sidebarRightField(m AppModel, name string) string {
     val status = m.Statuses.Get(name).GetOrElse(StIdle())
-    return status match {
+    val base = status match {
         case StIdle()           => totalWorkFor(m, name, false)
         case StQueued()         => ""
         case StDone()           => totalWorkFor(m, name, false)
@@ -1289,6 +1289,24 @@ func sidebarRightField(m AppModel, name string) string {
         case StSlow()           => s"${totalWorkFor(m, name, true)} slow"
         case StStuck()          => s"${totalWorkFor(m, name, true)} stuck"
     }
+    // Workflow progress decoration. When a claude-code Workflow tool
+    // is in flight, the WorkflowStatus map carries the latest
+    // task_progress description (e.g. "Synthesize: synthesize"). Show
+    // it only while the member is actively in a working status —
+    // showing a stale workflow label on an Idle / Done row would
+    // mislead. The decoration is appended after the timer with a "·"
+    // separator so the working-time signal is preserved.
+    val workflowLabel = m.WorkflowStatus.Get(name).GetOrElse("")
+    val showWorkflow = workflowLabel != "" && (status match {
+        case StWorking() => true
+        case StSlow()    => true
+        case StStuck()   => true
+        case StRecovering(_, _) => true
+        case _           => false
+    })
+    if !showWorkflow { return base }
+    if base == ""    { return workflowLabel }
+    return s"${base} · ${workflowLabel}"
 }
 
 // totalWorkFor returns the formatted "M:SS" cumulative-work timer

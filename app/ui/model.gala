@@ -460,6 +460,16 @@ struct AppModel(
     // assumed to have been refreshed once a real assistant chunk
     // arrives).
     TransportAuthErrorMembers HashSet[string],
+    // WorkflowStatus holds the latest claude-code Workflow tool
+    // progress label per member — e.g. "Synthesize: synthesize",
+    // "Map: map:runtime". Populated from FilterClaudeStreamJsonFor's
+    // handling of `system / subtype:"task_progress"` envelopes, which
+    // claude-code emits ~3 ticks/sec while a Workflow runs. The view
+    // renders this on the sidebar / status surface so the user sees
+    // what is happening inside the workflow instead of blank silence
+    // while N parallel agents churn for minutes. Overwritten on every
+    // progress tick; cleared when the member's session closes.
+    WorkflowStatus HashMap[string, string],
 )
 
 // PendingSummary wraps the parsed TL directives so AppModel's
@@ -645,6 +655,7 @@ func InitialModelWithTeams(
     PendingQuestion       = None[PendingQuestion](),
     PendingSummaryDirs    = None[PendingSummary](),
     TransportAuthErrorMembers = EmptyHashSet[string](),
+    WorkflowStatus            = EmptyHashMap[string, string](),
 )
 
 // AppMsg is every event the UI dispatches through update().  Keyboard +

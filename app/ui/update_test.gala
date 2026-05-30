@@ -6505,3 +6505,18 @@ func TestFormatDecodeIssues_Empty(t T) T {
     val reason = formatDecodeIssues(EmptyArray[protocol.DecodeIssue]())
     return Eq(t, reason, "")
 }
+
+// ClaimedBackgroundWork renders a nudge that names the matched markers
+// verbatim, denies the existence of a workflow runner, and points the
+// TL at @dispatch as the only parallel-work mechanism. Markers list is
+// inlined so the model sees exactly which words tripped the rule.
+func TestFormatDecodeIssues_ClaimedBackgroundWork(t T) T {
+    val markers = ArrayOf("workflow", "background", "report back")
+    val issues = ArrayOf[protocol.DecodeIssue](protocol.ClaimedBackgroundWork(Markers = markers))
+    val reason = formatDecodeIssues(issues)
+    val a = IsTrue(t, strings.Contains(reason, "workflow"))
+    val b = IsTrue(a, strings.Contains(reason, "background"))
+    val c = IsTrue(b, strings.Contains(reason, "report back"))
+    val d = IsTrue(c, strings.Contains(reason, "@dispatch"))
+    return IsTrue(d, strings.Contains(reason, "NO workflow runner"))
+}

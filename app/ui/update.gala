@@ -4671,6 +4671,10 @@ func formatDecodeIssues(issues Array[protocol.DecodeIssue]) string {
         }
         return s"${dir} ... @end with an empty body — give it a body or omit the directive."
     }
+    if tag == "claimed_background_work" {
+        val markers = protocol.IssueClaimedBackgroundMarkers(first).MkString(", ")
+        return s"your turn described async/background work (markers: ${markers}) but emitted no @dispatch. gala_team has NO workflow runner / job queue / background-agent abstraction — parallel work happens only via concurrent @dispatch(...)...@end blocks, one per engineer. Either open those blocks now so the engineers actually run, OR answer the user directly with your own analysis if no delegation is needed."
+    }
     return ""
 }
 

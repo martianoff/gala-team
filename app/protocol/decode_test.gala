@@ -184,6 +184,113 @@ func TestDecodeIssues_UnclosedBase(t T) T {
     }
 }
 
+// ----- ClaimedBackgroundWork (heuristic, prose-level) ----------------------
+//
+// When a TL turn parses to ZERO directives AND ZERO grammar issues but
+// the prose names ≥2 markers of a non-existent async-job runner, surface
+// a ClaimedBackgroundWork issue. The FSM would otherwise route through
+// the "plain chat → Idle" branch and the user would be left waiting for
+// work that was never dispatched.
+
+// Positive: 2+ generic markers ("workflow" + "background") in prose with
+// no directives → ClaimedBackgroundWork issue listing the matched
+// markers in source order.
+func TestDecodeIssues_ClaimedBackgroundWork_TwoMarkers(t T) T {
+    val buf = "I'll kick off the research workflow now; it runs in the background and reports back when done."
+    val res = DecodeWithIssues(buf, tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    val t2 = Eq(t1, res.Issues.Length(), 1)
+    return res.Issues.Get(0) match {
+        case ClaimedBackgroundWork(ms) => IsTrue(t2, ms.Length() >= 2)
+        case _                         => IsTrue(t2, false)
+    }
+}
+
+// Positive: a fake workflow ID prefix ("wf_") fires on its own even
+// alongside a single other marker — strong distinctive signal with no
+// legitimate use in TL prose.
+func TestDecodeIssues_ClaimedBackgroundWork_FakeWorkflowId(t T) T {
+    val buf = "Still working — the workflow run `wf_c6aedc6c-2d3` hasn't reported back yet. I'll wait."
+    val res = DecodeWithIssues(buf, tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    val t2 = Eq(t1, res.Issues.Length(), 1)
+    return res.Issues.Get(0) match {
+        case ClaimedBackgroundWork(ms) => IsTrue(t2, strings.Contains(ms.MkString(","), "wf_"))
+        case _                         => IsTrue(t2, false)
+    }
+}
+
+// Negative: a single generic marker alone is below threshold — common
+// prose ("let me think about it in the background") must not nudge.
+func TestDecodeIssues_ClaimedBackgroundWork_SingleMarkerNoIssue(t T) T {
+    val buf = "Let me think about this in the background while you decide on the scope."
+    val res = DecodeWithIssues(buf, tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    return Eq(t1, res.Issues.Length(), 0)
+}
+
+// Negative: prose with no markers at all — must not nudge.
+func TestDecodeIssues_ClaimedBackgroundWork_NoMarkersNoIssue(t T) T {
+    val buf = "The request is ambiguous; do you want option A or option B before I dispatch?"
+    val res = DecodeWithIssues(buf, tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 0)
+    return Eq(t1, res.Issues.Length(), 0)
+}
+
+// Negative: a legitimate @dispatch turn that mentions "workflow" /
+// "background" in its body must NOT trip the heuristic. The detector
+// only runs when ZERO directives parse, so engaging the orchestrator
+// at all silences the rule.
+func TestDecodeIssues_ClaimedBackgroundWork_DispatchPresentSilences(t T) T {
+    val buf = "@dispatch(Felix)\nbuild the workflow handler in the background path\n@end"
+    val res = DecodeWithIssues(buf, tl(0))
+    val t1 = Eq(t, res.Messages.Length(), 1)
+    return Eq(t1, res.Issues.Length(), 0)
+}
+
+// Negative: an existing grammar issue silences the heuristic (the
+// parser already has a specific complaint; layering a fuzzy second
+// complaint would be noise). Unclosed @summary with workflow/background
+// prose still emits only the UnclosedBlock issue.
+func TestDecodeIssues_ClaimedBackgroundWork_GrammarIssueSilences(t T) T {
+    val buf = "@summary\nthe workflow runs in the background and reports back when done"
+    val res = DecodeWithIssues(buf, tl(0))
+    val t1 = Eq(t, res.Issues.Length(), 1)
+    return res.Issues.Get(0) match {
+        case UnclosedBlock(k) => Eq(t1, k, "summary")
+        case _                => IsTrue(t1, false)
+    }
+}
+
+// Negative: a member-view buffer (not LeadView) is never scanned by the
+// heuristic, even with markers present — only TL turns are subject to
+// the "must dispatch or answer directly" contract.
+func TestDecodeIssues_ClaimedBackgroundWork_MemberViewSkips(t T) T {
+    val buf = "the workflow runs in the background and reports back when done"
+    val res = DecodeWithIssues(buf, mem("Felix", 0))
+    return Eq(t, res.Issues.Length(), 0)
+}
+
+// IssueTag and IssueClaimedBackgroundMarkers project the issue to the
+// shape the UI consumes. Tag is the cross-package dispatch key; the
+// accessor returns the matched substring list verbatim so the nudge
+// can quote it back to the TL.
+func TestDecodeIssues_ClaimedBackgroundWork_TagAndAccessor(t T) T {
+    val issue = ClaimedBackgroundWork(Markers = ArrayOf("workflow", "background"))
+    val t1 = Eq(t, IssueTag(issue), "claimed_background_work")
+    val ms = IssueClaimedBackgroundMarkers(issue)
+    val t2 = Eq(t1, ms.Length(), 2)
+    return Eq(t2, ms.MkString(","), "workflow,background")
+}
+
+// Accessor returns an empty array for any non-ClaimedBackgroundWork
+// issue variant — callers should gate on IssueTag first, matching the
+// other accessor contracts in this file.
+func TestDecodeIssues_ClaimedBackgroundMarkers_WrongVariantEmpty(t T) T {
+    val ms = IssueClaimedBackgroundMarkers(UnclosedBlock(Kind = "summary"))
+    return Eq(t, ms.Length(), 0)
+}
+
 // Interleaved sequence of all five lead-kinds in source order — proves
 // the unified scanner walks one buffer once and emits each directive
 // kind alongside the others without dropping any.

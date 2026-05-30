@@ -26,21 +26,34 @@ func TestClassifyClaudeRead_LineIsChunk(t T) T {
 // directive parser found zero @summary/@blocked in the otherwise-
 // empty turn buffer, the FSM stepped TLThinking → Idle, and the
 // prior gate's pending user question was forgotten. The transport
-// now routes the line onto AgentDiagnostic — same channel that
-// existing onStderr handling surfaces as a toast + LastError without
-// touching the conversation.
-func TestClassifyClaudeRead_AuthErrorIsDiagnostic(t T) T {
+// now routes the line onto the typed AgentTransportAuthError variant
+// — the UI maps it to RtTransportAuthError, surfaces a warn toast +
+// LastError, AND records the failure in TransportAuthErrorMembers so
+// onSessionFailed can pattern-match the flag instead of substring-
+// scanning LastError text.
+func TestClassifyClaudeRead_AuthErrorIsTransportAuthError(t T) T {
     val authLine = "Failed to authenticate. API Error: 401 Invalid authentication credentials"
     return classifyClaudeRead(Success(authLine)) match {
-        case AgentDiagnostic(text) => Eq(t, text, authLine)
-        case _                     => IsTrue(t, false)
+        case AgentTransportAuthError(text) => Eq(t, text, authLine)
+        case _                             => IsTrue(t, false)
     }
 }
 
-func TestClassifyClaudeRead_403IsDiagnostic(t T) T {
+func TestClassifyClaudeRead_403IsTransportAuthError(t T) T {
     return classifyClaudeRead(Success("API Error: 403 Forbidden")) match {
-        case AgentDiagnostic(_) => IsTrue(t, true)
-        case _                  => IsTrue(t, false)
+        case AgentTransportAuthError(_) => IsTrue(t, true)
+        case _                          => IsTrue(t, false)
+    }
+}
+
+// stderr-channel auth errors get the same typed routing — the
+// classifier promotes them out of AgentDiagnostic so the UI's typed
+// handler captures them whether they came in on stdout or stderr.
+func TestClassifyClaudeDiagnostic_AuthErrorIsTransportAuthError(t T) T {
+    val authLine = "Failed to authenticate. API Error: 401 Invalid authentication credentials"
+    return classifyClaudeDiagnostic(Success(authLine)) match {
+        case AgentTransportAuthError(text) => Eq(t, text, authLine)
+        case _                             => IsTrue(t, false)
     }
 }
 
@@ -148,6 +161,35 @@ func TestAgentDiagnosticToMsg_Mapping(t T) T {
     }
     val t1 = IsTrue(t, arrived)
     return IsTrue(t1, ended)
+}
+
+// AgentTransportAuthError on the stdout pump maps to
+// RtTransportAuthError (not RtStderrArrived) so the UI's typed
+// handler can capture both the user-facing surface (toast + LastError)
+// and the FSM flag (TransportAuthErrorMembers set membership) in one
+// dispatch. The substring scan at onSessionFailed time goes away
+// once the flag is set up front.
+func TestAgentEventToMsg_TransportAuthError(t T) T {
+    return agentEventToMsg("Felix", AgentTransportAuthError(Text = "401")) match {
+        case RtTransportAuthError(name, text) => {
+            val t1 = Eq(t, name, "Felix")
+            return Eq(t1, text, "401")
+        }
+        case _ => IsTrue(t, false)
+    }
+}
+
+// Same routing on the stderr pump — the typed event is stream-
+// agnostic, so wherever the auth line appears, the UI gets the same
+// RtTransportAuthError dispatch.
+func TestAgentDiagnosticToMsg_TransportAuthError(t T) T {
+    return agentDiagnosticToMsg("Felix", AgentTransportAuthError(Text = "403")) match {
+        case RtTransportAuthError(name, text) => {
+            val t1 = Eq(t, name, "Felix")
+            return Eq(t1, text, "403")
+        }
+        case _ => IsTrue(t, false)
+    }
 }
 
 // IsLongRunningClaudeToolName: claude-code's Task and Workflow tools

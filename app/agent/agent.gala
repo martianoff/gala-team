@@ -17,15 +17,28 @@ import (
 
 // AgentEvent is one thing an agent produces while working a turn.
 //
-//   AgentChunk      — a unit of assistant output text.
-//   AgentDiagnostic — out-of-band diagnostic text (auth / setup / health
-//                      notices) the agent surfaces alongside its output.
-//   AgentTurnEnded  — the agent finished the turn cleanly; no more output
-//                      until the next input.
-//   AgentFailed     — the event source broke; Err carries the cause.
+//   AgentChunk              — a unit of assistant output text.
+//   AgentDiagnostic         — out-of-band diagnostic text (setup /
+//                              health / generic warning notices) the
+//                              agent surfaces alongside its output.
+//   AgentTransportAuthError — the transport layer (CLI / API client)
+//                              authenticated unsuccessfully and the
+//                              session cannot continue until the user
+//                              fixes credentials. Distinguished from
+//                              AgentDiagnostic so the orchestrator
+//                              suppresses the TLDone transition and
+//                              shows a recovery notice instead of
+//                              treating the dead session as a normal
+//                              turn end. Text carries the original
+//                              transport message for the audit log.
+//   AgentTurnEnded          — the agent finished the turn cleanly; no
+//                              more output until the next input.
+//   AgentFailed             — the event source broke; Err carries the
+//                              cause.
 sealed type AgentEvent {
     case AgentChunk(Text string)
     case AgentDiagnostic(Text string)
+    case AgentTransportAuthError(Text string)
     case AgentTurnEnded()
     case AgentFailed(Err error)
 }

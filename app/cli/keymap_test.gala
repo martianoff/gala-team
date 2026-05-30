@@ -272,6 +272,7 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case KeyQuestionDismiss()        => "KeyQuestionDismiss"
     case StderrArrived(_, _)         => "StderrArrived"
     case StderrEnded(_)              => "StderrEnded"
+    case TransportAuthError(_, _)    => "TransportAuthError"
     case QAPromptReady(_)            => "QAPromptReady"
     case ClipboardPasted(_)          => "ClipboardPasted"
     case ClipboardFailed(_)          => "ClipboardFailed"

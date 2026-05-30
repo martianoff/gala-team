@@ -44,6 +44,14 @@ sealed type Msg {
     case RtWriteSent(Member string)
     case RtStderrArrived(Member string, Line string)
     case RtStderrEnded(Member string)
+    // RtTransportAuthError surfaces a transport-layer authentication
+    // failure (OAuth token rejected by the API, billing-blocked
+    // credentials, etc.). Distinguished from RtStderrArrived so the UI
+    // can both display the wording AND set a per-member flag the
+    // onSessionFailed path checks when deciding whether to suppress
+    // the TLDone transition. Without the typed variant the UI had to
+    // substring-scan LastError at turn end to recover the same signal.
+    case RtTransportAuthError(Member string, Text string)
     case RtPrCreated(Url string, Branch string)
     case RtPrFailed(Err error)
     case RtWorktreesWiped()
@@ -671,20 +679,22 @@ func PruneWorktrees(proj Project) Try[bool] = Try(() => {
 // for the `claude` transport but is routed sensibly for any transport
 // that interleaves it.
 func agentEventToMsg(name string, ev AgentEvent) Msg = ev match {
-    case AgentChunk(text)      => RtChunkArrived(Member = name, Line = text)
-    case AgentDiagnostic(text) => RtStderrArrived(Member = name, Line = text)
-    case AgentTurnEnded()      => RtSessionFailed(Member = name, Err = errors.New("EOF"))
-    case AgentFailed(err)      => RtSessionFailed(Member = name, Err = err)
+    case AgentChunk(text)              => RtChunkArrived(Member = name, Line = text)
+    case AgentDiagnostic(text)         => RtStderrArrived(Member = name, Line = text)
+    case AgentTransportAuthError(text) => RtTransportAuthError(Member = name, Text = text)
+    case AgentTurnEnded()              => RtSessionFailed(Member = name, Err = errors.New("EOF"))
+    case AgentFailed(err)              => RtSessionFailed(Member = name, Err = err)
 }
 
 // agentDiagnosticToMsg maps the diagnostic stream to a runtime Msg: a
 // line is RtStderrArrived; any terminal event ends the pump as
 // RtStderrEnded.
 func agentDiagnosticToMsg(name string, ev AgentEvent) Msg = ev match {
-    case AgentDiagnostic(text) => RtStderrArrived(Member = name, Line = text)
-    case AgentChunk(_)         => RtStderrEnded(Member = name)
-    case AgentTurnEnded()      => RtStderrEnded(Member = name)
-    case AgentFailed(_)        => RtStderrEnded(Member = name)
+    case AgentDiagnostic(text)         => RtStderrArrived(Member = name, Line = text)
+    case AgentTransportAuthError(text) => RtTransportAuthError(Member = name, Text = text)
+    case AgentChunk(_)                 => RtStderrEnded(Member = name)
+    case AgentTurnEnded()              => RtStderrEnded(Member = name)
+    case AgentFailed(_)                => RtStderrEnded(Member = name)
 }
 
 // NextChunkFuture schedules the next output event and maps it to a Msg.
@@ -771,14 +781,15 @@ func CloseAllSessions(sessions HashMap[string, MemberSession]) Array[Tuple[strin
 // PR / merge variants don't have a member; they return "" so callers
 // can branch on that or pattern-match instead.
 func MsgMember(msg Msg) string = msg match {
-    case RtChunkArrived(name, _)    => name
-    case RtSessionFailed(name, _)   => name
-    case RtWriteSent(name)          => name
-    case RtStderrArrived(name, _)   => name
-    case RtStderrEnded(name)        => name
-    case RtPrCreated(_, _)          => ""
-    case RtPrFailed(_)              => ""
-    case RtWorktreesWiped()         => ""
+    case RtChunkArrived(name, _)       => name
+    case RtSessionFailed(name, _)      => name
+    case RtWriteSent(name)             => name
+    case RtStderrArrived(name, _)      => name
+    case RtStderrEnded(name)           => name
+    case RtTransportAuthError(name, _) => name
+    case RtPrCreated(_, _)             => ""
+    case RtPrFailed(_)                 => ""
+    case RtWorktreesWiped()            => ""
 }
 
 // ----------------------------------------------------------------------------

@@ -581,8 +581,8 @@ func TestE2EProperty_StateTag_IsTotalAndUnique(t T) T {
     return IsTrue(t1, allUnique)
 }
 
-// looksLikeStreamJson detects only real envelope shapes; arbitrary
-// prose and partial fragments return false.
+// LooksLikeClaudeStreamJson detects only real envelope shapes;
+// arbitrary prose and partial fragments return false.
 func TestE2EProperty_LooksLikeStreamJson_OnlyTrueForEnvelopes(t T) T {
     val envelopes = ArrayOf[string](
         "{\"type\":\"assistant\",\"message\":{\"content\":[]}}",
@@ -611,8 +611,8 @@ func TestE2EProperty_LooksLikeStreamJson_OnlyTrueForEnvelopes(t T) T {
         // user pasted.
         "{\"foo\":\"bar\"}",
     )
-    val allEnvelopesTrue = envelopes.Map((s) => looksLikeStreamJson(s)).FoldLeft(true, (acc, b) => acc && b)
-    val allProseFalse    = prose.Map((s) => !looksLikeStreamJson(s)).FoldLeft(true, (acc, b) => acc && b)
+    val allEnvelopesTrue = envelopes.Map((s) => LooksLikeClaudeStreamJson(s)).FoldLeft(true, (acc, b) => acc && b)
+    val allProseFalse    = prose.Map((s) => !LooksLikeClaudeStreamJson(s)).FoldLeft(true, (acc, b) => acc && b)
     val t1 = IsTrue(t, allEnvelopesTrue)
     return IsTrue(t1, allProseFalse)
 }

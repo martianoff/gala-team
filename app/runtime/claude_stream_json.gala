@@ -1,0 +1,130 @@
+package runtime
+
+import (
+    "strings"
+    "martianoff/gala/json"
+    . "martianoff/gala/std"
+    . "martianoff/gala/collection_immutable"
+)
+
+// ============================================================================
+// app/runtime/claude_stream_json — small claude-code stream-json
+// classifiers and extractors shared across orchestrator surfaces.
+//
+// Lives in the runtime package because every symbol here knows the
+// concrete shape of claude-code's wire output: the `"type":"<kind>"`
+// envelope header, the tool_result block shape, the error wording the
+// CLI uses for stale `--resume` ids. Nothing above app/runtime (UI,
+// headless, consult, fsm) should need to know any of this; callers
+// import these predicates from this package.
+//
+// Larger pieces of the parser — the full envelope classifier, the
+// buffer-and-extract pipeline, the codec types — are sibling material
+// and migrate alongside in follow-up changes. This file is the leaf
+// move: tiny, dependency-free helpers with no AppModel coupling.
+// ============================================================================
+
+// streamJsonHeader is the bare envelope shape every claude-code
+// stream-json line carries: a top-level `type` field tagging the
+// event kind ("assistant", "user", "result", "system", "tool_use",
+// "tool_use_result", "message_start", ...). Used by
+// LooksLikeClaudeStreamJson to decide whether a stray bytestring
+// (claude-code stderr output, a result envelope's `result.result`
+// field, etc.) is actually a misrouted stream-json envelope rather
+// than arbitrary prose. Decoded via json.Codec so the check is a
+// real parse rather than a substring heuristic.
+struct streamJsonHeader(Type string)
+val streamJsonHeaderCodec = json.Codec[streamJsonHeader](json.SnakeCase())
+
+// LooksLikeClaudeStreamJson returns true when `s` parses as a JSON
+// object with a non-empty top-level `type` field. The decode is the
+// authoritative signal: any string that round-trips through the
+// codec to a streamJsonHeader with Type != "" is a real envelope.
+// Arbitrary prose, partial fragments, and non-object JSON all fail
+// the decode and return false. Used by the UI's onStderr (to
+// suppress stream-json misrouted onto stderr) and by
+// applyChunkVisible (to suppress stream-json carried in a result
+// envelope's `result` field) so neither surface dumps raw envelope
+// bytes into the bottom-bar toast / LastError. Headless uses the
+// same predicate to filter brace-counter false positives.
+func LooksLikeClaudeStreamJson(s string) bool {
+    val trimmed = strings.TrimSpace(s)
+    if !strings.HasPrefix(trimmed, "{") { return false }
+    // Fast path: full decode. Works for clean single envelopes.
+    val decoded = streamJsonHeaderCodec.Decode(trimmed) match {
+        case Success(h) => h.Type != ""
+        case Failure(_) => false
+    }
+    if decoded { return true }
+    // Decode failed. Two common reasons claude-code dumps a string
+    // starting with `{` but the codec rejects: (a) the payload is a
+    // multi-envelope newline-joined chunk (only the first object
+    // parses cleanly), (b) the payload is truncated mid-object. In
+    // both cases the leading bytes are recognisably an envelope —
+    // catch them so the user sees the friendly tag instead of the
+    // raw bytes leaking into LastError / toasts.
+    //
+    // Try the first line in isolation — handles the multi-envelope
+    // dump shape.
+    val parts = strings.SplitN(trimmed, "\n", 2)
+    val firstLineDecoded = if (len(parts) == 0) false
+                           else streamJsonHeaderCodec.Decode(strings.TrimSpace(parts[0])) match {
+                               case Success(h) => h.Type != ""
+                               case Failure(_) => false
+                           }
+    if firstLineDecoded { return true }
+    // Fallback: leading-bytes substring check. claude's envelopes
+    // always carry `"type":"<kind>"` early in the object, so a string
+    // that starts with `{"type":"` is almost certainly a (possibly
+    // truncated) envelope even when the JSON tail is malformed.
+    return strings.HasPrefix(trimmed, "{\"type\":\"")
+}
+
+// LooksLikeStaleClaudeSessionError returns true if claude's error
+// text indicates the `--resume` id we passed isn't recognised. Two
+// surface shapes claude has been observed to use: "No conversation
+// found with session ID …" (typical) and "session not found" (older
+// builds). Case-insensitive substring check — the message wording
+// varies across claude versions and we want every variant to trigger
+// the recovery path that drops the bad id from SessionIds so the next
+// dispatch spawns fresh.
+func LooksLikeStaleClaudeSessionError(err string) bool {
+    if err == "" { return false }
+    val lower = strings.ToLower(err)
+    return strings.Contains(lower, "no conversation found") ||
+           strings.Contains(lower, "session not found") ||
+           strings.Contains(lower, "session id not found")
+}
+
+// ExtractClaudeEnvelopeType pulls the top-level `"type"` value out of
+// a trimmed claude stream-json envelope. Cheap string match used by
+// the whitelist gate to avoid running the codec on envelopes we
+// already know we're going to drop. Returns "" when the field is
+// absent or malformed.
+func ExtractClaudeEnvelopeType(trimmed string) string {
+    val needle = "\"type\":\""
+    val parts = strings.SplitN(trimmed, needle, 2)
+    if len(parts) < 2 { return "" }
+    val rest = parts[1]
+    val tail = strings.SplitN(rest, "\"", 2)
+    if len(tail) < 2 { return "" }
+    return tail[0]
+}
+
+// ExtractFirstClaudeToolUseId scans `envelope` (a type:"user"
+// stream-json line) for the first `"tool_use_id":"<id>"` field. Used
+// to detect when a Task / Workflow tool_result has landed, so the
+// orchestrator can remove the id from OutstandingTaskTools and
+// resume the watchdog. Returns "" when the field is absent.
+// String-scan rather than a typed codec because tool_result blocks
+// ship with mixed inner schemas depending on the source tool — we
+// only need this one stable key.
+func ExtractFirstClaudeToolUseId(envelope string) string {
+    val needle = "\"tool_use_id\":\""
+    val parts = strings.SplitN(envelope, needle, 2)
+    if len(parts) < 2 { return "" }
+    val rest = parts[1]
+    val tail = strings.SplitN(rest, "\"", 2)
+    if len(tail) < 2 { return "" }
+    return tail[0]
+}

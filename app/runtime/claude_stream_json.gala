@@ -305,6 +305,16 @@ struct ClaudeChunk(
     // set is the source of truth for which ids matter, so removing a
     // never-tracked id is a harmless no-op.
     TaskToolResultId string,
+    // WorkflowProgressLabel is the latest claude-code Workflow tool
+    // status, extracted from `system / subtype:"task_progress"`
+    // envelopes. Carries the envelope's `description` field (e.g.
+    // "Synthesize: synthesize", "Map: map:runtime") so the UI can
+    // render the currently-running phase + agent on the sidebar /
+    // status surface. Empty for any non-task-progress envelope.
+    // claude-code emits these ~3/sec while a workflow runs; the UI
+    // overwrites the per-member slot on each tick, so only the
+    // latest progress is surfaced (no log spam).
+    WorkflowProgressLabel string,
 )
 
 // EmptyClaudeChunk is the "drop this line" marker.
@@ -319,8 +329,9 @@ func EmptyClaudeChunk() ClaudeChunk = ClaudeChunk(
     TurnEnded        = false,
     IsToolActivity   = false,
     IsSynthetic      = false,
-    TaskToolUseIds   = EmptyArray[string](),
-    TaskToolResultId = "",
+    TaskToolUseIds        = EmptyArray[string](),
+    TaskToolResultId      = "",
+    WorkflowProgressLabel = "",
 )
 
 // SyntheticClaudeChunk marks a claude-code synthetic envelope. The caller
@@ -338,8 +349,9 @@ func SyntheticClaudeChunk() ClaudeChunk = ClaudeChunk(
     TurnEnded        = false,
     IsToolActivity   = false,
     IsSynthetic      = true,
-    TaskToolUseIds   = EmptyArray[string](),
-    TaskToolResultId = "",
+    TaskToolUseIds        = EmptyArray[string](),
+    TaskToolResultId      = "",
+    WorkflowProgressLabel = "",
 )
 
 // FilterClaudeStreamJsonFor is the chunk classifier. The `member`
@@ -448,6 +460,30 @@ func FilterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
         val chunk = EmptyClaudeChunk().Copy(TaskToolResultId = toolResultId)
         return chunk
     }
+    // type:"system" envelopes carry orchestration metadata claude-code
+    // emits during its own internal operations. The `task_progress`
+    // subtype is the live progress tick for the Workflow tool — a
+    // multi-phase parallel-agent script that emits ~3 ticks/sec while
+    // running but no visible text until the workflow ends. The envelope
+    // carries a `description` field (e.g. "Synthesize: synthesize",
+    // "Map: map:runtime") that names the currently-active phase + agent.
+    // Surface it on the chunk so applyChunkVisible can stash it in
+    // m.WorkflowStatus[name] and the view can render "what is the
+    // workflow doing right now" instead of blank silence. Other system
+    // subtypes (init / hooks / settings) are still dropped — only
+    // task_progress has a user-meaningful payload to surface today.
+    if kind == "system" {
+        val subtype = extractJsonField(trimmed, "subtype")
+        if subtype == "task_progress" {
+            val description = extractJsonField(trimmed, "description")
+            val chunk = EmptyClaudeChunk().Copy(WorkflowProgressLabel = description)
+            val reason = if (description == "") "system task_progress (no description)" else "system task_progress"
+            TraceClaudeLine(member, envelope, "", "", true, reason)
+            return chunk
+        }
+        TraceClaudeLine(member, envelope, "", "", true, s"system event subtype=${subtype}")
+        return EmptyClaudeChunk()
+    }
     val typeStr = if (kind == "") "<no type>" else kind
     TraceClaudeLine(member, envelope, "", "", true, s"non-whitelisted event type: ${typeStr}")
     return EmptyClaudeChunk()
@@ -506,7 +542,8 @@ func RateLimitEventChunk(envelope string) ClaudeChunk {
         IsToolActivity   = false,
         IsSynthetic      = false,
         TaskToolUseIds   = EmptyArray[string](),
-        TaskToolResultId = "",
+        TaskToolResultId      = "",
+        WorkflowProgressLabel = "",
     )
 }
 
@@ -681,7 +718,8 @@ func assistantEventChunk(evt ClaudeAssistantEvent, rawEnvelope string) ClaudeChu
         IsToolActivity   = isToolActivity,
         IsSynthetic      = false,
         TaskToolUseIds   = taskToolUseIds,
-        TaskToolResultId = "",
+        TaskToolResultId      = "",
+        WorkflowProgressLabel = "",
     )
 }
 
@@ -825,7 +863,8 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
             IsToolActivity   = false,
             IsSynthetic      = false,
             TaskToolUseIds   = EmptyArray[string](),
-            TaskToolResultId = "",
+            TaskToolResultId      = "",
+            WorkflowProgressLabel = "",
         )
     }
     // Render the `result` field as visible text on a clean turn. Two
@@ -856,6 +895,7 @@ func resultEventChunk(evt ClaudeResultEvent) ClaudeChunk {
         IsToolActivity   = false,
         IsSynthetic      = false,
         TaskToolUseIds   = EmptyArray[string](),
-        TaskToolResultId = "",
+        TaskToolResultId      = "",
+        WorkflowProgressLabel = "",
     )
 }

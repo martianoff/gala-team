@@ -2682,13 +2682,22 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     // synchronously while a subagent runs, and a long Explore / Plan
     // would otherwise trip the 5-minute TL watchdog.
     val mTracked = trackTaskTool(m, name, chunk)
+    // Workflow progress tick. claude-code's Workflow tool emits a
+    // `system / task_progress` envelope ~3 times/sec while it runs;
+    // FilterClaudeStreamJsonFor extracts the human-readable phase +
+    // agent label (e.g. "Synthesize: synthesize") into
+    // chunk.WorkflowProgressLabel. Overwrite the per-member slot so
+    // the latest progress always wins (no log spam). Cleared elsewhere
+    // when the session closes / member is erased.
+    val mProgress = if (chunk.WorkflowProgressLabel == "") mTracked
+                    else mTracked.Copy(WorkflowStatus = mTracked.WorkflowStatus.Put(name, chunk.WorkflowProgressLabel))
     // Any real chunk resets the synthetic counter. LastChunkAt is
     // bumped by the caller (onChunk) so it lands AFTER setStatus's
     // own LastChunkAt write on the non-working→working transition
     // (setStatus stamps m.NowAt onto LastChunkAt as part of the
     // work-start accounting; bumping LastChunkAt here would just
     // get clobbered downstream).
-    val mAccrued = accrueTokens(mTracked.Copy(SyntheticOnlyChunks = mTracked.SyntheticOnlyChunks.Remove(name)), name, chunk)
+    val mAccrued = accrueTokens(mProgress.Copy(SyntheticOnlyChunks = mProgress.SyntheticOnlyChunks.Remove(name)), name, chunk)
     val displayText = chunk.Visible
     // Stale-session-id recovery: claude returns "No conversation found
     // with session ID …" when --resume points at an id claude doesn't

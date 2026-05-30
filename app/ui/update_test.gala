@@ -5449,6 +5449,45 @@ func TestFilterClaudeStreamJson_RealAssistantEnvelope_NotSynthetic(t T) T {
     return Eq(t1, chunk.Visible, "hello")
 }
 
+// claude-code's Workflow tool emits `system / subtype:"task_progress"`
+// envelopes ~3x/sec while a workflow runs. The classifier surfaces
+// the `description` field on chunk.WorkflowProgressLabel so the UI
+// can render it on the sidebar / status surface. Without this the
+// envelope dropped as "non-whitelisted event type: system" and the
+// user saw blank silence while N parallel agents ran for minutes.
+func TestFilterClaudeStreamJson_WorkflowTaskProgress_SurfacesDescription(t T) T {
+    val env = "{\"type\":\"system\",\"subtype\":\"task_progress\",\"description\":\"Synthesize: synthesize\",\"workflow_progress\":[]}"
+    val chunk = FilterClaudeStreamJsonFor("Iris", env)
+    return Eq(t, chunk.WorkflowProgressLabel, "Synthesize: synthesize")
+}
+
+// Other system subtypes (init / hooks / settings) drop to an empty
+// chunk — only task_progress has a user-meaningful payload today.
+func TestFilterClaudeStreamJson_SystemNonTaskProgress_Drops(t T) T {
+    val env = "{\"type\":\"system\",\"subtype\":\"init\"}"
+    val chunk = FilterClaudeStreamJsonFor("Iris", env)
+    return Eq(t, chunk.WorkflowProgressLabel, "")
+}
+
+// applyChunkVisible end-to-end: when a chunk carries a workflow
+// progress label, the per-member entry in m.WorkflowStatus is
+// overwritten with the latest tick.
+func TestChunkArrived_WorkflowTaskProgress_UpdatesWorkflowStatus(t T) T {
+    val env = "{\"type\":\"system\",\"subtype\":\"task_progress\",\"description\":\"Map: map:runtime\"}"
+    val (m, _) = Update(sampleModel(), ChunkArrived(Member = "Iris", Line = env))
+    return Eq(t, m.WorkflowStatus.Get("Iris").GetOrElse(""), "Map: map:runtime")
+}
+
+// A subsequent tick with a different phase overwrites the prior one
+// — only the latest progress is surfaced.
+func TestChunkArrived_WorkflowTaskProgress_LatestTickWins(t T) T {
+    val env1 = "{\"type\":\"system\",\"subtype\":\"task_progress\",\"description\":\"Map: map:runtime\"}"
+    val env2 = "{\"type\":\"system\",\"subtype\":\"task_progress\",\"description\":\"Synthesize: synthesize\"}"
+    val (m1, _) = Update(sampleModel(), ChunkArrived(Member = "Iris", Line = env1))
+    val (m2, _) = Update(m1,           ChunkArrived(Member = "Iris", Line = env2))
+    return Eq(t, m2.WorkflowStatus.Get("Iris").GetOrElse(""), "Synthesize: synthesize")
+}
+
 // ChunkArrived with a synthetic envelope must NOT bump LastChunkAt.
 // If it did, the heartbeat would treat the synthetic-only stream as
 // alive and never escalate to MemberAbandoned — the QA-gate freeze

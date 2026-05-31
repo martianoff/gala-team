@@ -6639,3 +6639,45 @@ func TestFormatDecodeIssues_Empty(t T) T {
     val reason = formatDecodeIssues(EmptyArray[protocol.DecodeIssue]())
     return Eq(t, reason, "")
 }
+
+// ---------------------------------------------------------------------------
+// Single-surface error model (Activity band)
+// ---------------------------------------------------------------------------
+
+// A generic stderr diagnostic sets the sticky LastError but does NOT
+// also push a transient toast. Earlier this surfaced the same error
+// twice — a top toast AND a bottom bar.
+func TestStderr_SetsLastError_NoDuplicateToast(t T) T {
+    val line = "Failed to authenticate. API Error: 401 Invalid authentication credentials"
+    val (m, _) = Update(sampleModel(), StderrArrived(Member = "Iris", Line = line))
+    val t1 = IsTrue(t, m.LastError.IsDefined())
+    return Eq(t1, m.Toasts.Length(), 0)
+}
+
+// The typed TransportAuthError event likewise surfaces once on
+// LastError with no parallel toast.
+func TestTransportAuthError_SetsLastError_NoToast(t T) T {
+    val (m, _) = Update(sampleModel(), TransportAuthError(Member = "Iris", Text = "OAuth token rejected"))
+    val t1 = IsTrue(t, m.LastError.IsDefined())
+    return Eq(t1, m.Toasts.Length(), 0)
+}
+
+// A misrouted stream-json envelope arriving as a transport-auth error
+// must NOT leak its raw JSON into the user-visible LastError.
+func TestTransportAuthError_SanitisesStreamJson(t T) T {
+    val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_x\"}]}}"
+    val (m, _) = Update(sampleModel(), TransportAuthError(Member = "Iris", Text = envelope))
+    return m.LastError match {
+        case Some(s) => IsFalse(t, strings.Contains(s, "tool_use_id"))
+        case None()  => IsTrue(t, false)
+    }
+}
+
+// Esc dismisses the sticky band error when nothing higher-precedence
+// (modal / selection / sidebar focus) is open. Esc routes through
+// HistoryDeselect → onEscOrDeselect.
+func TestEsc_DismissesStickyBandError(t T) T {
+    val seed = sampleModel().Copy(LastError = Some("gh pr create: auth required"))
+    val (m, _) = Update(seed, HistoryDeselect())
+    return IsFalse(t, m.LastError.IsDefined())
+}

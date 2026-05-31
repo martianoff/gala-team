@@ -108,6 +108,11 @@ func View(m AppModel) Widget {
     val base = Column(ArrayOf[LayoutChild](
         Fixed(headerHeight(m), header),
         Flex(1, body),
+        // Activity band: full-width status strip for active members +
+        // any sticky error. Spans the whole window (sidebar + chat)
+        // so variable-length workflow phases / error remedies have
+        // room to render without clipping. Renders 0 rows at rest.
+        activityBand(m),
         // Plan panel sits below the chat log (above the composer)
         // when a multi-PR plan is active: a bordered, one-row-per-
         // step view of shipped → in progress → queued. Renders 0
@@ -115,10 +120,6 @@ func View(m AppModel) Widget {
         planPanel(m),
         Fixed(composerOuterHeight(m), composerPanel),
         Fixed(1, footer),
-        // Error banner sits at the very bottom — visible without
-        // shadowing the keybind row, off the chat-input area, easy
-        // to scan at a glance. Renders 0 rows when there's no error.
-        errorBanner(m),
     ))
     // Overlay stack — paint each modal on top of the base, in
     // ascending z-order. Each overlay is conditional; when none are
@@ -498,15 +499,29 @@ func gridBody(m AppModel) Widget {
 }
 
 // memberCard renders one member as a bordered card with their role
-// badge, current status, last-message preview, cumulative token
-// count, and a per-turn token counter (when there's an active turn).
-// Frame N in DESIGN.md.
+// badge, an animated severity-coloured status line (glyph + tag +
+// work timer), the live workflow phase when one is in flight, a
+// last-message preview, and token counters. Frame N in DESIGN.md. The
+// status / timer / phase mirror the Activity band so the F3 grid
+// reflects the same live signal as the default view.
 func memberCard(m AppModel, mem Member) Widget {
     val st = m.Statuses.Get(mem.Name).GetOrElse(StIdle())
     val nameStyle = DefaultStyle().WithBold().WithFg(MemberColor(m.Team, mem))
     val name = TextStyled(s"  ${mem.Name}", nameStyle)
     val role = TextStyled(s"  ${RoleName(mem.Role)}", DefaultStyle().WithDim())
-    val status = TextStyled(s"  ${statusTagFor(st)}", DefaultStyle().WithDim())
+    // Status line: animated glyph (spins on m.Tick for working/slow) +
+    // status tag + cumulative work timer, coloured by severity so a
+    // failed / stuck card reads red at a glance.
+    val timer = totalWorkFor(m, mem.Name, isRunningStatus(st))
+    val statusText = if (timer == "") s"  ${bandGlyph(st, m.Tick)} ${statusTagFor(st)}"
+                     else             s"  ${bandGlyph(st, m.Tick)} ${statusTagFor(st)} · ${timer}"
+    val status = TextStyled(statusText, activityRowStyle(st))
+    // Live workflow phase — only while the member is actively working
+    // and a Workflow tool is in flight. Capped to the card width.
+    val phaseRaw = m.WorkflowStatus.Get(mem.Name).GetOrElse("")
+    val phaseText = if (phaseRaw == "" || !isActiveStatus(st)) ""
+                    else s"  ⚙ ${cardCap(phaseRaw, 26)}"
+    val phase = TextStyled(phaseText, DefaultStyle().WithFg(BrightCyan()))
     val preview = TextStyled(s"  \"${memberLastMessage(m, mem.Name)}\"",
         DefaultStyle().WithDim())
     val tokens = m.TokenUsage.Get(mem.Name).GetOrElse(zeroUsage())
@@ -522,6 +537,7 @@ func memberCard(m AppModel, mem Member) Widget {
         Fixed(1, name),
         Fixed(1, role),
         Fixed(1, status),
+        Fixed(1, phase),
         Fixed(1, Empty()),
         Fixed(1, preview),
         Fixed(1, Empty()),
@@ -529,6 +545,14 @@ func memberCard(m AppModel, mem Member) Widget {
         Flex(1, Empty()),
     ))
     return BorderOf(body, RoundedBorder())
+}
+
+// cardCap clamps card text to `n` runes with an ellipsis so a long
+// workflow phase doesn't overrun the (width / member-count) card.
+func cardCap(s string, n int) string {
+    val rs = ToRunes(s)
+    if len(rs) <= n { return s }
+    return runesPrefix(s, n - 1) + "…"
 }
 
 // memberLastMessage returns a one-line preview of `name`'s most
@@ -1276,9 +1300,15 @@ func buildSidebarRightFields(m AppModel, members Array[Member]) HashMap[string, 
 //
 // Idle / queued / done shows nothing (no work to time). Failed and
 // help-waiting show their static labels.
+// The workflow-progress phase is intentionally NOT shown here. It used
+// to be appended to the timer ("2:40 · Map: scout architecture"), but
+// the sidebar column is too narrow for variable-length text — it
+// clipped mid-word. The phase now renders in the full-width Activity
+// band (see activityBand), which has room for the whole label. The
+// sidebar keeps to the fixed-width timer/status, which always fits.
 func sidebarRightField(m AppModel, name string) string {
     val status = m.Statuses.Get(name).GetOrElse(StIdle())
-    val base = status match {
+    return status match {
         case StIdle()           => totalWorkFor(m, name, false)
         case StQueued()         => ""
         case StDone()           => totalWorkFor(m, name, false)
@@ -1289,24 +1319,6 @@ func sidebarRightField(m AppModel, name string) string {
         case StSlow()           => s"${totalWorkFor(m, name, true)} slow"
         case StStuck()          => s"${totalWorkFor(m, name, true)} stuck"
     }
-    // Workflow progress decoration. When a claude-code Workflow tool
-    // is in flight, the WorkflowStatus map carries the latest
-    // task_progress description (e.g. "Synthesize: synthesize"). Show
-    // it only while the member is actively in a working status —
-    // showing a stale workflow label on an Idle / Done row would
-    // mislead. The decoration is appended after the timer with a "·"
-    // separator so the working-time signal is preserved.
-    val workflowLabel = m.WorkflowStatus.Get(name).GetOrElse("")
-    val showWorkflow = workflowLabel != "" && (status match {
-        case StWorking() => true
-        case StSlow()    => true
-        case StStuck()   => true
-        case StRecovering(_, _) => true
-        case _           => false
-    })
-    if !showWorkflow { return base }
-    if base == ""    { return workflowLabel }
-    return s"${base} · ${workflowLabel}"
 }
 
 // totalWorkFor returns the formatted "M:SS" cumulative-work timer
@@ -2000,13 +2012,197 @@ func footerWidget(m AppModel) Widget {
     return TextStyled(footerHints(m), DefaultStyle().WithDim())
 }
 
-// errorBanner renders LastError as a single line above the composer
-// when set, or a 0-row spacer when there's no error. Keeps the
-// footer's keybind hints stable instead of being shadowed by error
-// text.
-func errorBanner(m AppModel) LayoutChild = m.LastError match {
-    case None()    => Fixed(0, Empty())
-    case Some(err) => Fixed(1, TextStyled(s"  ⚠ ${err}", DefaultStyle().WithFg(BrightRed())))
+// activityBand is the full-width status strip rendered above the
+// composer. It is the single home for the variable-length, actionable
+// text the narrow sidebar can't hold:
+//
+//   • one row per ACTIVE member — animated spinner glyph + name +
+//     work timer + the live workflow phase (or a status word). The
+//     glyph cycles on m.Tick so an active row visibly spins, matching
+//     the sidebar's spinner cadence.
+//   • a sticky ⚠ error row sourced from LastError, carrying a remedy
+//     hint and the Esc-to-dismiss affordance — so an error is shown
+//     once, in one place, with something the user can act on (instead
+//     of a raw envelope echoed in both a toast and a footer bar).
+//
+// Renders 0 rows when the team is quiescent and there's no error, so
+// the strip is invisible at rest. Member rows are capped so a wide
+// fan-out can't crowd out the conversation.
+// bandSpinnerFrames mirrors the team panel's braille spinner so the
+// Activity band's animated glyphs share the sidebar's visual cadence.
+// (The canonical set lives in package view but is private to it.)
+val bandSpinnerFrames = ArrayOf("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+
+// bandSpinnerIdx clamps `tick` into the frame range, handling negative
+// ticks defensively (hand-built test models).
+func bandSpinnerIdx(tick int) int {
+    val n = bandSpinnerFrames.Size()
+    if n == 0 { return 0 }
+    val raw = tick % n
+    if raw < 0 { return raw + n }
+    return raw
+}
+
+// bandGlyph picks the band row's left marker, cycling the spinner on
+// `tick` for working/slow members so the row visibly animates. Mirrors
+// the sidebar's statusGlyph.
+func bandGlyph(status Status, tick int) string = status match {
+    case StIdle()           => "◇"
+    case StQueued()         => "○"
+    case StWorking()        => bandSpinnerFrames.Get(bandSpinnerIdx(tick))
+    case StSlow()           => bandSpinnerFrames.Get(bandSpinnerIdx(tick / 2))  // half-speed
+    case StStuck()          => "!"
+    case StRecovering(_, _) => "↻"
+    case StHelpWaiting(_)   => "?"
+    case StDone()           => "✓"
+    case StFailed(_)        => "✗"
+}
+
+// bandPad right-pads `s` with spaces to `width`; returns `s` unchanged
+// when it already meets/exceeds the width.
+func bandPad(s string, width int) string {
+    val deficit = width - len(s)
+    if deficit <= 0 { return s }
+    return s + strings.Repeat(" ", deficit)
+}
+
+func activityBand(m AppModel) LayoutChild {
+    val (cols, _) = TermSize()
+    val memberRows = activeMemberRows(m, cols)
+    val hasErr = m.LastError.IsDefined()
+    if memberRows.IsEmpty() && !hasErr { return Fixed(0, Empty()) }
+    val header = ArrayOf[LayoutChild](
+        Fixed(1, TextStyled("  Activity", DefaultStyle().WithBold())),
+    )
+    val withErr = m.LastError match {
+        case Some(err) => header.Append(Fixed(1, TextStyled(
+            capForBand(s"  ⚠ ${err}${errorRemedy(err)}    (Esc dismiss)", cols),
+            DefaultStyle().WithFg(BrightRed()))))
+        case None()    => header
+    }
+    val children = memberRows.FoldLeft(withErr, (acc, w) => acc.Append(Fixed(1, w)))
+    return Fixed(children.Size(), Column(children))
+}
+
+// activityBandMaxRows caps how many member rows the band shows so a
+// large fan-out can't push the conversation off-screen. Overflow is
+// summarised in a trailing "…and N more" row.
+func activityBandMaxRows() int = 8
+
+// activeMemberRows builds one band row per active member of the main
+// team, in team order, capped at activityBandMaxRows.
+func activeMemberRows(m AppModel, cols int) Array[Widget] {
+    val active = m.Team.Members.FoldLeft(EmptyArray[Member](), (acc, mem) => {
+        val st = m.Statuses.Get(mem.Name).GetOrElse(StIdle())
+        if (isActiveStatus(st)) acc.Append(mem) else acc
+    })
+    if active.IsEmpty() { return EmptyArray[Widget]() }
+    val shown = active.FoldLeft(EmptyArray[Widget](), (acc, mem) => {
+        if (acc.Size() >= activityBandMaxRows()) acc
+        else                                     acc.Append(activityMemberRow(m, mem, cols))
+    })
+    if active.Size() <= activityBandMaxRows() { return shown }
+    val extra = active.Size() - activityBandMaxRows()
+    return shown.Append(TextStyled(s"  …and ${extra} more active", DefaultStyle().WithDim()))
+}
+
+// activityMemberRow renders one full-width member row: animated glyph +
+// padded name + work timer + descriptive detail. The text is capped to
+// the terminal width so a long workflow phase can't wrap and corrupt
+// the layout below.
+func activityMemberRow(m AppModel, mem Member, cols int) Widget {
+    val status = m.Statuses.Get(mem.Name).GetOrElse(StIdle())
+    val glyph = bandGlyph(status, m.Tick)
+    val timer = totalWorkFor(m, mem.Name, isRunningStatus(status))
+    val timerCol = if (timer == "") "     " else bandPad(timer, 5)
+    val text = s"  ${glyph} ${bandPad(mem.Name, 10)} ${timerCol} ${activityDetail(m, mem.Name, status)}"
+    return TextStyled(capForBand(text, cols), activityRowStyle(status))
+}
+
+// isActiveStatus is true for the statuses that warrant a band row —
+// anything the user might want to watch or act on. Idle / queued /
+// done members are quiescent and stay out so the band collapses to
+// nothing when the team is at rest.
+func isActiveStatus(status Status) bool = status match {
+    case StWorking()        => true
+    case StSlow()           => true
+    case StStuck()          => true
+    case StRecovering(_, _) => true
+    case StHelpWaiting(_)   => true
+    case StFailed(_)        => true
+    case StIdle()           => false
+    case StQueued()         => false
+    case StDone()           => false
+}
+
+// isRunningStatus is true when the member's work timer should include
+// the live in-flight segment (still actively working). Failed /
+// help-waiting members are paused, so their timer shows the frozen
+// accumulated total.
+func isRunningStatus(status Status) bool = status match {
+    case StWorking()        => true
+    case StSlow()           => true
+    case StStuck()          => true
+    case StRecovering(_, _) => true
+    case _                  => false
+}
+
+// activityDetail is the right-hand descriptive text for a member's
+// band row. Prefers the live workflow phase (the claude-code Workflow
+// task_progress label) when one is in flight; otherwise falls back to
+// a status word so the row is never blank.
+func activityDetail(m AppModel, name string, status Status) string {
+    val phase = m.WorkflowStatus.Get(name).GetOrElse("")
+    return status match {
+        case StFailed(reason)    => if (reason == "") "failed" else s"failed — ${reason}"
+        case StHelpWaiting(q)    => if (q == "") "needs help" else s"needs help — ${q}"
+        case StRecovering(a, mx) => if (phase == "") s"recovering (retry ${a}/${mx})"
+                                    else              s"recovering (retry ${a}/${mx}) · ${phase}"
+        case StStuck()           => if (phase == "") "stuck — no output yet" else s"stuck · ${phase}"
+        case StSlow()            => if (phase == "") "slow — still working"   else s"slow · ${phase}"
+        case StWorking()         => if (phase == "") "working"                else phase
+        case _                   => phase
+    }
+}
+
+// activityRowStyle colours a band row by severity: red for things that
+// need attention (failed / stuck), yellow for caution (slow / help),
+// cyan for healthy in-flight work, default otherwise.
+func activityRowStyle(status Status) Style = status match {
+    case StFailed(_)        => DefaultStyle().WithFg(BrightRed())
+    case StStuck()          => DefaultStyle().WithFg(BrightRed())
+    case StSlow()           => DefaultStyle().WithFg(BrightYellow())
+    case StHelpWaiting(_)   => DefaultStyle().WithFg(BrightYellow())
+    case StRecovering(_, _) => DefaultStyle().WithFg(BrightCyan())
+    case StWorking()        => DefaultStyle().WithFg(BrightCyan())
+    case _                  => DefaultStyle()
+}
+
+// capForBand clamps a band line to the terminal width (minus a column
+// of breathing room) with an ellipsis, so a long workflow phase or
+// error message never wraps into the row below.
+func capForBand(s string, cols int) string {
+    val maxw = MaxInt(8, cols - 1)
+    val rs = ToRunes(s)
+    if len(rs) <= maxw { return s }
+    return runesPrefix(s, maxw - 1) + "…"
+}
+
+// errorRemedy maps a known LastError shape to a short actionable hint
+// appended to the band's error row. Returns "" for errors we have no
+// specific remedy for — the raw message still shows.
+func errorRemedy(err string) string {
+    val low = strings.ToLower(err)
+    if strings.Contains(low, "auth") || strings.Contains(low, "login") || strings.Contains(low, "credential") {
+        return " — run `claude /login`, then re-send"
+    }
+    if strings.Contains(low, "rate") && strings.Contains(low, "limit") {
+        return " — rate limited, retry shortly"
+    }
+    if strings.Contains(low, "session id") {
+        return " — will respawn fresh on next send"
+    }
+    return ""
 }
 
 // planPanel renders the active multi-PR plan as a BORDERED panel

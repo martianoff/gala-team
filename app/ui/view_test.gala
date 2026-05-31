@@ -1269,3 +1269,59 @@ func TestView_Footer_NoSelection_ShowsDefaultHints(t T) T {
     val t1 = IsTrue(t, strings.Contains(out, "Enter send"))
     return IsFalse(t1, strings.Contains(out, "Ctrl+Y copy"))
 }
+
+// ---------------------------------------------------------------------------
+// Activity band
+// ---------------------------------------------------------------------------
+
+// A working member's workflow phase renders in the full-width Activity
+// band. The phase is longer than the narrow sidebar could hold without
+// clipping mid-word — the band spans the whole window, so the full
+// label shows.
+func TestView_ActivityBand_ShowsFullWorkflowPhase(t T) T {
+    val phase = "Map: scout the architecture seams first"
+    val m = mkModel(mkTeam("X", "")).Copy(
+        Statuses       = EmptyHashMap[string, Status]().Put("Iris", StWorking()),
+        WorkflowStatus = EmptyHashMap[string, string]().Put("Iris", phase),
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "Activity"))
+    return IsTrue(t1, strings.Contains(out, phase))
+}
+
+// The sticky band error row carries an actionable remedy + the
+// Esc-dismiss affordance, instead of a bare or raw-envelope message.
+func TestView_ActivityBand_ErrorShowsRemedyAndDismiss(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(LastError = Some("auth failed"))
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "⚠"))
+    val t2 = IsTrue(t1, strings.Contains(out, "claude /login"))
+    return IsTrue(t2, strings.Contains(out, "Esc dismiss"))
+}
+
+// A failed member surfaces as a band row carrying its reason, not just
+// a terminal sidebar glyph.
+func TestView_ActivityBand_ShowsFailedMemberReason(t T) T {
+    val m = mkModel(mkTeam("X", "")).Copy(
+        Statuses = EmptyHashMap[string, Status]().Put("Iris", StFailed(Reason = "crashed twice")),
+    )
+    return IsTrue(t, strings.Contains(render(m), "crashed twice"))
+}
+
+// At rest (all members idle, no error) the band collapses to nothing —
+// no stray "Activity" header eating a row.
+func TestView_ActivityBand_HiddenWhenQuiescent(t T) T {
+    return IsFalse(t, strings.Contains(render(mkModel(mkTeam("X", ""))), "Activity"))
+}
+
+// The F3 grid cards reflect the same live signal as the band: a
+// working member's card shows its workflow phase.
+func TestView_Grid_CardShowsWorkflowPhase(t T) T {
+    val phase = "Map: scout seams"
+    val m = mkModel(mkTeam("X", "")).Copy(
+        ViewMode       = ViewGrid(),
+        Statuses       = EmptyHashMap[string, Status]().Put("Iris", StWorking()),
+        WorkflowStatus = EmptyHashMap[string, string]().Put("Iris", phase),
+    )
+    return IsTrue(t, strings.Contains(render(m), phase))
+}

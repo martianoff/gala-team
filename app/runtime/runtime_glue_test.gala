@@ -245,7 +245,7 @@ func TestRemoveWorktree_DeregistersDirtySoNextSpawnIsClean(t T) T {
         DefaultBranch = "main",
     )
     val mem = Member(
-        Name = "Kael", Role = Engineer(),
+        Name = "Bram", Role = Engineer(),
         Personality = "", Model = None[string](),
         Extra = "", Onboarding = EmptyArray[string](),
     )
@@ -330,7 +330,7 @@ func TestGhTitle_ShortTitlePassthrough(t T) T {
     return Eq(t, title, "fix(crypto): handle empty Bytes input")
 }
 
-// Regression for PR #336: the rollback-floor was checked with
+// Regression: the rollback-floor was checked with
 // strict-greater, missing the floor position itself. A space that
 // happened to sit at exactly hardLimit - 10 was never seen, and
 // the algorithm fell through to a mid-word cut. The exact input
@@ -467,7 +467,7 @@ func TestFirstCommitSubjectSinceBase_LongSubject_ReturnedVerbatim(t T) T {
     return Eq(t, firstCommitSubjectSinceBase(dir, "main", "feature"), subject)
 }
 
-// Regression for PR #88: pushSnapshotBranch creates the PR branch
+// Regression: pushSnapshotBranch creates the PR branch
 // only on the remote (refs/heads/<pr-branch> on origin), so the
 // local lead worktree has NO local ref by the PR-branch name —
 // only origin/<pr-branch>. Calling firstCommitSubjectSinceBase

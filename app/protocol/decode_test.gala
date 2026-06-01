@@ -237,7 +237,7 @@ func TestDecode_IgnoresQuotedBlockBeforeRealSignoff(t T) T {
         "@finished\n" +
         "Real deliverable: app/protocol shipped.\n" +
         "@end"
-    val msgs = Decode(buf, mem("Kael", 0))
+    val msgs = Decode(buf, mem("Bram", 0))
     val t1 = Eq(t, msgs.Length(), 1)
     val m = msgs.Get(0)
     val t2 = Eq(t1, KindTag(m.Kind), "finished")
@@ -246,9 +246,9 @@ func TestDecode_IgnoresQuotedBlockBeforeRealSignoff(t T) T {
 
 // @finished / @review / @done are aliases — all decode to Finished.
 func TestDecode_TerminalAliases(t T) T {
-    val fin = Decode("@finished\nbody\n@end", mem("Kael", 0)).Get(0)
+    val fin = Decode("@finished\nbody\n@end", mem("Bram", 0)).Get(0)
     val rev = Decode("@review APPROVE — clean\n@end", mem("Theo", 0)).Get(0)
-    val don = Decode("@done\nbody\n@end", mem("Kael", 0)).Get(0)
+    val don = Decode("@done\nbody\n@end", mem("Bram", 0)).Get(0)
     val t1 = Eq(t,  KindTag(fin.Kind), "finished")
     val t2 = Eq(t1, KindTag(rev.Kind), "finished")
     val t3 = Eq(t2, KindTag(don.Kind), "finished")
@@ -256,8 +256,8 @@ func TestDecode_TerminalAliases(t T) T {
 }
 
 func TestDecode_HelpAndBlockedTerminals(t T) T {
-    val h = Decode("@help\nwhich auth flow?\n@end", mem("Kael", 0)).Get(0)
-    val b = Decode("@blocked\ngh CLI missing\n@end", mem("Kael", 0)).Get(0)
+    val h = Decode("@help\nwhich auth flow?\n@end", mem("Bram", 0)).Get(0)
+    val b = Decode("@blocked\ngh CLI missing\n@end", mem("Bram", 0)).Get(0)
     val t1 = Eq(t,  KindTag(h.Kind), "help")
     return Eq(t1, KindTag(b.Kind), "blocked")
 }
@@ -266,19 +266,19 @@ func TestDecode_HelpAndBlockedTerminals(t T) T {
 // real dispatch — TL kinds never anchor a member terminal.
 func TestDecode_QuotedDispatchInMemberBufferIgnored(t T) T {
     val buf = "@dispatch(Felix)\nexample of a dispatch in the audit\n@end"
-    return Eq(t, Decode(buf, mem("Kael", 0)).Length(), 0)
+    return Eq(t, Decode(buf, mem("Bram", 0)).Length(), 0)
 }
 
 // Still streaming (no closed terminal) → empty, caller waits.
 func TestDecode_NoneWhileStreaming(t T) T {
-    return Eq(t, Decode("@finished\nnot done yet", mem("Kael", 0)).Length(), 0)
+    return Eq(t, Decode("@finished\nnot done yet", mem("Bram", 0)).Length(), 0)
 }
 
 // Member terminal idempotent under a re-emitted sign-off chunk.
 func TestDecode_MemberTerminalIdempotent(t T) T {
     val one = "@finished\nshipped it\n@end"
-    val a = Decode(one, mem("Kael", 0))
-    val b = Decode(one + "\n" + one, mem("Kael", 0))
+    val a = Decode(one, mem("Bram", 0))
+    val b = Decode(one + "\n" + one, mem("Bram", 0))
     val t1 = Eq(t, a.Length(), 1)
     val t2 = Eq(t1, b.Length(), 1)
     return Eq(t2, a.Get(0).Id, b.Get(0).Id)

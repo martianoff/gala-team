@@ -330,8 +330,8 @@ func TestDelegating_MemberDone_UnknownMember_StaysWithFullPending(t T) T {
 // Delegating + MemberStuck must carry the pending set into TLNudging
 // (so the nudge resolution knows who we're still waiting on).
 func TestDelegating_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
-    val pending = EmptyHashSet[string]().Add("Kael").Add("Lyra")
-    val s = Transition(Delegating(Pending = pending, Dispatched = pending), MemberStuck(MemberName = "Kael"), ctxWithQA(true))
+    val pending = EmptyHashSet[string]().Add("Bram").Add("Otis")
+    val s = Transition(Delegating(Pending = pending, Dispatched = pending), MemberStuck(MemberName = "Bram"), ctxWithQA(true))
     return s match {
         case TLNudging(_, p, _) => Eq(t, p.Size(), 2)
         case _               => IsTrue(t, false)
@@ -343,8 +343,8 @@ func TestDelegating_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
 // MemberStuck every cycle (~2 min) — live audit caught this as a
 // QAGate→QAGate livelock with a fresh TL nudge each round.
 func TestQAGate_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
-    val pending = EmptyHashSet[string]().Add("Sable").Add("Theo")
-    val s = Transition(QAGate(Pending = pending, Dispatched = pending), MemberStuck(MemberName = "Sable"), ctxWithQA(true))
+    val pending = EmptyHashSet[string]().Add("Mara").Add("Theo")
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), MemberStuck(MemberName = "Mara"), ctxWithQA(true))
     return s match {
         case TLNudging(reason, p, _) => IsTrue(t, reason == "stuck" && p.Size() == 2)
         case _                    => IsTrue(t, false)
@@ -352,10 +352,10 @@ func TestQAGate_OnMemberStuck_CarriesPendingIntoTLNudging(t T) T {
 }
 
 func TestQAGate_OnMemberHelpRequested_CarriesPendingIntoTLNudging(t T) T {
-    val pending = EmptyHashSet[string]().Add("Sable")
-    val s = Transition(QAGate(Pending = pending, Dispatched = pending), MemberHelpRequested(MemberName = "Sable", Question = "What's the contract?"), ctxWithQA(true))
+    val pending = EmptyHashSet[string]().Add("Mara")
+    val s = Transition(QAGate(Pending = pending, Dispatched = pending), MemberHelpRequested(MemberName = "Mara", Question = "What's the contract?"), ctxWithQA(true))
     return s match {
-        case TLNudging(reason, p, _) => IsTrue(t, reason == "help" && p.Contains("Sable"))
+        case TLNudging(reason, p, _) => IsTrue(t, reason == "help" && p.Contains("Mara"))
         case _                    => IsTrue(t, false)
     }
 }
@@ -368,7 +368,7 @@ func TestQAGate_OnMemberHelpRequested_CarriesPendingIntoTLNudging(t T) T {
 // on the next heartbeat — recovery is owned by the protocol path,
 // not by an ad-hoc FSM bounce.
 func TestTLNudging_NoDirectiveWithPending_GoesIdle(t T) T {
-    val pending = EmptyHashSet[string]().Add("Kael")
+    val pending = EmptyHashSet[string]().Add("Bram")
     val s = Transition(TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending), TLDone(Directives = EmptyArray[Directive]()), ctxWithQA(true))
     return Eq(t, stateName(s), "Idle")
 }
@@ -384,7 +384,7 @@ func TestTLNudging_NoDirectiveNoPending_GoesIdle(t T) T {
 // @dispatch still fans out (Delegating) — the override only rescues
 // the empty case.
 func TestTLNudging_SummaryStillShips(t T) T {
-    val pending = EmptyHashSet[string]().Add("Kael")
+    val pending = EmptyHashSet[string]().Add("Bram")
     val s = Transition(TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending), TLDone(Directives = ArrayOf[Directive](summary("## Done"))), ctxWithQA(true))
     return Eq(t, stateName(s), "Approval")
 }
@@ -393,8 +393,8 @@ func TestTLNudging_SummaryStillShips(t T) T {
 // set exactly like Delegating (so a finish racing the nudge isn't
 // lost into TLNudging).
 func TestTLNudging_MemberDoneDuringNudge_Drains(t T) T {
-    val pending = EmptyHashSet[string]().Add("Kael").Add("Lyra")
-    val s = Transition(TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending), MemberDone(MemberName = "Kael", Body = ""), ctxWithQA(true))
+    val pending = EmptyHashSet[string]().Add("Bram").Add("Otis")
+    val s = Transition(TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending), MemberDone(MemberName = "Bram", Body = ""), ctxWithQA(true))
     return s match {
         case Delegating(rest, _) => Eq(t, rest.Size(), 1)
         case _                => IsTrue(t, false)

@@ -265,8 +265,8 @@ func TestSessionIds_RoundTrip(t T) T {
     val dir = mkTempDir("sids_rt")
     defer fs.RemoveAll(dir)
     val entries = ArrayOf(
-        SessionIdEntry(Member = "Vesper", SessionId = "11111111-aaaa-bbbb-cccc-222222222222"),
-        SessionIdEntry(Member = "Kael",   SessionId = "33333333-aaaa-bbbb-cccc-444444444444"),
+        SessionIdEntry(Member = "Nadia", SessionId = "11111111-aaaa-bbbb-cccc-222222222222"),
+        SessionIdEntry(Member = "Bram",   SessionId = "33333333-aaaa-bbbb-cccc-444444444444"),
     )
     val saveRes = Save(
         dir,
@@ -281,10 +281,10 @@ func TestSessionIds_RoundTrip(t T) T {
         case Some(snap)   => {
             val t2 = Eq(t1, snap.SessionIds.Size(), 2)
             val first = snap.SessionIds.Get(0)
-            val t3 = Eq(t2, first.Member, "Vesper")
+            val t3 = Eq(t2, first.Member, "Nadia")
             val t4 = Eq(t3, first.SessionId, "11111111-aaaa-bbbb-cccc-222222222222")
             val second = snap.SessionIds.Get(1)
-            val t5 = Eq(t4, second.Member, "Kael")
+            val t5 = Eq(t4, second.Member, "Bram")
             return Eq(t5, second.SessionId, "33333333-aaaa-bbbb-cccc-444444444444")
         }
     }
@@ -335,7 +335,7 @@ func TestSaveThenLoad_RoundTripsOrchestration(t T) T {
     val dir = mkTempDir("orch")
     val orch = Orchestration(
         StateTag         = "Delegating",
-        StatePending     = ArrayOf("Kael", "Lyra"),
+        StatePending     = ArrayOf("Bram", "Otis"),
         Plan             = ArrayOf("port", "harness", "tests"),
         PlanShipped      = 1,
         PlanContinuing   = true,
@@ -344,7 +344,7 @@ func TestSaveThenLoad_RoundTripsOrchestration(t T) T {
         OpenPrs          = ArrayOf(SnapPr(
             Url = "https://pr/1", Branch = "b1", Title = "PR 1",
             OpenedAtNanos = int64(1700000000000000000))),
-        PendingQMember   = "Vesper",
+        PendingQMember   = "Nadia",
         PendingQToolUse  = "toolu_z",
         PendingQText     = "Which approach?",
     )
@@ -397,8 +397,8 @@ func TestSaveThenLoad_PostPromptSentRoundTrips(t T) T {
     defer fs.RemoveAll(dir)
     val orch = Orchestration(
         StateTag       = "Delegating",
-        StatePending   = ArrayOf("Lyra"),
-        PostPromptSent = ArrayOf("Lyra", "Kael"),
+        StatePending   = ArrayOf("Otis"),
+        PostPromptSent = ArrayOf("Otis", "Bram"),
     )
     val saved = Save(dir, "demo", EmptyArray[ConversationLine](),
         EmptyArray[string](), EmptyArray[SessionIdEntry](), orch)
@@ -407,8 +407,8 @@ func TestSaveThenLoad_PostPromptSentRoundTrips(t T) T {
         case None()     => IsTrue(t1, false)
         case Some(snap) => {
             val t2 = Eq(t1, snap.PostPromptSent.Size(), 2)
-            val t3 = IsTrue(t2, snap.PostPromptSent.Contains("Lyra"))
-            return IsTrue(t3, snap.PostPromptSent.Contains("Kael"))
+            val t3 = IsTrue(t2, snap.PostPromptSent.Contains("Otis"))
+            return IsTrue(t3, snap.PostPromptSent.Contains("Bram"))
         }
     }
 }

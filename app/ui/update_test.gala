@@ -287,6 +287,42 @@ func TestSessionFailed_SetsLastErrorAndDropsSession(t T) T {
     }
 }
 
+// onTurnFinalize is idempotent against the real EOF: when the session
+// was already swept out (a normal turn whose EOF ran onSessionFailed
+// first), a trailing TurnFinalize must be a no-op — it must not
+// re-advance the FSM or touch state. Sessions starts empty in the test
+// model, which is exactly the "already finalized" shape.
+func TestTurnFinalize_AlreadyFinalized_NoOp(t T) T {
+    val seed = sampleModel().Copy(State = TLThinking(), Tick = 5)
+    val (m, _) = Update(seed, TurnFinalize(Member = "Iris"))
+    val t1 = m.State match {
+        case TLThinking() => IsTrue(t, true)
+        case _            => IsTrue(t, false)
+    }
+    return Eq(t1, m.Tick, 5)
+}
+
+// envelopeIsExitPlanMode recognises a claude-code ExitPlanMode tool_use
+// on the raw assistant envelope (the signal the lead presented a plan
+// and parked), and ignores other tool_use blocks.
+func TestEnvelopeIsExitPlanMode_DetectsToolUse(t T) T {
+    val yes = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"ExitPlanMode\",\"input\":{\"plan\":\"do x\"}}]}}"
+    val no  = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":\"Edit\"}]}}"
+    val t1 = IsTrue(t, envelopeIsExitPlanMode(yes))
+    return IsFalse(t1, envelopeIsExitPlanMode(no))
+}
+
+// The plan-mode nudge steers the lead back onto the directive contract
+// (@dispatch to delegate, @summary to escalate) and tells it not to
+// re-enter plan mode.
+func TestPlanModeNudgePrompt_TellsLeadToDelegate(t T) T {
+    val p = buildPlanModeNudgePrompt(sampleTeam())
+    val t1 = IsTrue(t,  strings.Contains(p, "plan mode"))
+    val t2 = IsTrue(t1, strings.Contains(p, "@dispatch"))
+    val t3 = IsTrue(t2, strings.Contains(p, "@summary"))
+    return IsTrue(t3, strings.Contains(p, "Do NOT re-enter plan mode"))
+}
+
 func TestWriteSent_LeavesModelUnchanged(t T) T {
     val seed = sampleModel().Copy(Composer = "draft", Tick = 7)
     val (m, _) = Update(seed, WriteSent(Member = "Iris"))

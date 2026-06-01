@@ -1314,6 +1314,24 @@ func TestView_ActivityBand_HiddenWhenQuiescent(t T) T {
     return IsFalse(t, strings.Contains(render(mkModel(mkTeam("X", ""))), "Activity"))
 }
 
+// A detail too long for the row width is MIDDLE-truncated, not
+// tail-cut: both the leading verb and the trailing destination (the
+// part the reader is watching for) survive, joined by an ellipsis.
+// Past behaviour dropped the tail, leaving a redundant path prefix
+// and an ellipsis where the answer should be.
+func TestView_ActivityBand_LongDetailKeepsTail(t T) T {
+    val phase = "Edit HEADxx /a/very/long/path/that/keeps/going/and/going/and/going/until/it/cannot/possibly/fit/TAILyy.gala"
+    val m = mkModel(mkTeam("X", "")).Copy(
+        Statuses       = EmptyHashMap[string, Status]().Put("Iris", StWorking()),
+        WorkflowStatus = EmptyHashMap[string, string]().Put("Iris", phase),
+    )
+    val out = render(m)
+    val t1 = IsTrue(t,  strings.Contains(out, "Edit HEADxx"))   // head kept
+    val t2 = IsTrue(t1, strings.Contains(out, "TAILyy.gala"))   // tail kept
+    val t3 = IsTrue(t2, strings.Contains(out, "…"))             // truncated
+    return IsFalse(t3, strings.Contains(out, phase))            // not shown whole
+}
+
 // The F3 grid cards reflect the same live signal as the band: a
 // working member's card shows its workflow phase.
 func TestView_Grid_CardShowsWorkflowPhase(t T) T {

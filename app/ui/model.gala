@@ -375,6 +375,16 @@ struct AppModel(
     // after a watchdog auto-retry so a prompt that reliably hangs
     // the model can't loop forever.
     WatchdogRetryFired bool,
+    // SawExitPlanMode latches when the lead emits an ExitPlanMode
+    // tool_use in the current turn — claude-code plan mode. Consumed
+    // at the lead's turn-end (onTurnFinalize) to re-drive delegation
+    // instead of parking with the plan as inert prose. Reset on
+    // onSubmit and cleared when the turn finalizes.
+    SawExitPlanMode bool,
+    // One-shot latch per LastUserPrompt: set when a plan-mode turn is
+    // re-driven with a delegate nudge, so a lead that keeps choosing
+    // plan mode can't loop. Reset on onSubmit.
+    PlanModeNudged bool,
     // Per-member count of consecutive synthetic ("<synthetic>")
     // assistant envelopes seen on stdout. Reset on any real chunk.
     SyntheticOnlyChunks HashMap[string, int],
@@ -643,6 +653,8 @@ func InitialModelWithTeams(
     TurnVisibleChunks     = EmptyHashMap[string, int](),
     LastUserPrompt        = "",
     WatchdogRetryFired    = false,
+    SawExitPlanMode       = false,
+    PlanModeNudged        = false,
     SyntheticOnlyChunks   = EmptyHashMap[string, int](),
     OutstandingTaskTools  = EmptyHashMap[string, HashSet[string]](),
     HelpVisible           = false,
@@ -681,6 +693,13 @@ sealed type AppMsg {
     // app vocabulary so update() can dispatch on a single sealed type).
     case ChunkArrived(Member string, Line string)
     case SessionFailed(Member string, ErrText string)
+    // TurnFinalize drives the clean-close finalization off a member's
+    // turn-end `result` event instead of waiting for the subprocess
+    // EOF. Emitted for the lead when a turn ends, so a plan-mode turn
+    // (which parks without EOF-ing) still advances the FSM. The
+    // handler no-ops when the session was already finalized by a real
+    // EOF, so it is safe to emit on every lead turn-end.
+    case TurnFinalize(Member string)
     case WriteSent(Member string)
     // Approval pipeline outcomes. PreMergeHooksPassed kicks the actual
     // `gh pr create` after a clean hook run; PreMergeHooksFailed surfaces

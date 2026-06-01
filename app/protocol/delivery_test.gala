@@ -120,15 +120,15 @@ func TestTick_AckedHappyPathIsInert(t T) T {
 // N silent members fold into AT MOST ONE batched nudge naming them all.
 func TestAggregateNudges_BatchesAllSilent(t T) T {
     val states = ArrayOf[Tuple[string, DeliveryState]](
-        ("Kael", Silent(SinceNanos = 0, Attempt = 3)),
-        ("Lyra", Working(LastSeenNanos = ns(5))),
+        ("Bram", Silent(SinceNanos = 0, Attempt = 3)),
+        ("Otis", Working(LastSeenNanos = ns(5))),
         ("Mira", Silent(SinceNanos = 0, Attempt = 4)),
     )
     return AggregateNudges(states, ns(400), pol()) match {
         case Some(act) => act match {
             case IssueNudge(member, _) =>
-                // Folded in input order; Lyra (Working) is excluded.
-                Eq(t, member, "Kael, Mira")
+                // Folded in input order; Otis (Working) is excluded.
+                Eq(t, member, "Bram, Mira")
             case _ => IsTrue(t, false)
         }
         case None() => IsTrue(t, false)
@@ -138,8 +138,8 @@ func TestAggregateNudges_BatchesAllSilent(t T) T {
 // Nobody silent → no nudge.
 func TestAggregateNudges_NoneWhenAllHealthy(t T) T {
     val states = ArrayOf[Tuple[string, DeliveryState]](
-        ("Kael", Working(LastSeenNanos = ns(5))),
-        ("Lyra", Sent(AtNanos = 0, Attempt = 1)),
+        ("Bram", Working(LastSeenNanos = ns(5))),
+        ("Otis", Sent(AtNanos = 0, Attempt = 1)),
     )
     return IsNone(t, AggregateNudges(states, ns(10), pol()))
 }

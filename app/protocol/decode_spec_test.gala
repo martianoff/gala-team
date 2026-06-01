@@ -89,7 +89,7 @@ func TestDecode_DuplicateChunkIsIdempotent(t T) T {
         // byte-identical duplicates).
         Case[Tuple[string, DecodeContext], int](
             Name = "single-finished",
-            Input = ("@finished\nParser landed; tests green.\n@end", mem("Sable", 0)),
+            Input = ("@finished\nParser landed; tests green.\n@end", mem("Mara", 0)),
             Expected = 1,
         ),
         // a multi-target TL turn, re-flushed → still N, not 2N (dedupTargetsByName's job).
@@ -119,7 +119,7 @@ func TestDecode_DuplicateChunkIsIdempotent(t T) T {
 func TestDecode_QuotedDirectivesDoNotCollideWithRealSignoff(t T) T {
     return RunCases[string, string](t,
         (sub T, input string, expected string) => {
-            val ms  = Decode(input, mem("Sable", 0))
+            val ms  = Decode(input, mem("Mara", 0))
             val fin = ms.Filter((m) => KindTag(m.Kind) == "finished")
             val dsp = ms.Filter((m) => KindTag(m.Kind) == "dispatch")
             val t1 = Eq(sub, fin.Length(), 1)        // exactly the real sign-off
@@ -180,7 +180,7 @@ func TestDecode_QuotedDirectivesDoNotCollideWithRealSignoff(t T) T {
 func TestDecode_FinishedAliasesAreAccepted(t T) T {
     return RunCases[string, string](t,
         (sub T, input string, expected string) => {
-            val ms = Decode(input, mem("Sable", 0))
+            val ms = Decode(input, mem("Mara", 0))
             val t1 = Eq(sub, ms.Length(), 1)
             val t2 = Eq(t1, KindTag(ms.Get(0).Kind), "finished")
             return Eq(t2, ms.Get(0).Body, expected)
@@ -303,7 +303,7 @@ func TestDecode_MultipleBackToBackDispatch(t T) T {
 
 func TestDecode_ProseOnlyTurnYieldsNothing(t T) T {
     return RunCases[string, int](t,
-        (sub T, input string, expected int) => Eq(sub, Decode(input, mem("Sable", 0)).Length(), expected),
+        (sub T, input string, expected int) => Eq(sub, Decode(input, mem("Mara", 0)).Length(), expected),
         Case[string, int](
             Name = "plain-chatter",
             Input = "Looking into this now. I'll split the work and report back shortly.",

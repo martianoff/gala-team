@@ -90,60 +90,94 @@ func classifyReadFailure(e error) AgentEvent =
     if (e.Error() == "EOF") AgentTurnEnded() else AgentFailed(Err = e)
 
 // classifyClaudeRead / classifyClaudeDiagnostic map one stdout / stderr
-// read to an AgentEvent. Pure — unit-tested directly.
-//
-// A successful stdout read is usually an assistant chunk, but the
-// `claude` CLI also prints transport-layer errors (OAuth token
-// expired / rejected) to stdout as plain prose with no JSON shape —
-// e.g. "Failed to authenticate. API Error: 401 Invalid authentication
-// credentials". Past behaviour treated those lines as model output:
-// the line was committed to the conversation as the agent's reply,
-// the directive parser found no @summary/@blocked in the (otherwise
-// empty) turn buffer, the orchestrator stepped TLThinking → Idle, and
-// the prior gate's pending user question was silently forgotten.
-// LooksLikeTransportAuthError catches those lines here and routes
-// them to AgentDiagnostic — the transport-neutral channel the agent
-// port already exposes for "out-of-band diagnostic text (auth /
-// setup / health notices)". The UI's onStderr handler surfaces them
-// as a toast + LastError without touching the conversation.
+// read to an AgentEvent. Pure — unit-tested directly. Both consult
+// transportAuthLine so the auth-vs-output decision lives in one place;
+// they differ only in the non-auth fallback (chunk vs diagnostic).
 func classifyClaudeRead(r Try[string]) AgentEvent = r match {
-    case Success(line) => if (LooksLikeTransportAuthError(line)) AgentTransportAuthError(Text = line) else AgentChunk(Text = line)
-    case Failure(e)    => classifyReadFailure(e)
+    case Success(line) => transportAuthLine(line) match {
+        case Some(l) => AgentTransportAuthError(Text = l)
+        case None()  => AgentChunk(Text = line)
+    }
+    case Failure(e) => classifyReadFailure(e)
 }
 
 func classifyClaudeDiagnostic(r Try[string]) AgentEvent = r match {
-    case Success(line) => if (LooksLikeTransportAuthError(line)) AgentTransportAuthError(Text = line) else AgentDiagnostic(Text = line)
-    case Failure(e)    => classifyReadFailure(e)
+    case Success(line) => transportAuthLine(line) match {
+        case Some(l) => AgentTransportAuthError(Text = l)
+        case None()  => AgentDiagnostic(Text = line)
+    }
+    case Failure(e) => classifyReadFailure(e)
 }
 
+// transportAuthLine is the single transport-error gate for one raw
+// stdout/stderr line: Some(line) when the line is a genuine credential
+// rejection, None when it is anything else. The decision is SHAPE-FIRST,
+// not substring-first:
+//
+//   - The `claude` CLI emits model output and protocol data as
+//     stream-json envelopes (one JSON object per line). An envelope can
+//     legitimately CONTAIN the auth wording as payload — a member
+//     reading this very file, an assistant explaining how a 401 is
+//     classified, a tool_result echoing a test fixture. Such a line is
+//     protocol data and is NEVER a credential failure, so it returns
+//     None and flows on to AgentChunk / AgentDiagnostic, where the typed
+//     stream-json parser extracts only the real content.
+//   - A genuine transport auth failure is printed OUT of band, as plain
+//     prose with no JSON shape (the CLI bypasses the protocol when its
+//     OAuth token is rejected). Only a non-envelope line that also
+//     matches the canonical auth signature returns Some.
+//
+// Gating on LooksLikeClaudeStreamJson first (here, before the substring
+// check) is what stops a member that merely quotes "Failed to
+// authenticate. API Error: 401" from killing its own turn — the precise
+// failure mode this gate exists to prevent.
+func transportAuthLine(line string) Option[string] =
+    if (!LooksLikeClaudeStreamJson(line) && LooksLikeTransportAuthError(line)) Some(line)
+    else None[string]()
+
 // LooksLikeTransportAuthError returns true when `s` is a claude-code
-// transport-layer auth/identity failure rather than model output.
-// Two surface shapes the CLI prints when its OAuth token has expired
-// or is rejected by Anthropic:
+// transport-layer auth/identity failure rather than model output. The
+// two surface shapes the CLI prints when its OAuth token has expired or
+// is rejected by Anthropic:
 //
 //   - "Failed to authenticate. API Error: 401 Invalid authentication
 //     credentials" (canonical 401 from the API).
 //   - "API Error: 403 ..." (org/billing-blocked credentials).
 //
-// Used by classifyClaudeRead above (to route matching stdout lines
-// onto the AgentDiagnostic channel instead of AgentChunk) and by the
-// UI's onSessionFailed lead-EOF guard (to suppress the TLDone
-// transition when the just-finished turn was a transport failure, so
-// the prior gate's pending question is preserved). Case-insensitive
-// substring — both error wording variants Anthropic uses match, and
-// wrapped forms like "Vesper stderr: Failed to authenticate..." also
-// match so the same helper works on a LastError surface.
+// The match is deliberately narrow — a real credential rejection is a
+// short out-of-band prose line, so two guards keep arbitrary text that
+// merely mentions an HTTP code from tripping it:
 //
-// Public (exported) because UI code in app/ui needs to inspect
-// LastError strings for the same signature when deciding whether to
-// advance the FSM.
+//   - Length cap: a multi-kilobyte payload reaching here is buffered
+//     output or an envelope that QUOTES the wording, never the genuine
+//     one-line rejection.
+//   - Anchored signature: "failed to authenticate" / "invalid
+//     authentication credentials" are auth-conclusive on their own; a
+//     bare "api error: 401|403" only counts paired with an auth /
+//     credential token, because the API reuses that prose shape for
+//     non-auth 4xx replies.
+//
+// Callers MUST gate on !LooksLikeClaudeStreamJson first (see
+// transportAuthLine) — this predicate assumes it has been handed an
+// out-of-band line, not a protocol envelope. Case-insensitive; wrapped
+// forms like "<member> stderr: Failed to authenticate..." still match
+// so the same helper works on a LastError surface. Exported for direct
+// unit testing.
 func LooksLikeTransportAuthError(s string) bool {
     if s == "" { return false }
-    val lower = strings.ToLower(s)
-    return strings.Contains(lower, "failed to authenticate") ||
-           strings.Contains(lower, "invalid authentication credentials") ||
-           strings.Contains(lower, "api error: 401") ||
-           strings.Contains(lower, "api error: 403")
+    // A genuine CLI auth-error line is short prose. Anything large is
+    // buffered / echoed content that only quotes the wording.
+    if len(s) > 512 { return false }
+    val lower = strings.ToLower(strings.TrimSpace(s))
+    val explicit = strings.Contains(lower, "failed to authenticate") ||
+                   strings.Contains(lower, "invalid authentication credentials")
+    val codePlusAuth = (strings.Contains(lower, "api error: 401") ||
+                        strings.Contains(lower, "api error: 403")) &&
+                       (strings.Contains(lower, "authentic") ||
+                        strings.Contains(lower, "credential") ||
+                        strings.Contains(lower, "unauthorized") ||
+                        strings.Contains(lower, "forbidden"))
+    return explicit || codePlusAuth
 }
 
 // IsLongRunningClaudeToolName names the assistant tool_use kinds

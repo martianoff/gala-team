@@ -2,6 +2,7 @@ package runtime
 
 import (
     "errors"
+    "strings"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "github.com/martianoff/gala_team/app/agent"
@@ -57,9 +58,33 @@ func TestClassifyClaudeDiagnostic_AuthErrorIsTransportAuthError(t T) T {
     }
 }
 
+// Regression: a stream-json envelope that merely QUOTES the auth
+// wording is protocol payload, not a credential failure. A member
+// reading the classifier's own source (or any file/test that contains
+// the canonical 401 prose) streams it back inside an envelope; the
+// shape-first gate must let it through as a normal chunk. Without the
+// gate this exact line killed the reading member's turn.
+func TestClassifyClaudeRead_AuthWordingInEnvelopeIsChunk(t T) T {
+    val envelope = "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"the classifier matches 'Failed to authenticate. API Error: 401 Invalid authentication credentials'\"}]}}"
+    return classifyClaudeRead(Success(envelope)) match {
+        case AgentChunk(text) => Eq(t, text, envelope)
+        case _                => IsTrue(t, false)
+    }
+}
+
+// Same protection on the stderr channel: a tool_result envelope echoing
+// a file that contains the auth wording stays an AgentDiagnostic.
+func TestClassifyClaudeDiagnostic_AuthWordingInEnvelopeIsDiagnostic(t T) T {
+    val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"content\":\"98 // e.g. Failed to authenticate. API Error: 401 Invalid authentication credentials\"}]}}"
+    return classifyClaudeDiagnostic(Success(envelope)) match {
+        case AgentDiagnostic(text) => Eq(t, text, envelope)
+        case _                     => IsTrue(t, false)
+    }
+}
+
 // Looks-like-transport-auth-error: substring matcher, case-
 // insensitive, also matches wrapped forms like
-// "Vesper stderr: Failed to authenticate..." that the UI's
+// "<member> stderr: Failed to authenticate..." that the UI's
 // onSessionFailed guard checks against LastError.
 func TestLooksLikeTransportAuthError_Matches401Verbatim(t T) T {
     return IsTrue(t, LooksLikeTransportAuthError("Failed to authenticate. API Error: 401 Invalid authentication credentials"))
@@ -74,7 +99,7 @@ func TestLooksLikeTransportAuthError_MatchesCaseInsensitive(t T) T {
 }
 
 func TestLooksLikeTransportAuthError_MatchesWrappedLastError(t T) T {
-    val wrapped = "Vesper stderr: Failed to authenticate. API Error: 401 Invalid authentication credentials"
+    val wrapped = "Iris stderr: Failed to authenticate. API Error: 401 Invalid authentication credentials"
     return IsTrue(t, LooksLikeTransportAuthError(wrapped))
 }
 
@@ -84,6 +109,22 @@ func TestLooksLikeTransportAuthError_RejectsOrdinaryProse(t T) T {
 
 func TestLooksLikeTransportAuthError_RejectsEmpty(t T) T {
     return IsTrue(t, !LooksLikeTransportAuthError(""))
+}
+
+// Length cap: a real auth rejection is a short out-of-band line. A
+// multi-kilobyte blob that happens to contain the wording (buffered
+// output, an accumulated error surface) must not trip the matcher.
+func TestLooksLikeTransportAuthError_RejectsHugeBlob(t T) T {
+    val padding = strings.Repeat("x", 600)
+    val blob = padding + " Failed to authenticate. API Error: 401 Invalid authentication credentials"
+    return IsTrue(t, !LooksLikeTransportAuthError(blob))
+}
+
+// Anchored signature: a bare HTTP code with no auth/credential token is
+// not auth-conclusive (the API reuses "API Error: 4xx" prose for
+// non-auth failures), so it must not match on its own.
+func TestLooksLikeTransportAuthError_RejectsBareCodeWithoutAuthToken(t T) T {
+    return IsTrue(t, !LooksLikeTransportAuthError("API Error: 401"))
 }
 
 // A clean end ("EOF" failure) is AgentTurnEnded, not AgentFailed.

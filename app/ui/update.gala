@@ -548,7 +548,7 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     // the pending set survives. respawnMember reads
     // LastDispatchedMsg via the wasRotated branch (SessionId was
     // removed above) and sends msg.Body as the rescue prompt — the
-    // same PR #76 fix that the heartbeat-respawn path uses.
+    // same respawn path the heartbeat-respawn flow uses.
     if canAutoRetry && !isTLState {
         LogFsmTransition(tag, "WatchdogExpired", s"silence=${silenceSec}s state_dwell=${stateDwellSec}s auto_retry=${canAutoRetry} affected=${affected.MkString(",")} last_visible=${lastVisibleSec}s mode=respawn", tag)
         val seed = (mRotated.Copy(Toasts = toast, LastError = Some(reason)), EmptyArray[Cmd[AppMsg]]())
@@ -574,9 +574,17 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     }
     // Latch must be set AFTER onSubmit returns — onSubmit resets
     // it on every fresh user prompt as part of its normal flow.
+    //
+    // PlanContinuing rides along so onSubmit preserves the in-flight
+    // @plan queue (and shipped count). A watchdog auto-retry re-injects
+    // the orchestrator's OWN last prompt to recover a silent turn — it
+    // is not the user typing something new, so wiping a multi-step plan
+    // mid-recovery (onSubmit's default for a genuine fresh prompt) would
+    // silently discard queued work the user never abandoned.
     val retrying = persisted.Copy(
         Composer       = persisted.LastUserPrompt,
         ComposerCursor = len(persisted.LastUserPrompt),
+        PlanContinuing = true,
     )
     val (mAfterSubmit, cmdAfterSubmit) = onSubmit(retrying)
     return (mAfterSubmit.Copy(WatchdogRetryFired = true), cmdAfterSubmit)
@@ -3734,8 +3742,8 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
         // closes the session via closeLiveSession. The EOF we're
         // processing now is the trailing signal from that same closure
         // — re-firing MemberDone here would produce a doubled
-        // `fsm_transition MemberDone(name)` event pair (54 ms apart in
-        // a past audit log). PendingClosures usually catches the race
+        // `fsm_transition MemberDone(name)` event pair in quick
+        // succession. PendingClosures usually catches the race
         // (closeLiveSession bumps it before EOF arrives), but the
         // counter occasionally lands at 0 when timing is unkind.
         // MemberDoneBodies acts as the in-turn watermark.
@@ -3869,9 +3877,9 @@ func heartbeatNoticePrefix(name string) string = s"${name}: silent past heartbea
 // keeps the same information but spells it out and explicitly flags
 // the "last retry" and "over budget" edges. Readable at a glance:
 //
-//   "Kael silent past heartbeat — respawn 1 of 2"
-//   "Kael silent past heartbeat — respawn 2 of 2 (last retry)"
-//   "Kael silent past heartbeat — respawn 3 over 2-retry budget"
+//   "<member> silent past heartbeat — respawn 1 of 2"
+//   "<member> silent past heartbeat — respawn 2 of 2 (last retry)"
+//   "<member> silent past heartbeat — respawn 3 over 2-retry budget"
 //
 // The prefix `${name}: silent past heartbeat` is shared with
 // heartbeatNoticePrefix so the recovery path can recognise and clear
@@ -5578,7 +5586,21 @@ func rejectAndIdle(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     return (withState, NoCmd[AppMsg]())
 }
 
-// onPrCreated appends the new PR to OpenPrs + the conversation log so
+// upsertOpenPr records `entry` in `prs`, replacing any existing row
+// that targets the same PR (same Url) rather than stacking a duplicate.
+// A PR gets re-touched whenever the TL re-emits an @summary against an
+// already-open branch (a description edit, a follow-up push) — each of
+// those fires onPrCreated with the SAME url, so a blind append left
+// OpenPrs accumulating two or three rows for one PR across a session.
+// The refreshed entry moves to the end so OpenPrs.Last() still names
+// the most-recently-touched PR (the `previous` alias's anchor). Rows
+// with no url yet (unresolved) are always appended — they have no
+// identity to dedup on.
+func upsertOpenPr(prs Array[BatchPr], entry BatchPr) Array[BatchPr] =
+    if (entry.Url == "") prs.Append(entry)
+    else prs.Filter((p) => p.Url != entry.Url).Append(entry)
+
+// onPrCreated records the new PR in OpenPrs + the conversation log so
 // the user has a copy-paste-friendly link, and snapshots the session
 // into the archive (Ctrl+H history). PR creation is the app's
 // completion point: merging is done by the user on GitHub, never by
@@ -5602,6 +5624,12 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
         Title    = pendingPrTitle(m),
         OpenedAt = time_utils.Now(),
     )
+    // Upsert (not append): re-pushing the same PR — the reject → TL
+    // fixes → re-approve flow force-pushes the SAME branch and reuses
+    // the SAME PR URL — must update the existing batch entry in place,
+    // not duplicate it. Bound once so the "N open" toast count and the
+    // stored array agree (a re-push leaves the count unchanged).
+    val nextOpenPrs = upsertOpenPr(m.OpenPrs, entry)
     // Snapshot the session for the Ctrl+H history browser. The app no
     // longer merges (that's done on GitHub), so PR creation — not a
     // never-arriving "merged" event — is the completion point that
@@ -5640,7 +5668,7 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
                 Text    = s"plan: continuing ${nextShipped + 1}/${total} → ${nextStep}",
             ))
         return (m.Copy(
-            OpenPrs        = m.OpenPrs.Append(entry),
+            OpenPrs        = nextOpenPrs,
             ActiveBase     = None[string](),
             ActivePrBranch = None[string](),
             PlanShipped    = nextShipped,
@@ -5662,7 +5690,7 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
     } else if (m.AutoApprove) {
         convoBase.Append(session.ConversationLine(
             Speaker = "gh",
-            Text    = s"queued in batch (${m.OpenPrs.Size() + 1} open) — review & merge on GitHub (configured: --${policy.MergeRuleName(m.Policy.MergeRule)})",
+            Text    = s"queued in batch (${nextOpenPrs.Size()} open) — review & merge on GitHub (configured: --${policy.MergeRuleName(m.Policy.MergeRule)})",
         ))
     } else {
         convoBase.Append(session.ConversationLine(
@@ -5681,7 +5709,7 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
     // one). Cleared on merge / Start fresh.
     val finalShipped = if (planActive) nextShipped else m.PlanShipped
     return (m.Copy(
-        OpenPrs        = m.OpenPrs.Append(entry),
+        OpenPrs        = nextOpenPrs,
         ActiveBase     = None[string](),
         ActivePrBranch = Some(effectiveBranch),
         PlanShipped    = finalShipped,

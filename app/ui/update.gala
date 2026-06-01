@@ -867,6 +867,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case KeyReject()                 => onReject(m)
     case ChunkArrived(name, ln)      => onChunk(m, name, ln)
     case SessionFailed(name, e)      => onSessionFailed(m, name, e)
+    case TurnFinalize(name)          => onTurnFinalize(m, name)
     case WriteSent(_)                => (m, NoCmd[AppMsg]())
     case StderrArrived(name, ln)     => onStderr(m, name, ln)
     case StderrEnded(_)              => (m, NoCmd[AppMsg]())
@@ -1932,6 +1933,8 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val mCleanWithLast = mClean.Copy(
         LastUserPrompt     = prompt,
         WatchdogRetryFired = false,
+        SawExitPlanMode    = false,
+        PlanModeNudged     = false,
     )
     // Plan survives ONLY when this submit is the orchestrator's own
     // plan-step continuation (onPrCreated set PlanContinuing). A
@@ -2668,8 +2671,27 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
 // the envelope to a ClaudeChunk, then thread it through the visible-
 // text / token-accrual / directive pipeline.
 func applyOneEnvelope(m AppModel, name string, envelope string) Tuple[AppModel, Cmd[AppMsg]] {
-    return applyChunkVisible(m, name, FilterClaudeStreamJsonFor(name, envelope))
+    val (m1, cmd) = applyChunkVisible(m, name, FilterClaudeStreamJsonFor(name, envelope))
+    // Plan-mode detection. claude-code emits an ExitPlanMode tool_use
+    // when the agent presents a plan and waits for the user to approve
+    // leaving plan mode. The headless transport can't deliver that
+    // approval, so the lead would otherwise present a plan, park, and
+    // (with the turn-end finalize) drop to Idle with the plan as inert
+    // prose instead of delegating. Latch it on the lead so the turn-end
+    // re-drives delegation. The tool_use carries no visible text, so it
+    // never reaches the TurnBuffer — detect it on the raw envelope here.
+    if name == m.Team.Lead.Name && envelopeIsExitPlanMode(envelope) {
+        return (m1.Copy(SawExitPlanMode = true), cmd)
+    }
+    return (m1, cmd)
 }
+
+// envelopeIsExitPlanMode is true when a raw assistant stream-json
+// envelope contains an ExitPlanMode tool_use part. Cheap substring
+// match — the tool name is emitted as the literal `"name":"ExitPlanMode"`
+// inside the content[] tool_use block.
+func envelopeIsExitPlanMode(envelope string) bool =
+    strings.Contains(envelope, "\"name\":\"ExitPlanMode\"")
 
 // applyChunkVisible is the post-filter pipeline. Token accrual, error
 // toast, transcript append (dedup-guarded), status flip, directive
@@ -2792,7 +2814,7 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     // pending question survives this (see onSessionFailed) so the user
     // can still answer it; finalizing the turn and keeping the
     // question answerable are independent.
-    val withCloseCmd = if (chunk.TurnEnded) {
+    val closeCmd = if (chunk.TurnEnded) {
         withAsk.Sessions.Get(name) match {
             case Some(s) => runtimeFutureToCmd(CloseSendFuture(s))
             case None()  => NoCmd[AppMsg]()
@@ -2800,6 +2822,24 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
     } else {
         NoCmd[AppMsg]()
     }
+    // Deterministic lead-turn finalize. Normally the FSM leaves
+    // TLThinking when the lead subprocess EOFs and onSessionFailed
+    // fires TLDone. A lead turn that ends in claude-code plan mode
+    // (ExitPlanMode) emits its `result` but then parks awaiting a
+    // plan approval the headless transport can't deliver — no EOF
+    // ever arrives, onSessionFailed never runs, and the FSM froze in
+    // TLThinking until the 5-minute watchdog killed it (and rotated
+    // to an empty session). Drive finalization off the result event
+    // itself: TurnFinalize hard-closes the parked subprocess and runs
+    // the same clean-close path. It no-ops when a real EOF already
+    // finalized the turn, so a normal turn (process exits on its own)
+    // never double-fires regardless of which signal wins the race.
+    val finalizeCmd = if (chunk.TurnEnded && name == withAsk.Team.Lead.Name) {
+        MsgCmd[AppMsg](Msg = TurnFinalize(Member = name))
+    } else {
+        NoCmd[AppMsg]()
+    }
+    val withCloseCmd = batchAll(ArrayOf[Cmd[AppMsg]](closeCmd, finalizeCmd))
     if displayText == "" {
         // Tool-activity flip: a silent tool_use chunk still means
         // the member is alive and working. Keep the heartbeat clock
@@ -3453,6 +3493,77 @@ func serialiseSessionIds(m AppModel) Array[session.SessionIdEntry] =
 // MaxAutoRetries is sourced from m.Policy.Heartbeat.MaxRetries (#29).
 // Kept as a function shim so call sites stay readable.
 func maxAutoRetriesOf(m AppModel) int = m.Policy.Heartbeat.MaxRetries
+
+// onTurnFinalize drives a member's clean-close finalization off its
+// turn-end `result` event instead of the subprocess EOF. See the emit
+// site in applyChunkVisible: a lead turn that ends in claude-code plan
+// mode emits `result` but the subprocess parks awaiting an approval
+// the headless transport can't deliver, so the EOF that normally fires
+// onSessionFailed never arrives and the FSM froze in TLThinking.
+//
+// Idempotent against the real EOF — whichever signal wins the race
+// finalizes exactly once:
+//   - Session already gone ⇒ a real EOF (or a prior finalize) already
+//     ran onSessionFailed; no-op.
+//   - A kill is already in flight (PendingClosures > 0) ⇒ let that
+//     EOF drive finalization; no-op.
+//   - Otherwise run the SAME clean-close path onSessionFailed uses so
+//     directive routing (Idle / Delegating / Approval / nudge) is
+//     identical. If that path respawned a fresh session for `name`
+//     (a malformed-dispatch / qa-only nudge), it now owns the pipe
+//     lifecycle — leave it untouched, exactly as the EOF path would.
+//     Only when no fresh session exists do we tear down the orphaned
+//     parked subprocess and bump PendingClosures so its trailing EOF
+//     is dropped as stale rather than finalizing a second time.
+func onTurnFinalize(m AppModel, name string) Tuple[AppModel, Cmd[AppMsg]] {
+    return m.Sessions.Get(name) match {
+        case None()  => (m, NoCmd[AppMsg]())
+        case Some(s) => {
+            val pending = m.PendingClosures.Get(name).GetOrElse(0)
+            if pending > 0 { return (m, NoCmd[AppMsg]()) }
+            // Plan-mode re-drive. A lead turn that ended in plan mode
+            // produced a plan but no @dispatch / @summary, so the normal
+            // finalize would route it to Idle (plain chat) and the work
+            // never fans out. Instead re-drive the lead with a delegate
+            // nudge — once per user-prompt cycle (PlanModeNudged) so a
+            // lead that keeps choosing plan mode can't loop. spawnTLNudge
+            // does the canonical closeLiveSession→respawn, tearing down
+            // the parked subprocess and absorbing its EOF as stale.
+            if m.SawExitPlanMode && !m.PlanModeNudged && name == m.Team.Lead.Name {
+                val seed = setStatus(m.Copy(SawExitPlanMode = false, PlanModeNudged = true), name, StIdle())
+                val (m1, cmds) = spawnTLNudge(seed, "plan-mode", buildPlanModeNudgePrompt(m.Team))
+                return (m1, batchAll(cmds))
+            }
+            // Normal finalize: run the same clean-close path the EOF
+            // would have. Clear any stale plan-mode latch first (a
+            // second plan-mode turn in the same cycle falls through
+            // here and is allowed to settle to Idle).
+            val cleared = m.Copy(SawExitPlanMode = false)
+            val (finalized, cmd) = onSessionFailed(cleared, name, "EOF")
+            if finalized.Sessions.Get(name).IsDefined() {
+                return (finalized, cmd)
+            }
+            CloseSession(s)
+            val curr = finalized.PendingClosures.Get(name).GetOrElse(0)
+            val absorbed = finalized.Copy(PendingClosures = finalized.PendingClosures.Put(name, curr + 1))
+            return (absorbed, cmd)
+        }
+    }
+}
+
+// buildPlanModeNudgePrompt is the system message the lead gets when it
+// ended a turn in claude-code plan mode. The orchestrator can't surface
+// an interactive plan approval, so the plan would otherwise strand. Tell
+// the lead to proceed through the directive contract instead.
+func buildPlanModeNudgePrompt(tm Team) string {
+    val others = tm.Members.Map((mem) => mem.Name).Filter((n) => n != tm.Lead.Name)
+    val othersList = if (others.IsEmpty()) "(no other members on team)" else others.MkString(", ")
+    return "System: your turn ended in plan mode (ExitPlanMode). This orchestrator runs headless — there is no interactive \"approve plan\" step, so a presented plan strands instead of proceeding. Your plan is preserved in the transcript.\n\n" +
+        "To move the work forward, end your next turn through the directive contract — pick ONE:\n\n" +
+        "  (A) Delegate. For each parallel unit of work issue `@dispatch(<member>) <instructions> @end`. Team members: " + othersList + ". Independent dispatches run concurrently.\n\n" +
+        "  (B) Escalate a decision. If you need the user to choose before any work can start, issue `@summary <one paragraph: the decision + the options> @end` — the user sees an Approval dialog.\n\n" +
+        "Do NOT re-enter plan mode. Emit your @dispatch / @summary directives and end the turn."
+}
 
 // onSessionFailed handles the read pump's terminal event.
 //

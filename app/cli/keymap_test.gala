@@ -228,6 +228,7 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case HistoryArchiveFailed(_)     => "HistoryArchiveFailed"
     case ChunkArrived(_, _)          => "ChunkArrived"
     case SessionFailed(_, _)         => "SessionFailed"
+    case TurnFinalize(_)             => "TurnFinalize"
     case WriteSent(_)                => "WriteSent"
     case PreMergeHooksPassed(_)      => "PreMergeHooksPassed"
     case PreMergeHooksFailed(_)      => "PreMergeHooksFailed"

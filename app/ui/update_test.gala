@@ -109,12 +109,11 @@ func TestKeySubmit_Empty_NoOp(t T) T {
 }
 
 // Plain-chat TL response (no @dispatch / @summary directives) must
-// still transition the FSM to Idle. Without this, an audit reading
-// events.jsonl saw a fresh UserPrompted event pop from "nowhere"
-// because the prior turn's TLThinking→Idle hop was assigned
-// directly to State, bypassing transitionLogged. Now the empty-
-// dispatch path routes through transitionLogged so the audit log
-// is complete.
+// still transition the FSM to Idle. Without this, the event log
+// showed a fresh UserPrompted event pop from "nowhere" because the
+// prior turn's TLThinking→Idle hop was assigned directly to State,
+// bypassing transitionLogged. Now the empty-dispatch path routes
+// through transitionLogged so the transition log is complete.
 func TestSessionFailed_PlainChatTLResponse_LandsBackInIdle(t T) T {
     val seed = sampleModel().Copy(
         State      = TLThinking(),
@@ -1423,6 +1422,17 @@ func TestPrCreated_OpenPrsOnlyGrows(t T) T {
     return Eq(t2, m2.OpenPrs.Get(1).Url, "https://x/y/pull/8")
 }
 
+// A PR re-touched on the SAME branch (an @summary description edit or a
+// follow-up push) fires PrCreated with the same url. upsertOpenPr
+// refreshes the row in place rather than stacking a duplicate — one PR
+// stays one entry however many times it's updated.
+func TestPrCreated_SameUrlUpsertsInPlace(t T) T {
+    val (m1, _) = Update(sampleModel(), PrCreated(Url = "https://x/y/pull/7", Branch = "b7"))
+    val (m2, _) = Update(m1,            PrCreated(Url = "https://x/y/pull/7", Branch = "b7"))
+    val t1 = Eq(t, m2.OpenPrs.Size(), 1)
+    return Eq(t1, m2.OpenPrs.Get(0).Url, "https://x/y/pull/7")
+}
+
 // ---------------------------------------------------------------------------
 // Conversation-entry selection (click → SelectedEntry → Ctrl+Y copies
 // just that entry; Esc clears).
@@ -1704,11 +1714,10 @@ func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T)
 // liveRespawnMember must rotate the SessionId AND clear
 // PendingClosures unconditionally. Without rotation the
 // hung session's poisoned jsonl gets reloaded on every
-// `--resume` (live observation: Lyra + Kael cycled 3 times
-// each between 05:43 and 06:21 without producing output);
-// without clearing PendingClosures the fresh subprocess's
-// first chunk is eaten by onChunk's stale-drop and the read
-// pump dies.
+// `--resume` (past sessions saw members cycle several times
+// without producing output); without clearing PendingClosures
+// the fresh subprocess's first chunk is eaten by onChunk's
+// stale-drop and the read pump dies.
 func TestOnTick_LivenessSilence_RotatesSessionAndDrainsPendingClosures(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel()
@@ -1828,7 +1837,7 @@ func TestStateWatchdog_Delegating_PastCeiling_ForcesIdle(t T) T {
 }
 
 func TestStateWatchdog_QAGate_PastCeiling_ForcesIdle(t T) T {
-    val pending = EmptyHashSet[string]().Add("Sable")
+    val pending = EmptyHashSet[string]().Add("Mara")
     val seed = sampleModel().Copy(
         State          = QAGate(Pending = pending, Dispatched = pending),
         StateEnteredAt = staleStateEnteredAt(),
@@ -1921,17 +1930,17 @@ func TestStateWatchdog_TLThinking_ResumesAfterTaskCleared(t T) T {
 func TestTrackTaskTool_AddRemoveAndNoOps(t T) T {
     val m0 = sampleModel()
     val openChunk = EmptyClaudeChunk().Copy(TaskToolUseIds = ArrayOf("toolu_x"))
-    val m1 = trackTaskTool(m0, "Vesper", openChunk)
-    val sz1 = m1.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
+    val m1 = trackTaskTool(m0, "Nadia", openChunk)
+    val sz1 = m1.OutstandingTaskTools.Get("Nadia").GetOrElse(EmptyHashSet[string]()).Size()
     val t1 = Eq(t, sz1, 1)
     val closeChunk = EmptyClaudeChunk().Copy(TaskToolResultId = "toolu_x")
-    val m2 = trackTaskTool(m1, "Vesper", closeChunk)
-    val sz2 = m2.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
+    val m2 = trackTaskTool(m1, "Nadia", closeChunk)
+    val sz2 = m2.OutstandingTaskTools.Get("Nadia").GetOrElse(EmptyHashSet[string]()).Size()
     val t2 = Eq(t1, sz2, 0)
     // No-op chunk (empty ids + empty result) does not touch state.
     val noopChunk = EmptyClaudeChunk()
-    val m3 = trackTaskTool(m2, "Vesper", noopChunk)
-    return Eq(t2, m3.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size(), 0)
+    val m3 = trackTaskTool(m2, "Nadia", noopChunk)
+    return Eq(t2, m3.OutstandingTaskTools.Get("Nadia").GetOrElse(EmptyHashSet[string]()).Size(), 0)
 }
 
 // Regression: a single assistant envelope opens THREE parallel Task
@@ -1946,15 +1955,15 @@ func TestTrackTaskTool_AddRemoveAndNoOps(t T) T {
 func TestTrackTaskTool_ParallelTasks_AllTracked(t T) T {
     val m0 = sampleModel()
     val openChunk = EmptyClaudeChunk().Copy(TaskToolUseIds = ArrayOf("toolu_a", "toolu_b", "toolu_c"))
-    val m1 = trackTaskTool(m0, "Vesper", openChunk)
-    val sz1 = m1.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
+    val m1 = trackTaskTool(m0, "Nadia", openChunk)
+    val sz1 = m1.OutstandingTaskTools.Get("Nadia").GetOrElse(EmptyHashSet[string]()).Size()
     val t1 = Eq(t, sz1, 3)
     // First subagent finishes — only toolu_a removed; b and c still in flight.
     val close1 = EmptyClaudeChunk().Copy(TaskToolResultId = "toolu_a")
-    val m2 = trackTaskTool(m1, "Vesper", close1)
-    val sz2 = m2.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]()).Size()
+    val m2 = trackTaskTool(m1, "Nadia", close1)
+    val sz2 = m2.OutstandingTaskTools.Get("Nadia").GetOrElse(EmptyHashSet[string]()).Size()
     val t2 = Eq(t1, sz2, 2)
-    val remaining = m2.OutstandingTaskTools.Get("Vesper").GetOrElse(EmptyHashSet[string]())
+    val remaining = m2.OutstandingTaskTools.Get("Nadia").GetOrElse(EmptyHashSet[string]())
     val t3 = IsTrue(t2, remaining.Contains("toolu_b"))
     return IsTrue(t3, remaining.Contains("toolu_c"))
 }
@@ -2038,38 +2047,38 @@ func TestExtractFirstClaudeToolUseId_ImportWired(t T) T {
 // ---------------------------------------------------------------------------
 
 func TestHeartbeatRespawnNotice_NormalAttempt(t T) T =
-    Eq(t, heartbeatRespawnNotice("Kael", 1, 2),
-            "Kael: silent past heartbeat — respawn 1 of 2")
+    Eq(t, heartbeatRespawnNotice("Bram", 1, 2),
+            "Bram: silent past heartbeat — respawn 1 of 2")
 
 func TestHeartbeatRespawnNotice_LastRetry(t T) T =
-    Eq(t, heartbeatRespawnNotice("Kael", 2, 2),
-            "Kael: silent past heartbeat — respawn 2 of 2 (last retry)")
+    Eq(t, heartbeatRespawnNotice("Bram", 2, 2),
+            "Bram: silent past heartbeat — respawn 2 of 2 (last retry)")
 
 func TestHeartbeatRespawnNotice_OverBudget(t T) T =
-    Eq(t, heartbeatRespawnNotice("Kael", 3, 2),
-            "Kael: silent past heartbeat — respawn 3 over 2-retry budget")
+    Eq(t, heartbeatRespawnNotice("Bram", 3, 2),
+            "Bram: silent past heartbeat — respawn 3 over 2-retry budget")
 
 // clearHeartbeatNoticeFor only clears LastError when it's the
 // heartbeat-respawn shape for THIS member. Other LastError values
 // (auth failures, PR errors, other members' heartbeat) are preserved.
 
 func TestClearHeartbeatNoticeFor_ClearsOwnNotice(t T) T {
-    val cur = Some[string]("Kael: silent past heartbeat — respawn 2 of 2 (last retry)")
-    return IsNone(t, clearHeartbeatNoticeFor(cur, "Kael"))
+    val cur = Some[string]("Bram: silent past heartbeat — respawn 2 of 2 (last retry)")
+    return IsNone(t, clearHeartbeatNoticeFor(cur, "Bram"))
 }
 
 func TestClearHeartbeatNoticeFor_PreservesOtherMembersNotice(t T) T {
-    val cur = Some[string]("Lyra: silent past heartbeat — respawn 1 of 2")
-    val result = clearHeartbeatNoticeFor(cur, "Kael")
+    val cur = Some[string]("Otis: silent past heartbeat — respawn 1 of 2")
+    val result = clearHeartbeatNoticeFor(cur, "Bram")
     return result match {
-        case Some(s) => Eq(t, s, "Lyra: silent past heartbeat — respawn 1 of 2")
+        case Some(s) => Eq(t, s, "Otis: silent past heartbeat — respawn 1 of 2")
         case None()  => IsTrue(t, false)
     }
 }
 
 func TestClearHeartbeatNoticeFor_PreservesUnrelatedError(t T) T {
-    val cur = Some[string]("Kael: Failed to authenticate. API Error: 401")
-    val result = clearHeartbeatNoticeFor(cur, "Kael")
+    val cur = Some[string]("Bram: Failed to authenticate. API Error: 401")
+    val result = clearHeartbeatNoticeFor(cur, "Bram")
     return result match {
         case Some(s) => IsTrue(t, strings.Contains(s, "Failed to authenticate"))
         case None()  => IsTrue(t, false)
@@ -2077,7 +2086,7 @@ func TestClearHeartbeatNoticeFor_PreservesUnrelatedError(t T) T {
 }
 
 func TestClearHeartbeatNoticeFor_NoneStaysNone(t T) T =
-    IsNone(t, clearHeartbeatNoticeFor(None[string](), "Kael"))
+    IsNone(t, clearHeartbeatNoticeFor(None[string](), "Bram"))
 
 // The watchdog must also flip the affected members' Status back to
 // StIdle. Without this, the sidebar keeps showing the member as
@@ -2142,6 +2151,25 @@ func TestStateWatchdog_TLThinking_AutoRetriesLastPrompt(t T) T {
     }
 }
 
+// A watchdog auto-retry re-injects the orchestrator's own last prompt
+// to recover a silent TL turn — it must NOT wipe the in-flight @plan
+// queue the way a genuine fresh user prompt does. The synthetic
+// resubmit rides PlanContinuing so onSubmit preserves Plan + PlanShipped
+// instead of discarding the queued multi-step work mid-recovery.
+func TestStateWatchdog_TLThinking_AutoRetryPreservesPlan(t T) T {
+    val seed = sampleModel().Copy(
+        State              = TLThinking(),
+        StateEnteredAt     = staleStateEnteredAt(),
+        LastUserPrompt     = "do the thing",
+        WatchdogRetryFired = false,
+        Plan               = ArrayOf("step one", "step two", "step three"),
+        PlanShipped        = 1,
+    )
+    val (m, _) = Update(seed, TickMsg())
+    val t1 = Eq(t, m.Plan.Size(), 3)
+    return Eq(t1, m.PlanShipped, 1)
+}
+
 // No retry on second watchdog firing (latch holds).
 func TestStateWatchdog_TLThinking_SecondFire_NoRetry_LandsInIdle(t T) T {
     val seed = sampleModel().Copy(
@@ -2175,8 +2203,8 @@ func TestStateWatchdog_TLThinking_EmptyLastPrompt_NoRetry(t T) T {
 }
 
 // Member-state watchdog now auto-respawns the affected members with
-// their original dispatch body (the same PR #76 fix used by the
-// heartbeat-respawn path) and STAYS in Delegating / QAGate so the
+// their original dispatch body (the same respawn path the
+// heartbeat-respawn flow uses) and STAYS in Delegating / QAGate so the
 // pending set survives. Past sessions saw the orchestrator park
 // forever in Idle after a member-watchdog kill because the @blocked
 // straggler that followed arrived against an Idle FSM and was
@@ -2253,9 +2281,8 @@ func TestOnSubmit_CapturesLastUserPromptAndResetsWatchdogLatch(t T) T {
 // prompt on member-gated states) spawns `claude --session-id
 // <new>` instead of `claude --resume <stale-id>`. Without this,
 // auto-retry reloads the same claude-code session jsonl that just
-// hung — observed in PR #68's first deployment as the watchdog
-// firing, auto-retrying, and the retry hitting the exact same
-// synthetic-poisoning loop within seconds.
+// hung — past sessions saw the watchdog fire, auto-retry, and the
+// retry hit the exact same synthetic-poisoning loop within seconds.
 func TestStateWatchdog_TLThinking_RotatesLeadSessionId(t T) T {
     val seed = sampleModel()
     val leadName = seed.Team.Lead.Name
@@ -2292,8 +2319,8 @@ func TestStateWatchdog_Delegating_RotatesPendingMemberSessionIds(t T) T {
 // past the ceiling, so it's hung and won't emit a stale straggler.
 // If the budget isn't cleared, the fresh subprocess's first real
 // chunk gets eaten by the stale-drop in onChunk (which returns
-// NoCmd, killing the read pump). Observed live in PR #69 as the
-// auto-retry spawn producing 0 chunks for 300s.
+// NoCmd, killing the read pump). Past sessions saw the auto-retry
+// spawn produce 0 chunks for 300s.
 func TestStateWatchdog_TLThinking_PastCeiling_ClearsPendingClosures(t T) T {
     val seed = sampleModel()
     val leadName = seed.Team.Lead.Name
@@ -4259,7 +4286,7 @@ func TestAskUserQuestion_TakesPrecedenceOverApproval(t T) T {
 
 // ----------------------------------------------------------------------------
 // First-turn-with-AskUserQuestion regression — reproduces the user-reported
-// "doesn't work anymore" symptom (PR #21 build): typing a fresh prompt,
+// "doesn't work anymore" symptom: typing a fresh prompt,
 // pressing Enter, getting an empty-member "is no longer running — answer
 // not delivered" toast plus a saved transcript line whose Text contains
 // a literal "you: " prefix. The story below walks the exact state the
@@ -4314,12 +4341,12 @@ func TestFirstTurn_NoPendingQuestionImmediatelyAfterSubmit(t T) T {
 // with an empty member in its format string.
 func TestFirstTurn_AskUserQuestion_PendingHasNonEmptyMember(t T) T {
     val seed = sampleModel()
-    val (m, _) = Update(seed, ChunkArrived(Member = "Vesper", Line = askUserQuestionEnvelope))
+    val (m, _) = Update(seed, ChunkArrived(Member = "Nadia", Line = askUserQuestionEnvelope))
     return m.PendingQuestion match {
         case None() => IsTrue(t, false)
         case Some(p) => {
             val t1 = IsTrue(t, p.Member != "")
-            return Eq(t1, p.Member, "Vesper")
+            return Eq(t1, p.Member, "Nadia")
         }
     }
 }
@@ -4332,7 +4359,7 @@ func TestFirstTurn_AskUserQuestion_PendingHasNonEmptyMember(t T) T {
 func TestFirstTurn_AnswerText_HasNoSpeakerPrefix(t T) T {
     val seeded = sampleModel().Copy(
         PendingQuestion = Some(PendingQuestion(
-            Member       = "Vesper",
+            Member       = "Nadia",
             ToolUseId    = "toolu_x",
             QuestionText = "Continue?",
         )),
@@ -4356,7 +4383,7 @@ func TestFirstTurn_AnswerText_HasNoSpeakerPrefix(t T) T {
 func TestFirstTurn_NoLiveSession_NoAnswerNotDeliveredToast(t T) T {
     val seeded = sampleModel().Copy(
         PendingQuestion = Some(PendingQuestion(
-            Member       = "Vesper",
+            Member       = "Nadia",
             ToolUseId    = "toolu_x",
             QuestionText = "Continue?",
         )),
@@ -4378,11 +4405,11 @@ func TestFirstTurn_NoLiveSession_NoAnswerNotDeliveredToast(t T) T {
 // no scary toast — hold either way and are the regression net.)
 func TestFirstTurn_PendingWithNoSession_AnswerLoggedNotSwallowed(t T) T {
     val seeded = sampleModel().Copy(
-        // PendingQuestion set, but Sessions has NO entry for "Vesper".
+        // PendingQuestion set, but Sessions has NO entry for "Nadia".
         // This is the state the user landed in: stale pending from a
         // crashed / completed prior session.
         PendingQuestion = Some(PendingQuestion(
-            Member       = "Vesper",
+            Member       = "Nadia",
             ToolUseId    = "toolu_old",
             QuestionText = "scope?",
         )),
@@ -4639,18 +4666,18 @@ func TestTurnEnd_PendingNoDirectives_LandsIdleNotFrozen(t T) T {
 }
 
 // ----------------------------------------------------------------------------
-// Orchestrator dispatch bugs uncovered in the 0.49.0-migration audit log
-// (gala_team .gala_team/sessions/debug/events.jsonl, 04:55–05:37 UTC):
-//   - Duplicate MemberDone fired twice for Lyra within 54 ms.
-//   - Stuck-nudge cascade re-dispatched both engineers 5× even though
-//     only one was stuck; the healthy one lost in-flight work each cycle.
-//   - Freshly-respawned member marked stuck within 50 ms because
+// Orchestrator dispatch bugs surfaced in past sessions:
+//   - Duplicate MemberDone fired twice for one member in quick succession.
+//   - Stuck-nudge cascade re-dispatched both engineers repeatedly even
+//     though only one was stuck; the healthy one lost in-flight work
+//     each cycle.
+//   - Freshly-respawned member marked stuck almost immediately because
 //     LastChunkAt still held the prior subprocess's stale timestamp.
-//   - 148 tool_use chunks produced zero conversation entries —
-//     transcripts looked frozen while Kael was editing at full speed.
+//   - A burst of tool_use chunks produced zero conversation entries —
+//     transcripts looked frozen while a member was editing at full speed.
 //
 // Each test below pins one of those invariants. Names start with
-// `TestDispatchBugs_` so future readers can grep the audit narrative.
+// `TestDispatchBugs_` so future readers can grep the group.
 // ----------------------------------------------------------------------------
 
 // 1. Duplicate MemberDone suppression.
@@ -4658,9 +4685,9 @@ func TestTurnEnd_PendingNoDirectives_LandsIdleNotFrozen(t T) T {
 // When `@done` has already been parsed for a member (MemberDoneBodies
 // has an entry), the subsequent EOF-driven MemberDone in
 // onSessionFailed must NOT fire. The FSM tolerates the no-op self
-// loop but it churns transition events; the audit log showed two
-// MemberDone transitions for Lyra 54ms apart in the Delegating→
-// Delegating loop. After the fix only one transition is emitted.
+// loop but it churns transition events; past sessions showed two
+// MemberDone transitions for one member in quick succession in the
+// Delegating→Delegating loop. After the fix only one is emitted.
 func TestDispatchBugs_NoDuplicateMemberDoneOnEofAfterAtDone(t T) T {
     val seed = sampleModel().Copy(
         State            = Delegating(Pending = ArrayToHashSet[string](ArrayOf("Felix")), Dispatched = ArrayToHashSet[string](ArrayOf("Felix"))),
@@ -4690,7 +4717,7 @@ func pendingSizeOf(s AppState) int = s match {
 // fresh subprocess so the heartbeat's "stuck since LastChunkAt"
 // math measures against the NEW process, not the old one's stale
 // last-chunk time. Without this, the new subprocess could be marked
-// stuck 50 ms after spawn (audit log 05:18:38 → 05:18:38.199).
+// stuck almost immediately after spawn.
 func TestDispatchBugs_EnsureSession_ResetsLastChunkAtToNow(t T) T {
     val proj = sampleProject()
     val team = sampleTeam()
@@ -4771,9 +4798,8 @@ func TestDispatchBugs_ToolUseWithText_RendersTextOnly(t T) T {
 // ----------------------------------------------------------------------------
 // TL livelock regression — `TurnBuffer` carrying stale `@dispatch`
 // blocks from a prior turn caused the TL to re-fire the same dispatches
-// on every nudge / relay. Audit log of the 0.49.0-migration session
-// showed 250 dispatches for Kael over 80 minutes, every body
-// byte-identical to the first turn's.
+// on every nudge / relay. Past sessions showed hundreds of dispatches
+// for a single member, every body byte-identical to the first turn's.
 //
 // Fix lives in spawnTLNudge: it clears TurnBuffer + ConsultsFired +
 // closes any prior TL subprocess before spawning. Every TL re-spawn
@@ -4857,10 +4883,10 @@ func readEventsFile(path string) string {
 func TestSpawnFailureLog_EmitsEvent(t T) T {
     val dir = setupDebugRepo("spawn_fail")
     defer os.RemoveAll(dir)
-    LogSpawnFailure("Sable", "qa_auto", "spawn Sable: workspace failed")
+    LogSpawnFailure("Mara", "qa_auto", "spawn Mara: workspace failed")
     val contents = readEventsFile(eventsFilePath(dir))
     val t1 = IsTrue(t, strings.Contains(contents, "\"kind\":\"spawn_failure\""))
-    val t2 = IsTrue(t1, strings.Contains(contents, "\"member\":\"Sable\""))
+    val t2 = IsTrue(t1, strings.Contains(contents, "\"member\":\"Mara\""))
     val t3 = IsTrue(t2, strings.Contains(contents, "qa_auto"))
     return IsTrue(t3, strings.Contains(contents, "workspace failed"))
 }
@@ -4868,17 +4894,17 @@ func TestSpawnFailureLog_EmitsEvent(t T) T {
 func TestStderrLog_EmitsEventWithTextAndLength(t T) T {
     val dir = setupDebugRepo("stderr")
     defer os.RemoveAll(dir)
-    LogStderr("Sable", "usage_limit_reached")
+    LogStderr("Mara", "usage_limit_reached")
     val contents = readEventsFile(eventsFilePath(dir))
     val t1 = IsTrue(t, strings.Contains(contents, "\"kind\":\"stderr\""))
-    val t2 = IsTrue(t1, strings.Contains(contents, "\"member\":\"Sable\""))
+    val t2 = IsTrue(t1, strings.Contains(contents, "\"member\":\"Mara\""))
     return IsTrue(t2, strings.Contains(contents, "usage_limit_reached"))
 }
 
 func TestStderrLog_DropsEmptyLine(t T) T {
     val dir = setupDebugRepo("stderr_empty")
     defer os.RemoveAll(dir)
-    LogStderr("Sable", "")
+    LogStderr("Mara", "")
     val contents = readEventsFile(eventsFilePath(dir))
     return IsFalse(t, strings.Contains(contents, "\"kind\":\"stderr\""))
 }
@@ -4891,7 +4917,7 @@ func TestOnStderr_FiresLogStderrEvent(t T) T {
     val dir = setupDebugRepo("on_stderr")
     defer os.RemoveAll(dir)
     val m = sampleModel()
-    val (_, _) = Update(m, StderrArrived(Member = "Sable", Line = "Error: rate limit reached"))
+    val (_, _) = Update(m, StderrArrived(Member = "Mara", Line = "Error: rate limit reached"))
     val contents = readEventsFile(eventsFilePath(dir))
     return IsTrue(t, strings.Contains(contents, "rate limit reached"))
 }
@@ -4909,7 +4935,7 @@ func TestOnStderr_LastErrorIsTruncated(t T) T {
     val m = sampleModel()
     // 4 KB stderr line. truncateForToast clamps to ~80 chars.
     val giant = strings.Repeat("x", 4000)
-    val (m1, _) = Update(m, StderrArrived(Member = "Sable", Line = giant))
+    val (m1, _) = Update(m, StderrArrived(Member = "Mara", Line = giant))
     return m1.LastError match {
         case None()    => IsTrue(t, false)
         case Some(err) => IsTrue(t, len(err) < 200)
@@ -4947,9 +4973,9 @@ func TestApplyChunkVisible_LongErrorText_IsTruncatedInLastError(t T) T {
 // claude-code's `result` envelopes with `is_error=true` sometimes
 // carry a stream-json envelope (`{"type":"user","message":...}`) in
 // the `result` field itself. resultEventChunk passes it through into
-// chunk.ErrorText, and PR #65's truncate-only fix still surfaced the
+// chunk.ErrorText, and an earlier truncate-only fix still surfaced the
 // first 80 bytes as visible JSON in the bottom bar (the user-reported
-// `⚠ Vesper: {"type":"user","message":...` symptom). Detect the
+// `⚠ <member>: {"type":"user","message":...` symptom). Detect the
 // envelope shape on chunk.ErrorText and replace with a clean tag, the
 // same way onStderr does.
 func TestApplyChunkVisible_StreamJsonErrorText_SuppressedTag(t T) T {
@@ -4967,7 +4993,7 @@ func TestApplyChunkVisible_StreamJsonErrorText_SuppressedTag(t T) T {
         IsSynthetic     = false,
     )
     val seed = sampleModel()
-    val (m, _) = applyChunkVisible(seed, "Vesper", errChunk)
+    val (m, _) = applyChunkVisible(seed, "Nadia", errChunk)
     return m.LastError match {
         case None()    => IsTrue(t, false)
         case Some(err) => {
@@ -4989,7 +5015,7 @@ func TestOnStderr_StreamJsonShape_SilentlyAbsorbed(t T) T {
     defer os.RemoveAll(dir)
     val m = sampleModel()
     val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01abc\",\"type\":\"tool_result\",\"content\":\"ok\"}]}}"
-    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = envelope))
+    val (m1, _) = Update(m, StderrArrived(Member = "Otis", Line = envelope))
     // No LastError set, no toast pushed — the envelope is a known
     // claude-code stream-routing quirk the user can't act on. The
     // audit trail is preserved in events.jsonl via LogStderr.
@@ -5008,7 +5034,7 @@ func TestOnStderr_NonEnvelopeLine_StillSurfaces(t T) T {
     val dir = setupDebugRepo("on_stderr_nonenvelope")
     defer os.RemoveAll(dir)
     val m = sampleModel()
-    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = "Error: rate limit hit, retry in 60s"))
+    val (m1, _) = Update(m, StderrArrived(Member = "Otis", Line = "Error: rate limit hit, retry in 60s"))
     return m1.LastError match {
         case None()    => IsTrue(t, false)
         case Some(err) => IsTrue(t, strings.Contains(err, "rate limit"))
@@ -5025,12 +5051,12 @@ func TestOnStderr_BumpsLastChunkAt(t T) T {
     val dir = setupDebugRepo("on_stderr_alive")
     defer os.RemoveAll(dir)
     val m = sampleModel()
-    val t1 = m.LastChunkAt.Get("Lyra") match {
+    val t1 = m.LastChunkAt.Get("Otis") match {
         case None()    => IsTrue(t, true)
         case Some(_)   => IsTrue(t, false)
     }
-    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = "Error: rate limit hit, retry in 60s"))
-    return m1.LastChunkAt.Get("Lyra") match {
+    val (m1, _) = Update(m, StderrArrived(Member = "Otis", Line = "Error: rate limit hit, retry in 60s"))
+    return m1.LastChunkAt.Get("Otis") match {
         case None()    => IsTrue(t1, false)
         case Some(_)   => IsTrue(t1, true)
     }
@@ -5044,8 +5070,8 @@ func TestOnStderr_StreamJsonShape_BumpsLastChunkAt(t T) T {
     defer os.RemoveAll(dir)
     val m = sampleModel()
     val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_xyz\",\"type\":\"tool_result\",\"content\":\"ok\"}]}}"
-    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = envelope))
-    return m1.LastChunkAt.Get("Lyra") match {
+    val (m1, _) = Update(m, StderrArrived(Member = "Otis", Line = envelope))
+    return m1.LastChunkAt.Get("Otis") match {
         case None()    => IsTrue(t, false)
         case Some(_)   => IsTrue(t, true)
     }
@@ -5063,11 +5089,11 @@ func TestOnStderr_StreamJsonToolResult_RemovesFromOutstandingTaskTools(t T) T {
     defer os.RemoveAll(dir)
     val seed = sampleModel().Copy(
         OutstandingTaskTools = EmptyHashMap[string, HashSet[string]]()
-            .Put("Lyra", EmptyHashSet[string]().Add("toolu_explore_01")),
+            .Put("Otis", EmptyHashSet[string]().Add("toolu_explore_01")),
     )
     val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_explore_01\",\"type\":\"tool_result\",\"content\":\"done\"}]}}"
-    val (m1, _) = Update(seed, StderrArrived(Member = "Lyra", Line = envelope))
-    return Eq(t, m1.OutstandingTaskTools.Get("Lyra").GetOrElse(EmptyHashSet[string]()).Size(), 0)
+    val (m1, _) = Update(seed, StderrArrived(Member = "Otis", Line = envelope))
+    return Eq(t, m1.OutstandingTaskTools.Get("Otis").GetOrElse(EmptyHashSet[string]()).Size(), 0)
 }
 
 // Regression guard: stream-json on stderr must never reach the
@@ -5081,41 +5107,40 @@ func TestOnStderr_StreamJsonShape_DoesNotAppendToTranscript(t T) T {
     val m = sampleModel()
     val before = m.Conversation.Size()
     val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_abc\",\"type\":\"tool_result\",\"content\":\"don't surface me\"}]}}"
-    val (m1, _) = Update(m, StderrArrived(Member = "Lyra", Line = envelope))
+    val (m1, _) = Update(m, StderrArrived(Member = "Otis", Line = envelope))
     return Eq(t, m1.Conversation.Size(), before)
 }
 
-// QAGate variant of the heartbeat-abandoned test from PR #61. A live
-// session captured Sable in QAGate(Pending={Sable}) with StWorking
-// status and LastChunkAt aged past AbandonAfterSeconds; the walk
-// should escalate her status and either respawn (if retries < max)
-// or fire MemberAbandoned (which drains QAGate → TLReview). The
-// debuglog flush fix in this PR is what makes the FSM transition
-// observable in events.jsonl — without it, transitions fired but
-// were silently dropped after the first write failure.
+// QAGate variant of the heartbeat-abandoned test. A QA member parked
+// in QAGate(Pending={qa}) with StWorking status and LastChunkAt aged
+// past AbandonAfterSeconds; the walk should escalate its status and
+// either respawn (if retries < max) or fire MemberAbandoned (which
+// drains QAGate → TLReview). The debuglog flush fix is what makes the
+// FSM transition observable in events.jsonl — without it, transitions
+// fired but were silently dropped after the first write failure.
 func TestHeartbeat_QAGateAbandonedMember_DrainsToTLReview(t T) T {
     val proj  = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    val sable = Member(
-        Name = "Sable", Role = QA(),
+    val mara = Member(
+        Name = "Mara", Role = QA(),
         Personality = "rigorous",
         Model = None[string](), Extra = "",
         Onboarding = EmptyArray[string](),
     )
-    val team  = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
+    val team  = sampleTeam().Copy(Members = sampleTeam().Members.Append(mara))
     val now   = time_utils.FromUnixSeconds(int64(30000))
     val stale = time_utils.FromUnixSeconds(int64(29000))  // 1000s ago, past AbandonAfterSeconds=300
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
-    val dispatchMsg = protocol.NewMessage(team.Lead.Name, "Sable", protocol.Dispatch(), "review", 0)
+    val dispatchMsg = protocol.NewMessage(team.Lead.Name, "Mara", protocol.Dispatch(), "review", 0)
     val seed = base.Copy(
-        State             = QAGate(Pending = EmptyHashSet[string]().Add("Sable"), Dispatched = EmptyHashSet[string]().Add("Sable")),
-        Statuses          = base.Statuses.Put("Sable", StWorking()),
-        LastChunkAt       = base.LastChunkAt.Put("Sable", stale),
+        State             = QAGate(Pending = EmptyHashSet[string]().Add("Mara"), Dispatched = EmptyHashSet[string]().Add("Mara")),
+        Statuses          = base.Statuses.Put("Mara", StWorking()),
+        LastChunkAt       = base.LastChunkAt.Put("Mara", stale),
         // Protocol-driven: Silent past abandon threshold + Attempt past
         // policy.MaxRetries forces protocol.Tick → MarkAbandoned.
-        LastDispatchedMsg = base.LastDispatchedMsg.Put("Sable", dispatchMsg),
-        DeliveryStates    = base.DeliveryStates.Put("Sable", protocol.Silent(SinceNanos = int(stale.UnixNanos()), Attempt = 100)),
-        RetryCount        = base.RetryCount.Put("Sable", 10),
+        LastDispatchedMsg = base.LastDispatchedMsg.Put("Mara", dispatchMsg),
+        DeliveryStates    = base.DeliveryStates.Put("Mara", protocol.Silent(SinceNanos = int(stale.UnixNanos()), Attempt = 100)),
+        RetryCount        = base.RetryCount.Put("Mara", 10),
     )
     val (m, _) = updateLivenessStatuses(seed, team.Members, now)
     // afterMemberDone with empty pending → TLReview.
@@ -5151,48 +5176,48 @@ func TestHeartbeat_QAGateAbandonedMember_DrainsToTLReview(t T) T {
 // spawnQAReview's UI-thread half: when the FSM lands in QAGate and
 // the team has a QA member, the entry returns the model UNCHANGED.
 // The reviewBody / FoldLeft over QA members runs after QAPromptReady
-// lands (and that handler is the one that flips Sable to StWorking).
+// lands (and that handler is the one that flips Mara to StWorking).
 func TestSpawnQAReview_ReturnsImmediatelyForQATeam(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    val sable = Member(
-        Name = "Sable", Role = QA(),
+    val mara = Member(
+        Name = "Mara", Role = QA(),
         Personality = "rigorous",
         Model = None[string](), Extra = "",
         Onboarding = EmptyArray[string](),
     )
-    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
+    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(mara))
     val seed = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy()).Copy(
         State    = QAGate(Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StIdle()),
     )
     val (m, _) = spawnQAReview(seed)
     // Status map untouched — applyQAPromptReady is the one that
-    // upserts Sable to StWorking once the Future resolves.
-    val sableStatus = m.Statuses.Get("Sable")
-    return IsFalse(t, sableStatus.IsDefined())
+    // upserts Mara to StWorking once the Future resolves.
+    val maraStatus = m.Statuses.Get("Mara")
+    return IsFalse(t, maraStatus.IsDefined())
 }
 
 // applyQAPromptReady is the back-channel of the QA fan-out. Fed a
 // QAPromptReady result with the FSM in QAGate, it must upsert the
-// QA member to StWorking (the visible UI signal that Sable started
+// QA member to StWorking (the visible UI signal that Mara started
 // the review).
 func TestApplyQAPromptReady_FlipsQAToWorking(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    val sable = Member(
-        Name = "Sable", Role = QA(),
+    val mara = Member(
+        Name = "Mara", Role = QA(),
         Personality = "rigorous",
         Model = None[string](), Extra = "",
         Onboarding = EmptyArray[string](),
     )
-    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
+    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(mara))
     val seed = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy()).Copy(
         State    = QAGate(Pending = EmptyHashSet[string](), Dispatched = EmptyHashSet[string]()),
         Statuses = EmptyHashMap[string, Status]().Put("Felix", StIdle()),
     )
     val (m, _) = applyQAPromptReady(seed, "synthetic review prompt")
-    return m.Statuses.Get("Sable") match {
+    return m.Statuses.Get("Mara") match {
         case Some(s) => s match {
             case StWorking() => IsTrue(t, true)
             case _           => IsTrue(t, false)
@@ -5209,18 +5234,18 @@ func TestApplyQAPromptReady_FlipsQAToWorking(t T) T {
 func TestApplyQAPromptReady_DroppedWhenNotInQAGate(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    val sable = Member(
-        Name = "Sable", Role = QA(),
+    val mara = Member(
+        Name = "Mara", Role = QA(),
         Personality = "rigorous",
         Model = None[string](), Extra = "",
         Onboarding = EmptyArray[string](),
     )
-    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
+    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(mara))
     val seed = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy()).Copy(
         State = Idle(),  // moved on — no longer waiting on QA
     )
     val (m, _) = applyQAPromptReady(seed, "synthetic review prompt")
-    return IsFalse(t, m.Statuses.Get("Sable").IsDefined())
+    return IsFalse(t, m.Statuses.Get("Mara").IsDefined())
 }
 
 // REGRESSION: a QA reviewer that goes stuck WHILE the FSM is parked
@@ -5234,23 +5259,23 @@ func TestApplyQAPromptReady_DroppedWhenNotInQAGate(t T) T {
 func TestQaGateStuck_RepromptsReviewer_NotTL(t T) T {
     val proj = emptyLeadBranchProject()
     defer os.RemoveAll(proj.Repo)
-    val sable = Member(
-        Name = "Sable", Role = QA(),
+    val mara = Member(
+        Name = "Mara", Role = QA(),
         Personality = "rigorous",
         Model = None[string](), Extra = "",
         Onboarding = EmptyArray[string](),
     )
-    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(sable))
-    // now = 10000s; Sable's last chunk 200s ago → the StStuck band
+    val team = sampleTeam().Copy(Members = sampleTeam().Members.Append(mara))
+    // now = 10000s; Mara's last chunk 200s ago → the StStuck band
     // (StuckAfterSeconds=120 <= 200 < AbandonAfterSeconds=300), so
-    // the heartbeat escalates Sable to stuck (not failed).
+    // the heartbeat escalates Mara to stuck (not failed).
     val now   = time_utils.FromUnixSeconds(int64(10000))
     val stale = time_utils.FromUnixSeconds(int64(9800))
     val base  = InitialModel(proj, team, DefaultWorkflow(), DefaultPolicy())
     val seed  = base.Copy(
-        State       = QAGate(Pending = EmptyHashSet[string]().Add("Sable"), Dispatched = EmptyHashSet[string]().Add("Sable")),
-        Statuses    = base.Statuses.Put("Sable", StWorking()),
-        LastChunkAt = base.LastChunkAt.Put("Sable", stale),
+        State       = QAGate(Pending = EmptyHashSet[string]().Add("Mara"), Dispatched = EmptyHashSet[string]().Add("Mara")),
+        Statuses    = base.Statuses.Put("Mara", StWorking()),
+        LastChunkAt = base.LastChunkAt.Put("Mara", stale),
     )
     val (m, _) = updateLivenessStatuses(seed, team.Members, now)
     // FSM still parked in QAGate — NOT bounced to TLNudging.
@@ -5271,8 +5296,8 @@ func TestQaGateStuck_RepromptsReviewer_NotTL(t T) T {
 // Heartbeat gating: a member whose status was StWorking but who's
 // no longer in the FSM's pending set must NOT escalate to
 // StStuck/StFailed on the elapsed-time walk. Past sessions captured
-// three ghost MemberStuck transitions for Sable in eight minutes
-// while the FSM was Idle (the pending entry had drained but Sable's
+// three ghost MemberStuck transitions for Mara in eight minutes
+// while the FSM was Idle (the pending entry had drained but Mara's
 // status hadn't yet flipped). The new pending gate in
 // escalateByElapsed keeps the status at the working fallback for
 // any non-pending member, so no MemberStuck FSM event fires.
@@ -5435,7 +5460,7 @@ func realAssistantEnvelope(text string) string =
 // flagged IsSynthetic with empty Visible/AskQuestionId. Without this,
 // "No response requested." would render in the transcript.
 func TestFilterClaudeStreamJson_SyntheticEnvelope_FlagsAndDropsText(t T) T {
-    val chunk = FilterClaudeStreamJsonFor("Sable", syntheticAssistantEnvelope())
+    val chunk = FilterClaudeStreamJsonFor("Mara", syntheticAssistantEnvelope())
     val t1 = IsTrue(t, chunk.IsSynthetic)
     val t2 = Eq(t1, chunk.Visible, "")
     return Eq(t2, chunk.AskQuestionId, "")
@@ -5444,7 +5469,7 @@ func TestFilterClaudeStreamJson_SyntheticEnvelope_FlagsAndDropsText(t T) T {
 // A real (non-synthetic) assistant envelope still classifies normally
 // — IsSynthetic stays false and Visible carries the model's text.
 func TestFilterClaudeStreamJson_RealAssistantEnvelope_NotSynthetic(t T) T {
-    val chunk = FilterClaudeStreamJsonFor("Sable", realAssistantEnvelope("hello"))
+    val chunk = FilterClaudeStreamJsonFor("Mara", realAssistantEnvelope("hello"))
     val t1 = IsTrue(t, !chunk.IsSynthetic)
     return Eq(t1, chunk.Visible, "hello")
 }
@@ -6126,13 +6151,13 @@ func TestPrBranchOverride_ManualApproveReusesActivePr(t T) T {
 // stateTag (+ payload) and stateFromSnap are inverses for the variant
 // that carries a pending set — the round-trip must preserve it.
 func TestStateRoundTrip_DelegatingPreservesPending(t T) T {
-    val pset = EmptyHashSet[string]().Add("Kael").Add("Lyra")
+    val pset = EmptyHashSet[string]().Add("Bram").Add("Otis")
     val st = Delegating(Pending = pset, Dispatched = pset)
     val back = stateFromSnap(stateTag(st), statePendingList(st), stateReasonOf(st), stateSummaryOf(st))
     return back match {
         case Delegating(p, _) => {
-            val t1 = IsTrue(t, p.Contains("Kael"))
-            return IsTrue(t1, p.Contains("Lyra"))
+            val t1 = IsTrue(t, p.Contains("Bram"))
+            return IsTrue(t1, p.Contains("Otis"))
         }
         case _ => IsTrue(t, false)
     }
@@ -6225,7 +6250,7 @@ func TestRehydrateOrchestration_RestoresPostPromptSent(t T) T {
 
 // resumeTargets: pending workers for Delegating, nobody for Idle.
 func TestResumeTargets_DelegatingVsIdle(t T) T {
-    val pset = EmptyHashSet[string]().Add("Kael")
+    val pset = EmptyHashSet[string]().Add("Bram")
     val mDel = sampleModel().Copy(State = Delegating(Pending = pset, Dispatched = pset))
     val t1 = Eq(t, resumeTargets(mDel).Size(), 1)
     val mIdle = sampleModel().Copy(State = Idle())
@@ -6298,18 +6323,18 @@ func TestMemberDirectives_QuotedThenRealSignoffStillFires(t T) T {
 // and team configurations with / without QA.
 // ---------------------------------------------------------------------------
 
-// teamWithQA returns sampleTeam plus a Sable QA member. Used by the
+// teamWithQA returns sampleTeam plus a Mara QA member. Used by the
 // QAGate-drain tests so the FSM can actually enter QAGate (which
 // requires QARequired + at least one QA member).
 func teamWithQA() Team {
-    val sable = Member(
-        Name = "Sable", Role = QA(),
+    val mara = Member(
+        Name = "Mara", Role = QA(),
         Personality = "rigorous",
         Model = None[string](), Extra = "",
         Onboarding = EmptyArray[string](),
     )
     val base = sampleTeam()
-    return base.Copy(Members = base.Members.Append(sable))
+    return base.Copy(Members = base.Members.Append(mara))
 }
 
 // modelWithQA is sampleModel but with the QA-enabled team + workflow.
@@ -6324,18 +6349,18 @@ func modelWithQA() AppModel {
 
 // finaliseMemberDone (QA path): a QA member emits @finished and
 // finaliseMemberDone fires MemberDone immediately. From QAGate
-// with only Sable pending, the drain hops to TLReview.
+// with only Mara pending, the drain hops to TLReview.
 //
 // Past behaviour (bug): finaliseMemberDone wrote MemberDoneBodies
 // but never called transitionLogged. FSM stayed in QAGate forever.
-// Live session: Sable APPROVE'd at 05:01:00 and the FSM stayed
-// stuck in QAGate for 57 minutes until tui_exit.
+// Past sessions saw the sole QA member APPROVE and the FSM stay
+// stuck in QAGate until exit.
 func TestFinaliseMemberDone_QAOnly_DrainsQAGateToTLReview(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable")), Dispatched = ArrayToHashSet[string](ArrayOf("Sable"))),
-        Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
+        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Mara")), Dispatched = ArrayToHashSet[string](ArrayOf("Mara"))),
+        Statuses = EmptyHashMap[string, Status]().Put("Mara", StWorking()),
     )
-    val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
+    val (m, _) = finaliseMemberDone(seed, "Mara", "APPROVE")
     return m.State match {
         case TLReview() => IsTrue(t, true)
         case _          => IsTrue(t, false)
@@ -6351,12 +6376,12 @@ func TestFinaliseMemberDone_QAGate_PartialPending_StaysInQAGate(t T) T {
         Onboarding = EmptyArray[string](),
     )
     val seed = modelWithQA().Copy(
-        State = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable", "Theo")), Dispatched = ArrayToHashSet[string](ArrayOf("Sable", "Theo"))),
+        State = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Mara", "Theo")), Dispatched = ArrayToHashSet[string](ArrayOf("Mara", "Theo"))),
         Team  = modelWithQA().Team.Copy(Members = modelWithQA().Team.Members.Append(theo)),
     )
-    val (m, _) = finaliseMemberDone(seed, "Sable", "APPROVE")
+    val (m, _) = finaliseMemberDone(seed, "Mara", "APPROVE")
     return m.State match {
-        case QAGate(rest, _) => IsTrue(t, rest.Contains("Theo") && !rest.Contains("Sable"))
+        case QAGate(rest, _) => IsTrue(t, rest.Contains("Theo") && !rest.Contains("Mara"))
         case _            => IsTrue(t, false)
     }
 }
@@ -6386,7 +6411,7 @@ func TestEngineerFinish_NoQA_DrainsDelegatingToTLReview(t T) T {
 }
 
 // Engineer path with QA: same shape but QARequired=true + QA member
-// exists → Delegating drains to QAGate(Pending={Sable}) instead of
+// exists → Delegating drains to QAGate(Pending={Mara}) instead of
 // TLReview.
 func TestEngineerFinish_WithQA_DrainsDelegatingToQAGate(t T) T {
     val seed = modelWithQA().Copy(
@@ -6395,7 +6420,7 @@ func TestEngineerFinish_WithQA_DrainsDelegatingToQAGate(t T) T {
     )
     val (m, _) = Update(seed, UncommittedCheckResult(Member = "Felix", Body = "shipped", Dirty = false))
     return m.State match {
-        case QAGate(pending, _) => IsTrue(t, pending.Contains("Sable"))
+        case QAGate(pending, _) => IsTrue(t, pending.Contains("Mara"))
         case _               => IsTrue(t, false)
     }
 }
@@ -6464,15 +6489,15 @@ func TestChunkArrived_MemberBlocked_DrainsToTLReview(t T) T {
 // (QA), onMemberDone calls finaliseMemberDone directly — and now
 // with the bug fix, finaliseMemberDone fires MemberDone.
 //
-// This is the test that would have caught Sable's stuck-in-QAGate
-// symptom from the live session.
+// This is the test that would have caught the QA-member
+// stuck-in-QAGate symptom seen in past sessions.
 func TestChunkArrived_QAFinished_DrainsToTLReview(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable")), Dispatched = ArrayToHashSet[string](ArrayOf("Sable"))),
-        Statuses = EmptyHashMap[string, Status]().Put("Sable", StWorking()),
+        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Mara")), Dispatched = ArrayToHashSet[string](ArrayOf("Mara"))),
+        Statuses = EmptyHashMap[string, Status]().Put("Mara", StWorking()),
     )
     val approveChunk = "Reviewed the deliverables; build green; tests pass.\n@finished\nAPPROVE. Migration looks clean.\n@end"
-    val (m, _) = Update(seed, ChunkArrived(Member = "Sable", Line = approveChunk))
+    val (m, _) = Update(seed, ChunkArrived(Member = "Mara", Line = approveChunk))
     return m.State match {
         case TLReview() => IsTrue(t, true)
         case _          => IsTrue(t, false)
@@ -6536,7 +6561,7 @@ func TestUserPrompted_FromDelegating_LandsInTLThinking(t T) T {
 
 func TestUserPrompted_FromQAGate_LandsInTLThinking(t T) T {
     val seed = modelWithQA().Copy(
-        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Sable")), Dispatched = ArrayToHashSet[string](ArrayOf("Sable"))),
+        State    = QAGate(Pending = ArrayToHashSet[string](ArrayOf("Mara")), Dispatched = ArrayToHashSet[string](ArrayOf("Mara"))),
         Composer = "wait, scrap the review",
     )
     val (m, _) = Update(seed, KeySubmit())

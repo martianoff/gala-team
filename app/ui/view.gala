@@ -2115,8 +2115,16 @@ func activityMemberRow(m AppModel, mem Member, cols int) Widget {
     val glyph = bandGlyph(status, m.Tick)
     val timer = totalWorkFor(m, mem.Name, isRunningStatus(status))
     val timerCol = if (timer == "") "     " else bandPad(timer, 5)
-    val text = s"  ${glyph} ${bandPad(mem.Name, 10)} ${timerCol} ${activityDetail(m, mem.Name, status)}"
-    return TextStyled(capForBand(text, cols), activityRowStyle(status))
+    // Keep the glyph/name/timer columns intact and give only the
+    // detail the remaining width. The detail is MIDDLE-truncated, not
+    // tail-truncated: a member's phase often ends in the part that
+    // matters (the file being edited, the destination of a long
+    // `cd <path>`), so dropping the tail throws away the signal and
+    // leaves the redundant prefix. capMiddle keeps both ends.
+    val prefix = s"  ${glyph} ${bandPad(mem.Name, 10)} ${timerCol} "
+    val budget = MaxInt(8, cols - 1 - visibleWidth(prefix))
+    val detail = capMiddle(activityDetail(m, mem.Name, status), budget)
+    return TextStyled(prefix + detail, activityRowStyle(status))
 }
 
 // isActiveStatus is true for the statuses that warrant a band row —
@@ -2186,6 +2194,36 @@ func capForBand(s string, cols int) string {
     val rs = ToRunes(s)
     if len(rs) <= maxw { return s }
     return runesPrefix(s, maxw - 1) + "…"
+}
+
+// capMiddle clamps `s` to `width` runes by dropping the MIDDLE and
+// joining head and tail with a single ellipsis. Unlike capForBand
+// (which drops the tail), this keeps the informative END of a value —
+// the file/destination a long phase ends in — which is usually what
+// the reader is actually watching for. Used for band member-row
+// detail; the error row keeps capForBand since errors read head-first.
+func capMiddle(s string, width int) string {
+    val w = MaxInt(8, width)
+    val rs = ToRunes(s)
+    if len(rs) <= w { return s }
+    val budget = w - 1            // one column for the ellipsis
+    val head = budget / 2
+    val tail = budget - head      // tail gets the odd column
+    return runesPrefix(s, head) + "…" + runesSuffix(s, tail)
+}
+
+// runesSuffix returns the last `n` runes of `s` (the whole string when
+// it is already shorter). Rune-safe counterpart to runesPrefix.
+func runesSuffix(s string, n int) string {
+    val rs = ToRunes(s)
+    if len(rs) <= n || n < 0 { return s }
+    var out = EmptyArray[string]()
+    var i = len(rs) - n
+    for i < len(rs) {
+        out = out.Append(string(rs[i]))
+        i = i + 1
+    }
+    return out.MkString("")
 }
 
 // errorRemedy maps a known LastError shape to a short actionable hint

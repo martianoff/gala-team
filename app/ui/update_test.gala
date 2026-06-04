@@ -6737,8 +6737,58 @@ func TestTransportAuthError_SanitisesStreamJson(t T) T {
 // Esc dismisses the sticky band error when nothing higher-precedence
 // (modal / selection / sidebar focus) is open. Esc routes through
 // HistoryDeselect → onEscOrDeselect.
-func TestEsc_DismissesStickyBandError(t T) T {
+// Esc must NOT clear the Activity-band error row: it is not a manual
+// dismissal target anymore. The row clears itself at the next at-rest
+// checkpoint (reconcileActivityAtRest), or gets overwritten by a newer
+// error — never by a keystroke.
+func TestEsc_DoesNotClearBandError(t T) T {
     val seed = sampleModel().Copy(LastError = Some("gh pr create: auth required"))
     val (m, _) = Update(seed, HistoryDeselect())
-    return IsFalse(t, m.LastError.IsDefined())
+    return IsTrue(t, m.LastError.IsDefined())
+}
+
+// reconcileActivityAtRest resets a superseded member — one with a
+// lingering problem status but no live subprocess — back to StIdle so
+// the band stops showing a stale "failed" row, and drops its stale
+// workflow phase label in the same move.
+func TestReconcile_ResetsSupersededFailedMember(t T) T {
+    val base = sampleModel()
+    val statuses = base.Statuses.Put("Felix", StFailed(Reason = "boom"))
+    val workflow = base.WorkflowStatus.Put("Felix", "Reading regex/BUILD.bazel")
+    val m = base.Copy(Statuses = statuses, WorkflowStatus = workflow)
+    val swept = reconcileActivityAtRest(m)
+    val resetToIdle = swept.Statuses.Get("Felix").GetOrElse(StWorking()) match {
+        case StIdle() => true
+        case _        => false
+    }
+    val t1 = IsTrue(t, resetToIdle)
+    return IsFalse(t1, swept.WorkflowStatus.Get("Felix").IsDefined())
+}
+
+// A resolved transient liveness notice (watchdog / heartbeat) is swept
+// from LastError; a hard error is left intact for the user to see.
+func TestReconcile_ClearsWatchdogNotice_KeepsHardError(t T) T {
+    val base = sampleModel()
+    val wd = base.Copy(LastError = Some("FSM watchdog: QAGate for 600s past 600s ceiling — rotating session"))
+    val clearedWatchdog = reconcileActivityAtRest(wd).LastError match {
+        case None()  => true
+        case Some(_) => false
+    }
+    val t1 = IsTrue(t, clearedWatchdog)
+    val hard = base.Copy(LastError = Some("gh pr create: auth required"))
+    return reconcileActivityAtRest(hard).LastError match {
+        case Some(s) => IsTrue(t1, s == "gh pr create: auth required")
+        case None()  => IsTrue(t1, false)
+    }
+}
+
+// setStatus drops a member's workflow phase label when it lands at a
+// rest status (idle/done), but keeps it while the member is working.
+func TestSetStatus_ClearsWorkflowLabelAtRest(t T) T {
+    val base = sampleModel()
+    val m = base.Copy(WorkflowStatus = base.WorkflowStatus.Put("Felix", "Editing lang.go"))
+    val afterDone = setStatus(m, "Felix", StDone())
+    val t1 = IsFalse(t, afterDone.WorkflowStatus.Get("Felix").IsDefined())
+    val afterWorking = setStatus(m, "Felix", StWorking())
+    return IsTrue(t1, afterWorking.WorkflowStatus.Get("Felix").IsDefined())
 }

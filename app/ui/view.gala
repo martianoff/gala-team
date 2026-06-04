@@ -2020,10 +2020,13 @@ func footerWidget(m AppModel) Widget {
 //     work timer + the live workflow phase (or a status word). The
 //     glyph cycles on m.Tick so an active row visibly spins, matching
 //     the sidebar's spinner cadence.
-//   • a sticky ⚠ error row sourced from LastError, carrying a remedy
-//     hint and the Esc-to-dismiss affordance — so an error is shown
-//     once, in one place, with something the user can act on (instead
-//     of a raw envelope echoed in both a toast and a footer bar).
+//   • a ⚠ error row sourced from LastError, carrying a remedy hint —
+//     so an error is shown once, in one place, with something the user
+//     can act on (instead of a raw envelope echoed in both a toast and
+//     a footer bar). It is not manually dismissable; transient liveness
+//     notices clear automatically at the next at-rest checkpoint (see
+//     reconcileActivityAtRest), and the record stays in the Activity
+//     log + debug trace.
 //
 // Renders 0 rows when the team is quiescent and there's no error, so
 // the strip is invisible at rest. Member rows are capped so a wide
@@ -2076,7 +2079,7 @@ func activityBand(m AppModel) LayoutChild {
     )
     val withErr = m.LastError match {
         case Some(err) => header.Append(Fixed(1, TextStyled(
-            capForBand(s"  ⚠ ${err}${errorRemedy(err)}    (Esc dismiss)", cols),
+            capForBand(s"  ⚠ ${err}${errorRemedy(err)}", cols),
             DefaultStyle().WithFg(BrightRed()))))
         case None()    => header
     }

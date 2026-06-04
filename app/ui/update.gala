@@ -538,7 +538,13 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     } else {
         s"${baseReason} — rotating session, re-dispatching ${affected.MkString(\", \")}"
     }
-    val toast = mRotated.Toasts.PushError(reason, now, time_utils.Seconds(int64(10)))
+    // Keep the alert in the Activity log (F5) + on-disk trace even
+    // though the sticky band auto-clears it once the run recovers (see
+    // reconcileActivityAtRest): append it as a system line so the record
+    // survives the sweep instead of vanishing with the expired toast.
+    val mNoted = mRotated.Copy(Conversation = mRotated.Conversation.Append(
+        session.ConversationLine(Speaker = "system", Text = reason, At = now.UnixNanos())))
+    val toast = mNoted.Toasts.PushError(reason, now, time_utils.Seconds(int64(10)))
     // lastVisibleSec carries the "no chunk ever" signal (-1) for
     // triage; silenceSec is what tripped the threshold.
     val lastVisibleSec = if (mostRecentChunkAt.UnixNanos() <= int64(0)) int64(-1) else silenceSec
@@ -551,7 +557,7 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     // same respawn path the heartbeat-respawn flow uses.
     if canAutoRetry && !isTLState {
         LogFsmTransition(tag, "WatchdogExpired", s"silence=${silenceSec}s state_dwell=${stateDwellSec}s auto_retry=${canAutoRetry} affected=${affected.MkString(",")} last_visible=${lastVisibleSec}s mode=respawn", tag)
-        val seed = (mRotated.Copy(Toasts = toast, LastError = Some(reason)), EmptyArray[Cmd[AppMsg]]())
+        val seed = (mNoted.Copy(Toasts = toast, LastError = Some(reason)), EmptyArray[Cmd[AppMsg]]())
         val (afterRespawn, cmds) = affected.FoldLeft(seed, (acc, name) => {
             val (curM, curCmds) = acc
             val (next, c) = respawnMember(curM, name)
@@ -561,7 +567,7 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
         return (persistAppModel(withFlag), batchAll(cmds))
     }
     LogFsmTransition(tag, "WatchdogExpired", s"silence=${silenceSec}s state_dwell=${stateDwellSec}s auto_retry=${canAutoRetry} affected=${affected.MkString(",")} last_visible=${lastVisibleSec}s", "Idle")
-    val withReset = affected.FoldLeft(mRotated, (acc, name) => setStatus(acc, name, StIdle()))
+    val withReset = affected.FoldLeft(mNoted, (acc, name) => setStatus(acc, name, StIdle()))
     val forced = withReset.Copy(
         State          = Idle(),
         StateEnteredAt = now,
@@ -874,7 +880,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case TransportAuthError(name, t) => onTransportAuthError(m, name, t)
     case PreMergeHooksPassed(body)   => onPreMergeHooksPassed(m, body)
     case PreMergeHooksFailed(err)    => onPreMergeHooksFailed(m, err)
-    case PrCreated(url, branch)      => onPrCreated(m, url, branch)
+    case PrCreated(url, branch)      => onPrCreated(reconcileActivityAtRest(m), url, branch)
     case WorktreesWiped()            => onWorktreesWiped(m)
     case PrFailed(err)               => (m.Copy(LastError = Some(s"gh pr create: ${err}")), NoCmd[AppMsg]())
     case OpenBrowser(url)            => onOpenBrowser(m, url)
@@ -1922,7 +1928,12 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return onAnswerPendingQuestion(m, m.Composer)
     }
     val droppedStalePending = m.PendingQuestion.IsDefined() && !pendingAnswerable
-    val mClean = if (droppedStalePending) m.Copy(PendingQuestion = None[PendingQuestion]()) else m
+    val mCleanPending = if (droppedStalePending) m.Copy(PendingQuestion = None[PendingQuestion]()) else m
+    // A fresh user turn is an at-rest checkpoint: sweep stale Activity
+    // state (superseded members, resolved watchdog / heartbeat notices)
+    // so the band reflects this turn, not a prior one. History stays in
+    // the transcript + debug log.
+    val mClean = reconcileActivityAtRest(mCleanPending)
     val prompt = mClean.Composer
     LogUserInput(prompt)
     val ctx = transitionContext(mClean)
@@ -5159,6 +5170,16 @@ func onApprove(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // being abandoned milliseconds after re-dispatch because their
 // prior LastChunkAt was many minutes stale. Working→working keeps
 // LastChunkAt untouched; non-working transitions don't read it.
+// isRestStatus is true for the quiescent statuses a member lands in when
+// its turn ends. Used by setStatus to drop the member's stale workflow
+// phase label so a finished / idle member never keeps showing a prior
+// turn's progress (e.g. a lingering "Reading <file>" in the band).
+func isRestStatus(st Status) bool = st match {
+    case StIdle() => true
+    case StDone() => true
+    case _        => false
+}
+
 func setStatus(m AppModel, name string, st Status) AppModel {
     val prior = m.Statuses.Get(name).GetOrElse(StIdle())
     val wasWorking = isWorkingStatus(prior)
@@ -5167,12 +5188,17 @@ func setStatus(m AppModel, name string, st Status) AppModel {
     // here — that would pollute the graph with idle members getting
     // routine status pokes). Spawn paths handle the upsert.
     val pipelinePatched = PipelinePatch(m.Pipeline, name, st)
+    // A member dropping to rest no longer has a live workflow phase, so
+    // clear its label here — the single choke point every turn-end /
+    // reset path flows through.
+    val nextWorkflow = if (isRestStatus(st)) m.WorkflowStatus.Remove(name) else m.WorkflowStatus
     if !wasWorking && nowWorking {
         return m.Copy(
-            Statuses      = m.Statuses.Put(name, st),
-            WorkStartedAt = m.WorkStartedAt.Put(name, m.NowAt),
-            LastChunkAt   = m.LastChunkAt.Put(name, m.NowAt),
-            Pipeline      = pipelinePatched,
+            Statuses       = m.Statuses.Put(name, st),
+            WorkStartedAt  = m.WorkStartedAt.Put(name, m.NowAt),
+            LastChunkAt    = m.LastChunkAt.Put(name, m.NowAt),
+            Pipeline       = pipelinePatched,
+            WorkflowStatus = nextWorkflow,
         )
     }
     if wasWorking && !nowWorking {
@@ -5187,13 +5213,48 @@ func setStatus(m AppModel, name string, st Status) AppModel {
             }
         }
         return m.Copy(
-            Statuses      = m.Statuses.Put(name, st),
-            WorkElapsedNs = m.WorkElapsedNs.Put(name, priorAccum + seg),
-            WorkStartedAt = m.WorkStartedAt.Remove(name),
-            Pipeline      = pipelinePatched,
+            Statuses       = m.Statuses.Put(name, st),
+            WorkElapsedNs  = m.WorkElapsedNs.Put(name, priorAccum + seg),
+            WorkStartedAt  = m.WorkStartedAt.Remove(name),
+            Pipeline       = pipelinePatched,
+            WorkflowStatus = nextWorkflow,
         )
     }
-    return m.Copy(Statuses = m.Statuses.Put(name, st), Pipeline = pipelinePatched)
+    return m.Copy(Statuses = m.Statuses.Put(name, st), Pipeline = pipelinePatched, WorkflowStatus = nextWorkflow)
+}
+
+// isTransientNotice reports whether a LastError string is an
+// auto-generated liveness alert (watchdog ceiling breach / heartbeat
+// silence) that goes stale the moment the run recovers. Hard errors
+// (spawn / PR / clipboard / onboarding failures) are NOT transient —
+// they describe a still-broken thing and must remain until a newer
+// error replaces them.
+func isTransientNotice(err string) bool =
+    strings.HasPrefix(err, "FSM watchdog:") || strings.Contains(err, "silent past heartbeat")
+
+// reconcileActivityAtRest sweeps stale Activity-band state at an
+// orchestration checkpoint — a PR landing or a fresh user turn. A member
+// with a lingering active/problem status but NO live subprocess (absent
+// from m.Sessions) is no longer participating: its status is reset to
+// StIdle (which also drops its stale workflow phase label via setStatus),
+// so the band stops showing a superseded "failed" / "stuck" row. A
+// resolved transient notice is cleared from LastError.
+//
+// Members that are still live (have a session) are left untouched, so a
+// genuinely in-flight problem remains visible — "if it's permanent it
+// stays, otherwise it disappears". Nothing is removed from the
+// conversation transcript or the debug trace, so the Activity log (F5)
+// and on-disk logs keep the full history.
+func reconcileActivityAtRest(m AppModel) AppModel {
+    val swept = m.Statuses.FoldLeftKV(m, (acc, name, st) => {
+        if (acc.Sessions.Get(name).IsDefined()) { return acc }
+        if (!isActiveStatus(st)) { return acc }
+        return setStatus(acc, name, StIdle())
+    })
+    return swept.LastError match {
+        case Some(err) if isTransientNotice(err) => swept.Copy(LastError = None[string]())
+        case _                                   => swept
+    }
 }
 
 // isWorkingStatus returns true for any status that should accrue
@@ -6223,8 +6284,9 @@ func onComposerEndKey(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
 // prompt wins (any-key would be too aggressive — only Esc cancels
 // it, matching the footer hint); then the recovery banner; then
 // FocusSidebar pops back to FocusComposer so the user can resume
-// typing; then a sticky band error is dismissed; then HistoryDeselect
-// closes a viewed archive; otherwise no-op.
+// typing; then HistoryDeselect closes a viewed archive; otherwise
+// no-op. The Activity-band error row is intentionally NOT Esc-
+// dismissable — it clears automatically (see reconcileActivityAtRest).
 //
 // Dismissing the recovery banner clears Conversation +
 // RecoveredMembers so the user gets a clean slate, matching the
@@ -6304,13 +6366,11 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if focusedSidebar {
         return (m.Copy(Focus = FocusComposer()), NoCmd[AppMsg]())
     }
-    // With no modal, selection, or focus to unwind, Esc dismisses the
-    // sticky Activity-band error row — honouring its "(Esc dismiss)"
-    // affordance. Lowest precedence so it never shadows a real Esc
-    // target above.
-    if m.LastError.IsDefined() {
-        return (m.Copy(LastError = None[string]()), NoCmd[AppMsg]())
-    }
+    // Esc does NOT dismiss the Activity-band error row: transient
+    // liveness notices clear themselves at the next at-rest checkpoint
+    // (reconcileActivityAtRest), and a hard error stays until a newer
+    // one replaces it. With nothing else to unwind, Esc closes a viewed
+    // archive.
     return (m.Copy(ViewingArchive = None[session.Snapshot]()), NoCmd[AppMsg]())
 }
 

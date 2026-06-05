@@ -1,4 +1,5 @@
 load("@gazelle//:def.bzl", "gazelle", "gazelle_binary")
+load("@rules_gala//gala:defs.bzl", "gala_imports_helper")
 
 exports_files(
     ["go.mod"],
@@ -12,10 +13,11 @@ gazelle_binary(
     languages = ["@gala_gazelle//gala"],
 )
 
-# Drive the import helper from the bazel-built gala (the gala module's binary)
-# rather than PATH, so the helper always matches the consumed gala version. The
-# relative $(execpath) resolves against BUILD_WORKSPACE_DIRECTORY.
-#
+# Drive the import helper from the registered GALA toolchain (not PATH), so the
+# helper that extracts imports is the same gala the toolchain transpiles with —
+# BUILD generation stays reproducible and never drifts from the gala version.
+gala_imports_helper(name = "gala_imports")
+
 # gazelle:prefix github.com/martianoff/gala_team
 # gazelle:gala_prefix github.com/martianoff/gala_team
 # gala_tui ships its gala_library in another Bazel module; map its import path
@@ -23,7 +25,7 @@ gazelle_binary(
 # gazelle:resolve gala github.com/martianoff/gala-tui @gala_tui//:gala_tui
 gazelle(
     name = "gazelle",
-    data = ["@gala//cmd/gala"],
-    extra_args = ["-gala_helper=$(execpath @gala//cmd/gala:gala)"],
+    data = [":gala_imports"],
+    extra_args = ["-gala_helper=$(execpath :gala_imports)"],
     gazelle = ":gazelle_bin",
 )

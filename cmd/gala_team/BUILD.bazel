@@ -7,16 +7,17 @@ load("@rules_gala//gala:defs.bzl", "gala_binary")
 gala_binary(
     name = "gala_team",
     srcs = ["main.gala"],
-    gala_deps = [
-        "@gala_tui//:gala_tui",
-    ],
+    gala_deps = ["@gala_tui//:gala_tui"],
+    visibility = ["//visibility:public"],
+    x_defs = {
+        "github.com/martianoff/gala_team/app/buildinfo.Version": "{STABLE_GALA_TEAM_VERSION}",
+        "github.com/martianoff/gala_team/app/buildinfo.Commit": "{STABLE_GIT_COMMIT}",
+        "github.com/martianoff/gala_team/app/buildinfo.GitDescribe": "{STABLE_GIT_TAG}",
+    },
     deps = [
-        "//app/buildinfo",
         "//app/cli",
-        "//app/version",
         "//app/config",
         "//app/consult",
-        "//app/fsm",
         "//app/guidance",
         "//app/policy",
         "//app/project",
@@ -25,15 +26,10 @@ gala_binary(
         "//app/team",
         "//app/testdriver",
         "//app/ui",
+        "//app/version",
         "@gala//collection_immutable",
         "@gala//fs",
         "@gala//strings",
         "@gala//time_utils",
     ],
-    x_defs = {
-        "github.com/martianoff/gala_team/app/buildinfo.Version": "{STABLE_GALA_TEAM_VERSION}",
-        "github.com/martianoff/gala_team/app/buildinfo.Commit": "{STABLE_GIT_COMMIT}",
-        "github.com/martianoff/gala_team/app/buildinfo.GitDescribe": "{STABLE_GIT_TAG}",
-    },
-    visibility = ["//visibility:public"],
 )

@@ -7,6 +7,7 @@ gala_library(
         "resolver.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/project",
+    visibility = ["//visibility:public"],
     deps = [
         "@gala//collection_immutable",
         "@gala//fs",
@@ -14,17 +15,17 @@ gala_library(
         "@gala//strings",
         "@gala//subprocess",
     ],
-    visibility = ["//visibility:public"],
 )
 
 gala_test(
-    name = "resolver_test",
+    name = "project_test",
     srcs = ["resolver_test.gala"],
-    pkg = "project",
+    importpath = "github.com/martianoff/gala_team/app/project",
     lib_srcs = [
         "project.gala",
         "resolver.gala",
     ],
+    pkg = "project",
     deps = [
         "@gala//collection_immutable",
         "@gala//fs",

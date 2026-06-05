@@ -8,30 +8,29 @@ gala_library(
         "message.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/protocol",
+    visibility = ["//visibility:public"],
     deps = [
         "@gala//collection_immutable",
         "@gala//strings",
         "@gala//time_utils",
     ],
-    visibility = ["//visibility:public"],
 )
 
-# Internal test target (pkg = "protocol" + lib_srcs) so the tests can
-# reach unexported helpers. srcs is a glob over *_test.gala on purpose:
-# this package's test corpus is co-owned. The behavioral decode corpus
-# ships as decode_spec_test.gala, authored separately against the same
-# Message contract; globbing means it is compiled and run by THIS target
-# the moment it lands at integration — no BUILD edit needed — while this
-# branch still builds and tests green standalone with its own files.
 gala_test(
     name = "protocol_test",
-    srcs = glob(["*_test.gala"]),
-    pkg = "protocol",
+    srcs = [
+        "decode_spec_test.gala",
+        "decode_test.gala",
+        "delivery_test.gala",
+        "message_test.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/protocol",
     lib_srcs = [
         "decode.gala",
         "delivery.gala",
         "message.gala",
     ],
+    pkg = "protocol",
     deps = [
         "@gala//collection_immutable",
         "@gala//go_interop",

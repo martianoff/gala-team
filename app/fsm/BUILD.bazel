@@ -4,19 +4,20 @@ gala_library(
     name = "fsm",
     srcs = ["state_machine.gala"],
     importpath = "github.com/martianoff/gala_team/app/fsm",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/directive",
         "//app/util",
         "@gala//collection_immutable",
     ],
-    visibility = ["//visibility:public"],
 )
 
 gala_test(
-    name = "state_machine_test",
+    name = "fsm_test",
     srcs = ["state_machine_test.gala"],
-    pkg = "fsm",
+    importpath = "github.com/martianoff/gala_team/app/fsm",
     lib_srcs = ["state_machine.gala"],
+    pkg = "fsm",
     deps = [
         "//app/directive",
         "//app/util",

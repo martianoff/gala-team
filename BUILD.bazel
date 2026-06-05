@@ -1,4 +1,29 @@
+load("@gazelle//:def.bzl", "gazelle", "gazelle_binary")
+
 exports_files(
     ["go.mod"],
     visibility = ["//visibility:public"],
+)
+
+# gala_gazelle is a composite language: it manages GALA, mixed GALA/Go, and
+# pure-Go packages, so no separate @gazelle//language/go.
+gazelle_binary(
+    name = "gazelle_bin",
+    languages = ["@gala_gazelle//gala"],
+)
+
+# Drive the import helper from the bazel-built gala (the gala module's binary)
+# rather than PATH, so the helper always matches the consumed gala version. The
+# relative $(execpath) resolves against BUILD_WORKSPACE_DIRECTORY.
+#
+# gazelle:prefix github.com/martianoff/gala_team
+# gazelle:gala_prefix github.com/martianoff/gala_team
+# gala_tui ships its gala_library in another Bazel module; map its import path
+# to that label so it lands in deps correctly.
+# gazelle:resolve gala github.com/martianoff/gala-tui @gala_tui//:gala_tui
+gazelle(
+    name = "gazelle",
+    data = ["@gala//cmd/gala"],
+    extra_args = ["-gala_helper=$(execpath @gala//cmd/gala:gala)"],
+    gazelle = ":gazelle_bin",
 )

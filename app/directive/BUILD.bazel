@@ -7,23 +7,24 @@ gala_library(
         "directive.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/directive",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/protocol",
         "@gala//collection_immutable",
         "@gala//go_interop",
         "@gala//strings",
     ],
-    visibility = ["//visibility:public"],
 )
 
 gala_test(
-    name = "adapter_test",
+    name = "directive_test",
     srcs = ["adapter_test.gala"],
-    pkg = "directive",
+    importpath = "github.com/martianoff/gala_team/app/directive",
     lib_srcs = [
         "adapter.gala",
         "directive.gala",
     ],
+    pkg = "directive",
     deps = [
         "//app/protocol",
         "@gala//collection_immutable",

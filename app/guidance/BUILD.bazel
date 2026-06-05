@@ -4,10 +4,10 @@ gala_library(
     name = "guidance",
     srcs = ["guidance.gala"],
     importpath = "github.com/martianoff/gala_team/app/guidance",
+    visibility = ["//visibility:public"],
     deps = [
         "@gala//collection_immutable",
         "@gala//fs",
         "@gala//strings",
     ],
-    visibility = ["//visibility:public"],
 )

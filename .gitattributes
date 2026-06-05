@@ -1,0 +1,9 @@
+# Keep Bazel files LF on every platform. gazelle writes LF; without this an
+# autocrlf=true checkout (Windows) rewrites the stored-LF BUILD files to CRLF,
+# producing perpetual churn in `bazel run //:gazelle` output.
+*.bazel    text eol=lf
+*.bzl      text eol=lf
+BUILD      text eol=lf
+WORKSPACE  text eol=lf
+.bazelrc   text eol=lf
+.bazelignore text eol=lf

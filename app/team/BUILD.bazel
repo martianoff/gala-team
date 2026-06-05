@@ -4,19 +4,15 @@ gala_library(
     name = "team",
     srcs = ["team.gala"],
     importpath = "github.com/martianoff/gala_team/app/team",
-    deps = [
-        "@gala//collection_immutable",
-    ],
     visibility = ["//visibility:public"],
+    deps = ["@gala//collection_immutable"],
 )
 
 gala_test(
     name = "team_test",
     srcs = ["team_test.gala"],
-    pkg = "team",
+    importpath = "github.com/martianoff/gala_team/app/team",
     lib_srcs = ["team.gala"],
-    deps = [
-        ":team",
-        "@gala//collection_immutable",
-    ],
+    pkg = "team",
+    deps = ["@gala//collection_immutable"],
 )

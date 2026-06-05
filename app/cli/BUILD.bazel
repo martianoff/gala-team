@@ -6,33 +6,11 @@ gala_library(
         "keymap.gala",
         "picker.gala",
     ],
+    gala_deps = ["@gala_tui//:gala_tui"],
     importpath = "github.com/martianoff/gala_team/app/cli",
-    gala_deps = [
-        "@gala_tui//:gala_tui",
-    ],
-    deps = [
-        "//app/config",
-        "//app/team",
-        "//app/ui",
-        "@gala//collection_immutable",
-    ],
     visibility = ["//visibility:public"],
-)
-
-gala_test(
-    name = "keymap_test",
-    srcs = ["keymap_test.gala"],
-    pkg = "cli",
-    lib_srcs = [
-        "keymap.gala",
-        "picker.gala",
-    ],
-    gala_deps = [
-        "@gala_tui//:gala_tui",
-    ],
     deps = [
         "//app/config",
-        "//app/session",
         "//app/team",
         "//app/ui",
         "@gala//collection_immutable",
@@ -40,19 +18,22 @@ gala_test(
 )
 
 gala_test(
-    name = "picker_test",
-    srcs = ["picker_test.gala"],
-    pkg = "cli",
+    name = "cli_test",
+    srcs = [
+        "keymap_test.gala",
+        "picker_test.gala",
+    ],
+    gala_deps = ["@gala_tui//:gala_tui"],
+    importpath = "github.com/martianoff/gala_team/app/cli",
     lib_srcs = [
         "keymap.gala",
         "picker.gala",
     ],
-    gala_deps = [
-        "@gala_tui//:gala_tui",
-    ],
+    pkg = "cli",
     deps = [
         "//app/config",
         "//app/policy",
+        "//app/session",  # keep: transpiler surfaces session types via the app/ui dot-import
         "//app/team",
         "//app/ui",
         "@gala//collection_immutable",

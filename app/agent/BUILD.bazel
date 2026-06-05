@@ -4,10 +4,9 @@ gala_library(
     name = "agent",
     srcs = ["agent.gala"],
     importpath = "github.com/martianoff/gala_team/app/agent",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/team",
-        "@gala//collection_immutable",
         "@gala//concurrent",
     ],
-    visibility = ["//visibility:public"],
 )

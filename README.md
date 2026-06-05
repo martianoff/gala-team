@@ -41,10 +41,10 @@ You need:
 Build:
 
 ```bash
-bazel build //cmd:gala_team
+bazel build //cmd/gala_team
 ```
 
-The binary lands at `bazel-bin/cmd/gala_team_/gala_team`.
+The binary lands at `bazel-bin/cmd/gala_team/gala_team_/gala_team`.
 
 ---
 

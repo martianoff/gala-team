@@ -1,4 +1,4 @@
-load("@rules_gala//gala:defs.bzl", "gala_library")
+load("@rules_gala//gala:defs.bzl", "gala_library", "gala_test")
 
 gala_library(
     name = "runtime",
@@ -17,6 +17,7 @@ gala_library(
         "trace.go",
     ],
     importpath = "github.com/martianoff/gala_team/app/runtime",
+    visibility = ["//visibility:public"],
     deps = [
         "//app/agent",
         "//app/policy",
@@ -33,11 +34,46 @@ gala_library(
         "@gala//subprocess",
         "@gala//time_utils",
     ],
-    visibility = ["//visibility:public"],
 )
 
-# runtime_glue_test.gala runs via `gala test` (CI). It is an internal
-# test (`package runtime`) and would need a custom go_test setup here
-# because the lib mixes .gala sources with hand-written go_srcs that
-# `gala_test` cannot embed cleanly. Since CI now uses `gala test`,
-# we don't duplicate the harness in Bazel.
+gala_test(
+    name = "runtime_test",
+    srcs = [
+        "claude_stream_json_test.gala",
+        "claude_transport_test.gala",
+        "runtime_glue_test.gala",
+        "subprocess_util_test.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/runtime",
+    lib_go_srcs = [
+        "browser.go",
+        "debuglog.go",
+        "trace.go",
+    ],
+    lib_srcs = [
+        "claude_stream_json.gala",
+        "claude_transport.gala",
+        "debuglog.gala",
+        "runtime_glue.gala",
+        "session_id.gala",
+        "subprocess_util.gala",
+        "trace.gala",
+    ],
+    pkg = "runtime",
+    deps = [
+        "//app/agent",
+        "//app/policy",
+        "//app/project",
+        "//app/team",
+        "//app/version",
+        "@com_github_google_uuid//:uuid",
+        "@gala//collection_immutable",
+        "@gala//concurrent",
+        "@gala//fs",
+        "@gala//go_interop",
+        "@gala//json",
+        "@gala//strings",
+        "@gala//subprocess",
+        "@gala//time_utils",
+    ],
+)

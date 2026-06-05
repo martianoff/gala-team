@@ -3,10 +3,10 @@
 # code path and saves frames for batch inspection. Output goes to
 # /tmp/ui_audit.<scenario>.jsonl (one JSON frame per line).
 #
-# Run from repo root after `bazel build cmd:gala_team`.
+# Run from repo root after `bazel build cmd/gala_team`.
 
 set -uo pipefail
-BIN="$(bazel info bazel-bin)/cmd/gala_team_/gala_team.exe"
+BIN="$(bazel info bazel-bin)/cmd/gala_team/gala_team_/gala_team.exe"
 TEAM_MIN="examples/minimal.yaml"
 TEAM_FULL="examples/skunkworks.yaml"   # may fail to parse — exercises that path
 TEAM_MULTI="examples/multi-team.yaml"  # may fail to parse — exercises that path

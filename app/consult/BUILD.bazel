@@ -8,32 +8,7 @@ gala_library(
         "streaming.gala",
     ],
     importpath = "github.com/martianoff/gala_team/app/consult",
-    deps = [
-        "//app/config",
-        "//app/headless",
-        "//app/onboarding",
-        "//app/policy",
-        "//app/project",
-        "//app/runtime",
-        "//app/team",
-        "@gala//collection_immutable",
-        "@gala//concurrent",
-        "@gala//fs",
-        "@gala//go_interop",
-        "@gala//yaml",
-    ],
     visibility = ["//visibility:public"],
-)
-
-gala_test(
-    name = "registry_test",
-    srcs = ["registry_test.gala"],
-    pkg = "consult",
-    lib_srcs = [
-        "registry.gala",
-        "runner.gala",
-        "streaming.gala",
-    ],
     deps = [
         "//app/config",
         "//app/headless",
@@ -51,39 +26,19 @@ gala_test(
 )
 
 gala_test(
-    name = "runner_test",
-    srcs = ["runner_test.gala"],
-    pkg = "consult",
+    name = "consult_test",
+    srcs = [
+        "dispatch_test.gala",
+        "registry_test.gala",
+        "runner_test.gala",
+    ],
+    importpath = "github.com/martianoff/gala_team/app/consult",
     lib_srcs = [
         "registry.gala",
         "runner.gala",
         "streaming.gala",
     ],
-    deps = [
-        "//app/config",
-        "//app/headless",
-        "//app/onboarding",
-        "//app/policy",
-        "//app/project",
-        "//app/runtime",
-        "//app/team",
-        "@gala//collection_immutable",
-        "@gala//concurrent",
-        "@gala//fs",
-        "@gala//go_interop",
-        "@gala//yaml",
-    ],
-)
-
-gala_test(
-    name = "dispatch_test",
-    srcs = ["dispatch_test.gala"],
     pkg = "consult",
-    lib_srcs = [
-        "registry.gala",
-        "runner.gala",
-        "streaming.gala",
-    ],
     deps = [
         "//app/config",
         "//app/headless",

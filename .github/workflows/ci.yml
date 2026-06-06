@@ -41,7 +41,7 @@ jobs:
           gala version
 
       - name: Build
-        run: gala build -o gala_team ./cmd/gala_team
+        run: gala build -o gala_team ./cmd
 
       - name: Stub claude binary
         # A few app/ui tests drive flows that synchronously

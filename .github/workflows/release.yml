@@ -104,7 +104,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          gala build -o dist/gala_team-${{ matrix.os }}-${{ matrix.arch }} ./cmd/gala_team
+          gala build -o dist/gala_team-${{ matrix.os }}-${{ matrix.arch }} ./cmd
           chmod +x dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}
 
       - name: Build binary (Windows)
@@ -112,7 +112,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          gala build -o "dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}.exe" ./cmd/gala_team
+          gala build -o "dist/gala_team-${{ matrix.os }}-${{ matrix.arch }}.exe" ./cmd
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

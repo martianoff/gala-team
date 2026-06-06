@@ -25,7 +25,7 @@ Run from the gala_team repo root. The skill needs:
 
 Build first if either binary is stale:
 ```bash
-bazel build cmd/gala_team cmd/gala_team_headless:gala_team_headless
+bazel build cmd:gala_team cmd/gala_team_headless:gala_team_headless
 ```
 
 ## Instructions

@@ -1,6 +1,6 @@
 load("@rules_gala//gala:defs.bzl", "gala_binary")
 
-# x_defs mirrors //cmd/gala_team — same STABLE_* keys from
+# x_defs mirrors //cmd:gala_team — same STABLE_* keys from
 # tools/workspace_status.sh. Both binaries report the same version /
 # commit so a debug log lifted from either is self-consistent with
 # the other.

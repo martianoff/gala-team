@@ -1,5 +1,14 @@
 load("@rules_gala//gala:defs.bzl", "gala_binary")
 
+# main.gala lives directly in cmd/ (not cmd/gala_team/) so the `gala build ./cmd`
+# CLI smoke-build works — the gala CLI cannot build a main nested under
+# cmd/<name>/ (its build-workspace import rewrite misses the sibling app/*
+# packages). gazelle therefore can't own this target (it would mint a
+# directory-named "cmd" binary), so the file is excluded and the rule is hand-
+# maintained and kept.
+# gazelle:exclude main.gala
+
+# keep
 # x_defs is consumed by rules_go's link step: each key is a fully-
 # qualified `<importpath>.<Var>` and each value is either a literal or
 # a `{KEY}` reference into the workspace status output. The STABLE_*

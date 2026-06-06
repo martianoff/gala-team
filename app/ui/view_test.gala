@@ -1291,12 +1291,15 @@ func TestView_ActivityBand_ShowsFullWorkflowPhase(t T) T {
 
 // The sticky band error row carries an actionable remedy + the
 // Esc-dismiss affordance, instead of a bare or raw-envelope message.
-func TestView_ActivityBand_ErrorShowsRemedyAndDismiss(t T) T {
+// An auth error surfaces in the band as a ⚠ row carrying its remedy hint.
+// The row is not manually dismissable (transient liveness, auto-cleared at
+// rest), so it carries no "Esc dismiss" affordance.
+func TestView_ActivityBand_ErrorShowsRemedy(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(LastError = Some("auth failed"))
     val out = render(m)
     val t1 = IsTrue(t,  strings.Contains(out, "⚠"))
     val t2 = IsTrue(t1, strings.Contains(out, "claude /login"))
-    return IsTrue(t2, strings.Contains(out, "Esc dismiss"))
+    return IsFalse(t2, strings.Contains(out, "Esc dismiss"))
 }
 
 // A failed member surfaces as a band row carrying its reason, not just

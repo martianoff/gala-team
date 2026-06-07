@@ -8,6 +8,7 @@ import (
     "runtime"
     "github.com/martianoff/gala_team/app/onboarding"
     "github.com/martianoff/gala_team/app/policy"
+    "github.com/martianoff/gala-acp"
     "github.com/martianoff/gala_team/app/protocol"
     "github.com/martianoff/gala_team/app/session"
     "martianoff/gala/time_utils"
@@ -406,7 +407,7 @@ func rotateSessionIfSyntheticPoisoned(m AppModel, name string) Tuple3[AppModel, 
 }
 
 // onTick advances Tick + NowAt, prunes expired toasts, and runs the
-// protocol-driven liveness driver: per-member protocol.Tick decides
+// protocol-driven liveness driver: per-member acp.Tick decides
 // Redeliver / IssueNudge / MarkAbandoned, AggregateNudges folds every
 // currently-silent member into one batched TL nudge, and the resulting
 // actions are consumed via consumeDeliveryAction (the FSM
@@ -640,7 +641,7 @@ func updateLivenessStatuses(
     }
     if !activeFsm { return (m, EmptyArray[Cmd[AppMsg]]()) }
     val nowNanos = int(now.UnixNanos())
-    val policy   = protocol.PolicyFromHeartbeat(
+    val policy   = acp.PolicyFromHeartbeat(
         m.Policy.Heartbeat.SlowAfterSeconds,
         m.Policy.Heartbeat.StuckAfterSeconds,
         m.Policy.Heartbeat.AbandonAfterSeconds,
@@ -648,7 +649,7 @@ func updateLivenessStatuses(
     )
 
     // 1. Tick each non-lead member that has a dispatch in flight.
-    val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyArray[Tuple[string, protocol.DeliveryAction]]())
+    val seed = (m, EmptyArray[Cmd[AppMsg]](), EmptyArray[Tuple[string, acp.DeliveryAction]]())
     val (m1, cmds, actions) = members.FoldLeft(seed, (acc, mem) => {
         val (curM, curCmds, curActions) = acc
         val name = mem.Name
@@ -656,8 +657,8 @@ func updateLivenessStatuses(
         return curM.LastDispatchedMsg.Get(name) match {
             case None() => (curM, curCmds, curActions)
             case Some(msg) => {
-                val st = curM.DeliveryStates.Get(name).GetOrElse(protocol.Sent(AtNanos = nowNanos, Attempt = 1))
-                val (newSt, action) = protocol.Tick(st, msg, nowNanos, policy)
+                val st = curM.DeliveryStates.Get(name).GetOrElse(acp.Sent(AtNanos = nowNanos, Attempt = 1))
+                val (newSt, action) = acp.Tick(st, msg, nowNanos, policy)
                 val updated = curM.Copy(DeliveryStates = curM.DeliveryStates.Put(name, newSt))
                 return (updated, curCmds, curActions.Append((name, action)))
             }
@@ -680,7 +681,7 @@ func updateLivenessStatuses(
     //    so the transition log carries a real member, not an empty
     //    placeholder (the FSM itself ignores the name; the log doesn't).
     val statePairs = aggregateStatePairs(m2, members, leadName)
-    return protocol.AggregateNudges(statePairs, nowNanos, policy) match {
+    return acp.AggregateNudges(statePairs, nowNanos, policy) match {
         case None()    => (m2, cmds2)
         case Some(act) => fireAggregateNudge(m2, cmds2, act, firstSilentName(statePairs))
     }
@@ -690,9 +691,9 @@ func updateLivenessStatuses(
 // "" when nothing is silent. AggregateNudges only fires Some when at
 // least one member is Silent, so a "" result is unreachable in the
 // caller — the empty default is defensive only.
-func firstSilentName(pairs Array[Tuple[string, protocol.DeliveryState]]) string =
+func firstSilentName(pairs Array[Tuple[string, acp.DeliveryState]]) string =
     pairs.Collect((pair) =>
-        if (protocol.StateName(pair.V2) == "silent") Some[string](pair.V1)
+        if (acp.StateName(pair.V2) == "silent") Some[string](pair.V1)
         else                                          None[string]()
     ).HeadOption().GetOrElse("")
 
@@ -701,8 +702,8 @@ func firstSilentName(pairs Array[Tuple[string, protocol.DeliveryState]]) string 
 // AggregateNudges scans this list for `Silent` states.
 func aggregateStatePairs(
     m AppModel, members Array[Member], leadName string,
-) Array[Tuple[string, protocol.DeliveryState]] = members.FoldLeft(
-    EmptyArray[Tuple[string, protocol.DeliveryState]](),
+) Array[Tuple[string, acp.DeliveryState]] = members.FoldLeft(
+    EmptyArray[Tuple[string, acp.DeliveryState]](),
     (acc, mem) => {
         val n = mem.Name
         if (n == leadName) { return acc }
@@ -719,10 +720,10 @@ func aggregateStatePairs(
 // names the first Silent member for the FSM MemberStuck event so the
 // transition log carries a real name rather than an empty placeholder.
 func fireAggregateNudge(
-    m AppModel, cmds Array[Cmd[AppMsg]], act protocol.DeliveryAction, representativeMember string,
+    m AppModel, cmds Array[Cmd[AppMsg]], act acp.DeliveryAction, representativeMember string,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
-    if (protocol.ActionName(act) != "nudge") { return (m, cmds) }
-    val text = protocol.IssueNudgeText(act).GetOrElse("")
+    if (acp.ActionName(act) != "nudge") { return (m, cmds) }
+    val text = acp.IssueNudgeText(act).GetOrElse("")
     val nextState = transitionLogged(m.State, MemberStuck(MemberName = representativeMember), transitionContext(m))
     // Save AFTER the FSM transition + BEFORE spawning the nudge. The
     // nudge will produce chunks and trigger per-chunk saves on its
@@ -742,9 +743,9 @@ func fireAggregateNudge(
 // GALA does not resolve qualified case constructors in patterns, so
 // the consumer extracts via the protocol's field accessors.
 func consumeDeliveryAction(
-    m AppModel, cmds Array[Cmd[AppMsg]], name string, action protocol.DeliveryAction,
+    m AppModel, cmds Array[Cmd[AppMsg]], name string, action acp.DeliveryAction,
 ) Tuple[AppModel, Array[Cmd[AppMsg]]] {
-    val tag = protocol.ActionName(action)
+    val tag = acp.ActionName(action)
     if (tag == "redeliver") {
         // Persist the bumped Message back into LastDispatchedMsg so the
         // next Tick reads the new Attempt against the policy budget.
@@ -752,7 +753,7 @@ func consumeDeliveryAction(
         // subsequent Tick re-reads the original Attempt=1 dispatch,
         // unconditionally returns Redeliver again, and the retry budget
         // never enforces.
-        val mWithMsg = protocol.RedeliverMessage(action) match {
+        val mWithMsg = acp.RedeliverMessage(action) match {
             case Some(bumped) => m.Copy(LastDispatchedMsg = m.LastDispatchedMsg.Put(name, bumped))
             case None()       => m
         }
@@ -809,8 +810,8 @@ func spawnTLNudge(m AppModel, reason string, prompt string) Tuple[AppModel, Arra
     val mClosed = closeLiveSession(m, lead.Name).Copy(
         TurnBuffer        = "",
         ConsultsFired     = 0,
-        Ledger            = protocol.EmptyLedger(),
-        DeliveryStates    = EmptyHashMap[string, protocol.DeliveryState](),
+        Ledger            = acp.EmptyLedger(),
+        DeliveryStates    = EmptyHashMap[string, acp.DeliveryState](),
     )
     return ensureSession(mClosed, lead) match {
         case Left(err) => {
@@ -1846,9 +1847,9 @@ func clearSessionState(m AppModel) AppModel {
         TotalCostUsd          = 0.0,
         TurnBuffer            = "",
         ConsultsFired         = 0,
-        Ledger                = protocol.EmptyLedger(),
-        DeliveryStates        = EmptyHashMap[string, protocol.DeliveryState](),
-        LastDispatchedMsg     = EmptyHashMap[string, protocol.Message](),
+        Ledger                = acp.EmptyLedger(),
+        DeliveryStates        = EmptyHashMap[string, acp.DeliveryState](),
+        LastDispatchedMsg     = EmptyHashMap[string, acp.Envelope](),
         ActiveConsults        = EmptyHashMap[string, ConsultSession](),
         ConsultBuffers        = EmptyHashMap[string, Array[string]](),
         ConsultViewerOpen     = false,
@@ -1966,9 +1967,9 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         ConversationSticky = true,
         TurnBuffer        = "",
         ConsultsFired     = 0,
-        Ledger            = protocol.EmptyLedger(),
-        DeliveryStates    = EmptyHashMap[string, protocol.DeliveryState](),
-        LastDispatchedMsg = EmptyHashMap[string, protocol.Message](),
+        Ledger            = acp.EmptyLedger(),
+        DeliveryStates    = EmptyHashMap[string, acp.DeliveryState](),
+        LastDispatchedMsg = EmptyHashMap[string, acp.Envelope](),
         // Reset @base — a new prompt starts a fresh PR-base decision.
         // The TL re-emits @base early in this turn if stacking is
         // wanted; otherwise the PR opens against the project default.
@@ -2515,10 +2516,10 @@ func trackTaskTool(m AppModel, name string, chunk ClaudeChunk) AppModel {
 func recordChunkArrival(m AppModel, name string) AppModel {
     val now      = time_utils.Now()
     val nowNanos = int(now.UnixNanos())
-    val cur      = m.DeliveryStates.Get(name).GetOrElse(protocol.Sent(AtNanos = nowNanos, Attempt = 1))
+    val cur      = m.DeliveryStates.Get(name).GetOrElse(acp.Sent(AtNanos = nowNanos, Attempt = 1))
     return m.Copy(
         LastChunkAt    = m.LastChunkAt.Put(name, now),
-        DeliveryStates = m.DeliveryStates.Put(name, protocol.OnChunk(cur, nowNanos)),
+        DeliveryStates = m.DeliveryStates.Put(name, acp.OnChunk(cur, nowNanos)),
     )
 }
 
@@ -2526,8 +2527,8 @@ func recordChunkArrival(m AppModel, name string) AppModel {
 // through OnTerminal so subsequent Ticks know the delivery is Acked
 // and stop firing Redeliver/IssueNudge against it.
 func recordMemberTerminal(m AppModel, name string) AppModel {
-    val cur = m.DeliveryStates.Get(name).GetOrElse(protocol.Sent(AtNanos = 0, Attempt = 1))
-    return m.Copy(DeliveryStates = m.DeliveryStates.Put(name, protocol.OnTerminal(cur)))
+    val cur = m.DeliveryStates.Get(name).GetOrElse(acp.Sent(AtNanos = 0, Attempt = 1))
+    return m.Copy(DeliveryStates = m.DeliveryStates.Put(name, acp.OnTerminal(cur)))
 }
 
 // onChunk records a streamed line under the speaker's name, persists
@@ -2673,7 +2674,7 @@ func onChunk(m AppModel, name string, line string) Tuple[AppModel, Cmd[AppMsg]] 
     // fold produced at least one real (non-synthetic) envelope. A
     // synthetic-only batch is claude-code's auto-stub reply to a resume
     // marker — not model output — so we leave the delivery state at
-    // its prior value and let protocol.Tick see continued silence.
+    // its prior value and let acp.Tick see continued silence.
     val mWithChunk = if (anyReal) recordChunkArrival(mFinal, name) else mFinal
     return (mWithChunk, batchAll(foldedCmds.Append(pumpCmd)))
 }
@@ -2910,7 +2911,7 @@ func applyChunkVisible(m AppModel, name string, chunk ClaudeChunk) Tuple[AppMode
 // at most one terminal Message per call — already robust against a
 // deliverable that QUOTES `@dispatch(` / `@finished` as documented
 // examples (the backward scan ignores quoted openers before the real
-// sign-off). protocol.Ledger.Admit then keys identity on the content-
+// sign-off). acp.Ledger.Admit then keys identity on the content-
 // hash Id: re-flushed chunks, transient matches of a quoted sign-off,
 // and post-restart replays all re-derive the same Id and are rejected
 // exactly once. This replaces the FNV terminalFingerprint latch and
@@ -3371,7 +3372,7 @@ func maybeDispatchConsults(m AppModel, speaker string, line string) Tuple[AppMod
     }
     val nextBuffer = if (m.TurnBuffer == "") line else m.TurnBuffer + "\n" + line
     val msgs = protocol.Decode(nextBuffer, protocol.TLDecodeContext(0))
-    val consults = msgs.Filter((mm) => protocol.KindTag(mm.Kind) == "consult")
+    val consults = msgs.Filter((mm) => mm.Kind == "consult")
     if (consults.IsEmpty()) {
         return (m.Copy(TurnBuffer = nextBuffer), EmptyArray[Cmd[AppMsg]]())
     }
@@ -3927,7 +3928,7 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
     return respawnMember(withStatus, name)
 }
 
-// liveRespawnMember is the action consumer for protocol.Redeliver:
+// liveRespawnMember is the action consumer for acp.Redeliver:
 // the delivery FSM has decided a silent member crossed the stuck
 // threshold with retry budget remaining, so we kill the wedged
 // subprocess via closeLiveSession, bump RetryCount, flip status to
@@ -4253,9 +4254,9 @@ func spawnDispatchedMembers(m AppModel, dirs Array[Directive]) Tuple[AppModel, C
                     // dispatch: the Message identity Tick will use to
                     // bump-and-redeliver if the member goes silent.
                     val nowNanos  = int(withStatus.NowAt.UnixNanos())
-                    val dispatchMsg = protocol.NewMessage(withStatus.Team.Lead.Name, name, protocol.Dispatch(), body, 0)
+                    val dispatchMsg = acp.NewEnvelope(withStatus.Team.Lead.Name, name, "dispatch", body, 0)
                     val withDelivery = withStatus.Copy(
-                        DeliveryStates    = withStatus.DeliveryStates.Put(name, protocol.Sent(AtNanos = nowNanos, Attempt = 1)),
+                        DeliveryStates    = withStatus.DeliveryStates.Put(name, acp.Sent(AtNanos = nowNanos, Attempt = 1)),
                         LastDispatchedMsg = withStatus.LastDispatchedMsg.Put(name, dispatchMsg),
                     )
                     return (withDelivery, curCmds.Append(cmd), curSpawned.Add(name))
@@ -5566,7 +5567,7 @@ func extractSummaryFromText(text string) string {
 
 func parseRawSummary(text string) string {
     val msgs = protocol.Decode(text, protocol.TLDecodeContext(0))
-    val summaries = msgs.Filter((mm) => protocol.KindTag(mm.Kind) == "summary").Map((mm) => mm.Body)
+    val summaries = msgs.Filter((mm) => mm.Kind == "summary").Map((mm) => mm.Body)
     if summaries.IsEmpty() { return "" }
     return summaries.Get(summaries.Size() - 1)
 }
@@ -6051,7 +6052,7 @@ func onConsultEnded(m AppModel, name string, errText Option[string]) Tuple[AppMo
 // unwrap it for parsing.
 func extractConsultSummary(lines Array[string]) Option[string] =
     protocol.Decode(lines.MkString("\n"), protocol.TLDecodeContext(0))
-        .Filter((mm) => protocol.KindTag(mm.Kind) == "summary")
+        .Filter((mm) => mm.Kind == "summary")
         .Map((mm) => mm.Body)
         .HeadOption()
 

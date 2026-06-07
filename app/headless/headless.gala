@@ -290,7 +290,7 @@ func isDuplicateOfLast(convo Array[session.ConversationLine], speaker string, te
 // if one is present.
 func extractSummary(convo Array[session.ConversationLine]) Option[string] =
     protocol.Decode(convo.Collect({ case cl if cl.Speaker != "you" => cl.Text }).MkString("\n"), protocol.TLDecodeContext(0))
-        .Filter((mm) => protocol.KindTag(mm.Kind) == "summary")
+        .Filter((mm) => mm.Kind == "summary")
         .Map((mm) => mm.Body)
         .HeadOption()
 

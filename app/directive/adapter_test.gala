@@ -4,19 +4,20 @@ import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    "github.com/martianoff/gala-acp"
     "github.com/martianoff/gala_team/app/protocol"
 )
 
-// Covers the protocol.Message → directive.Directive boundary: every
-// inbound kind maps to its FSM directive with Recipient/Body routed to
-// the right field; the never-inbound delivery kinds map to None;
-// FromMessages preserves order and drops the None kinds.
+// Covers the acp.Envelope → directive.Directive boundary: every inbound
+// kind tag maps to its FSM directive with Recipient/Body routed to the
+// right field; the never-inbound delivery kinds map to None; FromMessages
+// preserves order and drops the None kinds.
 
-func msg(recipient string, kind protocol.MessageKind, body string) protocol.Message =
-    protocol.NewMessage(protocol.LeadAddr(), recipient, kind, body, 0)
+func msg(recipient string, kind string, body string) acp.Envelope =
+    acp.NewEnvelope(protocol.LeadAddr(), recipient, kind, body, 0)
 
 func TestFromMessage_Dispatch(t T) T {
-    return FromMessage(msg("Felix", protocol.Dispatch(), "build the parser")) match {
+    return FromMessage(msg("Felix", "dispatch", "build the parser")) match {
         case Some(d) => d match {
             case Dispatch(target, body) => {
                 val t1 = Eq(t, target, "Felix")
@@ -29,7 +30,7 @@ func TestFromMessage_Dispatch(t T) T {
 }
 
 func TestFromMessage_Consult_ProjectOverrideIsNone(t T) T {
-    return FromMessage(msg("transpiler", protocol.Consult(), "repro inside")) match {
+    return FromMessage(msg("transpiler", "consult", "repro inside")) match {
         case Some(d) => d match {
             case Consult(target, override, body) => {
                 val t1 = Eq(t, target, "transpiler")
@@ -43,7 +44,7 @@ func TestFromMessage_Consult_ProjectOverrideIsNone(t T) T {
 }
 
 func TestFromMessage_Summary(t T) T {
-    return FromMessage(msg(protocol.UserAddr(), protocol.Summary(), "## Done\nshipped")) match {
+    return FromMessage(msg(protocol.UserAddr(), "summary", "## Done\nshipped")) match {
         case Some(d) => d match {
             case Summary(body) => Eq(t, body, "## Done\nshipped")
             case _             => IsTrue(t, false)
@@ -53,7 +54,7 @@ func TestFromMessage_Summary(t T) T {
 }
 
 func TestFromMessage_Finished(t T) T {
-    return FromMessage(msg(protocol.LeadAddr(), protocol.Finished(), "tests green")) match {
+    return FromMessage(msg(protocol.LeadAddr(), "finished", "tests green")) match {
         case Some(d) => d match {
             case Finished(body) => Eq(t, body, "tests green")
             case _              => IsTrue(t, false)
@@ -63,7 +64,7 @@ func TestFromMessage_Finished(t T) T {
 }
 
 func TestFromMessage_Help(t T) T {
-    return FromMessage(msg(protocol.LeadAddr(), protocol.HelpRequested(), "which auth flow?")) match {
+    return FromMessage(msg(protocol.LeadAddr(), "help", "which auth flow?")) match {
         case Some(d) => d match {
             case Help(q) => Eq(t, q, "which auth flow?")
             case _       => IsTrue(t, false)
@@ -73,7 +74,7 @@ func TestFromMessage_Help(t T) T {
 }
 
 func TestFromMessage_Blocked(t T) T {
-    return FromMessage(msg(protocol.LeadAddr(), protocol.Blocked(), "gh CLI missing")) match {
+    return FromMessage(msg(protocol.LeadAddr(), "blocked", "gh CLI missing")) match {
         case Some(d) => d match {
             case Blocked(r) => Eq(t, r, "gh CLI missing")
             case _          => IsTrue(t, false)
@@ -85,13 +86,13 @@ func TestFromMessage_Blocked(t T) T {
 // Nudge / Ack are delivery-side kinds the inbound decoder never emits.
 // The adapter maps them to None so callers get a total mapping.
 func TestFromMessage_NudgeAndAck_AreNone(t T) T {
-    val tn = IsNone(t, FromMessage(msg("Felix", protocol.Nudge(), "still there?")))
-    return IsNone(tn, FromMessage(msg(protocol.LeadAddr(), protocol.Ack(), "")))
+    val tn = IsNone(t, FromMessage(msg("Felix", "nudge", "still there?")))
+    return IsNone(tn, FromMessage(msg(protocol.LeadAddr(), "ack", "")))
 }
 
 // @base with a same-line ref maps to Directive.Base(Ref).
 func TestFromMessage_Base_SameLineRef(t T) T {
-    return FromMessage(msg(protocol.UserAddr(), protocol.Base(), "previous")) match {
+    return FromMessage(msg(protocol.UserAddr(), "base", "previous")) match {
         case Some(d) => d match {
             case Base(ref) => Eq(t, ref, "previous")
             case _         => IsTrue(t, false)
@@ -103,7 +104,7 @@ func TestFromMessage_Base_SameLineRef(t T) T {
 // @base with the ref on a separate line — the adapter takes the FIRST
 // non-empty token of the body (post-trim).
 func TestFromMessage_Base_SeparateLineRef(t T) T {
-    return FromMessage(msg(protocol.UserAddr(), protocol.Base(), "main")) match {
+    return FromMessage(msg(protocol.UserAddr(), "base", "main")) match {
         case Some(d) => d match {
             case Base(ref) => Eq(t, ref, "main")
             case _         => IsTrue(t, false)
@@ -115,7 +116,7 @@ func TestFromMessage_Base_SeparateLineRef(t T) T {
 // @plan mixed-list bodies — bullets are stripped, blank lines dropped.
 func TestFromMessage_Plan_MixedListStyles(t T) T {
     val body = "- dashed\n* starred\n1. numbered\nplain line"
-    return FromMessage(msg(protocol.UserAddr(), protocol.Plan(), body)) match {
+    return FromMessage(msg(protocol.UserAddr(), "plan", body)) match {
         case Some(d) => d match {
             case Plan(items) => {
                 val t1 = Eq(t, items.Length(), 4)
@@ -135,15 +136,15 @@ func TestFromMessage_Plan_MixedListStyles(t T) T {
 // surfaces a truly-empty body as EmptyBody upstream; this is the
 // post-bullet-strip degenerate case.
 func TestFromMessage_Plan_AllBulletsBlankIsNone(t T) T =
-    IsNone(t, FromMessage(msg(protocol.UserAddr(), protocol.Plan(), "- \n- \n")))
+    IsNone(t, FromMessage(msg(protocol.UserAddr(), "plan", "- \n- \n")))
 
 // FromMessages preserves source order and drops the None (Nudge/Ack)
 // kinds so the result is exactly the FSM-consumable directive stream.
 func TestFromMessages_PreservesOrderDropsNone(t T) T {
-    val msgs = ArrayOf[protocol.Message](
-        msg("Felix", protocol.Dispatch(), "a"),
-        msg("Felix", protocol.Nudge(), "ignored"),
-        msg("Mira", protocol.Dispatch(), "b"),
+    val msgs = ArrayOf[acp.Envelope](
+        msg("Felix", "dispatch", "a"),
+        msg("Felix", "nudge", "ignored"),
+        msg("Mira", "dispatch", "b"),
     )
     val dirs = FromMessages(msgs)
     val t1 = Eq(t, dirs.Length(), 2)

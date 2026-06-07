@@ -4,15 +4,13 @@ gala_library(
     name = "protocol",
     srcs = [
         "decode.gala",
-        "delivery.gala",
-        "message.gala",
     ],
+    gala_deps = ["@gala_acp//:gala_acp"],
     importpath = "github.com/martianoff/gala_team/app/protocol",
     visibility = ["//visibility:public"],
     deps = [
         "@gala//collection_immutable",
         "@gala//strings",
-        "@gala//time_utils",
     ],
 )
 
@@ -21,20 +19,15 @@ gala_test(
     srcs = [
         "decode_spec_test.gala",
         "decode_test.gala",
-        "delivery_test.gala",
-        "message_test.gala",
     ],
+    gala_deps = ["@gala_acp//:gala_acp"],
     importpath = "github.com/martianoff/gala_team/app/protocol",
     lib_srcs = [
         "decode.gala",
-        "delivery.gala",
-        "message.gala",
     ],
     pkg = "protocol",
     deps = [
         "@gala//collection_immutable",
-        "@gala//go_interop",
         "@gala//strings",
-        "@gala//time_utils",
     ],
 )

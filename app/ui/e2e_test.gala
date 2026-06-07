@@ -4,7 +4,7 @@ import (
     "os"
     "strings"
     "martianoff/gala/time_utils"
-    "github.com/martianoff/gala_team/app/protocol"
+    "github.com/martianoff/gala-acp"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -261,7 +261,7 @@ func TestE2E_ChunkAfterStaleDrop_ProcessesNormally(t T) T {
 func TestE2E_RespawnAfterRotation_PreservesDispatchBody(t T) T {
     val seed = e2eModel()
     val dispatchBody = "Refactor the foo module; tests must pass."
-    val dispatchMsg = protocol.NewMessage(seed.Team.Lead.Name, "Felix", protocol.Dispatch(), dispatchBody, 0)
+    val dispatchMsg = acp.NewEnvelope(seed.Team.Lead.Name, "Felix", "dispatch", dispatchBody, 0)
     val seeded = seed.Copy(
         State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
@@ -288,7 +288,7 @@ func TestE2E_SpawnTLNudge_PreservesLastDispatchedMsg(t T) T {
     defer SetSpawnDisabledForTest(false)
     val base = e2eModel()
     val dispatchBody = "Refactor the foo module; tests must pass."
-    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), dispatchBody, 0)
+    val dispatchMsg = acp.NewEnvelope(base.Team.Lead.Name, "Felix", "dispatch", dispatchBody, 0)
     val seeded = base.Copy(
         State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
@@ -313,7 +313,7 @@ func TestE2E_DispatchThenNudgeThenRotation_ReplaysOriginalBody(t T) T {
     defer SetSpawnDisabledForTest(false)
     val base = e2eModel()
     val dispatchBody = "Refactor the foo module; tests must pass."
-    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), dispatchBody, 0)
+    val dispatchMsg = acp.NewEnvelope(base.Team.Lead.Name, "Felix", "dispatch", dispatchBody, 0)
     val seeded = base.Copy(
         State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
@@ -345,11 +345,11 @@ func TestE2E_Heartbeat_InTLReview_NoMemberStuckRefires(t T) T {
     defer SetSpawnDisabledForTest(false)
     val base = e2eModel()
     val staleNanos = int(base.NowAt.UnixNanos()) - int(time_utils.Seconds(int64(600)).ToNanos())
-    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), "old task", 0)
+    val dispatchMsg = acp.NewEnvelope(base.Team.Lead.Name, "Felix", "dispatch", "old task", 0)
     val seeded = base.Copy(
         State             = TLReview(),
         LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
-        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = staleNanos, Attempt = 1)),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", acp.Sent(AtNanos = staleNanos, Attempt = 1)),
     )
     val (m, _) = Update(seeded, TickMsg())
     return m.State match {
@@ -365,11 +365,11 @@ func TestE2E_Heartbeat_InIdle_NoMemberStuckRefires(t T) T {
     defer SetSpawnDisabledForTest(false)
     val base = e2eModel()
     val staleNanos = int(base.NowAt.UnixNanos()) - int(time_utils.Seconds(int64(600)).ToNanos())
-    val dispatchMsg = protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), "old task", 0)
+    val dispatchMsg = acp.NewEnvelope(base.Team.Lead.Name, "Felix", "dispatch", "old task", 0)
     val seeded = base.Copy(
         State             = Idle(),
         LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
-        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = staleNanos, Attempt = 1)),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", acp.Sent(AtNanos = staleNanos, Attempt = 1)),
     )
     val (m, _) = Update(seeded, TickMsg())
     return IsTrue(t, stateIsIdle(m))
@@ -386,15 +386,15 @@ func TestE2E_Heartbeat_InDelegating_StillFiresMemberStuck(t T) T {
     defer SetSpawnDisabledForTest(false)
     val base = e2eModel()
     val staleNanos = int(base.NowAt.UnixNanos()) - int(time_utils.Seconds(int64(200)).ToNanos())
-    val dispatchMsg = protocol.WithAttempt(
-        protocol.NewMessage(base.Team.Lead.Name, "Felix", protocol.Dispatch(), "old task", 0),
+    val dispatchMsg = acp.WithAttempt(
+        acp.NewEnvelope(base.Team.Lead.Name, "Felix", "dispatch", "old task", 0),
         3,  // > MaxRetries=2
     )
     val seeded = base.Copy(
         State             = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
         Statuses          = base.Statuses.Put("Felix", StWorking()),
         LastDispatchedMsg = base.LastDispatchedMsg.Put("Felix", dispatchMsg),
-        DeliveryStates    = base.DeliveryStates.Put("Felix", protocol.Sent(AtNanos = staleNanos, Attempt = 3)),
+        DeliveryStates    = base.DeliveryStates.Put("Felix", acp.Sent(AtNanos = staleNanos, Attempt = 3)),
         // Don't seed StateEnteredAt as stale — we don't want the
         // state-dwell watchdog to fire; we want the per-member
         // heartbeat to fire MemberStuck through AggregateNudges.

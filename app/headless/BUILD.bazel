@@ -3,6 +3,7 @@ load("@rules_gala//gala:defs.bzl", "gala_library")
 gala_library(
     name = "headless",
     srcs = ["headless.gala"],
+    gala_deps = ["@gala_acp//:gala_acp"],
     importpath = "github.com/martianoff/gala_team/app/headless",
     visibility = ["//visibility:public"],
     deps = [

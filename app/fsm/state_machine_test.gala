@@ -360,17 +360,36 @@ func TestQAGate_OnMemberHelpRequested_CarriesPendingIntoTLNudging(t T) T {
     }
 }
 
-// A prose-only nudge resolution drops the FSM to Idle even when
-// members are still pending. The carry-back-to-Delegating(pending)
-// fallback was retired with the heartbeat-ladder rip-out: a still-
-// silent pending member is a delivery non-ack, and the protocol's
-// Tick driver re-escalates via Redeliver / IssueNudge / MarkAbandoned
-// on the next heartbeat — recovery is owned by the protocol path,
-// not by an ad-hoc FSM bounce.
-func TestTLNudging_NoDirectiveWithPending_GoesIdle(t T) T {
-    val pending = EmptyHashSet[string]().Add("Bram")
+// A prose-only nudge resolution while members are still pending returns
+// to Delegating — NOT Idle. Dropping to Idle would strand any sibling
+// still working when the nudge fired: liveness ticking is gated to
+// Delegating / QAGate, so once Idle nothing tracks it and its later
+// @finished arrives in Idle as a MemberDone no-op (its work is lost).
+// Carrying the pending set back keeps the heartbeat re-escalating the
+// stuck member and lets the sibling's completion drain.
+func TestTLNudging_NoDirectiveWithPending_StaysDelegating(t T) T {
+    val pending = EmptyHashSet[string]().Add("Bram").Add("Wren")
     val s = Transition(TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending), TLDone(Directives = EmptyArray[Directive]()), ctxWithQA(true))
-    return Eq(t, stateName(s), "Idle")
+    val t1 = Eq(t, stateName(s), "Delegating")
+    return s match {
+        case Delegating(p, _) => IsTrue(t1, p.Contains("Bram") && p.Contains("Wren"))
+        case _                => IsTrue(t1, false)
+    }
+}
+
+// Full shape of the observed orphan bug: one engineer goes stuck, the TL
+// nudge resolves prose-only (back to Delegating now), the stuck member is
+// later abandoned by the heartbeat, and the OTHER engineer then finishes.
+// Its MemberDone must drain the (now-empty) pending set to QAGate — under
+// the old drop-to-Idle behaviour this finish vanished as an Idle no-op.
+func TestTLNudging_StuckSiblingStillReachesQa(t T) T {
+    val pending = EmptyHashSet[string]().Add("Cass").Add("Wren")
+    val afterNudge = Transition(
+        TLNudging(Reason = "stuck", Pending = pending, Dispatched = pending),
+        TLDone(Directives = EmptyArray[Directive]()), ctxWithQA(true))
+    val afterCassGone = Transition(afterNudge, MemberAbandoned(MemberName = "Cass"), ctxWithQA(true))
+    val afterWren = Transition(afterCassGone, MemberDone(MemberName = "Wren", Body = "done"), ctxWithQA(true))
+    return Eq(t, stateName(afterWren), "QAGate")
 }
 
 // Nudge resolves with no directive AND nothing pending → Idle (the

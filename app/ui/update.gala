@@ -1905,7 +1905,12 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             case None()     => (m, NoCmd[AppMsg]())
         }
     }
-    if m.Composer == "" {
+    // Whitespace-only counts as empty: submitting "   " would send claude
+    // a text content block with no non-whitespace text, which the API
+    // rejects (`400 ... text content blocks must contain non-whitespace
+    // text`) and the turn hangs. Trim before the empty check so a
+    // spaces-only composer is a clean no-op, same as a blank one.
+    if strings.TrimSpace(m.Composer) == "" {
         return (m, NoCmd[AppMsg]())
     }
     // A pending AskUserQuestion takes precedence over starting a new

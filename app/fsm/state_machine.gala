@@ -247,20 +247,40 @@ func afterTLDoneInQaGate(dirs Array[Directive], pending HashSet[string], dispatc
         case _              => QAGate(Pending = pending, Dispatched = dispatched)
     }
 
+// afterTLDoneInTLNudging is afterTLDone with one override: a prose-only
+// nudge turn (no @dispatch / @summary) must NOT tear down an in-flight
+// Delegating run while members are still pending. Plain afterTLDone routes
+// such a reply to Idle — which STRANDS any sibling that was still working
+// when the nudge fired: liveness ticking is gated to Delegating / QAGate,
+// so once the FSM is Idle nothing tracks the sibling, and its later
+// @finished arrives in Idle as a MemberDone no-op — its completed work is
+// silently dropped (observed: one engineer went stuck, the nudge settled
+// to Idle, and a sibling's clean @finished milestone never reached QA).
+// Returning to Delegating keeps the pending set live so the heartbeat
+// re-escalates the stuck member AND the sibling's completion drains
+// normally. @summary (Approval) and @dispatch (Delegating with new
+// targets) still take precedence — only the would-be-Idle case with a
+// non-empty pending set is redirected.
+func afterTLDoneInTLNudging(dirs Array[Directive], pending HashSet[string], dispatched HashSet[string], ctx TransitionContext) AppState =
+    afterTLDone(dirs, ctx) match {
+        case Idle() if !pending.IsEmpty() => Delegating(Pending = pending, Dispatched = dispatched)
+        case other                        => other
+    }
+
 // onTLNudging routes nudge-turn TL responses. A nudge interrupts a
 // Delegating run with members still in `pending`:
 //
 //   - TLDone(@summary)  → Approval (the TL chose to ship)
 //   - TLDone(@dispatch) → Delegating(new targets)
-//   - TLDone(no directive) → routes via afterTLDone exactly like a
-//     normal TL turn (Idle when no directives, Delegating when there
-//     are targets, Approval on @summary). A prose-only reply that
-//     drops to Idle is no longer carried back to Delegating(pending)
-//     here: the protocol delivery FSM (Tick) treats a still-silent
-//     pending member as a delivery non-ack and re-escalates on the
-//     next heartbeat via Redeliver / IssueNudge / MarkAbandoned, so
-//     the in-flight run is recovered through the protocol path
-//     instead of via an ad-hoc FSM fallback.
+//   - TLDone(no directive) → afterTLDoneInTLNudging: Approval on
+//     @summary, Delegating on @dispatch, and — for a prose-only reply
+//     that afterTLDone would otherwise drop to Idle — back to
+//     Delegating(pending) whenever members are still pending. Carrying
+//     the pending set back is what keeps a sibling that was still
+//     working when the nudge fired tracked: liveness ticking is gated
+//     to Delegating / QAGate, so a drop to Idle here would strand it and
+//     swallow its eventual @finished. Only an empty pending set settles
+//     to Idle.
 //   - A member that completes / blocks / crashes DURING the nudge
 //     turn drains `pending` via memberCompletion exactly like
 //     onDelegating, so a finish that races the nudge isn't lost.
@@ -268,7 +288,7 @@ func onTLNudging(reason string, pending HashSet[string], dispatched HashSet[stri
     memberCompletion(event, pending, dispatched, ctx, true) match {
         case Some(s) => s
         case None()  => event match {
-            case TLDone(dirs)              => afterTLDone(dirs, ctx)
+            case TLDone(dirs)              => afterTLDoneInTLNudging(dirs, pending, dispatched, ctx)
             case DispatchComplete(spawned) => checkSpawnInvariant(pending, dispatched.Union(spawned),
                                                   (p, d) => TLNudging(Reason = reason, Pending = p, Dispatched = d))
             case _                         => TLNudging(Reason = reason, Pending = pending, Dispatched = dispatched)

@@ -100,6 +100,18 @@ func TestKeySubmit_NonEmpty_AdvancesFsmAndClearsComposer(t T) T {
     }
 }
 
+// A whitespace-only composer is a no-op (like an empty one): no turn
+// starts and the FSM stays Idle. Without the trim, "   " was submitted
+// as an empty text block and claude's API rejected it with a 400.
+func TestKeySubmit_WhitespaceOnly_NoOp(t T) T {
+    val seed = sampleModel().Copy(Composer = "   ")
+    val (m, _) = Update(seed, KeySubmit())
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
+    }
+}
+
 func TestKeySubmit_Empty_NoOp(t T) T {
     val (m, _) = Update(sampleModel(), KeySubmit())
     val t1 = Eq(t, m.Composer, "")

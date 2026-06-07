@@ -927,6 +927,15 @@ sealed type AppMsg {
     // of PowerShell startup (~200–1500ms on Windows).
     case ClipboardPasted(Text string)
     case ClipboardFailed(ErrText string)
+    // SpawnLeadTurn defers the lead's claude spawn out of onSubmit's
+    // synchronous path. onSubmit appends the user's line + flips the lead
+    // to working, then returns this message wrapped in a FutureCmd; the
+    // runtime paints the line FIRST and dispatches SpawnLeadTurn one loop
+    // iteration later, where the blocking git-worktree + subprocess spawn
+    // actually runs. Without the hop, `update` doesn't return (and the
+    // frame can't paint) until the spawn finishes, so the user's message
+    // appeared only alongside the TL's response. Carries the raw prompt.
+    case SpawnLeadTurn(Prompt string)
     // UncommittedCheckResult carries the engineer's @finished body
     // plus the dirty/clean answer from the async git diff probe.
     // Replaces the inline hasUncommittedWork() call inside

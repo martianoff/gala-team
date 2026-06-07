@@ -2145,6 +2145,31 @@ func TestStateWatchdog_TLThinking_PastCeiling_ResetsLeadStatus(t T) T {
     }
 }
 
+// reconcileActivityAtRest's sweep decision is FSM-state aware. A
+// non-lead member stranded in a working bucket OUTSIDE the driving
+// states (Delegating / QAGate) is swept even with a live session —
+// that session is a phantom from a dispatch the orchestrator already
+// moved past. Regression for the bug where a stuck member kept showing
+// "working" with a runaway sidebar timer indefinitely (liveness
+// ticking is off outside the driving states, so nothing else ever
+// transitioned it, and the old session guard refused to reset it).
+func TestShouldSweepAtRest_FsmStateAware(t T) T {
+    // The fix: live session, NOT driving, not lead, active → swept.
+    val t1 = IsTrue(t,  shouldSweepAtRest(false, false, true, StWorking()))
+    // Genuine in-flight: live session WHILE driving → protected.
+    val t2 = IsTrue(t1, !shouldSweepAtRest(true, false, true, StWorking()))
+    // The lead with a live session is protected in any state (it works
+    // during the TL-only states).
+    val t3 = IsTrue(t2, !shouldSweepAtRest(false, true, true, StWorking()))
+    // No live session in an active status is always swept — a stale row
+    // from a crashed subprocess — even while driving.
+    val t4 = IsTrue(t3, shouldSweepAtRest(true, false, false, StStuck()))
+    // The lead's stale active status with no session still resets.
+    val t5 = IsTrue(t4, shouldSweepAtRest(false, true, false, StFailed("boom")))
+    // A rest status is never swept.
+    return IsTrue(t5, !shouldSweepAtRest(false, false, true, StIdle()))
+}
+
 func TestStateWatchdog_Delegating_PastCeiling_ResetsPendingMemberStatuses(t T) T {
     val pending = EmptyHashSet[string]().Add("Felix")
     val seed = sampleModel()

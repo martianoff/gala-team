@@ -5234,27 +5234,67 @@ func isTransientNotice(err string) bool =
 
 // reconcileActivityAtRest sweeps stale Activity-band state at an
 // orchestration checkpoint — a PR landing or a fresh user turn. A member
-// with a lingering active/problem status but NO live subprocess (absent
-// from m.Sessions) is no longer participating: its status is reset to
-// StIdle (which also drops its stale workflow phase label via setStatus),
-// so the band stops showing a superseded "failed" / "stuck" row. A
-// resolved transient notice is cleared from LastError.
+// with a lingering active/problem status that is no longer participating
+// is reset to StIdle (which also drops its stale workflow phase label and
+// stops its work timer via setStatus), so the band stops showing a
+// superseded "working" / "stuck" / "failed" row. A resolved transient
+// notice is cleared from LastError.
 //
-// Members that are still live (have a session) are left untouched, so a
-// genuinely in-flight problem remains visible — "if it's permanent it
-// stays, otherwise it disappears". Nothing is removed from the
-// conversation transcript or the debug trace, so the Activity log (F5)
-// and on-disk logs keep the full history.
+// Which active members count as "no longer participating" depends on the
+// FSM state, mirroring updateLivenessStatuses's own activeFsm gate:
+//
+//   - While the FSM is driving members (Delegating / QAGate), only reset
+//     members whose subprocess already died (absent from m.Sessions). A
+//     genuinely in-flight member with a live session is left untouched —
+//     its next chunk re-asserts the working status. "If it's permanent it
+//     stays, otherwise it disappears."
+//   - Outside those states, NO non-lead member is being driven: liveness
+//     ticking is off there, so a non-lead member still in a working bucket
+//     is stranded — the orchestrator moved past its dispatch without a
+//     clean @finished (it got stuck, the TL nudged and gave up). Its
+//     lingering session is a phantom that nothing else will ever
+//     transition, and it kept the old session-guard rule from ever firing.
+//     Tear that session down AND reset to idle so the runaway sidebar
+//     timer stops. The lead is never swept here: it legitimately works
+//     during the TL-only states (TLThinking / TLReview / TLNudging).
+//
+// Nothing is removed from the conversation transcript or the debug trace,
+// so the Activity log (F5) and on-disk logs keep the full history.
 func reconcileActivityAtRest(m AppModel) AppModel {
+    val leadName = m.Team.Lead.Name
+    val driving = m.State match {
+        case Delegating(_, _) => true
+        case QAGate(_, _)     => true
+        case _                => false
+    }
     val swept = m.Statuses.FoldLeftKV(m, (acc, name, st) => {
-        if (acc.Sessions.Get(name).IsDefined()) { return acc }
-        if (!isActiveStatus(st)) { return acc }
-        return setStatus(acc, name, StIdle())
+        val hasSession = acc.Sessions.Get(name).IsDefined()
+        if (!shouldSweepAtRest(driving, name == leadName, hasSession, st)) { return acc }
+        val closed = if (hasSession) closeLiveSession(acc, name) else acc
+        return setStatus(closed, name, StIdle())
     })
     return swept.LastError match {
         case Some(err) if isTransientNotice(err) => swept.Copy(LastError = None[string]())
         case _                                   => swept
     }
+}
+
+// shouldSweepAtRest decides whether reconcileActivityAtRest resets a
+// member to idle (and tears down its session). Pure, so the FSM-state
+// awareness is unit-testable without a live subprocess.
+//
+// A member is swept iff it holds an active status AND it is not a
+// genuine in-flight case. A LIVE session is protected only while the
+// FSM is driving members (`driving` — Delegating/QAGate) or for the
+// lead (which legitimately works during TL-only states). A member with
+// NO live session in an active status is always swept (a dead session
+// left a stale row); a non-lead member with a live session OUTSIDE the
+// driving states is a phantom from a dispatch the orchestrator moved
+// past — swept so its runaway timer stops.
+func shouldSweepAtRest(driving bool, isLead bool, hasSession bool, st Status) bool {
+    if (!isActiveStatus(st)) { return false }
+    val protectedLive = hasSession && (driving || isLead)
+    return !protectedLive
 }
 
 // isWorkingStatus returns true for any status that should accrue

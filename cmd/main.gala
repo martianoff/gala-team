@@ -31,13 +31,19 @@ import (
 // their work, and produces a final summary + PR for the user to approve.
 //
 // Usage:
-//     gala_team [--project <dir>] [--team <yaml-path>]
+//     gala_team [--project <dir>] [--team <yaml-path>] [--default-branch <name>]
 //
 //   --project <dir>     project directory (must be a git repo). Defaults
 //                       to the current working directory when omitted.
 //   --team <yaml-path>  path to team.yaml. When omitted falls back to
 //                       a hard-coded three-member sample so the binary
 //                       still launches end-to-end (useful for demos).
+//   --default-branch    branch worktrees fork from. Overrides auto-detection
+//                       (origin/HEAD, else "main"); set it for remote-less or
+//                       master-default repos.
+//   --github <url>      GitHub repo for PRs (owner/name or URL). Overrides the
+//                       detected origin; the orchestrator wires origin (creating
+//                       the repo private if missing) on the first PR.
 //
 // The keyboard plumbing translates raw KeyEvents into the AppMsg sealed
 // type. A 120 ms TickSub drives spinner animation. Pressing Enter sends
@@ -85,8 +91,8 @@ func hasFlag(names Array[string]) bool {
 // than reject so the user can pipe additional context through if a
 // future flag wants it.
 func validateArgs() {
-    val known = ArrayOf("--help", "-h", "--version", "-V", "--project", "--team", "--teams", "--team-key", "--test-mode")
-    val takesValue = ArrayOf("--project", "--team", "--teams", "--team-key")
+    val known = ArrayOf("--help", "-h", "--version", "-V", "--project", "--team", "--teams", "--team-key", "--default-branch", "--github", "--test-mode")
+    val takesValue = ArrayOf("--project", "--team", "--teams", "--team-key", "--default-branch", "--github")
     val args = ArrayOf(os.Args...)
     val n = args.Size()
     var i = 1
@@ -126,6 +132,15 @@ func printUsage() {
         "  --team-key <key>   Pick the main team from a multi-team yaml.\n" +
         "                     Defaults to the first entry under `teams:`.\n" +
         "                     The remaining teams become @consult targets.\n" +
+        "  --default-branch <name>\n" +
+        "                     Branch worktrees fork from. Defaults to the repo's\n" +
+        "                     detected default (origin/HEAD), else `main`. Set this\n" +
+        "                     for repos with no remote or a `master` default.\n" +
+        "  --github <url>     GitHub repo to open PRs against (owner/name or URL).\n" +
+        "                     Defaults to the detected `origin`. When a project has\n" +
+        "                     no remote yet, the orchestrator wires `origin` from\n" +
+        "                     this (creating the repo private if it doesn't exist)\n" +
+        "                     on the first PR. Without it, derives <gh-login>/<dir>.\n" +
         "  -h, --help         Show this message and exit.\n" +
         "\n" +
         "EXAMPLES\n" +
@@ -206,11 +221,31 @@ func yamlHint(msg string) string {
 // resolveProject runs the resolver and exits cleanly on failure
 // (missing dir / not a git repo). Falls back to a placeholder
 // Project on the unreachable path after die() has called Exit.
-func resolveProject(dir string) Project = Resolve(dir, NoOverrides()) match {
-    case Success(p)   => p
-    case Failure(err) => {
-        die(s"--project: ${err.Error()}")
-        Project(Name = "", Repo = "", Github = None[string](), DefaultBranch = "main")  // unreachable
+//
+// branchOverride wins over auto-detection when non-empty: it's the
+// `--default-branch` escape hatch for repos where detection can't
+// find one (no remote / no origin/HEAD), where the local branch is
+// `master` rather than the assumed `main`, or where the user wants to
+// fork worktrees off a non-default branch.
+//
+// githubOverride likewise wins over detected `origin`: it's the
+// `--github` escape hatch naming the GitHub repo for a project with no
+// remote yet. The orchestrator wires `origin` (creating the repo
+// private if missing) from it on the first PR.
+func resolveProject(dir string, branchOverride string, githubOverride string) Project {
+    val branch = if (branchOverride == "") None[string]() else Some[string](branchOverride)
+    val github = if (githubOverride == "") None[string]() else Some[string](githubOverride)
+    val overrides = Overrides(
+        Name          = None[string](),
+        Github        = github,
+        DefaultBranch = branch,
+    )
+    return Resolve(dir, overrides) match {
+        case Success(p)   => p
+        case Failure(err) => {
+            die(s"--project: ${err.Error()}")
+            Project(Name = "", Repo = "", Github = None[string](), DefaultBranch = "main")  // unreachable
+        }
     }
 }
 
@@ -291,10 +326,12 @@ func main() {
     val projDir  = flagValue(ArrayOf("--project"),         ".")
     val teamPath = flagValue(ArrayOf("--team", "--teams"), "")
     val teamKey  = flagValue(ArrayOf("--team-key"),        "")
+    val branch   = flagValue(ArrayOf("--default-branch"),  "")
+    val github   = flagValue(ArrayOf("--github"),          "")
     if teamPath == "" {
         die("--team is required (path to team.yaml)\n  see --help for usage")
     }
-    val proj   = resolveProject(projDir)
+    val proj   = resolveProject(projDir, branch, github)
     // Register the project repo with the debug logger so subsequent
     // runtime.LogEvent / TraceClaudeLine calls can derive their
     // target paths without threading repoDir through every dispatch

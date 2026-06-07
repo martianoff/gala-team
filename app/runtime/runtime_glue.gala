@@ -800,9 +800,10 @@ func MsgMember(msg Msg) string = msg match {
 // the summary text as the PR body. The first line of `body` becomes the
 // title (capped at 70 chars per gala-style rule), the rest goes into
 // the body via the `--body` flag. `baseRef` is the branch the PR
-// targets — None lets gh pick the project's default branch (the usual
-// case); Some(ref) is set when the TL emitted an `@base <ref>`
-// directive earlier in the turn (V2 stacking).
+// targets — None means the project's default branch (passed to gh
+// explicitly, NOT left to gh's repo-default inference); Some(ref) is
+// set when the TL emitted an `@base <ref>` directive earlier in the
+// turn (V2 stacking).
 //
 // `forceBranch` decides the PR snapshot branch name:
 //   - None         → derive `gala_team/<project>/pr/<short-sha>` from
@@ -852,6 +853,13 @@ func GhPrCreateFuture(proj Project, body string, baseRef Option[string], forceBr
             case Some(b) => b
             case None()  => "gala_team/" + gitSlug(proj.Name) + "/pr/" + sha
         }
+        // Bootstrap the remote before pushing: wire `origin` (creating
+        // the GitHub repo private if it doesn't exist) and ensure the
+        // base branch is on it. No-op once the project is set up.
+        val remoteErr = EnsureProjectRemote(proj)
+        if remoteErr != "" {
+            return RtPrFailed(Err = errors.New(s"remote setup failed: ${remoteErr}"))
+        }
         val pushResult = pushSnapshotBranch(proj, leadBranch, prBranch)
         if pushResult != "" {
             return RtPrFailed(Err = errors.New(s"git push pr branch failed: ${pushResult}"))
@@ -891,11 +899,16 @@ func GhPrCreateFuture(proj Project, body string, baseRef Option[string], forceBr
         if existing != "" {
             return RtPrCreated(Url = existing, Branch = prBranch)
         }
-        val baseArgs = baseRef match {
-            case None()    => EmptyArray[string]()
-            case Some(ref) => ArrayOf("--base", ref)
-        }
-        val args = ArrayOf("pr", "create", "--head", prBranch, "--title", title, "--body", bodyWithFooter).AppendAll(baseArgs)
+        // Always pass --base explicitly (reusing `base` from above).
+        // Letting gh infer the base from the GitHub repo's default
+        // branch is fragile: on a fresh project a leftover
+        // gala_team/<proj>/pr/<sha> snapshot branch can BE the repo
+        // default, and gh then rejects the PR with "head ... is the
+        // same as base ...". The orchestrator forks worktrees from
+        // proj.DefaultBranch, so that is the correct base — overridden
+        // only by an explicit @base directive (already folded into
+        // `base` via baseRef.GetOrElse).
+        val args = ArrayOf("pr", "create", "--head", prBranch, "--base", base, "--title", title, "--body", bodyWithFooter)
         val opts = subprocess.NewSpawnOpts(
             "gh",
             args.ToGoSlice(),
@@ -1011,6 +1024,207 @@ func firstCommitSubjectSinceBase(cwd string, base string, branch string) string 
             line match {
                 case Failure(_) => ""
                 case Success(s) => strings.TrimSpace(s)
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Project remote bootstrap
+//
+// Fresh projects often start as a local git repo with NO `origin`
+// remote wired — the user ran `git init` and committed but never
+// `git remote add`, or the GitHub repo doesn't exist yet at all. The
+// orchestrator's first PR pushes to `origin`, so without a remote the
+// push fails with "'origin' does not appear to be a git repository"
+// and PR creation dies. A second, subtler gap: even with origin set,
+// `gh pr create --base <defaultBranch>` fails if that base branch was
+// never pushed to the remote. EnsureProjectRemote closes both so the
+// team can take a project from "just committed locally" to "PR open"
+// without the user hand-wiring git.
+// ----------------------------------------------------------------------------
+
+// EnsureProjectRemote guarantees the project repo can host a PR before
+// the orchestrator pushes: an `origin` remote exists AND the default
+// branch is present on it. Idempotent — a no-op once both hold.
+// Returns "" on success or a human-readable error string.
+//
+// Resolution order for the GitHub repo when origin is missing:
+//   1. proj.Github (--github override)  → parse owner/name from it.
+//   2. derive <gh-login>/<repo-basename> → `gh api user` + basename.
+// If the resolved repo already exists on GitHub we `git remote add
+// origin <https-url>`. If it does NOT exist we `gh repo create
+// <owner>/<name> --private --source <repo> --remote origin --push`,
+// which creates it PRIVATE and wires origin in one step. Remotes live
+// in the shared common git dir, so adding them against proj.Repo
+// propagates to every worktree (incl. _lead), where the push runs.
+func EnsureProjectRemote(proj Project) string {
+    if !originRemoteExists(proj.Repo) {
+        val ownerRepo = resolveOwnerRepo(proj)
+        if ownerRepo == "" {
+            return "no `origin` remote and could not determine the GitHub repo — pass --github <url> or run `gh auth login`"
+        }
+        if ghRepoExists(proj.Repo, ownerRepo) {
+            val addErr = runCommandResult("git", ArrayOf("remote", "add", "origin", "https://github.com/" + ownerRepo + ".git"), proj.Repo)
+            if addErr != "" { return s"git remote add origin failed: ${addErr}" }
+        } else {
+            // --source wires origin against proj.Repo; --push uploads
+            // the current default branch so the base ensure below is a
+            // no-op on the freshly-created repo.
+            val createErr = runCommandResult("gh", ArrayOf("repo", "create", ownerRepo, "--private", "--source", proj.Repo, "--remote", "origin", "--push"), proj.Repo)
+            if createErr != "" { return s"gh repo create ${ownerRepo} failed: ${createErr}" }
+        }
+    }
+    return ensureRemoteBaseBranch(proj)
+}
+
+// ensureRemoteBaseBranch pushes proj.DefaultBranch to origin when the
+// remote has never seen it. Without this, the first PR of a brand-new
+// repo fails at `gh pr create --base <defaultBranch>` ("base branch
+// not found") even though origin is wired and the snapshot branch
+// pushed fine. Pushed from proj.Repo (the canonical holder of the
+// default branch ref); this reads and uploads the user's base branch
+// but never mutates their working tree.
+func ensureRemoteBaseBranch(proj Project) string {
+    val branch = proj.DefaultBranch
+    if remoteBranchExists(proj.Repo, branch) {
+        return ""
+    }
+    val pushErr = runCommandResult("git", ArrayOf("push", "origin", branch + ":refs/heads/" + branch), proj.Repo)
+    if pushErr != "" { return s"could not push base branch '${branch}' to origin: ${pushErr}" }
+    return ""
+}
+
+// originRemoteExists reports whether the repo at `cwd` has an `origin`
+// remote configured. `git remote get-url origin` exits non-zero when
+// it doesn't.
+func originRemoteExists(cwd string) bool =
+    captureLine("git", ArrayOf("remote", "get-url", "origin"), cwd) != ""
+
+// remoteBranchExists reports whether `origin` already has `branch`.
+// `git ls-remote --heads` prints a line per matching ref, nothing on
+// a miss.
+func remoteBranchExists(cwd string, branch string) bool =
+    captureLine("git", ArrayOf("ls-remote", "--heads", "origin", branch), cwd) != ""
+
+// resolveOwnerRepo determines the "owner/name" slug for the project's
+// GitHub repo: the --github override (parsed) wins; otherwise derive
+// `<gh-login>/<repo-basename>`. Returns "" when neither is available
+// (no override and `gh api user` failed — e.g. gh not authenticated).
+func resolveOwnerRepo(proj Project) string = proj.Github match {
+    case Some(url) => parseOwnerRepo(url)
+    case None()    => {
+        val login = captureLine("gh", ArrayOf("api", "user", "--jq", ".login"), proj.Repo)
+        if (login == "") "" else login + "/" + filepath.Base(proj.Repo)
+    }
+}
+
+// ghRepoExists reports whether `ownerRepo` (e.g. "octocat/hello") is a
+// repo the authenticated gh user can see. `gh repo view` exits
+// non-zero when the repo is missing or inaccessible.
+func ghRepoExists(cwd string, ownerRepo string) bool =
+    commandSucceeds("gh", ArrayOf("repo", "view", ownerRepo), cwd)
+
+// parseOwnerRepo extracts "owner/name" from a GitHub remote URL or a
+// bare "owner/name" shorthand. Handles https://github.com/owner/repo,
+// git@github.com:owner/repo, an optional ".git" suffix, and trailing
+// slashes by taking the last two path segments. Returns "" when it
+// can't find two non-empty segments.
+func parseOwnerRepo(raw string) string {
+    var s = strings.TrimSpace(raw)
+    s = strings.TrimSuffix(s, ".git")
+    s = strings.ReplaceAll(s, "git@github.com:", "")
+    s = strings.ReplaceAll(s, "https://github.com/", "")
+    s = strings.ReplaceAll(s, "http://github.com/", "")
+    s = strings.ReplaceAll(s, "ssh://git@github.com/", "")
+    s = strings.TrimPrefix(s, "/")
+    s = strings.TrimSuffix(s, "/")
+    val parts = strings.Split(s, "/")
+    val n = parts.Size()
+    if n < 2 { return "" }
+    val owner = strings.TrimSpace(parts.Get(n - 2))
+    val name = strings.TrimSpace(parts.Get(n - 1))
+    if (owner == "" || name == "") "" else owner + "/" + name
+}
+
+// captureLine runs `cmd cmdArgs...` in `cwd` and returns the trimmed
+// first stdout line, or "" on spawn failure or non-zero exit. Both
+// pipes are fully drained so the child never blocks on a full pipe.
+// For the small "read one value" git/gh queries.
+func captureLine(cmd string, cmdArgs Array[string], cwd string) string {
+    val opts = subprocess.NewSpawnOpts(cmd, cmdArgs.ToGoSlice(), SliceEmpty[string](), cwd)
+    return subprocess.Spawn(opts) match {
+        case Failure(_) => ""
+        case Success(p) => {
+            val first = p.ReadLine()
+            for {
+                val more = p.ReadLine()
+                if more.IsFailure() { break }
+            }
+            for {
+                val e = p.ReadStderrLine()
+                if e.IsFailure() { break }
+            }
+            p.Wait() match {
+                case Failure(_)    => ""
+                case Success(code) =>
+                    if (code != 0) ""
+                    else first match {
+                        case Failure(_) => ""
+                        case Success(s) => strings.TrimSpace(s)
+                    }
+            }
+        }
+    }
+}
+
+// commandSucceeds runs `cmd cmdArgs...` in `cwd`, drains both pipes,
+// and reports whether it exited 0. For probe commands where only the
+// exit status matters (e.g. `gh repo view`).
+func commandSucceeds(cmd string, cmdArgs Array[string], cwd string) bool {
+    val opts = subprocess.NewSpawnOpts(cmd, cmdArgs.ToGoSlice(), SliceEmpty[string](), cwd)
+    return subprocess.Spawn(opts) match {
+        case Failure(_) => false
+        case Success(p) => {
+            for {
+                val l = p.ReadLine()
+                if l.IsFailure() { break }
+            }
+            for {
+                val e = p.ReadStderrLine()
+                if e.IsFailure() { break }
+            }
+            p.Wait() match {
+                case Failure(_)    => false
+                case Success(code) => code == 0
+            }
+        }
+    }
+}
+
+// runCommandResult runs `cmd cmdArgs...` in `cwd` and returns "" on a
+// clean (exit 0) run, or "exit <code>: <stderr>" otherwise. Mirrors
+// drainGitPushResult but for arbitrary git/gh mutations (remote add,
+// repo create, base push) whose stderr carries the actionable reason.
+func runCommandResult(cmd string, cmdArgs Array[string], cwd string) string {
+    val opts = subprocess.NewSpawnOpts(cmd, cmdArgs.ToGoSlice(), SliceEmpty[string](), cwd)
+    return subprocess.Spawn(opts) match {
+        case Failure(err) => err.Error()
+        case Success(p)   => {
+            for {
+                val l = p.ReadLine()
+                if l.IsFailure() { break }
+            }
+            var stderrAcc = EmptyArray[string]()
+            for {
+                val e = p.ReadStderrLine()
+                if e.IsFailure() { break }
+                val t = strings.TrimSpace(e.Get())
+                if t != "" { stderrAcc = stderrAcc.Append(t) }
+            }
+            p.Wait() match {
+                case Failure(err)  => err.Error()
+                case Success(code) => if (code == 0) "" else s"exit ${code}: ${stderrAcc.MkString(" | ")}"
             }
         }
     }

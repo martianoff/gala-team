@@ -103,6 +103,21 @@ func TestWorktreeBranchFor_SlugifiesSpaces(t T) T {
     return Eq(t, branch, "gala_team/default-project/Felix")
 }
 
+// parseOwnerRepo normalizes the shapes the --github flag (and a
+// detected origin) can take into a bare "owner/name" slug. Covers
+// https / scp / ssh URLs, the .git suffix, trailing slashes, and the
+// bare shorthand — the inputs EnsureProjectRemote feeds it when wiring
+// origin on a remote-less project.
+func TestParseOwnerRepo_NormalizesShapes(t T) T {
+    val t1 = Eq(t,  parseOwnerRepo("https://github.com/octocat/hello.git"), "octocat/hello")
+    val t2 = Eq(t1, parseOwnerRepo("https://github.com/octocat/hello"),     "octocat/hello")
+    val t3 = Eq(t2, parseOwnerRepo("git@github.com:octocat/hello.git"),     "octocat/hello")
+    val t4 = Eq(t3, parseOwnerRepo("ssh://git@github.com/octocat/hello"),   "octocat/hello")
+    val t5 = Eq(t4, parseOwnerRepo("octocat/hello"),                        "octocat/hello")
+    val t6 = Eq(t5, parseOwnerRepo("  https://github.com/octocat/hello/ "), "octocat/hello")
+    return Eq(t6, parseOwnerRepo("not-a-repo"), "")
+}
+
 func TestLeadBranchFor_SlugifiesSpaces(t T) T {
     val proj = Project(
         Name = "Default Project",

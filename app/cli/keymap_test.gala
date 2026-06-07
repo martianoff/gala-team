@@ -277,6 +277,7 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case QAPromptReady(_)            => "QAPromptReady"
     case ClipboardPasted(_)          => "ClipboardPasted"
     case ClipboardFailed(_)          => "ClipboardFailed"
+    case SpawnLeadTurn(_)            => "SpawnLeadTurn"
     case UncommittedCheckResult(_, _, _) => "UncommittedCheckResult"
     case ApprovalReadyResult(_, _)   => "ApprovalReadyResult"
     case SummaryReadyResult(_, _)    => "SummaryReadyResult"

@@ -938,6 +938,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case QAPromptReady(prompt)              => applyQAPromptReady(m, prompt)
     case ClipboardPasted(txt)               => onClipboardPasted(m, txt)
     case ClipboardFailed(err)               => onClipboardFailed(m, err)
+    case SpawnLeadTurn(prompt)              => onSpawnLeadTurn(m, prompt)
     case UncommittedCheckResult(n, b, d)    => onUncommittedCheckResult(m, n, b, d)
     case ApprovalReadyResult(body, reason)  => onApprovalReadyResult(m, body, reason)
     case SummaryReadyResult(member, reason) => onSummaryReadyResult(m, member, reason)
@@ -1999,10 +2000,42 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         Pipeline = PipelineUpsert(EmptyPipelineState(), mClean.Team.Lead.Name, StWorking()),
     )
     val lead = mClean.Team.Lead
+    // Phase 1 is done: the user's line is in the conversation and the
+    // turn state is reset. Flip the lead to working NOW so the spinner
+    // shows immediately alongside the line — the production path below
+    // returns before the spawn, so this is the only place StWorking is
+    // set until the spawn lands.
+    val withWorking = setStatus(withState, lead.Name, StWorking())
+    // Test / headless seam: no real subprocess is launched, so run the
+    // spawn bookkeeping inline. The observable model (SessionIds, etc.)
+    // is then complete in this single Update — matching what the suite
+    // asserts and avoiding an async hop tests don't pump.
+    if SpawnDisabledForTest() {
+        return spawnLeadTurn(withWorking, prompt)
+    }
+    // Production: defer the blocking git-worktree + claude spawn to a
+    // FutureCmd. ensureSession synchronously spawns the claude
+    // subprocess (and on the first turn creates the lead worktree via
+    // `git worktree add`), so running it inline means `update` doesn't
+    // return — and the runtime can't paint — until that finishes. The
+    // user's just-typed line then appeared only once the spawn was done,
+    // ~alongside the TL's first chunk. Deferring lets the line + spinner
+    // paint this frame; SpawnLeadTurn runs the spawn next loop iteration.
+    return (withWorking, FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() => SpawnLeadTurn(Prompt = prompt))))
+}
+
+// spawnLeadTurn performs the actual claude spawn for a lead turn: close
+// any in-flight lead subprocess, ensure the workspace + session, wrap a
+// first-turn prompt with onboarding, and start the send + read pump.
+// Extracted from onSubmit so it can run either inline (test / headless
+// seam) or deferred off a SpawnLeadTurn message (production) — keeping
+// the user's line painted before this blocking work.
+func spawnLeadTurn(m AppModel, prompt string) Tuple[AppModel, Cmd[AppMsg]] {
+    val lead = m.Team.Lead
     // First-turn detection keys on whether we have a SessionId for
     // the lead — claude with `--print` doesn't keep processes alive
     // across turns, so the SessionId map is the source of truth.
-    val firstTurn = !mClean.SessionIds.Get(lead.Name).IsDefined()
+    val firstTurn = !m.SessionIds.Get(lead.Name).IsDefined()
     // Kill any in-flight lead subprocess BEFORE spawning a new one.
     // Without this, a fast-double-submit (user types, hits Enter, types
     // again, hits Enter while claude is still streaming) leaves the
@@ -2010,15 +2043,15 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     // pipe but `m.Sessions[lead]` already points at the new spawn, so
     // the read pump for the OLD process is what's still scheduled, and
     // its EOF closes the new turn before any new chunks reach onChunk.
-    val cleared = closeLiveSession(withState, lead.Name)
+    val cleared = closeLiveSession(m, lead.Name)
     return ensureSession(cleared, lead) match {
         case Left(err)  => {
             LogSpawnFailure(lead.Name, "submit", err)
-            return (withState.Copy(LastError = Some(err)), NoCmd[AppMsg]())
+            return (cleared.Copy(LastError = Some(err)), NoCmd[AppMsg]())
         }
         case Right(m1)  => {
             val (effectivePrompt, onboardingErr) =
-                if (firstTurn) onboarding.WrapPromptSafe(mClean.Project, mClean.Team, lead, mClean.Policy.WorkspaceMode, prompt)
+                if (firstTurn) onboarding.WrapPromptSafe(m1.Project, m1.Team, lead, m1.Policy.WorkspaceMode, prompt)
                 else           (prompt, None[string]())
             val m2 = onboardingErr match {
                 case Some(e) => m1.Copy(LastError = Some(s"onboarding: ${e}"))
@@ -2028,6 +2061,12 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         }
     }
 }
+
+// onSpawnLeadTurn is the deferred-spawn handler (production path): it runs
+// the lead spawn one loop iteration after onSubmit returned, by which
+// point the user's line + working spinner have already painted.
+func onSpawnLeadTurn(m AppModel, prompt string) Tuple[AppModel, Cmd[AppMsg]] =
+    spawnLeadTurn(m, prompt)
 
 // onAskUserQuestion sets the PendingQuestion state and appends a
 // system-line hint to the transcript so the user can see there's a

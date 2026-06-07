@@ -20,9 +20,11 @@ gala_imports_helper(name = "gala_imports")
 
 # gazelle:prefix github.com/martianoff/gala_team
 # gazelle:gala_prefix github.com/martianoff/gala_team
-# gala_tui ships its gala_library in another Bazel module; map its import path
-# to that label so it lands in deps correctly.
+# gala_tui and gala-acp ship their gala_library in other Bazel modules; map
+# their import paths to those labels so they land in gala_deps correctly (a
+# cross-module GALA library needs its sources on the transpiler search path).
 # gazelle:resolve gala github.com/martianoff/gala-tui @gala_tui//:gala_tui
+# gazelle:resolve gala github.com/martianoff/gala-acp @gala_acp//:gala_acp
 gazelle(
     name = "gazelle",
     data = [":gala_imports"],

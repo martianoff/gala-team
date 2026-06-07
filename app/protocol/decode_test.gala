@@ -5,6 +5,7 @@ import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    "github.com/martianoff/gala-acp"
 )
 
 // These are the lighter, structural decode tests. The authoritative
@@ -21,7 +22,7 @@ func TestDecode_SingleDispatch(t T) T {
     val t1 = Eq(t, msgs.Length(), 1)
     val m = msgs.Get(0)
     val t2 = Eq(t1, m.Recipient, "Felix")
-    val t3 = Eq(t2, KindTag(m.Kind), "dispatch")
+    val t3 = Eq(t2, m.Kind, "dispatch")
     return Eq(t3, m.Body, "build parser")
 }
 
@@ -37,14 +38,14 @@ func TestDecode_SummaryAddressedToUser(t T) T {
     val msgs = Decode("@summary\n## Done\nshipped\n@end", tl(0))
     val t1 = Eq(t, msgs.Length(), 1)
     val t2 = Eq(t1, msgs.Get(0).Recipient, UserAddr())
-    return Eq(t2, KindTag(msgs.Get(0).Kind), "summary")
+    return Eq(t2, msgs.Get(0).Kind, "summary")
 }
 
 func TestDecode_ConsultTarget(t T) T {
     val msgs = Decode("@consult(transpiler, project=\"/x\") repro\n@end", tl(0))
     val t1 = Eq(t, msgs.Length(), 1)
     val t2 = Eq(t1, msgs.Get(0).Recipient, "transpiler")
-    return Eq(t2, KindTag(msgs.Get(0).Kind), "consult")
+    return Eq(t2, msgs.Get(0).Kind, "consult")
 }
 
 // An unclosed trailing block is dropped — acting on a half-streamed
@@ -132,7 +133,7 @@ func TestDecode_BaseRef(t T) T {
     val msgs = Decode("@base previous\n@end", tl(0))
     val t1 = Eq(t, msgs.Length(), 1)
     val m = msgs.Get(0)
-    val t2 = Eq(t1, KindTag(m.Kind), "base")
+    val t2 = Eq(t1, m.Kind, "base")
     val t3 = Eq(t2, m.Recipient, UserAddr())
     return Eq(t3, m.Body, "previous")
 }
@@ -144,7 +145,7 @@ func TestDecode_PlanMixedListStyles(t T) T {
     val buf = "@plan\n- dashed\n* starred\n1. numbered\nplain line\n@end"
     val msgs = Decode(buf, tl(0))
     val t1 = Eq(t, msgs.Length(), 1)
-    return Eq(t1, KindTag(msgs.Get(0).Kind), "plan")
+    return Eq(t1, msgs.Get(0).Kind, "plan")
 }
 
 // Empty-body @base surfaces an EmptyBody issue (the directive carries
@@ -195,7 +196,7 @@ func TestDecode_InterleavedAllFiveKinds(t T) T {
         "@summary\nshipped\n@end"
     val msgs = Decode(buf, tl(0))
     val t1 = Eq(t, msgs.Length(), 5)
-    val tags = msgs.Map((m) => KindTag(m.Kind)).MkString(",")
+    val tags = msgs.Map((m) => m.Kind).MkString(",")
     return Eq(t1, tags, "base,plan,dispatch,consult,summary")
 }
 
@@ -240,7 +241,7 @@ func TestDecode_IgnoresQuotedBlockBeforeRealSignoff(t T) T {
     val msgs = Decode(buf, mem("Bram", 0))
     val t1 = Eq(t, msgs.Length(), 1)
     val m = msgs.Get(0)
-    val t2 = Eq(t1, KindTag(m.Kind), "finished")
+    val t2 = Eq(t1, m.Kind, "finished")
     return Eq(t2, m.Body, "Real deliverable: app/protocol shipped.")
 }
 
@@ -249,17 +250,17 @@ func TestDecode_TerminalAliases(t T) T {
     val fin = Decode("@finished\nbody\n@end", mem("Bram", 0)).Get(0)
     val rev = Decode("@review APPROVE — clean\n@end", mem("Theo", 0)).Get(0)
     val don = Decode("@done\nbody\n@end", mem("Bram", 0)).Get(0)
-    val t1 = Eq(t,  KindTag(fin.Kind), "finished")
-    val t2 = Eq(t1, KindTag(rev.Kind), "finished")
-    val t3 = Eq(t2, KindTag(don.Kind), "finished")
+    val t1 = Eq(t,  fin.Kind, "finished")
+    val t2 = Eq(t1, rev.Kind, "finished")
+    val t3 = Eq(t2, don.Kind, "finished")
     return Eq(t3, rev.Body, "APPROVE — clean")
 }
 
 func TestDecode_HelpAndBlockedTerminals(t T) T {
     val h = Decode("@help\nwhich auth flow?\n@end", mem("Bram", 0)).Get(0)
     val b = Decode("@blocked\ngh CLI missing\n@end", mem("Bram", 0)).Get(0)
-    val t1 = Eq(t,  KindTag(h.Kind), "help")
-    return Eq(t1, KindTag(b.Kind), "blocked")
+    val t1 = Eq(t,  h.Kind, "help")
+    return Eq(t1, b.Kind, "blocked")
 }
 
 // A member buffer that QUOTES a TL-only @dispatch( must NOT decode as a
@@ -289,8 +290,8 @@ func TestDecode_MemberTerminalIdempotent(t T) T {
 // First sight of an Id is admitted; a second sight is rejected exactly
 // once — the durable dedup gate.
 func TestLedger_AdmitsOnceRejectsDuplicate(t T) T {
-    val m = NewMessage("_lead", "Felix", Dispatch(), "work", 0)
-    val (l1, first) = EmptyLedger().Admit(m)
+    val m = acp.NewEnvelope("_lead", "Felix", "dispatch", "work", 0)
+    val (l1, first) = acp.EmptyLedger().Admit(m)
     val (_, second) = l1.Admit(m)
     val t1 = IsSome(t, first)
     return IsNone(t1, second)
@@ -298,9 +299,9 @@ func TestLedger_AdmitsOnceRejectsDuplicate(t T) T {
 
 // Distinct messages both admit; the ledger threads immutably.
 func TestLedger_DistinctMessagesBothAdmit(t T) T {
-    val a = NewMessage("_lead", "Felix", Dispatch(), "a", 0)
-    val b = NewMessage("_lead", "Mira", Dispatch(), "b", 0)
-    val (l1, fa) = EmptyLedger().Admit(a)
+    val a = acp.NewEnvelope("_lead", "Felix", "dispatch", "a", 0)
+    val b = acp.NewEnvelope("_lead", "Mira", "dispatch", "b", 0)
+    val (l1, fa) = acp.EmptyLedger().Admit(a)
     val (_, fb) = l1.Admit(b)
     val t1 = IsSome(t, fa)
     return IsSome(t1, fb)
@@ -310,7 +311,7 @@ func TestLedger_DistinctMessagesBothAdmit(t T) T {
 // yields nothing new — the end-to-end idempotency guarantee.
 func TestLedger_AbsorbsRedecodedDuplicate(t T) T {
     val one = "@dispatch(Felix) build\n@end"
-    val (l1, _) = EmptyLedger().Admit(Decode(one, tl(0)).Get(0))
+    val (l1, _) = acp.EmptyLedger().Admit(Decode(one, tl(0)).Get(0))
     val (_, again) = l1.Admit(Decode(one + "\n" + one, tl(0)).Get(0))
     return IsNone(t, again)
 }

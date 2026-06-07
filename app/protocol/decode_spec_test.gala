@@ -4,6 +4,7 @@ import (
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
+    "github.com/martianoff/gala-acp"
 )
 
 // ============================================================================
@@ -26,8 +27,8 @@ import (
 //
 // `tl` / `mem` are the package's shared decode-context helpers (defined
 // alongside the structural decode tests) — reused here, not redefined.
-// `KindTag` is the package's public kind→tag function — reused for kind
-// assertions rather than carrying a parallel local taxonomy.
+// `Envelope.Kind` is the message's lowercase kind tag (an acp.Envelope field)
+// — asserted directly rather than carrying a parallel local taxonomy.
 //
 // The asserted intent of every case is view-independent: identity is the
 // content hash, so idempotency and regrowth hold regardless of which view
@@ -38,7 +39,7 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-func idList(ms Array[Message]) Array[string] = ms.Map((m) => m.Id)
+func idList(ms Array[acp.Envelope]) Array[string] = ms.Map((m) => m.Id)
 
 func distinctCount(ids Array[string]) int = ids.Distinct().Length()
 
@@ -120,8 +121,8 @@ func TestDecode_QuotedDirectivesDoNotCollideWithRealSignoff(t T) T {
     return RunCases[string, string](t,
         (sub T, input string, expected string) => {
             val ms  = Decode(input, mem("Mara", 0))
-            val fin = ms.Filter((m) => KindTag(m.Kind) == "finished")
-            val dsp = ms.Filter((m) => KindTag(m.Kind) == "dispatch")
+            val fin = ms.Filter((m) => m.Kind == "finished")
+            val dsp = ms.Filter((m) => m.Kind == "dispatch")
             val t1 = Eq(sub, fin.Length(), 1)        // exactly the real sign-off
             val t2 = Eq(t1, dsp.Length(), 0)         // quoted @dispatch( is inert
             return Eq(t2, fin.Get(0).Body, expected) // real body, not the quoted opener's
@@ -182,7 +183,7 @@ func TestDecode_FinishedAliasesAreAccepted(t T) T {
         (sub T, input string, expected string) => {
             val ms = Decode(input, mem("Mara", 0))
             val t1 = Eq(sub, ms.Length(), 1)
-            val t2 = Eq(t1, KindTag(ms.Get(0).Kind), "finished")
+            val t2 = Eq(t1, ms.Get(0).Kind, "finished")
             return Eq(t2, ms.Get(0).Body, expected)
         },
         Case[string, string](
@@ -230,7 +231,7 @@ func TestDecode_UnclosedTerminalIsStreamingSafe(t T) T {
             // truncated/garbled body. Guard on the actual length so a decode
             // regression fails the count assertion cleanly instead of
             // panicking on an out-of-bounds Get.
-            return if (ms.Length() > 0) { Eq(t1, KindTag(ms.Get(0).Kind), "dispatch") } else { t1 }
+            return if (ms.Length() > 0) { Eq(t1, ms.Get(0).Kind, "dispatch") } else { t1 }
         },
         // mid-stream: opener seen, body partially streamed, no @end yet → nothing.
         Case[string, int](
@@ -268,7 +269,7 @@ func TestDecode_UnclosedTerminalIsStreamingSafe(t T) T {
 func TestDecode_MultipleBackToBackDispatch(t T) T {
     return RunCases[string, string](t,
         (sub T, input string, expected string) => {
-            val dsp    = Decode(input, tl(0)).Filter((m) => KindTag(m.Kind) == "dispatch")
+            val dsp    = Decode(input, tl(0)).Filter((m) => m.Kind == "dispatch")
             val joined = dsp.Map((m) => m.Recipient + "::" + m.Body).MkString("|")
             val t1 = Eq(sub, dsp.Length(), 3)
             return Eq(t1, joined, expected)

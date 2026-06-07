@@ -6,10 +6,10 @@ gala_library(
         "adapter.gala",
         "directive.gala",
     ],
+    gala_deps = ["@gala_acp//:gala_acp"],
     importpath = "github.com/martianoff/gala_team/app/directive",
     visibility = ["//visibility:public"],
     deps = [
-        "//app/protocol",
         "@gala//collection_immutable",
         "@gala//go_interop",
         "@gala//strings",
@@ -19,6 +19,7 @@ gala_library(
 gala_test(
     name = "directive_test",
     srcs = ["adapter_test.gala"],
+    gala_deps = ["@gala_acp//:gala_acp"],
     importpath = "github.com/martianoff/gala_team/app/directive",
     lib_srcs = [
         "adapter.gala",

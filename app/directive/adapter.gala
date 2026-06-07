@@ -5,7 +5,7 @@ import (
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
-    "github.com/martianoff/gala_team/app/protocol"
+    "github.com/martianoff/gala-acp"
 )
 
 // adapter.gala — the boundary between the protocol envelope and the
@@ -14,7 +14,7 @@ import (
 // app/protocol owns inbound extraction + dedup (content-hash identity).
 // The FSM still speaks directive.Directive. FromMessage is the ONLY
 // directive-shaped code that survives the inbound decode swap: it maps
-// an admitted protocol.Message back into the Directive the FSM already
+// an admitted acp.Envelope back into the Directive the FSM already
 // consumes — no parallel parser.
 //
 // The inbound decoder yields eight kinds: Dispatch / Consult / Summary /
@@ -22,9 +22,8 @@ import (
 // HelpRequested / Blocked (end-anchored from a member buffer). Nudge
 // and Ack are delivery-side kinds the decoder never emits inbound, so
 // they map to None — a total mapping, no partial-function surprise at
-// the call site. Token dispatch (not a qualified sealed match) mirrors
-// the package's own tokenToKind / buildLeadMessage idiom and keeps the
-// frozen KindTag as the single source of the kind vocabulary.
+// the call site. Token dispatch reads the envelope's lowercase Kind tag
+// directly — the decoder's frozen kind vocabulary is the single source.
 //
 // Consult.ProjectOverride is None: the `project="..."` tail is not part
 // of protocol identity (the decoder drops it on purpose) and the sole
@@ -35,8 +34,8 @@ import (
 // Directive shape the FSM consumes — first non-empty token for Base,
 // bullet-stripped lines for Plan. Empty bodies cannot reach here: the
 // decoder already surfaces them as DecodeIssue.EmptyBody.
-func FromMessage(m protocol.Message) Option[Directive] {
-    val tag = protocol.KindTag(m.Kind)
+func FromMessage(m acp.Envelope) Option[Directive] {
+    val tag = m.Kind
     if (tag == "dispatch") {
         return Some[Directive](Dispatch(Target = m.Recipient, Body = m.Body))
     }
@@ -92,5 +91,5 @@ func stripPlanBullet(s string) string {
 // FSM consumes, dropping the never-inbound Nudge/Ack kinds. Order is
 // preserved — the decoder already emitted source order and deduped by
 // Id, so the caller hands this straight to TLDone / member routing.
-func FromMessages(msgs Array[protocol.Message]) Array[Directive] =
+func FromMessages(msgs Array[acp.Envelope]) Array[Directive] =
     msgs.Collect((m) => FromMessage(m))

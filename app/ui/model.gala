@@ -927,15 +927,19 @@ sealed type AppMsg {
     // of PowerShell startup (~200–1500ms on Windows).
     case ClipboardPasted(Text string)
     case ClipboardFailed(ErrText string)
-    // SpawnLeadTurn defers the lead's claude spawn out of onSubmit's
-    // synchronous path. onSubmit appends the user's line + flips the lead
-    // to working, then returns this message wrapped in a FutureCmd; the
-    // runtime paints the line FIRST and dispatches SpawnLeadTurn one loop
-    // iteration later, where the blocking git-worktree + subprocess spawn
-    // actually runs. Without the hop, `update` doesn't return (and the
-    // frame can't paint) until the spawn finishes, so the user's message
-    // appeared only alongside the TL's response. Carries the raw prompt.
-    case SpawnLeadTurn(Prompt string)
+    // LeadSpawned carries the result of the lead's claude spawn, which
+    // runs OFF the UI thread. onSubmit appends the user's line + flips the
+    // lead to working, then returns a FutureCmd whose body performs the
+    // blocking git-worktree + subprocess spawn on a worker goroutine and
+    // emits this message. The UI loop never blocks on the spawn, so the
+    // line + spinner keep painting (every 120ms tick) instead of the
+    // frame freezing until the spawn finishes — the bug where a typed
+    // message only appeared once the TL's first chunk arrived. Session is
+    // Some on success (installed into m.Sessions, then send+pump fire);
+    // None with ErrText set on workspace/spawn failure. Prompt is the
+    // already-onboarding-wrapped text to send; Sid is the session id the
+    // spawn used (persisted only on success).
+    case LeadSpawned(Prompt string, Session Option[MemberSession], Sid string, ErrText string)
     // UncommittedCheckResult carries the engineer's @finished body
     // plus the dirty/clean answer from the async git diff probe.
     // Replaces the inline hasUncommittedWork() call inside

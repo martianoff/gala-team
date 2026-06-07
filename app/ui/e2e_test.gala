@@ -11,6 +11,7 @@ import (
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
+    . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
 )
 
@@ -746,18 +747,21 @@ func TestE2E_KeySubmit_RendersUserLineBeforeSpawn(t T) T {
     return IsTrue(t3, leadWorking)
 }
 
-// The deferred SpawnLeadTurn handler runs the actual spawn bookkeeping.
-// Under the spawn seam ensureSession short-circuits to minting the
-// SessionId without a real subprocess, so dispatching SpawnLeadTurn must
-// leave the lead's SessionId defined — proving phase 2 wires the session.
-func TestE2E_SpawnLeadTurn_MintsLeadSession(t T) T {
-    SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+// The off-thread spawn lands via LeadSpawned. A failure result (no
+// session) must surface in LastError and start no pump — the lead is left
+// for the watchdog to recover, exactly as the inline spawn-failure arm
+// did. (The success arm carries a live MemberSession the seam can't
+// fabricate, so it's covered by the production render test + the inline
+// spawnLeadTurn path the rest of the suite exercises.)
+func TestE2E_LeadSpawned_Failure_SetsLastError(t T) T {
     val base = e2eModel()
     val leadName = base.Team.Lead.Name
     val seed = base.Copy(State = TLThinking())
-    val (m, _) = Update(seed, SpawnLeadTurn(Prompt = "go"))
-    return IsTrue(t, m.SessionIds.Get(leadName).IsDefined())
+    val (m, _) = Update(seed, LeadSpawned(
+        Prompt = "go", Session = None[MemberSession](), Sid = "sid-1", ErrText = "spawn Iris: boom"))
+    // No session installed; the error is surfaced for the user / watchdog.
+    val t1 = IsTrue(t, m.LastError.IsDefined())
+    return IsTrue(t1, !m.Sessions.Get(leadName).IsDefined())
 }
 
 // Auto-retry chain: KeySubmit lands TLThinking, then a watchdog fire

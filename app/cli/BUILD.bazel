@@ -33,6 +33,7 @@ gala_test(
     deps = [
         "//app/config",
         "//app/policy",
+        "//app/runtime",  # keep: AppMsg.LeadSpawned surfaces runtime.MemberSession via the app/ui dot-import
         "//app/session",  # keep: transpiler surfaces session types via the app/ui dot-import
         "//app/team",
         "//app/ui",

@@ -229,6 +229,37 @@ func TestView_Conversation_Clipping_ShowsHiddenHint(t T) T {
     return IsTrue(t, strings.Contains(render(m), "line 29"))
 }
 
+// Repro: a freshly-submitted user line must be visible in the
+// conversation pane immediately (sticky-bottom), not hidden below the
+// fold until the next line arrives. Seed a tall prior conversation, then
+// append a "you" line, and assert it renders.
+func TestView_Conversation_LastUserLineVisible_Seeded(t T) T {
+    var convo = EmptyArray[session.ConversationLine]()
+    var i = 0
+    for i < 25 {
+        convo = convo.Append(session.ConversationLine(Speaker = "Iris", Text = s"resp ${i}"))
+        i = i + 1
+    }
+    convo = convo.Append(session.ConversationLine(Speaker = "you", Text = "ZZMARKERZZ"))
+    val m = mkModel(mkTeam("X", "")).Copy(Conversation = convo, ConversationSticky = true)
+    return IsTrue(t, strings.Contains(render(m), "ZZMARKERZZ"))
+}
+
+// Repro through the real submit path: Update(KeySubmit) appends the user
+// line; the resulting model must render that line. (Production defer path
+// — the spawn Cmd is discarded, so no subprocess launches.)
+func TestView_Conversation_SubmittedUserLineVisible(t T) T {
+    var convo = EmptyArray[session.ConversationLine]()
+    var i = 0
+    for i < 25 {
+        convo = convo.Append(session.ConversationLine(Speaker = "Iris", Text = s"resp ${i}"))
+        i = i + 1
+    }
+    val seed = mkModel(mkTeam("X", "")).Copy(Conversation = convo, Composer = "ZZSUBMITZZ")
+    val (m, _) = Update(seed, KeySubmit())
+    return IsTrue(t, strings.Contains(render(m), "ZZSUBMITZZ"))
+}
+
 // Long chunks must wrap inside the conversation pane — otherwise long
 // claude responses get clipped at the right edge (see UI_AUDIT_BUGS.md
 // bug A). Sends a 200-char chunk and asserts the rendered output spans

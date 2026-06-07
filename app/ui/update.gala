@@ -938,7 +938,7 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case QAPromptReady(prompt)              => applyQAPromptReady(m, prompt)
     case ClipboardPasted(txt)               => onClipboardPasted(m, txt)
     case ClipboardFailed(err)               => onClipboardFailed(m, err)
-    case SpawnLeadTurn(prompt)              => onSpawnLeadTurn(m, prompt)
+    case LeadSpawned(prompt, sess, sid, e) => onLeadSpawned(m, prompt, sess, sid, e)
     case UncommittedCheckResult(n, b, d)    => onUncommittedCheckResult(m, n, b, d)
     case ApprovalReadyResult(body, reason)  => onApprovalReadyResult(m, body, reason)
     case SummaryReadyResult(member, reason) => onSummaryReadyResult(m, member, reason)
@@ -2018,23 +2018,56 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if SpawnDisabledForTest() {
         return spawnLeadTurn(withWorking, prompt)
     }
-    // Production: defer the blocking git-worktree + claude spawn to a
-    // FutureCmd. ensureSession synchronously spawns the claude
-    // subprocess (and on the first turn creates the lead worktree via
-    // `git worktree add`), so running it inline means `update` doesn't
-    // return — and the runtime can't paint — until that finishes. The
-    // user's just-typed line then appeared only once the spawn was done,
-    // ~alongside the TL's first chunk. Deferring lets the line + spinner
-    // paint this frame; SpawnLeadTurn runs the spawn next loop iteration.
-    return (withWorking, FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() => SpawnLeadTurn(Prompt = prompt))))
+    // Production: run the blocking git-worktree + claude spawn OFF the UI
+    // thread. ensureSession spawns the claude subprocess (and on the first
+    // turn creates the lead worktree via `git worktree add`) — done inline
+    // it freezes the whole UI loop (no paints, no 120ms spinner tick)
+    // until it finishes, so the just-typed line stayed invisible until the
+    // TL's first chunk arrived. The FutureCmd body runs on a worker
+    // goroutine and emits LeadSpawned; the UI keeps painting the line +
+    // spinner meanwhile, and onLeadSpawned installs the session + starts
+    // send/pump when it lands.
+    val firstTurn = !withWorking.SessionIds.Get(lead.Name).IsDefined()
+    val sid       = withWorking.SessionIds.Get(lead.Name).GetOrElse(NewSessionId())
+    val (effectivePrompt, onbErr) =
+        if (firstTurn) onboarding.WrapPromptSafe(withWorking.Project, withWorking.Team, lead, withWorking.Policy.WorkspaceMode, prompt)
+        else           (prompt, None[string]())
+    val m0 = onbErr match {
+        case Some(e) => withWorking.Copy(LastError = Some(s"onboarding: ${e}"))
+        case None()  => withWorking
+    }
+    // Kill any in-flight lead subprocess (normally a no-op between turns;
+    // guards the fast-double-submit race). Cheap; stays on the UI thread.
+    val cleared   = closeLiveSession(m0, lead.Name)
+    val proj      = cleared.Project
+    val mode      = cleared.Policy.WorkspaceMode
+    val skipPerms = cleared.Team.DangerouslySkipPermissions
+    return (cleared, FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+        spawnLeadOffThread(proj, lead, mode, skipPerms, sid, firstTurn, effectivePrompt))))
 }
 
-// spawnLeadTurn performs the actual claude spawn for a lead turn: close
-// any in-flight lead subprocess, ensure the workspace + session, wrap a
+// spawnLeadOffThread performs the blocking workspace-ensure + claude
+// spawn for the lead and packages the outcome as a LeadSpawned message.
+// Runs on a worker goroutine (concurrent.FutureApply) so the UI loop
+// never blocks on it — the whole point of the deferral.
+func spawnLeadOffThread(
+    proj Project, lead Member, mode WorkspaceMode, skipPerms bool,
+    sid string, firstTurn bool, prompt string,
+) AppMsg =
+    EnsureWorkspace(proj, lead, mode) match {
+        case Failure(e)  => LeadSpawned(Prompt = prompt, Session = None[MemberSession](), Sid = sid, ErrText = s"workspace ${lead.Name}: ${e.Error()}")
+        case Success(ws) => SpawnSession(proj, lead, ws, skipPerms, sid, firstTurn) match {
+            case Failure(e)    => LeadSpawned(Prompt = prompt, Session = None[MemberSession](), Sid = sid, ErrText = s"spawn ${lead.Name}: ${e.Error()}")
+            case Success(sess) => LeadSpawned(Prompt = prompt, Session = Some[MemberSession](sess), Sid = sid, ErrText = "")
+        }
+    }
+
+// spawnLeadTurn performs the lead claude spawn INLINE: close any
+// in-flight lead subprocess, ensure the workspace + session, wrap a
 // first-turn prompt with onboarding, and start the send + read pump.
-// Extracted from onSubmit so it can run either inline (test / headless
-// seam) or deferred off a SpawnLeadTurn message (production) — keeping
-// the user's line painted before this blocking work.
+// Used only on the test / headless seam (SpawnDisabledForTest), where no
+// real subprocess launches and the observable model must be complete in
+// one Update. Production spawns off-thread via spawnLeadOffThread.
 func spawnLeadTurn(m AppModel, prompt string) Tuple[AppModel, Cmd[AppMsg]] {
     val lead = m.Team.Lead
     // First-turn detection keys on whether we have a SessionId for
@@ -2067,11 +2100,34 @@ func spawnLeadTurn(m AppModel, prompt string) Tuple[AppModel, Cmd[AppMsg]] {
     }
 }
 
-// onSpawnLeadTurn is the deferred-spawn handler (production path): it runs
-// the lead spawn one loop iteration after onSubmit returned, by which
-// point the user's line + working spinner have already painted.
-func onSpawnLeadTurn(m AppModel, prompt string) Tuple[AppModel, Cmd[AppMsg]] =
-    spawnLeadTurn(m, prompt)
+// onLeadSpawned lands the off-thread lead spawn result. On success it
+// installs the session bookkeeping (mirroring ensureSession's success
+// arm — Sessions / SessionIds / LastChunkAt / recovery flags) and fires
+// send + pump; on failure it surfaces the error in LastError. By the time
+// this runs, the user's line + spinner have been painting for the spawn's
+// whole duration (the UI loop was never blocked).
+func onLeadSpawned(
+    m AppModel, prompt string, sessionOpt Option[MemberSession], sid string, err string,
+) Tuple[AppModel, Cmd[AppMsg]] {
+    val lead = m.Team.Lead
+    return sessionOpt match {
+        case None()     => {
+            LogSpawnFailure(lead.Name, "submit", err)
+            return (m.Copy(LastError = Some(err)), NoCmd[AppMsg]())
+        }
+        case Some(sess) => {
+            val nextRecovered = m.RecoveredMembers.FilterNot((n) => n == lead.Name)
+            val m1 = m.Copy(
+                Sessions              = m.Sessions.Put(lead.Name, sess),
+                SessionIds            = m.SessionIds.Put(lead.Name, sid),
+                LastChunkAt           = m.LastChunkAt.Put(lead.Name, time_utils.Now()),
+                RecoveredMembers      = nextRecovered,
+                RecoveryBannerVisible = m.RecoveryBannerVisible && nextRecovered.Size() > 0,
+            )
+            return (m1, sendAndPumpCmd(m1, lead, prompt))
+        }
+    }
+}
 
 // onAskUserQuestion sets the PendingQuestion state and appends a
 // system-line hint to the transcript so the user can see there's a

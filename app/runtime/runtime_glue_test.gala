@@ -393,13 +393,30 @@ func TestGhTitle_BoldWrapAndLongTitleRegression(t T) T {
     return t3
 }
 
+// A summary that opens straight into a "## What" heading must NOT title
+// the PR "## What": GhTitle skips leading heading lines to the first
+// real content line.
+func TestGhTitle_SkipsLeadingHeading(t T) T {
+    return Eq(t, GhTitle("## What\n\nAdd checkpoint persistence"), "Add checkpoint persistence")
+}
+
+// The realistic @summary shape — a one-line headline, then ## sections.
+// The headline is the title (it's unique per PR); the structured
+// sections that follow must not shadow it. Regression for "same title
+// for all PRs in a session", where the title was instead pinned to the
+// oldest accumulated commit on the lead branch.
+func TestGhTitle_PrefersHeadlineOverSections(t T) T {
+    val body = "Add disk-backed checkpoint save/restore and a selectable backend\n\n## What\n- a\n\n## Why\n- b"
+    return Eq(t, GhTitle(body), "Add disk-backed checkpoint save/restore and a selectable backend")
+}
+
 // ----------------------------------------------------------------------------
-// firstCommitSubjectSinceBase — PR title source. The orchestrator
-// previously derived the PR title from the first non-empty line of
-// the @summary body, which produced titles like "## What" whenever
-// the TL wrote a structured `## What / ## Why` body. Now the title
-// comes from the engineer's first commit on the branch since base,
-// which is already a one-line summary by convention.
+// firstCommitSubjectSinceBase — the FALLBACK PR title source, used only
+// when the @summary body has no usable headline (a heading-only body).
+// GhTitle(body) is the primary source because it's written for THIS PR
+// and stays unique across a session; the first-commit-since-base subject
+// is the same oldest commit every time the lead branch accumulates work,
+// which pinned one title onto every PR.
 // ----------------------------------------------------------------------------
 
 // Happy path: a single commit on the branch since base. Subject

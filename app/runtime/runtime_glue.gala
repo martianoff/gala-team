@@ -1028,6 +1028,51 @@ func firstCommitSubjectSinceBase(cwd string, base string, branch string) string 
     }
 }
 
+// LocalBaseBehindStr reports how many commits origin/<default> is AHEAD
+// of the local <default> branch — i.e. how many merged-on-GitHub commits
+// the user's local checkout hasn't pulled yet. The orchestrator merges
+// nothing locally (PRs are merged on GitHub by hand), so after a few
+// merges the user's local default branch silently falls behind; this
+// powers a warn-only advisory after each PR is opened.
+//
+// A quiet `git fetch origin <default>` refreshes the remote-tracking ref,
+// then `git rev-list --count <default>..origin/<default>` yields the gap
+// as a single numeric line, returned verbatim (already a string like
+// "8"). Returns "" on any failure (no origin, detached HEAD, git
+// missing) so the caller simply shows nothing. NEVER touches the working
+// tree — read-only and warn-only, because the user may have uncommitted
+// work that a `git pull` would disturb.
+func LocalBaseBehindStr(proj Project) string {
+    val branch = proj.DefaultBranch
+    // Best-effort refresh of origin/<branch>; ignore the outcome and
+    // count against whatever remote-tracking ref exists.
+    subprocess.Spawn(subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("fetch", "--quiet", "origin", branch).ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )) match {
+        case Failure(_) => ""
+        case Success(p) => { val _ = p.Wait(); "" }
+    }
+    return subprocess.Spawn(subprocess.NewSpawnOpts(
+        "git",
+        ArrayOf("rev-list", "--count", branch + "..origin/" + branch).ToGoSlice(),
+        SliceEmpty[string](),
+        proj.Repo,
+    )) match {
+        case Failure(_) => ""
+        case Success(p) => {
+            val line = p.ReadLine()
+            val _ = p.Wait()
+            line match {
+                case Failure(_) => ""
+                case Success(s) => strings.TrimSpace(s)
+            }
+        }
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Project remote bootstrap
 //

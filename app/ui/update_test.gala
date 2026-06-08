@@ -1760,6 +1760,64 @@ func TestOnTick_LivenessSilence_BelowMaxRetries_RespawnsInsteadOfAbandoning(t T)
     return Eq(t2, m.RetryCount.Get("Felix").GetOrElse(0), 1)
 }
 
+// Respawn-storm guard: once a member has been respawned MaxRespawnsPerTurn
+// times in one turn (RetryCount resets on each stray chunk, so the
+// 2-retry budget alone can't bound a flaky member that emits one token
+// between stalls), the heartbeat stops silently respawning — it surfaces
+// a visible blocker and abandons the member instead of churning.
+func TestOnTick_RespawnStorm_PastCap_SurfacesBlockerAndAbandons(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val seed = sampleModel()
+    val nowNanos     = int(time_utils.Now().UnixNanos())
+    val stuckBandAt  = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
+    val dispatchMsg  = acp.NewEnvelope(seed.Team.Lead.Name, "Felix", "dispatch", "work", 0)
+    val seeded = seed.Copy(
+        State             = Delegating(Pending = pending, Dispatched = pending),
+        Statuses          = seed.Statuses.Put("Felix", StWorking()),
+        DeliveryStates    = seed.DeliveryStates.Put("Felix", acp.Sent(AtNanos = stuckBandAt, Attempt = 1)),
+        LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
+        // Already at the cap this turn → the next Redeliver must NOT
+        // respawn; it must surface a blocker and abandon.
+        RespawnsThisTurn  = EmptyHashMap[string, int]().Put("Felix", MaxRespawnsPerTurn()),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    val warned = m.Conversation.Exists((ln) => strings.Contains(ln.Text, "pausing auto-recovery"))
+    val t1 = IsTrue(t, warned)
+    // Felix is no longer churning in the pending set (abandoned).
+    val notPending = m.State match {
+        case Delegating(p, _) => !p.Contains("Felix")
+        case _             => true
+    }
+    return IsTrue(t1, notPending)
+}
+
+// Under the cap, the heartbeat respawns as before (no premature
+// abandon). Guards against the cap being set so low it breaks normal
+// recovery.
+func TestOnTick_RespawnStorm_UnderCap_StillRespawns(t T) T {
+    val pending = EmptyHashSet[string]().Add("Felix")
+    val seed = sampleModel()
+    val nowNanos     = int(time_utils.Now().UnixNanos())
+    val stuckBandAt  = nowNanos - int(time_utils.Seconds(int64(200)).ToNanos())
+    val dispatchMsg  = acp.NewEnvelope(seed.Team.Lead.Name, "Felix", "dispatch", "work", 0)
+    val seeded = seed.Copy(
+        State             = Delegating(Pending = pending, Dispatched = pending),
+        Statuses          = seed.Statuses.Put("Felix", StWorking()),
+        DeliveryStates    = seed.DeliveryStates.Put("Felix", acp.Sent(AtNanos = stuckBandAt, Attempt = 1)),
+        LastDispatchedMsg = seed.LastDispatchedMsg.Put("Felix", dispatchMsg),
+        RespawnsThisTurn  = EmptyHashMap[string, int]().Put("Felix", 1),
+    )
+    val (m, _) = Update(seeded, TickMsg())
+    // Still pending (respawned, not abandoned) and the per-turn counter
+    // advanced to 2.
+    val fsmOk = m.State match {
+        case Delegating(p, _) => p.Contains("Felix")
+        case _             => false
+    }
+    val t1 = IsTrue(t, fsmOk)
+    return Eq(t1, m.RespawnsThisTurn.Get("Felix").GetOrElse(0), 2)
+}
+
 // liveRespawnMember must rotate the SessionId AND clear
 // PendingClosures unconditionally. Without rotation the
 // hung session's poisoned jsonl gets reloaded on every
@@ -1829,6 +1887,13 @@ func TestOnTick_LivenessSilence_AfterMaxRetries_FiresMemberAbandoned(t T) T {
 // Approval are excluded — the user is the gating signal there.
 
 func staleStateEnteredAt() time_utils.Instant = time_utils.FromUnixSeconds(int64(1))
+
+// recentStateEnteredAt returns "entered `secsAgo` seconds before now",
+// for watchdog tests that need a dwell BETWEEN the normal ceiling and
+// the (3×) hard ceiling — e.g. to prove the subagent-pause exemption
+// still holds short of the hard ceiling.
+func recentStateEnteredAt(secsAgo int64) time_utils.Instant =
+    time_utils.FromUnixSeconds(time_utils.Now().UnixNanos() / int64(1000000000) - secsAgo)
 
 func TestStateWatchdog_TLThinking_PastCeiling_ForcesIdle(t T) T {
     val seed = sampleModel().Copy(
@@ -1941,7 +2006,9 @@ func TestStateWatchdog_TLThinking_PausesWhileTaskOutstanding(t T) T {
     val leadName = sampleTeam().Lead.Name
     val seed = sampleModel().Copy(
         State                = TLThinking(),
-        StateEnteredAt       = staleStateEnteredAt(),
+        // Past the 300s TL ceiling but UNDER the 900s hard ceiling, so
+        // the pause exemption still applies (a genuinely-running Task).
+        StateEnteredAt       = recentStateEnteredAt(int64(400)),
         OutstandingTaskTools = EmptyHashMap[string, HashSet[string]]()
             .Put(leadName, EmptyHashSet[string]().Add("toolu_explore_01")),
     )
@@ -1951,6 +2018,26 @@ func TestStateWatchdog_TLThinking_PausesWhileTaskOutstanding(t T) T {
     return m.State match {
         case TLThinking() => IsTrue(t, true)
         case _            => IsTrue(t, false)
+    }
+}
+
+// The subagent-pause exemption is BOUNDED by a hard ceiling (3× the
+// state threshold). A tool_use whose tool_result never lands would
+// otherwise suppress the watchdog forever — the ceiling would never
+// fire while the stuck tool stays outstanding. Past the hard ceiling,
+// an outstanding Task no longer buys a pause: recovery is forced.
+func TestStateWatchdog_PausePastHardCeiling_ForcesRecovery(t T) T {
+    val leadName = sampleTeam().Lead.Name
+    val seed = sampleModel().Copy(
+        State                = TLThinking(),
+        StateEnteredAt       = staleStateEnteredAt(),
+        OutstandingTaskTools = EmptyHashMap[string, HashSet[string]]()
+            .Put(leadName, EmptyHashSet[string]().Add("toolu_wedged_01")),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return m.State match {
+        case Idle() => IsTrue(t, true)
+        case _      => IsTrue(t, false)
     }
 }
 
@@ -3744,7 +3831,7 @@ func TestPrCreated_AutoApprove_GitHubBatchHint_NoCtrlM(t T) T {
     val first = m.Conversation.Get(0).Text
     val second = m.Conversation.Get(1).Text
     val t2 = IsTrue(t1, strings.Contains(first, "https://x/y/pull/7"))
-    val t3 = IsTrue(t2, strings.Contains(second, "queued in batch"))
+    val t3 = IsTrue(t2, strings.Contains(second, "this session"))
     val t4 = IsTrue(t3, strings.Contains(second, "GitHub"))
     return IsFalse(t4, strings.Contains(second, "Ctrl+M"))
 }
@@ -4019,6 +4106,54 @@ func TestPendingPrTitle_SkipsSlashCommands(t T) T {
         session.ConversationLine(Speaker = "you", Text = "/merge"),
     ))
     return Eq(t, pendingPrTitle(seed), "ship the metrics endpoint")
+}
+
+// The batch entry's Title now comes from PendingPrTitle (the @summary
+// headline captured at approval time, the SAME string gh received), not
+// the user's prompt. Regression for a session where every PR in the
+// batch list was labelled with the user's chat line ("please make bug
+// report that I asked") instead of the actual PR title.
+func TestPrCreated_TitleFromPendingPrTitle(t T) T {
+    val seed = sampleModel().Copy(
+        AutoApprove    = true,
+        PendingPrTitle = Some("feat: real summary headline"),
+        Conversation   = ArrayOf(session.ConversationLine(Speaker = "you", Text = "do the work please")),
+    )
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/7", Branch = "gala_team/x/pr/def7"))
+    val t1 = Eq(t, m.OpenPrs.Get(0).Title, "feat: real summary headline")
+    // ...and PendingPrTitle is consumed so it can't leak onto the next PR.
+    return IsTrue(t1, m.PendingPrTitle.IsEmpty())
+}
+
+// When no @summary headline was captured (heading-only body →
+// PendingPrTitle None), the label falls back to the old user-prompt
+// behaviour rather than showing nothing.
+func TestPrCreated_TitleFallsBackToPromptWhenNoPending(t T) T {
+    val seed = sampleModel().Copy(
+        AutoApprove    = true,
+        PendingPrTitle = None[string](),
+        Conversation   = ArrayOf(session.ConversationLine(Speaker = "you", Text = "ship the parser")),
+    )
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/7", Branch = "gala_team/x/pr/def7"))
+    return Eq(t, m.OpenPrs.Get(0).Title, "ship the parser")
+}
+
+// BaseDriftChecked appends a "run git pull" advisory only when the local
+// default branch is actually behind (non-empty, non-"0"). "0" / "" are
+// no-ops. Warn-only — it never mutates anything but the conversation.
+func TestBaseDriftChecked_AdvisoryWhenBehind(t T) T {
+    val before = sampleModel().Conversation.Size()
+    val (m, _) = Update(sampleModel(), BaseDriftChecked(Behind = "8"))
+    val t1 = Eq(t, m.Conversation.Size(), before + 1)
+    return IsTrue(t1, strings.Contains(m.Conversation.Get(m.Conversation.Size() - 1).Text, "behind"))
+}
+
+func TestBaseDriftChecked_NoOpWhenInSync(t T) T {
+    val before = sampleModel().Conversation.Size()
+    val (m0, _) = Update(sampleModel(), BaseDriftChecked(Behind = "0"))
+    val t1 = Eq(t, m0.Conversation.Size(), before)
+    val (m1, _) = Update(sampleModel(), BaseDriftChecked(Behind = ""))
+    return Eq(t1, m1.Conversation.Size(), before)
 }
 
 // ---------------------------------------------------------------------------

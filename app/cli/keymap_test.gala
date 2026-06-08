@@ -235,6 +235,7 @@ func appMsgVariant(msg AppMsg) string = msg match {
     case PrCreated(_, _)             => "PrCreated"
     case PrFailed(_)                 => "PrFailed"
     case OpenBrowser(_)              => "OpenBrowser"
+    case BaseDriftChecked(_)         => "BaseDriftChecked"
     case WorktreesWiped()            => "WorktreesWiped"
     case ConsultCompleted(_, _)      => "ConsultCompleted"
     case ConsultFailed(_, _)         => "ConsultFailed"

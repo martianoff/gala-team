@@ -1030,7 +1030,7 @@ func wideTokensText(m AppModel) string {
     return s"${ins} in / ${outs} out  ·  cache ${cache}  ·  ${formatCostUsd(m.TotalCostUsd)}"
 }
 
-// autoBadgeText extracts the AUTO (N open · plan x/y) suffix that
+// autoBadgeText extracts the AUTO (N PR · plan x/y) suffix that
 // trails the state label when batch-PR auto-approve is on. Pulled out
 // of headerWidget so wide and narrow renderers stay byte-identical
 // for the badge contents.
@@ -1041,7 +1041,7 @@ func autoBadgeText(m AppModel) string {
     val planSuffix = if (total == 0) ""
                      else if (shipped >= total) s" · plan ${total}/${total}"
                      else                       s" · plan ${shipped + 1}/${total}"
-    return s"  ·  AUTO (${m.OpenPrs.Size()} open${planSuffix})"
+    return s"  ·  AUTO (${m.OpenPrs.Size()} PR${planSuffix})"
 }
 
 // appleColumn renders the gala apple as a 3-row × 7-col grid of

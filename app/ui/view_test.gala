@@ -403,15 +403,17 @@ func samplePr(url string) BatchPr = BatchPr(
     OpenedAt = UnixEpoch(),
 )
 
-// AutoApprove on shows an "AUTO (N open)" badge in the header sub-row
-// so the user can see the mode + batch size at a glance.
+// AutoApprove on shows an "AUTO (N PR)" badge in the header sub-row
+// so the user can see the mode + session PR count at a glance. The
+// count is "PRs opened this session", not "open on GitHub" — the app
+// never observes merges.
 func TestView_Header_AutoApproveBadge(t T) T {
     val m = mkModel(mkTeam("X", "")).Copy(
         AutoApprove = true,
         OpenPrs     = ArrayOf(samplePr("https://x/y/pull/1"), samplePr("https://x/y/pull/2")),
     )
     val out = render(m)
-    return IsTrue(t, strings.Contains(out, "AUTO (2 open)"))
+    return IsTrue(t, strings.Contains(out, "AUTO (2 PR)"))
 }
 
 // AutoApprove off — no AUTO badge in the header.

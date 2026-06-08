@@ -429,3 +429,49 @@ func WrapPromptSafe(proj Project, team Team, member Member, mode WorkspaceMode, 
         case Failure(err)     => (prompt, Some(err.Error()))
     }
 }
+
+// LooksLikePlanRequest is a coarse detector for "the user explicitly
+// asked the TL to plan multi-step work". Static onboarding alone has
+// proven insufficient: even with the @plan guidance present, a TL that
+// is asked to "create a plan … and finish remaining items" will still
+// write a prose roadmap and dispatch only round 1, queuing nothing — so
+// the orchestrator stops after the first PR and the user re-prompts
+// every later round. When this returns true the caller appends a
+// just-in-time, high-salience reminder (AppendPlanReminder) to the END
+// of the TL's prompt — the most-followed position — turning the
+// directive from "background onboarding text" into "this turn's
+// instruction".
+//
+// Phrases are word-bounded (each contains a space or is multi-word) so
+// the bare substring "plan" inside "explanation" / "planning" does not
+// false-trigger. False POSITIVES are cheap — the reminder is explicitly
+// self-limiting ("if this is a single PR, ignore") — so the list biases
+// toward catching real plan asks over precision.
+func LooksLikePlanRequest(prompt string) bool {
+    val p = strings.ToLower(prompt)
+    val phrases = ArrayOf(
+        "a plan", "the plan", "your plan", "this plan", "new plan",
+        "plan for", "plan to", "plan out", "plan the", "plan all", "plan and", "plan on",
+        "make plan", "start plan", "create plan", "draft plan", "write plan",
+        "roadmap",
+    )
+    return phrases.Exists((ph) => strings.Contains(p, ph))
+}
+
+// PlanReminderText is the just-in-time steering block appended to a TL
+// prompt whose user message LooksLikePlanRequest. Kept self-limiting so
+// a false positive on a single-PR ask is harmless: the TL is told to
+// ignore it when the work is one PR.
+func PlanReminderText() string =
+    "\n\n---\n[ORCHESTRATOR — the user asked you to PLAN.]\n" +
+    "If this work is a single self-contained PR, ignore this and proceed normally.\n" +
+    "If it is a sequence of dependent steps / rounds / milestones, you MUST emit a real " +
+    "`@plan` … `@end` directive block as the FIRST thing this turn, one line per step. " +
+    "A numbered roadmap written as ordinary prose queues NOTHING — the orchestrator would " +
+    "ship only step 1, land in Idle, and strand the user re-prompting for every later step. " +
+    "Put each round on its own `@plan` line; you may still `@dispatch` engineers in parallel WITHIN a step."
+
+// AppendPlanReminder tacks PlanReminderText onto an already-assembled
+// prompt (post-onboarding-wrap), so the reminder is the last thing the
+// TL reads.
+func AppendPlanReminder(prompt string) string = prompt + PlanReminderText()

@@ -150,6 +150,13 @@ struct AppModel(
     // step of a `@plan` is a separate PR by design). None when no
     // PR is currently open.
     ActivePrBranch Option[string],
+    // Title to label the next BatchPr with — the @summary headline
+    // (GhTitle of the approved body), captured at approval time so it
+    // survives the async hop to onPrCreated. This is the SAME string
+    // gh receives as --title, so the batch list matches GitHub. None
+    // when the body had no titleable line (onPrCreated then falls back
+    // to the user-prompt label). Consumed + cleared by onPrCreated.
+    PendingPrTitle Option[string] = None[string](),
     // Multi-PR plan queued by the TL via `@plan`. Plan is the full
     // ordered list of step prompts; PlanShipped counts how many of
     // them have already produced a PR. The step currently in
@@ -292,6 +299,16 @@ struct AppModel(
     // for non-EOF errors; reset on successful chunk delivery. Used
     // by auto-recovery to escalate after maxRetries.
     RetryCount HashMap[string, int],
+    // Per-member CUMULATIVE respawn count for the current user turn.
+    // Unlike RetryCount (reset by the next visible chunk), this is NOT
+    // cleared when a respawned member emits a token and stalls again —
+    // it only resets on a fresh user prompt (onSubmit). It bounds the
+    // cross-stall respawn storm: a flaky member that produces one chunk
+    // between every stall keeps resetting RetryCount and so could be
+    // respawned indefinitely; this counter caps that per turn and, once
+    // the cap is hit, the heartbeat surfaces a blocker + abandons rather
+    // than silently respawning yet again.
+    RespawnsThisTurn HashMap[string, int],
     // Transient notifications surfaced to the user when liveness
     // status escalates (member slow / stuck / crashed / recovered).
     // Pruned by onTick once each toast's TTL expires. Rendered via
@@ -612,6 +629,7 @@ func InitialModelWithTeams(
     AutoApprove  = policy.AutoApprove,
     ActiveBase   = None[string](),
     ActivePrBranch = None[string](),
+    PendingPrTitle = None[string](),
     Plan         = EmptyArray[string](),
     PlanShipped  = 0,
     SelectedEntry  = None[int](),
@@ -640,6 +658,7 @@ func InitialModelWithTeams(
     NudgeAt               = EmptyHashMap[string, Instant](),
     StateEnteredAt        = UnixEpoch(),
     RetryCount            = EmptyHashMap[string, int](),
+    RespawnsThisTurn      = EmptyHashMap[string, int](),
     Toasts                = NewToastQueue(5),
     MemberBuffers         = EmptyHashMap[string, string](),
     MemberJsonBuf         = EmptyHashMap[string, string](),
@@ -717,6 +736,12 @@ sealed type AppMsg {
     // the Cmd, dispatches OpenBrowser, and the Update branch
     // shells the OS launcher.
     case OpenBrowser(Url string)
+    // BaseDriftChecked carries the result of the best-effort post-PR
+    // git check (LocalBaseBehindStr): how many merged-on-GitHub commits
+    // the user's local default branch is behind. "" / "0" means in sync
+    // (no advisory); a positive number appends a one-line "run git pull"
+    // hint. Warn-only — the app never touches the user's working tree.
+    case BaseDriftChecked(Behind string)
     // Merge is intentionally NOT an app action. After a PR is opened
     // the user reviews and merges it on GitHub; the app's lifecycle
     // ends at "PR created". There is no KeyMerge / Merged /

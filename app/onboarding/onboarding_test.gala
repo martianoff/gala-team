@@ -238,3 +238,30 @@ func TestProtocolSection_TL_InstructsEmittingPlanDirective(t T) T {
     val nonTl = protocolSection(false, true)
     return IsTrue(t3, !strings.Contains(nonTl, "@plan"))
 }
+
+// LooksLikePlanRequest fires the just-in-time @plan reminder. It must
+// catch the real phrasings users plan with ("create a plan …", "start
+// plan for all remaining items") while NOT tripping on the bare
+// substring "plan" inside unrelated words like "explanation" /
+// "planning".
+func TestLooksLikePlanRequest_CatchesRealAsks(t T) T {
+    val t1 = IsTrue(t,  LooksLikePlanRequest("Create a plan saved in MD file to build an MVP"))
+    val t2 = IsTrue(t1, LooksLikePlanRequest("start plan for all remaining items and proceed"))
+    val t3 = IsTrue(t2, LooksLikePlanRequest("create a plan to move to the new toolchain"))
+    return IsTrue(t3, LooksLikePlanRequest("draft a roadmap for the rest"))
+}
+
+func TestLooksLikePlanRequest_IgnoresUnrelated(t T) T {
+    val t1 = IsFalse(t,  LooksLikePlanRequest("fix the explanation in the README"))
+    val t2 = IsFalse(t1, LooksLikePlanRequest("deploy the app and run the tests"))
+    return IsFalse(t2, LooksLikePlanRequest("add a histogram to the dashboard"))
+}
+
+// AppendPlanReminder puts the steering block at the END of the prompt
+// (highest-salience position) and preserves the original text.
+func TestAppendPlanReminder_AppendsAtEnd(t T) T {
+    val out = AppendPlanReminder("do the thing")
+    val t1 = IsTrue(t,  strings.HasPrefix(out, "do the thing"))
+    val t2 = IsTrue(t1, strings.Contains(out, "@plan"))
+    return IsTrue(t2, strings.Contains(out, "MUST emit"))
+}

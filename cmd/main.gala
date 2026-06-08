@@ -469,7 +469,8 @@ func primeFromSnapshot(m AppModel) AppModel = session.Load(m.Project.Repo) match
             return m
         }
         val primed = m.Copy(
-            Conversation          = snap.Conversation,
+            // Clear any line left "(sending…)" by a crash mid-send.
+            Conversation          = session.ClearPending(snap.Conversation),
             // Pin the conversation pane to the bottom on resume so the
             // user lands on the most recent messages — not partway up
             // the restored log where their old scroll position would

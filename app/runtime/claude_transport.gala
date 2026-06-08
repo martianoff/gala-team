@@ -71,6 +71,12 @@ func (s ClaudeProcessSession) EndTurn() Try[bool] = s.Proc.CloseStdin()
 func (s ClaudeProcessSession) NextEvent() concurrent.Future[AgentEvent] =
     concurrent.FutureApply[AgentEvent](() => classifyClaudeRead(s.Proc.ReadLine()))
 
+// Close kills the child and waits for it to fully exit. The wait is
+// deliberate — the caller that replaces a live lead turn wants the old
+// process gone before the new one spawns. Callers on the UI thread MUST
+// schedule Close() off the paint path (e.g. inside onSubmit's spawn
+// FutureCmd) so this Kill+Wait runs AFTER the user's line has painted,
+// never before it.
 func (s ClaudeProcessSession) Close() Try[bool] =
     s.Proc.Kill().FlatMap((_) => s.Proc.Wait()).Map((_) => true)
 

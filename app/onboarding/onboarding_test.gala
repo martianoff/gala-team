@@ -223,3 +223,18 @@ func stringFind(haystack string, needle string) int {
     }
     return -1
 }
+
+// The TL protocol must instruct emitting the @plan DIRECTIVE for
+// multi-step sequential work, and that a prose roadmap does NOT count.
+// Regression for a session where the TL wrote an R1/R2/R3 roadmap as
+// prose and dispatched only round 1, so the orchestrator queued nothing
+// and stopped after the first PR — the user "asked for a plan" but got
+// no plan. Non-TL members never see the @plan vocabulary.
+func TestProtocolSection_TL_InstructsEmittingPlanDirective(t T) T {
+    val tl = protocolSection(true, true)
+    val t1 = IsTrue(t,  strings.Contains(tl, "@plan"))
+    val t2 = IsTrue(t1, strings.Contains(tl, "A prose roadmap is NOT a plan"))
+    val t3 = IsTrue(t2, strings.Contains(tl, "start a plan"))
+    val nonTl = protocolSection(false, true)
+    return IsTrue(t3, !strings.Contains(nonTl, "@plan"))
+}

@@ -49,7 +49,22 @@ import (
 // snapshots reads as "delivered" — only an explicit true means "this
 // was dropped". The view renders these with a warning highlight so a
 // silently-lost message is impossible to miss.
-struct ConversationLine(Speaker string, Text string, At int64 = int64(0), Undelivered bool = false)
+// `Pending` marks a user line shown in the UI but not yet delivered to
+// the (about-to-be-spawned) team lead. onSubmit paints the line
+// immediately with Pending=true, then kills the prior subprocess and
+// spawns the new one off-thread; onLeadSpawned clears the flag once the
+// prompt is actually sent. The view shows a "(sending…)" hint while
+// Pending. Defaults false; cleared on snapshot load so a crash mid-send
+// never leaves a permanently-pending line.
+struct ConversationLine(Speaker string, Text string, At int64 = int64(0), Undelivered bool = false, Pending bool = false)
+
+// ClearPending flips every Pending line back to delivered. Applied on
+// snapshot load so a crash mid-send never restores a permanently
+// "(sending…)" line — the subprocess that would have cleared it is gone.
+func ClearPending(convo Array[ConversationLine]) Array[ConversationLine] =
+    convo.Map((cl ConversationLine) =>
+        if (cl.Pending) ConversationLine(Speaker = cl.Speaker, Text = cl.Text, At = cl.At, Undelivered = cl.Undelivered, Pending = false)
+        else cl)
 
 // SessionIdEntry pairs a member name with the persisted claude session
 // UUID. Stored as an array (not a HashMap) so the JSON codec handles

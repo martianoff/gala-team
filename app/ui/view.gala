@@ -1611,6 +1611,8 @@ func renderConversationLine(m AppModel, cl session.ConversationLine, width int, 
     val codeBarStyle  = if (isSelected) baseCodeBarStyle.WithReverse()  else baseCodeBarStyle
     val prefix = if (cl.Undelivered)
                      s"  ⚠ ${cl.Speaker} (not delivered): "
+                 else if (cl.Pending)
+                     s"  ${cl.Speaker} (sending…): "
                  else
                      s"  ${cl.Speaker}: "
     // Render directive markers at display time — the conversation

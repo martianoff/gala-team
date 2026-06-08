@@ -5,6 +5,7 @@ import (
     "strings"
     "martianoff/gala/time_utils"
     "github.com/martianoff/gala-acp"
+    "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -741,10 +742,14 @@ func TestE2E_KeySubmit_RendersUserLineBeforeSpawn(t T) T {
         case Some(StWorking()) => true
         case _                 => false
     }
+    // The line is shown but not yet delivered, so it's marked Pending
+    // (the view renders "(sending…)") until LeadSpawned sends the prompt.
+    val pending = lastLine.Pending
     val t1 = IsTrue(t,  userLineShown)
     val t2 = IsTrue(t1, noSessionYet)
     val t3 = IsTrue(t2, composerClear)
-    return IsTrue(t3, leadWorking)
+    val t4 = IsTrue(t3, leadWorking)
+    return IsTrue(t4, pending)
 }
 
 // The off-thread spawn lands via LeadSpawned. A failure result (no
@@ -756,12 +761,30 @@ func TestE2E_KeySubmit_RendersUserLineBeforeSpawn(t T) T {
 func TestE2E_LeadSpawned_Failure_SetsLastError(t T) T {
     val base = e2eModel()
     val leadName = base.Team.Lead.Name
-    val seed = base.Copy(State = TLThinking())
+    // A pending "you" line, as onSubmit would have left it before the
+    // (failed) spawn.
+    val convo = ArrayOf(session.ConversationLine(Speaker = "you", Text = "go", Pending = true))
+    val seed = base.Copy(State = TLThinking(), Conversation = convo)
     val (m, _) = Update(seed, LeadSpawned(
         Prompt = "go", Session = None[MemberSession](), Sid = "sid-1", ErrText = "spawn Iris: boom"))
-    // No session installed; the error is surfaced for the user / watchdog.
-    val t1 = IsTrue(t, m.LastError.IsDefined())
-    return IsTrue(t1, !m.Sessions.Get(leadName).IsDefined())
+    // No session installed; the error is surfaced; the pending line is
+    // flipped to undelivered (not left frozen as "(sending…)").
+    val lastLine = m.Conversation.Get(m.Conversation.Size() - 1)
+    val t1 = IsTrue(t,  m.LastError.IsDefined())
+    val t2 = IsTrue(t1, !m.Sessions.Get(leadName).IsDefined())
+    val t3 = IsTrue(t2, !lastLine.Pending)
+    return IsTrue(t3, lastLine.Undelivered)
+}
+
+// session.ClearPending flips Pending lines to delivered (used on snapshot
+// load so a crash mid-send never restores a frozen "(sending…)" line).
+func TestE2E_ClearPending_FlipsPendingToDelivered(t T) T {
+    val convo = ArrayOf(
+        session.ConversationLine(Speaker = "you",  Text = "a", Pending = true),
+        session.ConversationLine(Speaker = "Iris", Text = "b"))
+    val cleared = session.ClearPending(convo)
+    val t1 = IsTrue(t,  !cleared.Get(0).Pending)
+    return IsTrue(t1, cleared.Get(0).Text == "a")
 }
 
 // Auto-retry chain: KeySubmit lands TLThinking, then a watchdog fire

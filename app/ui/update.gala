@@ -1888,6 +1888,14 @@ func clearSessionState(m AppModel) AppModel {
 // When the history browser is open, Enter is repurposed to "load the
 // cursored archive" instead — matches the user's expectation that
 // the visible cursor is the action target.
+
+// submitElapsedMs is the whole-millisecond gap between two instants, for
+// the onSubmit `submit_timing` diagnostic.
+func submitElapsedMs(t1 time_utils.Instant, t2 time_utils.Instant) int64 {
+    val d = t2.UnixNanos() - t1.UnixNanos()
+    return if (d > int64(0)) d / int64(1000000) else int64(0)
+}
+
 func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if m.HistoryMode { return onHistorySelect(m) }
     // Enter while sidebar is focused on a member row opens that
@@ -1940,7 +1948,13 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     // state (superseded members, resolved watchdog / heartbeat notices)
     // so the band reflects this turn, not a prior one. History stays in
     // the transcript + debug log.
+    // tSubmitEnter / tAfterReconcile bracket the synchronous work so the
+    // production return below can emit a `submit_timing` debug event —
+    // the user line can't paint until onSubmit returns, so any big number
+    // here IS the "message posted with delay" the user sees.
+    val tSubmitEnter = time_utils.Now()
     val mClean = reconcileActivityAtRest(mCleanPending)
+    val tAfterReconcile = time_utils.Now()
     val prompt = mClean.Composer
     LogUserInput(prompt)
     val ctx = transitionContext(mClean)
@@ -2018,49 +2032,98 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     if SpawnDisabledForTest() {
         return spawnLeadTurn(withWorking, prompt)
     }
-    // Production: run the blocking git-worktree + claude spawn OFF the UI
-    // thread. ensureSession spawns the claude subprocess (and on the first
-    // turn creates the lead worktree via `git worktree add`) — done inline
-    // it freezes the whole UI loop (no paints, no 120ms spinner tick)
-    // until it finishes, so the just-typed line stayed invisible until the
-    // TL's first chunk arrived. The FutureCmd body runs on a worker
-    // goroutine and emits LeadSpawned; the UI keeps painting the line +
-    // spinner meanwhile, and onLeadSpawned installs the session + starts
-    // send/pump when it lands.
+    // Production: paint the message FIRST, then — off the UI thread —
+    // kill the prior lead subprocess (waiting for it to exit) and spawn
+    // the new one. Doing the kill (Kill+Wait, hundreds of ms) or the
+    // spawn (first turn also creates the lead worktree) inline froze the
+    // whole UI loop, so the just-typed line stayed invisible until that
+    // finished. Here onSubmit returns immediately with the line marked
+    // [pending]; the worker kills→spawns; onLeadSpawned then sends the
+    // prompt, installs the session, and clears Pending (delivered).
     val firstTurn = !withWorking.SessionIds.Get(lead.Name).IsDefined()
     val sid       = withWorking.SessionIds.Get(lead.Name).GetOrElse(NewSessionId())
     val (effectivePrompt, onbErr) =
         if (firstTurn) onboarding.WrapPromptSafe(withWorking.Project, withWorking.Team, lead, withWorking.Policy.WorkspaceMode, prompt)
         else           (prompt, None[string]())
-    val m0 = onbErr match {
+    val m1 = onbErr match {
         case Some(e) => withWorking.Copy(LastError = Some(s"onboarding: ${e}"))
         case None()  => withWorking
     }
-    // Kill any in-flight lead subprocess (normally a no-op between turns;
-    // guards the fast-double-submit race). Cheap; stays on the UI thread.
-    val cleared   = closeLiveSession(m0, lead.Name)
-    val proj      = cleared.Project
-    val mode      = cleared.Policy.WorkspaceMode
-    val skipPerms = cleared.Team.DangerouslySkipPermissions
-    return (cleared, FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
-        spawnLeadOffThread(proj, lead, mode, skipPerms, sid, firstTurn, effectivePrompt))))
+    // Show the line as pending until the spawn delivers it.
+    val m2 = m1.Copy(Conversation = markLastUserLinePending(m1.Conversation))
+    // Take the prior in-flight lead subprocess (if any) out of the model
+    // NOW — fast bookkeeping only; PendingClosures drops its trailing
+    // chunks — but kill it on the worker below, never on this thread.
+    val oldLeadSession = m2.Sessions.Get(lead.Name)
+    val m0 = oldLeadSession match {
+        case Some(_) => m2.Copy(
+            Sessions        = m2.Sessions.Remove(lead.Name),
+            PendingClosures = m2.PendingClosures.Put(lead.Name, m2.PendingClosures.Get(lead.Name).GetOrElse(0) + 1),
+        )
+        case None()  => m2
+    }
+    val tReturn = time_utils.Now()
+    // Diagnostic: synchronous onSubmit duration. The kill + spawn are now
+    // both off-thread, so a large total here points at reconcile (the
+    // stranded-session sweep) or the pure model build, NOT subprocess
+    // work. No-op unless GALA_TEAM_DEBUG is set.
+    LogEvent("submit_timing", "lead", s"{\"reconcile_ms\":${submitElapsedMs(tSubmitEnter, tAfterReconcile)},\"total_ms\":${submitElapsedMs(tSubmitEnter, tReturn)}}")
+    val proj      = m0.Project
+    val mode      = m0.Policy.WorkspaceMode
+    val skipPerms = m0.Team.DangerouslySkipPermissions
+    return (m0, FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+        spawnLeadOffThread(oldLeadSession, proj, lead, mode, skipPerms, sid, firstTurn, effectivePrompt))))
 }
 
-// spawnLeadOffThread performs the blocking workspace-ensure + claude
-// spawn for the lead and packages the outcome as a LeadSpawned message.
-// Runs on a worker goroutine (concurrent.FutureApply) so the UI loop
-// never blocks on it — the whole point of the deferral.
+// markLastUserLinePending flags the last conversation line as Pending so
+// the view shows a "(sending…)" hint until onLeadSpawned delivers it. No
+// in-place update exists on the immutable Array, so the tail is rebuilt.
+func markLastUserLinePending(convo Array[session.ConversationLine]) Array[session.ConversationLine] {
+    val n = convo.Size()
+    if (n == 0) { return convo }
+    val last = convo.Get(n - 1)
+    return convo.Take(n - 1).Append(
+        session.ConversationLine(Speaker = last.Speaker, Text = last.Text, At = last.At, Undelivered = last.Undelivered, Pending = true))
+}
+
+// clearPendingLines flips every Pending line back to delivered. Called
+// from onLeadSpawned once the prompt has actually been sent to the lead.
+func clearPendingLines(convo Array[session.ConversationLine]) Array[session.ConversationLine] =
+    session.ClearPending(convo)
+
+// markPendingLinesUndelivered turns a still-pending line into an
+// undelivered one — used when the lead spawn fails, so the user sees the
+// message didn't reach anyone rather than a frozen "(sending…)".
+func markPendingLinesUndelivered(convo Array[session.ConversationLine]) Array[session.ConversationLine] =
+    convo.Map((cl session.ConversationLine) =>
+        if (cl.Pending) session.ConversationLine(Speaker = cl.Speaker, Text = cl.Text, At = cl.At, Undelivered = true, Pending = false)
+        else cl)
+
+// spawnLeadOffThread runs entirely on a worker goroutine
+// (concurrent.FutureApply), so the UI loop never blocks on it. It first
+// kills the prior lead subprocess — waiting for it to exit so its stream
+// can't race the new turn — THEN ensures the workspace + spawns the new
+// claude, packaging the outcome as a LeadSpawned message. This ordering
+// (paint pending line on the UI thread → kill old here → spawn here →
+// send on LeadSpawned) is what keeps the typed message visible
+// immediately while the slow work happens behind it.
 func spawnLeadOffThread(
+    oldSession Option[MemberSession],
     proj Project, lead Member, mode WorkspaceMode, skipPerms bool,
     sid string, firstTurn bool, prompt string,
-) AppMsg =
-    EnsureWorkspace(proj, lead, mode) match {
+) AppMsg {
+    oldSession match {
+        case Some(s) => { val _ = CloseSession(s) }
+        case None()  => {}
+    }
+    return EnsureWorkspace(proj, lead, mode) match {
         case Failure(e)  => LeadSpawned(Prompt = prompt, Session = None[MemberSession](), Sid = sid, ErrText = s"workspace ${lead.Name}: ${e.Error()}")
         case Success(ws) => SpawnSession(proj, lead, ws, skipPerms, sid, firstTurn) match {
             case Failure(e)    => LeadSpawned(Prompt = prompt, Session = None[MemberSession](), Sid = sid, ErrText = s"spawn ${lead.Name}: ${e.Error()}")
             case Success(sess) => LeadSpawned(Prompt = prompt, Session = Some[MemberSession](sess), Sid = sid, ErrText = "")
         }
     }
+}
 
 // spawnLeadTurn performs the lead claude spawn INLINE: close any
 // in-flight lead subprocess, ensure the workspace + session, wrap a
@@ -2113,7 +2176,12 @@ func onLeadSpawned(
     return sessionOpt match {
         case None()     => {
             LogSpawnFailure(lead.Name, "submit", err)
-            return (m.Copy(LastError = Some(err)), NoCmd[AppMsg]())
+            // Spawn failed — the pending line never reached anyone; flag it
+            // undelivered so the user sees that, not a frozen "(sending…)".
+            return (m.Copy(
+                LastError    = Some(err),
+                Conversation = markPendingLinesUndelivered(m.Conversation),
+            ), NoCmd[AppMsg]())
         }
         case Some(sess) => {
             val nextRecovered = m.RecoveredMembers.FilterNot((n) => n == lead.Name)
@@ -2123,6 +2191,8 @@ func onLeadSpawned(
                 LastChunkAt           = m.LastChunkAt.Put(lead.Name, time_utils.Now()),
                 RecoveredMembers      = nextRecovered,
                 RecoveryBannerVisible = m.RecoveryBannerVisible && nextRecovered.Size() > 0,
+                // Delivered: the prompt is about to be sent below.
+                Conversation          = clearPendingLines(m.Conversation),
             )
             return (m1, sendAndPumpCmd(m1, lead, prompt))
         }

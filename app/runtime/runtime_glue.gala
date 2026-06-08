@@ -864,25 +864,24 @@ func GhPrCreateFuture(proj Project, body string, baseRef Option[string], forceBr
         if pushResult != "" {
             return RtPrFailed(Err = errors.New(s"git push pr branch failed: ${pushResult}"))
         }
-        // Title source priority: the first commit subject on the
-        // lead branch since the base ref. The lead branch is the
-        // local source pushSnapshotBranch just copied to
-        // refs/heads/<prBranch> on origin — content-identical, and
-        // it exists locally (the remote-only PR branch name does
-        // not, which silently broke the prior call against
-        // `prBranch` directly: `git log master..<prBranch>` failed
-        // with `unknown revision`, the function returned "", and
-        // every orchestrator PR fell back to GhTitle(body) producing
-        // titles like "## What" from the @summary heading).
-        //
-        // Falls back to GhTitle(body) when the git log is empty or
-        // fails (no commits, base ref missing locally, git not
-        // installed). capTitleAtWordBoundary bounds the commit
-        // subject the same way GhTitle does.
+        // Title source priority: the @summary body's own headline
+        // (GhTitle). It is written for THIS PR and stays unique across a
+        // session. The first-commit-since-base subject is only a
+        // FALLBACK (for a heading-only body GhTitle can't title): on the
+        // lead branch, which accumulates commits across a whole session,
+        // `base..lead` always starts at the SAME oldest commit, so using
+        // it as the primary source pinned the identical title onto every
+        // PR in the session — the "same title for all PRs" bug. GhTitle
+        // now skips a leading "## What" heading, so it produces a real
+        // title instead of the markdown header that originally motivated
+        // preferring the commit subject.
         val base = baseRef.GetOrElse(proj.DefaultBranch)
-        val commitSubject = firstCommitSubjectSinceBase(leadWtPath, base, leadBranch)
-        val title = if (commitSubject != "") capTitleAtWordBoundary(commitSubject, 70)
-                    else                     GhTitle(body)
+        val bodyTitle = GhTitle(body)
+        val title = if (bodyTitle != "Untitled") bodyTitle
+                    else {
+                        val commitSubject = firstCommitSubjectSinceBase(leadWtPath, base, leadBranch)
+                        if (commitSubject != "") capTitleAtWordBoundary(commitSubject, 70) else bodyTitle
+                    }
         // Existing-PR detection: before calling `gh pr create`, ask gh
         // whether an open PR already targets this branch. Two cases
         // hit this path:
@@ -1378,9 +1377,25 @@ func stderrMentionsExistingPr(stderr string) bool {
 // Exported (capitalized) so external tests in app/runtime can
 // exercise it directly without an internal-test build.
 func GhTitle(body string) string {
-    val firstLine = firstNonEmptyLine(body)
+    val firstLine = firstTitleLine(body)
     val cleaned = stripTitleMarkdown(firstLine)
     return capTitleAtWordBoundary(cleaned, 70)
+}
+
+// firstTitleLine picks the line of `body` to use as a PR title: the
+// first non-empty line that ISN'T a pure markdown heading (`#`, `##`,
+// …). A TL @summary that opens straight into "## What" would otherwise
+// yield "## What" as the title; we skip heading lines and take the first
+// real content line (typically the summary's one-line headline). Falls
+// back to the first non-empty line, then "Untitled" for a blank body.
+func firstTitleLine(body string) string {
+    val lines = strings.Split(body, "\n")
+        .Map((ln) => strings.TrimSpace(ln))
+        .Filter((s) => s != "")
+    return lines.Find((s) => !strings.HasPrefix(s, "#")) match {
+        case Some(s) => s
+        case None()  => lines.HeadOption().GetOrElse("Untitled")
+    }
 }
 
 // firstNonEmptyLine returns the first line of `body` that has

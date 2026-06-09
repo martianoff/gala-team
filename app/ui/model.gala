@@ -185,6 +185,19 @@ struct AppModel(
     // ever shipped 2 steps even under AutoApprove. Defaults false so
     // legacy snapshots / .Copy() callers are unaffected.
     PlanContinuing bool = false,
+    // PlanStallHandled bounds the idle-stall plan recovery to ONE
+    // auto-resume per stall. Plan advancement normally rides onPrCreated
+    // (a PR landing pops the next step); when a step ends with no PR —
+    // a @plan turn whose work was already shipped, a duplicate-PR / hook
+    // failure that never fired PrCreated, or a resume after the app
+    // closed between approve and PR — the chain strands in Idle, which
+    // the state watchdog deliberately ignores, and the plan renders with
+    // nothing happening. enforcePlanStallRecovery re-kicks the current
+    // step once, sets this flag, and then leaves a visible hint instead
+    // of looping the TL forever. Reset on a genuine user prompt and on
+    // real PR progress (PlanShipped increment). Transient — deliberately
+    // NOT persisted, so a resumed stalled plan gets a fresh auto-resume.
+    PlanStallHandled bool = false,
     // Anchor of a conversation-pane selection. Set on a mouse press
     // inside the pane; preserved across a drag. None = no selection.
     SelectedEntry Option[int],

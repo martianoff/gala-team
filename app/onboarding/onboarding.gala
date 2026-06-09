@@ -357,6 +357,8 @@ func protocolSection(isTL bool, hasQa bool) string {
             "**`@plan` IS a real directive — `\"@plan\\n<item>\\n<item>\\n@end\"`. A prose roadmap is NOT a plan.** If you write \"here's the plan: round 1… round 2… round 3…\" as ordinary text and then `@dispatch` only round 1, the orchestrator has queued NOTHING: it ships round 1's PR, lands in Idle, and the user must manually re-prompt every later round — the exact toil a plan is meant to remove. When you intend a multi-step sequence, the rounds MUST go inside a `@plan` block. **If the user explicitly asks you to \"plan\" / \"make a plan\" / \"start a plan\" for multi-step work, emitting the `@plan` directive is mandatory — a prose list does not satisfy that request.**\n\n" +
             "**Parallelizing within a step and `@plan`-ning across steps are compatible, not opposites.** The canonical shape is a dependent ROADMAP whose steps each decompose into parallel work: round N+1 builds on round N's merged result, but inside round N you still `@dispatch` several engineers at once. List each round as one `@plan` item; parallelize freely within it. The \"don't serialize\" rule forbids splitting INDEPENDENT work into separate rounds — it does NOT forbid `@plan` for genuinely dependent rounds. An MVP roadmap whose later milestones build on earlier ones is the textbook case: use `@plan`.\n\n" +
             "When the work genuinely IS a dependent chain, emit a `@plan` block as your VERY FIRST directive listing each step. The orchestrator queues every item except the first; this turn ships PR 1 normally. After PR 1 lands, the orchestrator auto-spawns you with the SECOND item as the prompt — you handle it like any user prompt, ship PR 2, the orchestrator advances to item 3, and so on until the plan drains. (Within each plan step you should still parallelize engineers if that step itself decomposes.)\n\n" +
+            "**The `@plan` turn MUST start step 1's real work in the SAME turn — `@dispatch` engineers for it (or, if step 1 is a pure-doc/no-engineer step, do the work and `@summary` so it ships a PR). The whole chain is driven by step 1's PR landing: queue advances ONLY when a PR is created. If your `@plan` turn dispatches nothing and ships no new PR, the chain has no first PR to advance from and the plan strands — the user sees the plan but no engineers move.**\n\n" +
+            "**NEVER make step 1 something already finished.** If the first thing on your roadmap is already done / already shipped / \"already on lead, green\", do NOT list it as step 1 — the orchestrator would reset the shipped counter to zero and try to re-ship already-merged work, producing no new PR and stranding the chain. Make step 1 the first UNFINISHED piece of work and `@dispatch` it now. If literally only one unfinished step remains, don't `@plan` at all — just `@dispatch` + `@summary` it directly. Asked \"do you have a plan to finish?\" — answer by `@plan`-ning the REMAINING work (first item = next real task) and dispatching it, not by re-describing what's already merged.\n\n" +
             "```\n" +
             "@plan\n" +
             "Stripe SDK + config\n" +
@@ -373,7 +375,8 @@ func protocolSection(isTL bool, hasQa bool) string {
             "- The auto-prompted follow-ups typically DO need `@base previous` because each step builds on the prior PR. Emit `@base previous` early in those continuation turns just like a manual stacked PR.\n\n" +
             "Rules of thumb:\n\n" +
             "- **If you catch yourself writing a numbered roadmap in prose and dispatching only the first item — STOP. That's a `@plan`.** Put the rounds in a `@plan` block so the orchestrator advances them for the user instead of stopping after round 1.\n" +
-            "- **Only emit `@plan` on the FIRST turn of a multi-PR ask.** Subsequent auto-prompted turns should NOT include `@plan` — that would queue another nested plan and confuse the chain.\n" +
+            "- **Normally emit `@plan` only on the FIRST turn of a multi-PR ask.** You don't need to re-list it on the auto-prompted continuation turns. Re-emitting is no longer destructive — a `@plan` issued while a plan is already active MERGES: items already in the plan are ignored (dedup), and any genuinely-new items are appended to the queue, with shipped progress preserved. So you CAN extend an in-flight plan by emitting `@plan` with the additional steps — but don't redundantly re-list the existing roadmap every turn.\n" +
+            "- **A `@plan` turn that starts no work is a planning failure.** Step 1 must be dispatched (or shipped) this turn, and step 1 must be UNFINISHED work — never an already-merged item. A plan whose step 1 is already done strands the whole chain.\n" +
             "- **Emit `@plan` once per turn.** If you emit it twice, only the first counts.\n" +
             "- **Empty plan body drops the directive.** A `@plan` with no items is meaningless and ignored.\n" +
             "- **Single-item plans are valid** but degenerate — the queue stays empty, the auto-continuation never fires. Don't bother for a single PR; just `@dispatch` and `@summary` like normal.\n" +
@@ -469,7 +472,11 @@ func PlanReminderText() string =
     "`@plan` … `@end` directive block as the FIRST thing this turn, one line per step. " +
     "A numbered roadmap written as ordinary prose queues NOTHING — the orchestrator would " +
     "ship only step 1, land in Idle, and strand the user re-prompting for every later step. " +
-    "Put each round on its own `@plan` line; you may still `@dispatch` engineers in parallel WITHIN a step."
+    "Put each round on its own `@plan` line; you may still `@dispatch` engineers in parallel WITHIN a step.\n" +
+    "Step 1 of the plan must be UNFINISHED work that you `@dispatch` (or ship) THIS turn — never an " +
+    "already-done / already-merged item. The chain only advances when step 1's PR lands; a plan that " +
+    "dispatches nothing, or whose step 1 is already shipped, produces no new PR and strands. If only " +
+    "one unfinished step remains, skip `@plan` and just `@dispatch` + `@summary` it directly."
 
 // AppendPlanReminder tacks PlanReminderText onto an already-assembled
 // prompt (post-onboarding-wrap), so the reminder is the last thing the

@@ -4296,6 +4296,50 @@ func TestSessionFailed_PlanDeclaredNoDispatch_KicksStepOne(t T) T {
     return IsTrue(t3, m.PlanStallHandled)
 }
 
+// ── Resume: don't re-open Approval for an already-shipped summary ───
+
+// planSummaryAlreadyShipped is true when a "gh: PR created" line follows
+// the summary — the resume path uses this to skip re-opening Approval
+// for a PR that already exists (and may be merged on GitHub).
+func TestPlanSummaryAlreadyShipped_PrCreatedAfter_True(t T) T {
+    val convo = ArrayOf(
+        session.ConversationLine(Speaker = "Iris", Text = "@summary ship it @end"),
+        session.ConversationLine(Speaker = "you",  Text = "/approve"),
+        session.ConversationLine(Speaker = "gh",   Text = "PR created: https://x/y/pull/1"),
+    )
+    return IsTrue(t, planSummaryAlreadyShipped(convo, 0))
+}
+
+// No PR line after the summary → not shipped (user exited before
+// approving), so Approval should be restorable.
+func TestPlanSummaryAlreadyShipped_NoPrAfter_False(t T) T {
+    val convo = ArrayOf(
+        session.ConversationLine(Speaker = "you",  Text = "do the thing"),
+        session.ConversationLine(Speaker = "Iris", Text = "@summary ship it @end"),
+    )
+    return IsFalse(t, planSummaryAlreadyShipped(convo, 1))
+}
+
+// A PR created for an EARLIER summary (before this one) doesn't count —
+// only a PR line AFTER summaryIdx marks this summary as shipped.
+func TestPlanSummaryAlreadyShipped_PrBeforeOnly_False(t T) T {
+    val convo = ArrayOf(
+        session.ConversationLine(Speaker = "gh",   Text = "PR created: https://x/y/pull/1"),
+        session.ConversationLine(Speaker = "Iris", Text = "@summary second round @end"),
+    )
+    return IsFalse(t, planSummaryAlreadyShipped(convo, 1))
+}
+
+// The auto-approve batch hint ("PR opened (N this session)") also marks
+// the summary as shipped.
+func TestPlanSummaryAlreadyShipped_PrOpenedHint_True(t T) T {
+    val convo = ArrayOf(
+        session.ConversationLine(Speaker = "Iris", Text = "@summary ship it @end"),
+        session.ConversationLine(Speaker = "gh",   Text = "PR opened (3 this session) — review & merge on GitHub"),
+    )
+    return IsTrue(t, planSummaryAlreadyShipped(convo, 0))
+}
+
 // pendingPrTitle pulls the most recent user prompt out of the
 // conversation log so each batch entry has a human-readable handle.
 // Falls back to the lead branch when no user line exists.

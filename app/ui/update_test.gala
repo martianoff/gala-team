@@ -3978,6 +3978,48 @@ func TestApplyPlan_FirstWins(t T) T {
     return Eq(t1, next.Plan.Get(0), "a")
 }
 
+// MERGE, don't reset: a @plan emitted while a plan is already active
+// (mid-chain) APPENDS new steps and preserves PlanShipped — it must not
+// re-run already-shipped steps. Adding "D" to [A,B,C] (B shipped) yields
+// [A,B,C,D] with PlanShipped still 1.
+func TestApplyPlan_MergesIntoActivePlan_PreservesShipped(t T) T {
+    val seed = sampleModel().Copy(
+        Plan        = ArrayOf("A", "B", "C"),
+        PlanShipped = 1,
+    )
+    val (next, _) = applyBaseDirective(seed, ArrayOf[Directive](Plan(Items = ArrayOf("D"))))
+    val t1 = Eq(t,  next.Plan.Size(), 4)
+    val t2 = Eq(t1, next.Plan.Get(3), "D")
+    return Eq(t2, next.PlanShipped, 1)
+}
+
+// Re-emitting the SAME roadmap mid-chain (a common lead mistake) is a
+// no-op: exact-string dedup drops the already-present items, progress
+// is preserved. Past behaviour reset PlanShipped to 0 and re-ran the
+// whole chain.
+func TestApplyPlan_ReEmitSameRoadmap_NoDuplicatesNoReset(t T) T {
+    val seed = sampleModel().Copy(
+        Plan        = ArrayOf("A", "B", "C"),
+        PlanShipped = 2,
+    )
+    val (next, _) = applyBaseDirective(seed, ArrayOf[Directive](Plan(Items = ArrayOf("A", "B", "C"))))
+    val t1 = Eq(t,  next.Plan.Size(), 3)
+    return Eq(t1, next.PlanShipped, 2)
+}
+
+// Partial overlap: re-listing remaining steps plus a new one appends
+// ONLY the new step.
+func TestApplyPlan_PartialOverlap_AppendsOnlyNew(t T) T {
+    val seed = sampleModel().Copy(
+        Plan        = ArrayOf("A", "B", "C"),
+        PlanShipped = 1,
+    )
+    val (next, _) = applyBaseDirective(seed, ArrayOf[Directive](Plan(Items = ArrayOf("B", "C", "D"))))
+    val t1 = Eq(t,  next.Plan.Size(), 4)
+    val t2 = Eq(t1, next.Plan.Get(3), "D")
+    return Eq(t2, next.PlanShipped, 1)
+}
+
 // PrCreated with an active plan + AutoApprove + idle composer:
 // advances PlanShipped and stages the next step in Composer. The
 // synthetic KeySubmit Cmd is dropped by the unit-test harness; we
@@ -4086,6 +4128,173 @@ func TestKeySubmit_ClearsPlanAndShipped(t T) T {
 // PlanContinuing lifecycle tests above; the panel widget itself
 // follows the codebase convention of not string-asserting view
 // output.)
+
+// ── Plan-stall recovery (enforcePlanStallRecovery, onTick) ──────────
+// A multi-PR @plan advances only when onPrCreated fires. A step that
+// ends WITHOUT a PR (already-shipped work, duplicate-PR / hook failure,
+// resume between approve and PR) strands the chain in Idle — which the
+// FSM watchdog ignores — so the plan renders with nothing running. The
+// idle-stall net auto-resumes the current step ONCE, then waits.
+
+// REGRESSION: the exact shape of the gala-assimilator session — a plan
+// sits queued (PlanShipped < size) with the FSM idle and no live work,
+// and nothing advances it. A tick past the ceiling re-kicks the
+// current step into the composer and flags the continuation.
+func TestPlanStallRecovery_IdleQueuedPlan_AutoResumes(t T) T {
+    val seed = sampleModel().Copy(
+        State          = Idle(),
+        StateEnteredAt = staleStateEnteredAt(),
+        Plan           = ArrayOf("verify gate", "resume UI", "e2e demo"),
+        PlanShipped    = 0,
+        Composer       = "",
+    )
+    val (m, _) = Update(seed, TickMsg())
+    val t1 = Eq(t,  m.Composer, "verify gate")
+    val t2 = IsTrue(t1, m.PlanContinuing)
+    val t3 = IsTrue(t2, m.PlanStallHandled)
+    // A visible system line explains the auto-resume.
+    val lastLine = m.Conversation.Get(m.Conversation.Size() - 1).Text
+    return IsTrue(t3, strings.Contains(lastLine, "auto-resuming"))
+}
+
+// Bounded to one attempt: once PlanStallHandled is set, a second tick
+// must NOT re-kick (otherwise a step that keeps stalling loops the TL).
+func TestPlanStallRecovery_AlreadyHandled_NoRekick(t T) T {
+    val seed = sampleModel().Copy(
+        State            = Idle(),
+        StateEnteredAt   = staleStateEnteredAt(),
+        Plan             = ArrayOf("verify gate", "resume UI"),
+        PlanShipped      = 0,
+        Composer         = "",
+        PlanStallHandled = true,
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return Eq(t, m.Composer, "")
+}
+
+// User mid-typing: never overwrite their draft.
+func TestPlanStallRecovery_ComposerInUse_NoKick(t T) T {
+    val seed = sampleModel().Copy(
+        State          = Idle(),
+        StateEnteredAt = staleStateEnteredAt(),
+        Plan           = ArrayOf("verify gate", "resume UI"),
+        PlanShipped    = 0,
+        Composer       = "wait, different idea",
+    )
+    val (m, _) = Update(seed, TickMsg())
+    val t1 = Eq(t, m.Composer, "wait, different idea")
+    return IsFalse(t1, m.PlanStallHandled)
+}
+
+// Too soon: a plan that just entered Idle gets a moment before the net
+// fires, so we don't race onPrCreated's own continuation.
+func TestPlanStallRecovery_ShortDwell_NoKick(t T) T {
+    val seed = sampleModel().Copy(
+        State          = Idle(),
+        StateEnteredAt = recentStateEnteredAt(int64(3)),
+        Plan           = ArrayOf("verify gate", "resume UI"),
+        PlanShipped    = 0,
+        Composer       = "",
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return Eq(t, m.Composer, "")
+}
+
+// No plan queued → nothing to do.
+func TestPlanStallRecovery_NoPlan_NoKick(t T) T {
+    val seed = sampleModel().Copy(
+        State          = Idle(),
+        StateEnteredAt = staleStateEnteredAt(),
+        Composer       = "",
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return Eq(t, m.Composer, "")
+}
+
+// Plan fully shipped (PlanShipped == size) → nothing queued.
+func TestPlanStallRecovery_PlanComplete_NoKick(t T) T {
+    val seed = sampleModel().Copy(
+        State          = Idle(),
+        StateEnteredAt = staleStateEnteredAt(),
+        Plan           = ArrayOf("a", "b"),
+        PlanShipped    = 2,
+        Composer       = "",
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return Eq(t, m.Composer, "")
+}
+
+// A pending user question owns the turn — don't auto-resume underneath it.
+func TestPlanStallRecovery_PendingQuestion_NoKick(t T) T {
+    val seed = sampleModel().Copy(
+        State          = Idle(),
+        StateEnteredAt = staleStateEnteredAt(),
+        Plan           = ArrayOf("verify gate", "resume UI"),
+        PlanShipped    = 0,
+        Composer       = "",
+        PendingQuestion = Some(PendingQuestion(
+            Member       = "Iris",
+            ToolUseId    = "toolu_1",
+            QuestionText = "which backend?",
+        )),
+    )
+    val (m, _) = Update(seed, TickMsg())
+    return Eq(t, m.Composer, "")
+}
+
+// A genuine fresh user prompt clears the one-shot latch so a LATER
+// stall can be recovered again.
+func TestKeySubmit_GenuinePrompt_ResetsPlanStallHandled(t T) T {
+    val seed = sampleModel().Copy(
+        Composer         = "do something new",
+        PlanStallHandled = true,
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    return IsFalse(t, m.PlanStallHandled)
+}
+
+// A plan-continuation submit must PRESERVE the latch — otherwise a
+// step that keeps stranding would re-arm the net every hop and loop.
+func TestKeySubmit_Continuation_PreservesPlanStallHandled(t T) T {
+    val seed = sampleModel().Copy(
+        Composer         = "verify gate",
+        Plan             = ArrayOf("verify gate", "resume UI"),
+        PlanShipped      = 0,
+        PlanContinuing   = true,
+        PlanStallHandled = true,
+    )
+    val (m, _) = Update(seed, KeySubmit())
+    return IsTrue(t, m.PlanStallHandled)
+}
+
+// Real PR progress re-arms the net for the NEXT step in case its PR
+// never lands either.
+func TestPrCreated_Continuation_ResetsPlanStallHandled(t T) T {
+    val seed = sampleModel().Copy(
+        Plan             = ArrayOf("step1", "step2"),
+        PlanShipped      = 0,
+        PlanStallHandled = true,
+    )
+    val (m, _) = Update(seed, PrCreated(Url = "https://x/y/pull/1", Branch = "gala_team/x/pr/aaa1"))
+    val t1 = Eq(t, m.PlanShipped, 1)
+    return IsFalse(t1, m.PlanStallHandled)
+}
+
+// Fix 1: a TL turn that declares a @plan but dispatches nothing and
+// ships no @summary would queue a plan then drop to Idle inert. The
+// turn-end path kicks step 1 immediately rather than waiting for the
+// idle-stall net.
+func TestSessionFailed_PlanDeclaredNoDispatch_KicksStepOne(t T) T {
+    val seed = sampleModel().Copy(
+        State      = TLThinking(),
+        TurnBuffer = "Here's the plan.\n@plan\nverify gate\nresume UI\n@end\n",
+    )
+    val (m, _) = Update(seed, SessionFailed(Member = "Iris", ErrText = "EOF"))
+    val t1 = Eq(t,  m.Plan.Size(), 2)
+    val t2 = Eq(t1, m.Composer, "verify gate")
+    val t3 = IsTrue(t2, m.PlanContinuing)
+    return IsTrue(t3, m.PlanStallHandled)
+}
 
 // pendingPrTitle pulls the most recent user prompt out of the
 // conversation log so each batch entry has a human-readable handle.

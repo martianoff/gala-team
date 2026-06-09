@@ -985,6 +985,15 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
             return intercepted.GetOrElse((m, NoCmd[AppMsg]()))
         }
     }
+    // Plan-viewer interception: while the full-plan overlay is up, ↑/↓
+    // and PageUp/PageDown scroll it; Esc / F8 close it; every other
+    // keyboard input is swallowed so it can't leak to the composer.
+    if m.PlanViewerOpen {
+        val intercepted = planViewerIntercept(m, msg)
+        if intercepted.IsDefined() {
+            return intercepted.GetOrElse((m, NoCmd[AppMsg]()))
+        }
+    }
     return msg match {
     case KeyChar(c)                  => onKeyChar(m, c)
     case KeyBackspace()              => onComposerBackspace(m)
@@ -1015,6 +1024,9 @@ func dispatchMsg(m AppModel, msg AppMsg) Tuple[AppModel, Cmd[AppMsg]] {
     case ConsultChunkArrived(n, ln)  => onConsultChunkArrived(m, n, ln)
     case ConsultEnded(name, err)     => onConsultEnded(m, name, err)
     case KeyToggleConsultViewer()    => (m.Copy(ConsultViewerOpen = !m.ConsultViewerOpen), NoCmd[AppMsg]())
+    case KeyTogglePlanViewer()       => onTogglePlanViewer(m)
+    case PlanViewerScrollUp()        => onPlanViewerScroll(m, -1)
+    case PlanViewerScrollDown()      => onPlanViewerScroll(m, 1)
     case KeyToggleHistory()          => onToggleHistory(m)
     case KeyToggleFocus()            => onToggleFocus(m)
     case KeySidebarToggleGroup()     => onSidebarToggleGroup(m)
@@ -1108,6 +1120,7 @@ func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
     case KeyEraseSession()         => Some((m, NoCmd[AppMsg]()))
     case KeyToggleHistory()        => Some((m, NoCmd[AppMsg]()))
     case KeyToggleConsultViewer()  => Some((m, NoCmd[AppMsg]()))
+    case KeyTogglePlanViewer()     => Some((m, NoCmd[AppMsg]()))
     case KeyTogglePalette()        => Some((m, NoCmd[AppMsg]()))
     case KeyToggleHelp()           => Some((m, NoCmd[AppMsg]()))
     case KeyToggleCompactSidebar() => Some((m, NoCmd[AppMsg]()))
@@ -1119,6 +1132,59 @@ func recoveryIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg
     case HistorySelect()           => Some((m, NoCmd[AppMsg]()))
     // Anything else (subprocess events, mouse outside buttons, async
     // results, ticks) flows through unchanged.
+    case _ => None[Tuple[AppModel, Cmd[AppMsg]]]()
+}
+
+// onTogglePlanViewer opens/closes the full-plan overlay, resetting the
+// scroll to the top each time it opens. Opening is a no-op when there's
+// no active plan — there'd be nothing to show.
+func onTogglePlanViewer(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
+    if !m.PlanViewerOpen && m.Plan.IsEmpty() { return (m, NoCmd[AppMsg]()) }
+    return (m.Copy(PlanViewerOpen = !m.PlanViewerOpen, PlanViewerScroll = 0), NoCmd[AppMsg]())
+}
+
+// onPlanViewerScroll moves the full-plan overlay's first-visible step by
+// `delta`, clamped so it can't scroll past either end of the list.
+func onPlanViewerScroll(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] {
+    val maxStart = MaxInt(0, m.Plan.Size() - 1)
+    val next = MinInt(maxStart, MaxInt(0, m.PlanViewerScroll + delta))
+    return (m.Copy(PlanViewerScroll = next), NoCmd[AppMsg]())
+}
+
+// planViewerPageSize is the ↑/↓-page jump for the full-plan overlay.
+func planViewerPageSize() int = 8
+
+// planViewerIntercept owns the keyboard while the full-plan overlay is
+// up. Scroll keys move the viewport; Esc / F8 / Quit pass through to
+// their normal handlers (which close the overlay); everything else is
+// swallowed so nothing bleeds into the composer behind the modal. Same
+// shape as recoveryIntercept.
+func planViewerIntercept(m AppModel, msg AppMsg) Option[Tuple[AppModel, Cmd[AppMsg]]] = msg match {
+    case HistoryCursorUp()       => Some(onPlanViewerScroll(m, -1))
+    case HistoryCursorDown()     => Some(onPlanViewerScroll(m, 1))
+    case KeyConvoPageUp()        => Some(onPlanViewerScroll(m, -planViewerPageSize()))
+    case KeyConvoPageDown()      => Some(onPlanViewerScroll(m, planViewerPageSize()))
+    case KeyConvoScrollUp()      => Some(onPlanViewerScroll(m, -1))
+    case KeyConvoScrollDown()    => Some(onPlanViewerScroll(m, 1))
+    // Pass-throughs: Esc closes via onEscOrDeselect, F8 toggles closed,
+    // Quit always quits.
+    case HistoryDeselect()       => None[Tuple[AppModel, Cmd[AppMsg]]]()
+    case KeyTogglePlanViewer()   => None[Tuple[AppModel, Cmd[AppMsg]]]()
+    case QuitMsg()               => None[Tuple[AppModel, Cmd[AppMsg]]]()
+    // Swallow other keyboard input while the overlay owns the screen.
+    case KeyChar(_)              => Some((m, NoCmd[AppMsg]()))
+    case KeyBackspace()          => Some((m, NoCmd[AppMsg]()))
+    case KeyDelete()             => Some((m, NoCmd[AppMsg]()))
+    case KeySubmit()             => Some((m, NoCmd[AppMsg]()))
+    case KeyComposerLeft()       => Some((m, NoCmd[AppMsg]()))
+    case KeyComposerRight()      => Some((m, NoCmd[AppMsg]()))
+    case KeyComposerHome()       => Some((m, NoCmd[AppMsg]()))
+    case KeyComposerEnd()        => Some((m, NoCmd[AppMsg]()))
+    case KeyToggleConsultViewer() => Some((m, NoCmd[AppMsg]()))
+    case KeyToggleHistory()      => Some((m, NoCmd[AppMsg]()))
+    case KeyTogglePalette()      => Some((m, NoCmd[AppMsg]()))
+    case KeyToggleFocus()        => Some((m, NoCmd[AppMsg]()))
+    // Anything else (subprocess events, async results, ticks) flows on.
     case _ => None[Tuple[AppModel, Cmd[AppMsg]]]()
 }
 
@@ -1718,6 +1784,7 @@ func paletteActions(m AppModel) Array[PaletteAction[AppMsg]] {
         ),
         PaletteAction[AppMsg](Label = "Toggle composer / sidebar focus (Tab)", Category = "Navigate", Msg = KeyToggleFocus()),
         PaletteAction[AppMsg](Label = "Toggle consult viewer (Ctrl+T)", Category = "Navigate", Msg = KeyToggleConsultViewer()),
+        PaletteAction[AppMsg](Label = "Show full plan (F8)", Category = "View", Msg = KeyTogglePlanViewer()),
         PaletteAction[AppMsg](Label = "History browser (Ctrl+H)", Category = "View", Msg = KeyToggleHistory()),
         PaletteAction[AppMsg](Label = "Yank conversation to clipboard (Ctrl+Y)", Category = "Session", Msg = KeyYankConversation()),
         PaletteAction[AppMsg](Label = "Erase session (Ctrl+N)", Category = "Session", Msg = KeyEraseSession()),
@@ -6759,6 +6826,9 @@ func onEscOrDeselect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     // recovery, guidance, project-info, member-detail, archive view.
     if m.HelpVisible {
         return (m.Copy(HelpVisible = false), NoCmd[AppMsg]())
+    }
+    if m.PlanViewerOpen {
+        return (m.Copy(PlanViewerOpen = false), NoCmd[AppMsg]())
     }
     if m.PendingQuestion.IsDefined() {
         // Esc on a pending question = "skip this question". The model

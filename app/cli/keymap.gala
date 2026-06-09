@@ -132,7 +132,8 @@ func KeyToAppMsg(ev KeyEvent) AppMsg {
 // the default split layout; F2/F3/F4/F5 set focus / grid / pipeline /
 // activity (Frame P). F6 toggles the help overlay (a printable `?`
 // would clash with composer typing; F6 is unambiguous). F7 toggles
-// AutoApprove (the batch-PR mode, see Policy.AutoApprove).
+// AutoApprove (the batch-PR mode, see Policy.AutoApprove). F8 opens the
+// full-plan viewer overlay (scrollable list of every @plan step).
 func fnKeyToMsg(n int) AppMsg {
     if n == 1 { return KeySetViewMode(Mode = ViewDefault()) }
     if n == 2 { return KeySetViewMode(Mode = ViewFocus()) }
@@ -141,5 +142,6 @@ func fnKeyToMsg(n int) AppMsg {
     if n == 5 { return KeySetViewMode(Mode = ViewActivity()) }
     if n == 6 { return KeyToggleHelp() }
     if n == 7 { return KeyToggleAutoApprove() }
+    if n == 8 { return KeyTogglePlanViewer() }
     return NoOp()
 }

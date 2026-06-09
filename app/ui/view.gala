@@ -834,8 +834,62 @@ func focusEquals(a FocusState, b FocusState) bool = a match {
 // then the consult viewer overlay, then the live conversation.
 func mainPanelWidget(m AppModel) Widget {
     if m.HistoryMode { return historyPanel(m) }
+    if m.PlanViewerOpen { return planViewerPanel(m) }
     if m.ConsultViewerOpen { return consultViewerPanel(m) }
     return conversationPanel(m)
+}
+
+// planViewerPanel renders the full-plan overlay: a scrollable list of
+// EVERY @plan step (the inline planPanel only windows to 8 rows). The
+// viewport starts at m.PlanViewerScroll, sized to the terminal height,
+// with "↑ N above / ↓ N below" markers so the user knows there's more.
+// Shipped/in-progress/queued use the same ✓ / ▶ / ☐ glyphs as the panel.
+func planViewerPanel(m AppModel) Widget {
+    val total   = m.Plan.Size()
+    val shipped = m.PlanShipped
+    val header = TextStyled(
+        s"  📋 Plan — ${total} step(s) · ${shipped} shipped   (↑/↓ scroll · Esc / F8 close)",
+        DefaultStyle().WithBold().WithFg(BrightYellow()))
+    if total == 0 {
+        return Column(ArrayOf[LayoutChild](
+            Fixed(1, header),
+            Fixed(1, Empty()),
+            Fixed(1, TextStyled("  (no active plan)", DefaultStyle().WithDim())),
+            Flex(1, Empty())))
+    }
+    val (cols, termRows) = TermSize()
+    val bodyMax = MaxInt(20, cols - 12)
+    // Reserve rows for header + bar + spacer + the two scroll markers.
+    val visible  = MaxInt(1, termRows - 6)
+    val maxStart = MaxInt(0, total - visible)
+    val startIdx = MinInt(MaxInt(0, m.PlanViewerScroll), maxStart)
+    val endIdx   = MinInt(total, startIdx + visible)
+    val bar = planProgressBar(shipped, total, 24)
+    var rows = ArrayOf[LayoutChild](
+        Fixed(1, header),
+        Fixed(1, TextStyled(s"  ${bar} ${shipped}/${total}", DefaultStyle().WithFg(BrightCyan()))),
+        Fixed(1, Empty()))
+    if startIdx > 0 {
+        rows = rows.Append(Fixed(1, TextStyled(
+            s"     ↑ ${startIdx} above", DefaultStyle().WithDim())))
+    }
+    var i = startIdx
+    for i < endIdx {
+        val flat  = strings.Join(strings.Fields(m.Plan.Get(i)), " ")
+        val glyph = if (i < shipped) "✓" else if (i == shipped) "▶" else "☐"
+        val st = if (i < shipped)       DefaultStyle().WithFg(BrightGreen())
+                 else if (i == shipped) DefaultStyle().WithBold().WithFg(BrightCyan())
+                 else                   DefaultStyle().WithDim()
+        rows = rows.Append(Fixed(1, TextStyled(
+            s"  ${glyph} ${i + 1}. ${truncateTitle(flat, bodyMax)}", st)))
+        i = i + 1
+    }
+    if endIdx < total {
+        rows = rows.Append(Fixed(1, TextStyled(
+            s"     ↓ ${total - endIdx} below", DefaultStyle().WithDim())))
+    }
+    rows = rows.Append(Flex(1, Empty()))
+    return Column(rows)
 }
 
 // approvalBanner points the user at the approval dialog above the

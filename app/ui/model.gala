@@ -236,6 +236,14 @@ struct AppModel(
     // replaced by the consult viewer overlay listing every active
     // consult and its last few streamed lines.
     ConsultViewerOpen bool,
+    // PlanViewerOpen pops a full-pane, scrollable overlay listing EVERY
+    // step of the active @plan (the inline panel only windows to 8 rows).
+    // Toggled by F8 / the command palette; closed by Esc or F8 again.
+    // PlanViewerScroll is the index of the first step shown, advanced by
+    // ↑/↓ and PageUp/PageDown while the overlay is open. Both transient —
+    // not persisted; a resume re-opens closed with scroll at the top.
+    PlanViewerOpen   bool = false,
+    PlanViewerScroll int  = 0,
     // Past sessions archived under .gala_team/sessions/archive/,
     // loaded once at startup. Browsable via Ctrl+H.
     Archives Array[session.SnapshotMeta],
@@ -783,6 +791,10 @@ sealed type AppMsg {
     case WorktreesWiped
     // Toggles the consult viewer modal overlay (Tab key).
     case KeyToggleConsultViewer
+    // Toggles the full-plan viewer overlay (F8). Scroll while open.
+    case KeyTogglePlanViewer
+    case PlanViewerScrollUp
+    case PlanViewerScrollDown
     // Toggles the session-history browser (Ctrl+H key). When opened
     // with no archive selected, shows the index. Esc / Ctrl+H again
     // returns to the live conversation.

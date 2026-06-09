@@ -4142,6 +4142,42 @@ func TestKeySubmit_ClearsPlanAndShipped(t T) T {
 // follows the codebase convention of not string-asserting view
 // output.)
 
+// ── Full-plan viewer overlay (F8) ──────────────────────────────────
+
+// F8 opens the overlay when a plan is active, and closes it again.
+func TestPlanViewer_TogglesOpenAndClosed(t T) T {
+    val seed = sampleModel().Copy(Plan = ArrayOf("A", "B", "C"))
+    val (opened, _) = Update(seed, KeyTogglePlanViewer())
+    val t1 = IsTrue(t, opened.PlanViewerOpen)
+    val (closed, _) = Update(opened, KeyTogglePlanViewer())
+    return IsFalse(t1, closed.PlanViewerOpen)
+}
+
+// Opening is a no-op with no active plan — nothing to show.
+func TestPlanViewer_NoopWhenNoPlan(t T) T {
+    val (m, _) = Update(sampleModel(), KeyTogglePlanViewer())
+    return IsFalse(t, m.PlanViewerOpen)
+}
+
+// Scroll advances and clamps at both ends (0 .. size-1).
+func TestPlanViewer_ScrollClampsAtEnds(t T) T {
+    val base = sampleModel().Copy(PlanViewerOpen = true, Plan = ArrayOf("A", "B", "C", "D", "E"))
+    val (downOnce, _) = Update(base, PlanViewerScrollDown())
+    val t1 = Eq(t, downOnce.PlanViewerScroll, 1)
+    val (atTop, _) = Update(base, PlanViewerScrollUp())
+    val t2 = Eq(t1, atTop.PlanViewerScroll, 0)
+    val atMax = base.Copy(PlanViewerScroll = 4)
+    val (pastMax, _) = Update(atMax, PlanViewerScrollDown())
+    return Eq(t2, pastMax.PlanViewerScroll, 4)
+}
+
+// Esc closes the overlay (via onEscOrDeselect's modal stack).
+func TestPlanViewer_EscCloses(t T) T {
+    val seed = sampleModel().Copy(PlanViewerOpen = true, Plan = ArrayOf("A", "B"))
+    val (m, _) = Update(seed, HistoryDeselect())
+    return IsFalse(t, m.PlanViewerOpen)
+}
+
 // ── Plan-stall recovery (enforcePlanStallRecovery, onTick) ──────────
 // A multi-PR @plan advances only when onPrCreated fires. A step that
 // ends WITHOUT a PR (already-shipped work, duplicate-PR / hook failure,

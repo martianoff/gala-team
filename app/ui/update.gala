@@ -3356,16 +3356,27 @@ func applyPlanDirective(m AppModel, dirs Array[Directive]) Tuple[AppModel, Array
     }
 }
 
-// applyPlanItems merges `items` into m's plan. Fresh adoption when no
-// plan is active (PlanShipped reset to 0); otherwise append only the
-// genuinely-new items (exact-string dedup) and PRESERVE PlanShipped so
-// a mid-chain @plan never re-runs shipped steps. See applyPlanDirective.
+// applyPlanItems folds `items` into m's plan, preserving shipped
+// progress without ever re-running or ballooning. See applyPlanDirective.
+//
+//   - No active plan → adopt the items fresh, PlanShipped = 0.
+//   - Active plan → a mid-chain @plan re-states the FULL roadmap (the
+//     onboarding convention), possibly REWORDED or EXTENDED. REPLACE the
+//     list with the new roadmap but KEEP PlanShipped (clamped if the new
+//     roadmap is shorter). The shipped prefix is immutable history; the
+//     latest @plan defines the rest.
+//
+// Why replace, not append: an earlier append-with-exact-dedup version
+// ballooned in practice — the lead re-emits the roadmap each
+// continuation turn with slightly different wording, so exact-string
+// dedup never matched and every re-emission stacked another copy (a
+// 3-step plan grew to dozens of "steps"). Replacing the list makes a
+// re-listed / reworded roadmap idempotent and an extended one additive,
+// regardless of wording.
 func applyPlanItems(m AppModel, items Array[string]) AppModel {
     if m.Plan.IsEmpty() { return m.Copy(Plan = items, PlanShipped = 0) }
-    val merged = items
-        .Filter((it) => !m.Plan.Contains(it))
-        .FoldLeft(m.Plan, (acc, it) => acc.Append(it))
-    return m.Copy(Plan = merged)
+    val shipped = if (m.PlanShipped > items.Size()) items.Size() else m.PlanShipped
+    return m.Copy(Plan = items, PlanShipped = shipped)
 }
 
 func extractHelpQuestion(d Directive) Option[string] = d match {

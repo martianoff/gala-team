@@ -2273,6 +2273,17 @@ func errorRemedy(err string) string {
 // in-progress one, with "⋯ N earlier / N more" markers.
 val planPanelMaxRows = 8
 
+// planProgressBar renders a compact shipped/total bar for the plan
+// panel title (e.g. "███░░░░░░"). Gives an at-a-glance sense of how far
+// the chain has drained even when the windowed step list is clipped on
+// a short terminal. Empty when there's nothing to show.
+func planProgressBar(shipped int, total int, width int) string {
+    if total <= 0 || width <= 0 { return "" }
+    val filled  = (shipped * width) / total
+    val clamped = MinInt(width, MaxInt(0, filled))
+    return strings.Repeat("█", clamped) + strings.Repeat("░", width - clamped)
+}
+
 func planPanel(m AppModel) LayoutChild {
     if m.Plan.IsEmpty() { return Fixed(0, Empty()) }
     val total   = m.Plan.Size()
@@ -2288,13 +2299,14 @@ func planPanel(m AppModel) LayoutChild {
     val complete = shipped >= total
     val (cols, _) = TermSize()
     val bodyMax = MaxInt(20, cols - 16)
+    val bar = planProgressBar(shipped, total, 12)
     val titleRow = if (complete)
         Fixed(1, TextStyled(
-            s"  📋 Plan complete — ${total}/${total} PRs shipped",
+            s"  📋 Plan complete — ${bar} ${total}/${total} PRs shipped",
             DefaultStyle().WithBold().WithFg(BrightGreen())))
     else
         Fixed(1, TextStyled(
-            s"  📋 Plan — step ${shipped + 1} of ${total}",
+            s"  📋 Plan — step ${shipped + 1} of ${total}  ${bar} ${shipped}/${total} shipped",
             DefaultStyle().WithBold().WithFg(BrightCyan())))
     val startIdx = if (total <= planPanelMaxRows) 0
                    else MinInt(MaxInt(0, shipped - 1), total - planPanelMaxRows)

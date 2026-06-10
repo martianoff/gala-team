@@ -41,6 +41,7 @@ gala_test(
     srcs = [
         "claude_stream_json_test.gala",
         "claude_transport_test.gala",
+        "crash_capture_test.gala",
         "runtime_glue_test.gala",
         "subprocess_util_test.gala",
     ],

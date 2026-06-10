@@ -390,7 +390,25 @@ func main() {
     // app's keymap can receive it. onQuit then runs the two-press
     // confirmation flow + CloseAllSessions cleanup before exit.
     SetEscapeHatchOnCtrlC(false)
-    val _ = RunWithMouse[AppModel, AppMsg](program, (ev) => InputToAppMsg(ev), tickSub)
+    // Top-level crash capture. A panic on the TUI's foreground
+    // goroutine unwinds THROUGH RunWithMouse (running its terminal-
+    // restore defers) and would otherwise print a raw multi-goroutine
+    // dump and die — scrolling the panic header off the top in a real
+    // terminal and leaving no durable trace at all when GALA_TEAM_DEBUG
+    // is off. RunGuarded recovers it, writes the panic + faulting stack
+    // to crash-<pid>.txt under the debug dir (always, flag-independent),
+    // and we surface where it landed before exiting non-zero.
+    val crashed, panicMsg, reportPath = runtime.RunGuarded(() => {
+        val _ = RunWithMouse[AppModel, AppMsg](program, (ev) => InputToAppMsg(ev), tickSub)
+    })
+    if crashed {
+        runtime.LogSessionDone("panic")
+        val _ = os.Stderr.WriteString(s"gala_team: fatal: ${panicMsg}\n")
+        if reportPath != "" {
+            val _ = os.Stderr.WriteString(s"gala_team: crash report written to ${reportPath}\n")
+        }
+        os.Exit(1)
+    }
     // Reached only on clean TUI exit — onQuit's two-press flow or
     // the runtime returning normally. A crash exit / panic skips this
     // and leaves the events.jsonl without a session_done marker, so

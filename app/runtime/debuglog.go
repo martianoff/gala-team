@@ -23,10 +23,13 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
@@ -214,3 +217,78 @@ func ResetDebugDir() error {
 }
 
 var errDebugNoRepo = errors.New("debug: SetDebugRepo not called yet")
+
+// ----- crash capture --------------------------------------------------
+//
+// A panic on the TUI's foreground goroutine unwinds THROUGH the gala-tui
+// runtime (running its terminal-restore defers) and would otherwise
+// print a raw multi-goroutine dump to stderr and die. In a real terminal
+// that dump scrolls the panic header — the one line that names the
+// faulting frame — off the top, and when GALA_TEAM_DEBUG is off nothing
+// durable is written at all, so the crash is undiagnosable. RunGuarded
+// recovers the panic at the top of the run and captures the faulting
+// goroutine's stack to a file the operator can actually read.
+
+// crashDir returns the directory crash reports are written to. Prefers
+// the registered debug dir (alongside events.jsonl) so reports sit with
+// the rest of the session's forensics; falls back to a stable temp dir
+// when no repo has been registered yet (e.g. a crash before/at startup).
+// Unlike the events log, this is intentionally INDEPENDENT of
+// GALA_TEAM_DEBUG — a crash is always worth a trace.
+func crashDir() string {
+	if d := DebugDir(); d != "" {
+		return d
+	}
+	return filepath.Join(os.TempDir(), "gala_team-crashes")
+}
+
+// writeCrashReport persists the panic value plus the faulting
+// goroutine's stack to crash-<pid>-<utc>.txt and returns the path it
+// wrote, or "" if the report could not be written (out of disk, dir not
+// creatable). Best-effort: a failure here must not mask the original
+// crash, so the caller treats "" as "no report, fall back to stderr".
+func writeCrashReport(panicMsg string, stack []byte) string {
+	dir := crashDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return ""
+	}
+	name := fmt.Sprintf("crash-%d-%s.txt", os.Getpid(),
+		time.Now().UTC().Format("20060102T150405Z"))
+	path := filepath.Join(dir, name)
+	var b strings.Builder
+	b.WriteString("gala_team crash report\n")
+	b.WriteString("panic: ")
+	b.WriteString(panicMsg)
+	b.WriteString("\n\n")
+	b.Write(stack)
+	if len(stack) == 0 || stack[len(stack)-1] != '\n' {
+		b.WriteString("\n")
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		return ""
+	}
+	return path
+}
+
+// RunGuarded executes run with a top-level panic recover. On a clean
+// return it reports crashed=false. On a panic it captures the panic
+// value and the faulting goroutine's stack (debug.Stack() inside the
+// deferred recover still includes the frames down to the panic site),
+// writes a crash report, and returns crashed=true with the panic
+// message and the report path ("" if the report could not be written).
+//
+// Terminal restoration is NOT this function's concern: the gala-tui
+// runtime's own unwinding defers (term.Restore / alt-screen-off) run as
+// the panic propagates THROUGH it, before reaching this recover. The
+// caller decides what to log and how to exit.
+func RunGuarded(run func()) (crashed bool, panicMsg string, reportPath string) {
+	defer func() {
+		if r := recover(); r != nil {
+			crashed = true
+			panicMsg = fmt.Sprint(r)
+			reportPath = writeCrashReport(panicMsg, debug.Stack())
+		}
+	}()
+	run()
+	return false, "", ""
+}

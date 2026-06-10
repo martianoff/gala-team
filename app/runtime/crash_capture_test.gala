@@ -1,0 +1,49 @@
+package runtime
+
+import (
+    "os"
+    "strings"
+    . "martianoff/gala/test"
+    . "martianoff/gala/std"
+)
+
+// RunGuarded is the top-level panic net wrapped around the TUI run in
+// cmd/main.gala. These tests lock in the two behaviours main() depends
+// on: a clean run passes through untouched, and a panic is recovered
+// into a (crashed, message, report-path) triple with a readable report
+// on disk — the artifact that turns an unscrollable goroutine dump into
+// something an operator can actually diagnose.
+
+// A clean guarded run reports not-crashed and leaves the crash channel
+// empty so main() falls through to its normal session_done path.
+func TestRunGuarded_CleanRunReportsNoCrash(t T) T {
+    val crashed, msg, path = RunGuarded(() => {
+        val _ = strings.Contains("ok", "ok")
+    })
+    val t1 = IsFalse(t, crashed)
+    val t2 = Eq(t1, msg, "")
+    return Eq(t2, path, "")
+}
+
+// A panic inside the guarded thunk is recovered rather than killing the
+// process: crashed is true, the panic value is captured verbatim, and a
+// crash report is written under the debug dir containing both the panic
+// message and the faulting goroutine's stack.
+func TestRunGuarded_CapturesPanicAndWritesReport(t T) T {
+    val dir, err = os.MkdirTemp("", "gala_team_crash_")
+    if err != nil { return IsTrue(t, false) }
+    defer os.RemoveAll(dir)
+    SetDebugRepo(dir)
+    val crashed, msg, path = RunGuarded(() => {
+        panic("boom-sentinel-42")
+    })
+    val t1 = IsTrue(t, crashed)
+    val t2 = IsTrue(t1, strings.Contains(msg, "boom-sentinel-42"))
+    val t3 = IsTrue(t2, path != "")
+    val b, rerr = os.ReadFile(path)
+    if rerr != nil { return IsTrue(t3, false) }
+    val contents = string(b)
+    val t4 = IsTrue(t3, strings.Contains(contents, "boom-sentinel-42"))
+    // debug.Stack() always emits at least one "goroutine" header line.
+    return IsTrue(t4, strings.Contains(contents, "goroutine"))
+}

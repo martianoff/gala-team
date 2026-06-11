@@ -5965,6 +5965,7 @@ func recoverApprovalIfReady(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val convo = m.Conversation
     var i = convo.Size() - 1
     var foundBody = ""
+    var foundIdx = -1
     var found = false
     for i >= 0 && !found {
         val line = convo.Get(i)
@@ -5972,12 +5973,23 @@ func recoverApprovalIfReady(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
             val raw = extractSummaryFromText(line.Text)
             if raw != "" {
                 foundBody = raw
+                foundIdx = i
                 found = true
             }
         }
         i = i - 1
     }
     if !found { return (m, NoCmd[AppMsg]()) }
+    // Already-shipped guard. If a "gh: PR created" line FOLLOWS the
+    // summary, that summary was already approved and its PR opened —
+    // re-entering Approval on resume would re-create a PR that may now
+    // be merged/closed on GitHub, and the approve dead-ends on "no
+    // commits / nothing to PR" (checkPrReady still passes because the
+    // local lead branch is ahead of the un-pulled local default). Only
+    // a summary the user exited BEFORE approving should restore the
+    // modal. (onPrCreated always logs "PR created: <url>" as speaker
+    // "gh", so this is the universal shipped signal.)
+    if planSummaryAlreadyShipped(convo, foundIdx) { return (m, NoCmd[AppMsg]()) }
     val readiness = checkPrReady(m.Project)
     if readiness.IsDefined() { return (m, NoCmd[AppMsg]()) }
     val bodyIssue = validatePrBody(foundBody, m.Team)
@@ -5993,6 +6005,26 @@ func recoverApprovalIfReady(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         return (m1, batchAll(cmds))
     }
     return (m.Copy(State = Approval(SummaryBody = foundBody)), NoCmd[AppMsg]())
+}
+
+// planSummaryAlreadyShipped reports whether the summary at convo index
+// `summaryIdx` was already approved + opened as a PR — i.e. a later
+// conversation line records the PR creation. onPrCreated logs every PR
+// as speaker "gh" with "PR created" (and the auto-approve batch hint as
+// "PR opened"), so either marker after the summary means it shipped.
+// Used by recoverApprovalIfReady to avoid re-opening the Approval modal
+// on resume for a PR that already exists (and may be merged on GitHub).
+func planSummaryAlreadyShipped(convo Array[session.ConversationLine], summaryIdx int) bool {
+    var j = summaryIdx + 1
+    for j < convo.Size() {
+        val line = convo.Get(j)
+        if line.Speaker == "gh" &&
+            (strings.Contains(line.Text, "PR created") || strings.Contains(line.Text, "PR opened")) {
+            return true
+        }
+        j = j + 1
+    }
+    return false
 }
 
 // extractSummaryFromText finds a summary body inside `text`,

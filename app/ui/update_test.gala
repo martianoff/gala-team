@@ -3978,26 +3978,26 @@ func TestApplyPlan_FirstWins(t T) T {
     return Eq(t1, next.Plan.Get(0), "a")
 }
 
-// MERGE, don't reset: a @plan emitted while a plan is already active
-// (mid-chain) APPENDS new steps and preserves PlanShipped — it must not
-// re-run already-shipped steps. Adding "D" to [A,B,C] (B shipped) yields
-// [A,B,C,D] with PlanShipped still 1.
-func TestApplyPlan_MergesIntoActivePlan_PreservesShipped(t T) T {
+// MERGE = replace the roadmap, preserve shipped progress. A @plan
+// emitted mid-chain re-states the full roadmap; extending it (re-list +
+// a new step) replaces the list and keeps PlanShipped. [A,B,C] (1
+// shipped) re-emitted as [A,B,C,D] → [A,B,C,D], PlanShipped still 1.
+func TestApplyPlan_ExtendRoadmap_PreservesShipped(t T) T {
     val seed = sampleModel().Copy(
         Plan        = ArrayOf("A", "B", "C"),
         PlanShipped = 1,
     )
-    val (next, _) = applyBaseDirective(seed, ArrayOf[Directive](Plan(Items = ArrayOf("D"))))
+    val (next, _) = applyBaseDirective(seed, ArrayOf[Directive](Plan(Items = ArrayOf("A", "B", "C", "D"))))
     val t1 = Eq(t,  next.Plan.Size(), 4)
     val t2 = Eq(t1, next.Plan.Get(3), "D")
     return Eq(t2, next.PlanShipped, 1)
 }
 
-// Re-emitting the SAME roadmap mid-chain (a common lead mistake) is a
-// no-op: exact-string dedup drops the already-present items, progress
-// is preserved. Past behaviour reset PlanShipped to 0 and re-ran the
+// Re-emitting the SAME roadmap mid-chain (a common lead habit on
+// continuation turns) is idempotent: size unchanged, progress
+// preserved. Past behaviour reset PlanShipped to 0 and re-ran the
 // whole chain.
-func TestApplyPlan_ReEmitSameRoadmap_NoDuplicatesNoReset(t T) T {
+func TestApplyPlan_ReEmitSameRoadmap_PreservesShipped_NoBalloon(t T) T {
     val seed = sampleModel().Copy(
         Plan        = ArrayOf("A", "B", "C"),
         PlanShipped = 2,
@@ -4007,17 +4007,30 @@ func TestApplyPlan_ReEmitSameRoadmap_NoDuplicatesNoReset(t T) T {
     return Eq(t1, next.PlanShipped, 2)
 }
 
-// Partial overlap: re-listing remaining steps plus a new one appends
-// ONLY the new step.
-func TestApplyPlan_PartialOverlap_AppendsOnlyNew(t T) T {
+// REGRESSION (the "step 1 of 33" balloon): a REWORDED re-emission of the
+// same roadmap must NOT stack copies. Replace semantics make it size-3
+// regardless of wording; an exact-string append would have grown to 6.
+func TestApplyPlan_RewordedRoadmap_NoBalloon(t T) T {
     val seed = sampleModel().Copy(
         Plan        = ArrayOf("A", "B", "C"),
         PlanShipped = 1,
     )
-    val (next, _) = applyBaseDirective(seed, ArrayOf[Directive](Plan(Items = ArrayOf("B", "C", "D"))))
-    val t1 = Eq(t,  next.Plan.Size(), 4)
-    val t2 = Eq(t1, next.Plan.Get(3), "D")
+    val (next, _) = applyBaseDirective(seed, ArrayOf[Directive](Plan(Items = ArrayOf("A v2", "B v2", "C v2"))))
+    val t1 = Eq(t,  next.Plan.Size(), 3)
+    val t2 = Eq(t1, next.Plan.Get(0), "A v2")
     return Eq(t2, next.PlanShipped, 1)
+}
+
+// A shorter re-emitted roadmap clamps PlanShipped so it never points
+// past the end of the list.
+func TestApplyPlan_ShorterRoadmap_ClampsShipped(t T) T {
+    val seed = sampleModel().Copy(
+        Plan        = ArrayOf("A", "B", "C"),
+        PlanShipped = 3,
+    )
+    val (next, _) = applyBaseDirective(seed, ArrayOf[Directive](Plan(Items = ArrayOf("A"))))
+    val t1 = Eq(t,  next.Plan.Size(), 1)
+    return Eq(t1, next.PlanShipped, 1)
 }
 
 // PrCreated with an active plan + AutoApprove + idle composer:
@@ -4128,6 +4141,42 @@ func TestKeySubmit_ClearsPlanAndShipped(t T) T {
 // PlanContinuing lifecycle tests above; the panel widget itself
 // follows the codebase convention of not string-asserting view
 // output.)
+
+// ── Full-plan viewer overlay (F8) ──────────────────────────────────
+
+// F8 opens the overlay when a plan is active, and closes it again.
+func TestPlanViewer_TogglesOpenAndClosed(t T) T {
+    val seed = sampleModel().Copy(Plan = ArrayOf("A", "B", "C"))
+    val (opened, _) = Update(seed, KeyTogglePlanViewer())
+    val t1 = IsTrue(t, opened.PlanViewerOpen)
+    val (closed, _) = Update(opened, KeyTogglePlanViewer())
+    return IsFalse(t1, closed.PlanViewerOpen)
+}
+
+// Opening is a no-op with no active plan — nothing to show.
+func TestPlanViewer_NoopWhenNoPlan(t T) T {
+    val (m, _) = Update(sampleModel(), KeyTogglePlanViewer())
+    return IsFalse(t, m.PlanViewerOpen)
+}
+
+// Scroll advances and clamps at both ends (0 .. size-1).
+func TestPlanViewer_ScrollClampsAtEnds(t T) T {
+    val base = sampleModel().Copy(PlanViewerOpen = true, Plan = ArrayOf("A", "B", "C", "D", "E"))
+    val (downOnce, _) = Update(base, PlanViewerScrollDown())
+    val t1 = Eq(t, downOnce.PlanViewerScroll, 1)
+    val (atTop, _) = Update(base, PlanViewerScrollUp())
+    val t2 = Eq(t1, atTop.PlanViewerScroll, 0)
+    val atMax = base.Copy(PlanViewerScroll = 4)
+    val (pastMax, _) = Update(atMax, PlanViewerScrollDown())
+    return Eq(t2, pastMax.PlanViewerScroll, 4)
+}
+
+// Esc closes the overlay (via onEscOrDeselect's modal stack).
+func TestPlanViewer_EscCloses(t T) T {
+    val seed = sampleModel().Copy(PlanViewerOpen = true, Plan = ArrayOf("A", "B"))
+    val (m, _) = Update(seed, HistoryDeselect())
+    return IsFalse(t, m.PlanViewerOpen)
+}
 
 // ── Plan-stall recovery (enforcePlanStallRecovery, onTick) ──────────
 // A multi-PR @plan advances only when onPrCreated fires. A step that

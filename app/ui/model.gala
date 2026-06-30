@@ -958,7 +958,7 @@ sealed type AppMsg {
     case KeyQuestionDismiss
     // Async-IO result messages. Each of these is the back-channel
     // for a synchronous subprocess that used to run on the UI
-    // thread; the handler fires a concurrent.FutureApply that
+    // thread; the handler fires a concurrent.Future(...) that
     // returns one of these once the IO completes, so the gala-tui
     // event loop stays responsive (keys + ticks keep flowing) while
     // git / clipboard subprocesses are in flight. Past audits

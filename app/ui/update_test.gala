@@ -2384,7 +2384,7 @@ func TestStateWatchdog_Delegating_AutoRetriesWithRespawn(t T) T {
     val t1 = IsTrue(t, m.WatchdogRetryFired)
     // FSM stays in Delegating — pending set is preserved.
     return m.State match {
-        case Delegating(_) => IsTrue(t1, true)
+        case Delegating(_, _) => IsTrue(t1, true)
         case _             => IsTrue(t1, false)
     }
 }

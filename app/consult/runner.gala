@@ -96,4 +96,4 @@ func loadTeamFromFile(path string) Try[config.TeamConfig] = Try[config.TeamConfi
 // TUI's update loop can return it as a Cmd without blocking the UI
 // thread on the (potentially long) child gala_team session.
 func RunConsultFuture(r Registry, name string, body string) concurrent.Future[ConsultOutcome] =
-    concurrent.FutureApply[ConsultOutcome](() => RunConsult(r, name, body))
+    concurrent.Future[ConsultOutcome](() => RunConsult(r, name, body))

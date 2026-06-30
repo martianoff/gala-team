@@ -69,7 +69,7 @@ func (s ClaudeProcessSession) Send(in AgentInput) Try[bool] = in match {
 func (s ClaudeProcessSession) EndTurn() Try[bool] = s.Proc.CloseStdin()
 
 func (s ClaudeProcessSession) NextEvent() concurrent.Future[AgentEvent] =
-    concurrent.FutureApply[AgentEvent](() => classifyClaudeRead(s.Proc.ReadLine()))
+    concurrent.Future[AgentEvent](() => classifyClaudeRead(s.Proc.ReadLine()))
 
 // Close kills the child and waits for it to fully exit. The wait is
 // deliberate — the caller that replaces a live lead turn wants the old
@@ -87,7 +87,7 @@ func (s ClaudeProcessSession) Close() Try[bool] =
 // on NextEvent instead. runtime_glue's stderr pump narrows to this type
 // and falls back to a clean end for any non-Claude session.
 func (s ClaudeProcessSession) NextDiagnosticFuture() concurrent.Future[AgentEvent] =
-    concurrent.FutureApply[AgentEvent](() => classifyClaudeDiagnostic(s.Proc.ReadStderrLine()))
+    concurrent.Future[AgentEvent](() => classifyClaudeDiagnostic(s.Proc.ReadStderrLine()))
 
 // classifyReadFailure maps a read failure to a terminal AgentEvent: a
 // clean end (subprocess reports it as Failure(io.EOF)) is AgentTurnEnded,

@@ -404,7 +404,7 @@ func ResetLeadBranch(proj Project) Try[bool] = Try(() => {
 // wipe. The user opted into "Start fresh = blank slate"; partial
 // cleanup is better than aborting on the first lockfile.
 func WipeWorktreesFuture(proj Project, members Array[Member], mode WorkspaceMode) concurrent.Future[Msg] {
-    return concurrent.FutureApply[Msg](() => {
+    return concurrent.Future[Msg](() => {
         val _ = ResetLeadBranch(proj)
         val isWorktreeMode = mode match {
             case Shared()              => false
@@ -727,7 +727,7 @@ func NextStderrFuture(s MemberSession) concurrent.Future[Msg] {
 // or follow-up can follow; CloseSendFuture is the explicit end.
 func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => s.Session.Send(PromptInput(Text = prompt)) match {
+    return concurrent.Future[Msg](() => s.Session.Send(PromptInput(Text = prompt)) match {
         case Success(_)   => RtWriteSent(Member = name)
         case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })
@@ -739,7 +739,7 @@ func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
 // unanswered.
 func SendToolResultFuture(s MemberSession, toolUseId string, answer string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => s.Session.Send(ToolResultInput(ToolUseId = toolUseId, Answer = answer)) match {
+    return concurrent.Future[Msg](() => s.Session.Send(ToolResultInput(ToolUseId = toolUseId, Answer = answer)) match {
         case Success(_)   => RtWriteSent(Member = name)
         case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })
@@ -749,7 +749,7 @@ func SendToolResultFuture(s MemberSession, toolUseId string, answer string) conc
 // Dispatched when a `result` event lands.
 func CloseSendFuture(s MemberSession) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.FutureApply[Msg](() => s.Session.EndTurn() match {
+    return concurrent.Future[Msg](() => s.Session.EndTurn() match {
         case Success(_)   => RtWriteSent(Member = name)
         case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })
@@ -836,7 +836,7 @@ func GhPrCreateFuture(proj Project, body string, baseRef Option[string], forceBr
     val bodyWithFooter = body + "\n\n---\n🍎 orchestrated by [Gala Team](https://github.com/martianoff/gala-team)"
     val leadBranch = LeadBranchFor(proj)
     val leadWtPath = LeadWorktreePath(proj)
-    return concurrent.FutureApply[Msg](() => {
+    return concurrent.Future[Msg](() => {
         // Snapshot the lead branch's current tip onto a per-PR
         // branch. With `forceBranch` set we reuse the named branch
         // (the user is iterating on an existing PR — push updates

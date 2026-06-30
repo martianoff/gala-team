@@ -1853,7 +1853,7 @@ func runesPrefix(s string, n int) string {
 // ClipboardFailed, and the existing insert / toast / error logic
 // runs in those handlers.
 func onPasteClipboard(m AppModel) Tuple[AppModel, Cmd[AppMsg]] =
-    (m, FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() => readClipboard() match {
+    (m, FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() => readClipboard() match {
         case Failure(err) => ClipboardFailed(ErrText = err.Error())
         case Success(txt) => ClipboardPasted(Text = txt)
     })))
@@ -2282,7 +2282,7 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     val proj      = m0.Project
     val mode      = m0.Policy.WorkspaceMode
     val skipPerms = m0.Team.DangerouslySkipPermissions
-    return (m0, FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+    return (m0, FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
         spawnLeadOffThread(oldLeadSession, proj, lead, mode, skipPerms, sid, firstTurn, effectivePrompt))))
 }
 
@@ -2311,7 +2311,7 @@ func markPendingLinesUndelivered(convo Array[session.ConversationLine]) Array[se
         else cl)
 
 // spawnLeadOffThread runs entirely on a worker goroutine
-// (concurrent.FutureApply), so the UI loop never blocks on it. It first
+// (concurrent.Future(...)), so the UI loop never blocks on it. It first
 // kills the prior lead subprocess — waiting for it to exit so its stream
 // can't race the new turn — THEN ensures the workspace + spawns the new
 // claude, packaging the outcome as a LeadSpawned message. This ordering
@@ -3495,7 +3495,7 @@ func onMemberDone(m AppModel, name string, body string) Tuple[AppModel, Cmd[AppM
 // nudge-or-finalise without re-reading model state. The Future
 // resolves into UncommittedCheckResult, dispatched through Update.
 func uncommittedCheckCmd(cwd string, name string, body string) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+    FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
         UncommittedCheckResult(Member = name, Body = body, Dirty = hasUncommittedWork(cwd))))
 
 // onUncommittedCheckResult is the back-channel for the engineer
@@ -5001,7 +5001,7 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // applyQAPromptReady handler guards on State == QAGate and drops
 // the result quietly.
 func qaPromptReadyCmd(m AppModel) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() => QAPromptReady(Prompt = buildQAReviewPrompt(m))))
+    FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() => QAPromptReady(Prompt = buildQAReviewPrompt(m))))
 
 // applyQAPromptReady consumes a QAPromptReady message — the result
 // of the off-thread buildQAReviewPrompt — and runs the same
@@ -5783,7 +5783,7 @@ func approveAndKickHooks(m AppModel, body string) Tuple[AppModel, Cmd[AppMsg]] =
 // everything it needs without re-reading model state. Capturing
 // `proj` by value is fine — it's an immutable struct.
 func approvalReadyCmd(proj Project, body string) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+    FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
         ApprovalReadyResult(Body = body, Reason = checkPrReady(proj))))
 
 // onApprovalReadyResult resumes approveAndKickHooks once the off-
@@ -5858,7 +5858,7 @@ func onApprovalReadyResult(m AppModel, body string, reason Option[string]) Tuple
 // onSummaryReadyResult reads them back, decides nudge-or-transition,
 // and clears the field.
 func summaryReadyCmd(proj Project, member string) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+    FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
         SummaryReadyResult(Member = member, Reason = checkPrReady(proj))))
 
 // onSummaryReadyResult resumes onSessionFailed's TL @summary branch.
@@ -6417,7 +6417,7 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
     // for whether the user's local default branch has fallen behind the
     // merged-on-GitHub commits — surfaced as a warn-only advisory by
     // onBaseDriftChecked. Batched so neither blocks the other.
-    val driftCmd = FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() =>
+    val driftCmd = FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
         BaseDriftChecked(Behind = LocalBaseBehindStr(m.Project))))
     return (m.Copy(
         OpenPrs        = nextOpenPrs,
@@ -6977,7 +6977,7 @@ func onHistorySelect(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // off the UI thread; result is mapped to a HistoryArchiveLoaded /
 // HistoryArchiveFailed AppMsg.
 func archiveLoadCmd(path string) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = concurrent.FutureApply[AppMsg](() => session.LoadArchive(path) match {
+    FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() => session.LoadArchive(path) match {
         case Success(snap) => HistoryArchiveLoaded(Snap = snap)
         case Failure(err)  => HistoryArchiveFailed(ErrText = err.Error())
     }))

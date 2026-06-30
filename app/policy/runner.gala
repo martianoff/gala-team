@@ -70,7 +70,7 @@ func RunHooks(cwd string, hooks Array[Hook]) Try[bool] = Try(() => {
 
 // RunHooksFuture wraps RunHooks for the UI dispatch loop.
 func RunHooksFuture(cwd string, hooks Array[Hook]) concurrent.Future[Try[bool]] =
-    concurrent.FutureApply[Try[bool]](() => RunHooks(cwd, hooks))
+    concurrent.Future[Try[bool]](() => RunHooks(cwd, hooks))
 
 // HookTimeout caps how long a single hook can run before the watchdog
 // kills it. Past audits caught a session where `bazel build //...`
@@ -113,7 +113,7 @@ func runOne(cwd string, hook Hook) Try[HookResult] = Try(() => {
     }
     val timeout = HookTimeout()
     val started = time_utils.Now()
-    concurrent.FutureApply[bool](() => {
+    concurrent.Future[bool](() => {
         time_utils.Sleep(timeout)
         proc.Kill()
         return true

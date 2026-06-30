@@ -59,7 +59,7 @@ struct SubprocessOutput(
 // Caller contract: invoke from a worker goroutine, not the UI thread.
 // RunWithTimeout still blocks the calling goroutine for up to
 // `timeout`; the bounded-failure property is what's new, not
-// off-thread-ness. Pair with concurrent.FutureApply for the off-
+// off-thread-ness. Pair with concurrent.Future(...) for the off-
 // thread half (every existing call site already does this).
 func RunWithTimeout(opts subprocess.SpawnOpts, timeout time_utils.Duration) Try[SubprocessOutput] {
     val procTry = subprocess.Spawn(opts)
@@ -72,7 +72,7 @@ func RunWithTimeout(opts subprocess.SpawnOpts, timeout time_utils.Duration) Try[
     // parent's reaping; either Kill fires on an already-exited
     // process (no-op) or fires fractions of a millisecond before
     // — irrelevant once stdout is drained.
-    concurrent.FutureApply[bool](() => {
+    concurrent.Future[bool](() => {
         time_utils.Sleep(timeout)
         proc.Kill()
         return true

@@ -1,6 +1,7 @@
 package consult
 
 import (
+    "martianoff/gala/go_builtins"
     "martianoff/gala/concurrent"
     "martianoff/gala/fs"
     "github.com/martianoff/gala_team/app/config"
@@ -86,7 +87,7 @@ func runHeadlessStep(entry ConsultEntry, proj Project, tm Team, body string) Con
 // its own thin facade and config.LoadFromString stays string-only.
 func loadTeamFromFile(path string) Try[config.TeamConfig] = Try[config.TeamConfig](() => {
     val raw = fs.ReadFileString(path) match {
-        case Failure(err) => panic(s"read ${path}: ${err.Error()}")
+        case Failure(err) => go_builtins.Panic(s"read ${path}: ${err.Error()}")
         case Success(s)   => s
     }
     return config.LoadFromString(raw).Get()

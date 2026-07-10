@@ -1,6 +1,7 @@
 package config
 
 import (
+    "martianoff/gala/go_builtins"
     "martianoff/gala/strings"
     "martianoff/gala/yaml"
     . "martianoff/gala/std"
@@ -26,7 +27,7 @@ import (
 func LoadFromString(yamlStr string) Try[TeamConfig] = Try(() => {
     val wire = configCodec().Decode(yamlStr).Get()
     if wire.Teams.IsEmpty() {
-        panic("team.yaml: must declare at least one team under top-level 'teams:'")
+        go_builtins.Panic("team.yaml: must declare at least one team under top-level 'teams:'")
     }
     val teams = wire.Teams.Map((wt) => convertTeam(wt))
     val workflow = convertWorkflow(wire.Workflow, yamlStr)
@@ -161,12 +162,12 @@ func configCodec() yaml.YamlEncoder[WireConfig] = yaml.Codec[WireConfig](yaml.Sn
 // ----------------------------------------------------------------------------
 
 func convertTeam(wt WireTeam) Team {
-    if wt.Name == "" { panic("team.yaml: team.name is required and must be non-empty") }
-    if wt.Members.IsEmpty() { panic(s"team.yaml: team '${wt.Name}' has no members") }
+    if wt.Name == "" { go_builtins.Panic("team.yaml: team.name is required and must be non-empty") }
+    if wt.Members.IsEmpty() { go_builtins.Panic(s"team.yaml: team '${wt.Name}' has no members") }
     val members = wt.Members.Map((wm) => convertMember(wm))
     val leads = members.Filter((m) => SameRole(m.Role, TeamLead()))
     if leads.Length() != 1 {
-        panic(s"team.yaml: team '${wt.Name}' must declare exactly one team_lead (found ${leads.Length()})")
+        go_builtins.Panic(s"team.yaml: team '${wt.Name}' must declare exactly one team_lead (found ${leads.Length()})")
     }
     val effectiveKey = if (wt.Key == "") slugify(wt.Name) else wt.Key
     return Team(
@@ -182,11 +183,11 @@ func convertTeam(wt WireTeam) Team {
 
 func convertMember(wm WireMember) Member {
     if wm.Name == "" {
-        panic("team.yaml: member is missing required 'name' field")
+        go_builtins.Panic("team.yaml: member is missing required 'name' field")
     }
     val role = RoleFromName(wm.Role) match {
         case Some(r) => r
-        case None()  => panic(s"team.yaml: unknown role '${wm.Role}' for member '${wm.Name}' (expected: team_lead | engineer | qa)")
+        case None()  => go_builtins.Panic(s"team.yaml: unknown role '${wm.Role}' for member '${wm.Name}' (expected: team_lead | engineer | qa)")
     }
     val modelOpt = if (wm.Model == "") None[string]() else Some(wm.Model)
     return Member(
@@ -291,22 +292,22 @@ func convertGuardrails(wg WireGuardrails) Guardrails {
 }
 
 func convertHook(wh WireHook) Hook {
-    if wh.Name == "" { panic("team.yaml: policy hook is missing required 'name'") }
-    if wh.Cmd == ""  { panic(s"team.yaml: policy hook '${wh.Name}' is missing required 'cmd'") }
+    if wh.Name == "" { go_builtins.Panic("team.yaml: policy hook is missing required 'name'") }
+    if wh.Cmd == ""  { go_builtins.Panic(s"team.yaml: policy hook '${wh.Name}' is missing required 'cmd'") }
     return Hook(Name = wh.Name, Cmd = wh.Cmd, Args = wh.Args)
 }
 
 func workspaceModeFromString(s string) WorkspaceMode {
     if s == "shared" { return Shared() }
     if s == "worktree-per-engineer" { return WorktreePerEngineer() }
-    panic(s"team.yaml: unknown policy.workspace_mode '${s}' (expected: shared | worktree-per-engineer)")
+    go_builtins.Panic(s"team.yaml: unknown policy.workspace_mode '${s}' (expected: shared | worktree-per-engineer)")
 }
 
 func mergeRuleFromString(s string) MergeRule {
     if s == "squash" { return SquashMerge() }
     if s == "rebase" { return RebaseMerge() }
     if s == "merge"  { return PlainMerge() }
-    panic(s"team.yaml: unknown policy.merge_rule '${s}' (expected: squash | rebase | merge)")
+    go_builtins.Panic(s"team.yaml: unknown policy.merge_rule '${s}' (expected: squash | rebase | merge)")
 }
 
 // hasYamlBlock returns true when `yamlStr` declares a top-level
@@ -345,7 +346,7 @@ func validate(teams Array[Team], workflow Workflow, pol Policy, guidance Array[G
 
     val _ = teams.FoldLeft(EmptyHashMap[string, bool](), (seen, tm) => {
         if seen.Contains(tm.Key) {
-            panic(s"team.yaml: duplicate team key '${tm.Key}'")
+            go_builtins.Panic(s"team.yaml: duplicate team key '${tm.Key}'")
         }
         return seen.Put(tm.Key, true)
     })
@@ -365,15 +366,15 @@ func validate(teams Array[Team], workflow Workflow, pol Policy, guidance Array[G
 func validateOneTeam(tm Team, workflow Workflow) {
     val engineers = tm.Members.Filter((m) => SameRole(m.Role, Engineer()))
     if engineers.IsEmpty() {
-        panic(s"team.yaml: team '${tm.Name}' must declare at least one engineer")
+        go_builtins.Panic(s"team.yaml: team '${tm.Name}' must declare at least one engineer")
     }
     val qas = tm.Members.Filter((m) => SameRole(m.Role, QA()))
     if workflow.QARequired && qas.IsEmpty() {
-        panic(s"team.yaml: workflow.qa_required is true but team '${tm.Name}' has no qa members")
+        go_builtins.Panic(s"team.yaml: workflow.qa_required is true but team '${tm.Name}' has no qa members")
     }
     val _ = tm.Members.FoldLeft(EmptyHashMap[string, bool](), (seen, m) => {
         if seen.Contains(m.Name) {
-            panic(s"team.yaml: team '${tm.Name}' has duplicate member name '${m.Name}'")
+            go_builtins.Panic(s"team.yaml: team '${tm.Name}' has duplicate member name '${m.Name}'")
         }
         return seen.Put(m.Name, true)
     })

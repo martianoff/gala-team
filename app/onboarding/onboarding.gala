@@ -1,6 +1,7 @@
 package onboarding
 
 import (
+    "martianoff/gala/go_builtins"
     "path/filepath"
     "martianoff/gala/fs"
     "martianoff/gala/strings"
@@ -48,7 +49,7 @@ func Load(proj Project, paths Array[string]) Try[string] = Try(() => {
                        else                     filepath.Join(proj.Repo, raw)
         val text = fs.ReadFileString(resolved) match {
             case Success(s)   => s
-            case Failure(err) => panic(s"onboarding: cannot read '${resolved}': ${err.Error()}")
+            case Failure(err) => go_builtins.Panic(s"onboarding: cannot read '${resolved}': ${err.Error()}")
         }
         return acc.Append(s"--- ${raw} ---").Append(text)
     }).MkString("\n\n")

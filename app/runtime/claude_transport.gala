@@ -173,7 +173,7 @@ func LooksLikeTransportAuthError(s string) bool {
     if s == "" { return false }
     // A genuine CLI auth-error line is short prose. Anything large is
     // buffered / echoed content that only quotes the wording.
-    if len(s) > 512 { return false }
+    if s.Size() > 512 { return false }
     val lower = strings.ToLower(strings.TrimSpace(s))
     val explicit = strings.Contains(lower, "failed to authenticate") ||
                    strings.Contains(lower, "invalid authentication credentials")

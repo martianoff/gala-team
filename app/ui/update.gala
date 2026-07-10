@@ -1,6 +1,7 @@
 package ui
 
 import (
+    "martianoff/gala/go_builtins"
     "strings"
     "martianoff/gala/concurrent"
     "martianoff/gala/json"
@@ -609,7 +610,7 @@ func enforceStateWatchdog(m AppModel, now time_utils.Instant) Tuple[AppModel, Cm
     // silently discard queued work the user never abandoned.
     val retrying = persisted.Copy(
         Composer       = persisted.LastUserPrompt,
-        ComposerCursor = len(persisted.LastUserPrompt),
+        ComposerCursor = persisted.LastUserPrompt.Size(),
         PlanContinuing = true,
     )
     val (mAfterSubmit, cmdAfterSubmit) = onSubmit(retrying)
@@ -634,7 +635,7 @@ func resumePlanStep(m AppModel, note string) Tuple[AppModel, Cmd[AppMsg]] {
     ))
     return (m.Copy(
         Composer       = step,
-        ComposerCursor = len(step),
+        ComposerCursor = step.Size(),
         PlanContinuing = true,
         Conversation   = convo,
     ), MsgCmd[AppMsg](Msg = KeySubmit()))
@@ -1809,7 +1810,7 @@ func truncateForToast(s string) string {
     val parts = strings.SplitN(strings.TrimSpace(s), "\n", 2)
     val firstLine = parts[0]
     val cap = 80
-    if len(firstLine) <= cap { return firstLine }
+    if ToRunes(firstLine).Size() <= cap { return firstLine }
     // strings.SplitN with a length-1 separator is safe at byte
     // boundary `cap` since gala doesn't expose a clean substring op
     // — feeding the second part through Drop avoids the slice syntax.
@@ -1823,7 +1824,7 @@ func truncateForToast(s string) string {
 // get sliced mid-codepoint.
 func runesPrefix(s string, n int) string {
     val rs = ToRunes(s)
-    if len(rs) <= n { return s }
+    if rs.Size() <= n { return s }
     var out = EmptyArray[string]()
     var i = 0
     for i < n {
@@ -1866,7 +1867,7 @@ func onPasteClipboard(m AppModel) Tuple[AppModel, Cmd[AppMsg]] =
 // the composer onto an empty line.
 func onClipboardPasted(m AppModel, txt string) Tuple[AppModel, Cmd[AppMsg]] {
     val clean = strings.TrimRight(txt, " \t\r\n")
-    val toast = m.Toasts.PushInfo(s"pasted ${len(clean)} chars", time_utils.Now(), time_utils.Seconds(int64(2)))
+    val toast = m.Toasts.PushInfo(s"pasted ${clean.Size()} chars", time_utils.Now(), time_utils.Seconds(int64(2)))
     val (next, cur) = composerInsertAt(m.Composer, m.ComposerCursor, clean)
     return (m.Copy(Composer = next, ComposerCursor = cur, Toasts = toast), NoCmd[AppMsg]())
 }
@@ -1891,14 +1892,14 @@ func readClipboard() Try[string] = Try(() => {
     // subsystem is wedged; surface as a "clipboard read timed out"
     // error rather than leaking a worker goroutine.
     val resTry = RunWithTimeout(opts, DefaultSubprocessTimeout())
-    if resTry.IsFailure() { panic(s"spawn ${cmd}: ${resTry.GetError().Error()}") }
+    if resTry.IsFailure() { go_builtins.Panic(s"spawn ${cmd}: ${resTry.GetError().Error()}") }
     val res = resTry.Get()
     if res.TimedOut {
         LogSubprocessTimeout(cmd, ArgvDebugString(opts),
             DefaultSubprocessTimeout().ToNanos() / int64(1000000))
-        panic(s"${cmd} timed out after ${DefaultSubprocessTimeout().ToNanos() / int64(1000000000)}s")
+        go_builtins.Panic(s"${cmd} timed out after ${DefaultSubprocessTimeout().ToNanos() / int64(1000000000)}s")
     }
-    if res.ExitCode != 0 { panic(s"${cmd} exited ${res.ExitCode}") }
+    if res.ExitCode != 0 { go_builtins.Panic(s"${cmd} exited ${res.ExitCode}") }
     return res.Lines.MkString("\n")
 })
 
@@ -4890,8 +4891,8 @@ func containsWord(haystack string, needle string) bool {
     if needle == "" { return false }
     val hRunes = ToRunes(strings.ToLower(haystack))
     val nRunes = ToRunes(strings.ToLower(needle))
-    val hLen = len(hRunes)
-    val nLen = len(nRunes)
+    val hLen = hRunes.Size()
+    val nLen = nRunes.Size()
     if nLen == 0 || nLen > hLen { return false }
     var i = 0
     val limit = hLen - nLen
@@ -4929,7 +4930,7 @@ func isWordRune(r rune) bool {
 // GitHub, the snapshot branch is already pushed.
 func buildBadSummaryBodyNudge(reason string, body string) string {
     val nl = "\n"
-    val truncated = if (len(body) > 600) runesPrefix(body, 600) else body
+    val truncated = if (body.Size() > 600) runesPrefix(body, 600) else body
     return "System: Your @summary was rejected by the PR-description quality gate — " + reason + "." + nl + nl +
         "The @summary body becomes the PR description verbatim. Reviewers see it cold without your transcript context, so the bar is: a reader who's never seen this orchestration should be able to understand what shipped and why." + nl + nl +
         "Required structure (use ## headers, GitHub-flavored markdown):" + nl +
@@ -4952,7 +4953,7 @@ func gitSlugForTeam(s string) string {
     val rs = ToRunes(lower)
     var out = EmptyArray[string]()
     var i = 0
-    val n = len(rs)
+    val n = rs.Size()
     var lastWasDash = false
     for i < n {
         val c = rs[i]
@@ -5475,7 +5476,7 @@ func formatDirectiveMarkers(text string) string {
     val lines = strings.Split(text, "\n")
     var kept = EmptyArray[string]()
     var i = 0
-    val n = len(lines)
+    val n = ArrayFromSlice(lines).Size()
     for i < n {
         val ln = lines[i]
         val replacement = rewriteMarkerLine(ln)
@@ -5531,7 +5532,7 @@ func parseTargetMarker(trimmed string, prefix string) Tuple[string, string] {
     // SplitN(afterOpen, ")", 2) yields [target, rest] when the close
     // paren exists, [afterOpen] when it doesn't (mid-stream chunk).
     val parts = strings.SplitN(afterOpen, ")", 2)
-    if len(parts) < 2 {
+    if ArrayFromSlice(parts).Size() < 2 {
         return (strings.TrimSpace(afterOpen), "")
     }
     return (strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
@@ -6068,7 +6069,7 @@ func parseRawSummary(text string) string {
 func parseRenderedSummary(text string) string {
     val lines = strings.Split(text, "\n")
     var i = 0
-    val n = len(lines)
+    val n = ArrayFromSlice(lines).Size()
     var startIdx = -1
     for i < n {
         if strings.TrimSpace(lines[i]) == "Summary:" {
@@ -6468,7 +6469,7 @@ func pendingPrTitle(m AppModel) string {
 
 func truncateTitle(s string, maxLen int) string {
     val rs = ToRunes(s)
-    if len(rs) <= maxLen { return s }
+    if rs.Size() <= maxLen { return s }
     return string(SliceTo(rs, maxLen - 1)) + "…"
 }
 
@@ -6663,7 +6664,7 @@ func transitionContext(m AppModel) TransitionContext = TransitionContext(
 // of byte-fiddling at the UTF-8 level.
 func trimLastRune(s string) string {
     val rs = ToRunes(s)
-    val n = len(rs)
+    val n = rs.Size()
     return if (n == 0) "" else string(SliceTo(rs, n - 1))
 }
 
@@ -6673,12 +6674,12 @@ func trimLastRune(s string) string {
 // just typed (standard text-input behaviour).
 func composerInsertAt(text string, cursor int, chunk string) Tuple[string, int] {
     val rs = ToRunes(text)
-    val n = len(rs)
+    val n = rs.Size()
     val cur = clampCursor(cursor, n)
     val left = string(SliceTo(rs, cur))
     val right = string(SliceFrom(rs, cur))
     val inserted = chunk
-    val nextCur = cur + len(ToRunes(inserted))
+    val nextCur = cur + ToRunes(inserted).Size()
     return (left + inserted + right, nextCur)
 }
 
@@ -6686,7 +6687,7 @@ func composerInsertAt(text string, cursor int, chunk string) Tuple[string, int] 
 // (Backspace semantics). Cursor moves left by one; no-op when at 0.
 func composerDeleteBefore(text string, cursor int) Tuple[string, int] {
     val rs = ToRunes(text)
-    val n = len(rs)
+    val n = rs.Size()
     val cur = clampCursor(cursor, n)
     if cur == 0 { return (text, 0) }
     val left = string(SliceTo(rs, cur - 1))
@@ -6698,7 +6699,7 @@ func composerDeleteBefore(text string, cursor int) Tuple[string, int] {
 // Cursor stays put; no-op when already at end.
 func composerDeleteAt(text string, cursor int) Tuple[string, int] {
     val rs = ToRunes(text)
-    val n = len(rs)
+    val n = rs.Size()
     val cur = clampCursor(cursor, n)
     if cur >= n { return (text, n) }
     val left = string(SliceTo(rs, cur))
@@ -6719,7 +6720,7 @@ func composerDeleteAt(text string, cursor int) Tuple[string, int] {
 // multiple rows.
 func composerVerticalMove(text string, cursor int, delta int) int {
     val rs = ToRunes(text)
-    val n = len(rs)
+    val n = rs.Size()
     val cur = clampCursor(cursor, n)
     // Walk to current line index + column.
     var lineIdx = 0
@@ -6802,7 +6803,7 @@ func onComposerDelete(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
 func onComposerCursor(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
     case FocusSidebar() => (m, NoCmd[AppMsg]())
     case FocusComposer() => {
-        val n = len(ToRunes(m.Composer))
+        val n = ToRunes(m.Composer).Size()
         val next = clampCursor(m.ComposerCursor + delta, n)
         return (m.Copy(ComposerCursor = next), NoCmd[AppMsg]())
     }
@@ -6813,7 +6814,7 @@ func onComposerCursor(m AppModel, delta int) Tuple[AppModel, Cmd[AppMsg]] = m.Fo
 func onComposerCursorJump(m AppModel, target int) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
     case FocusSidebar() => (m, NoCmd[AppMsg]())
     case FocusComposer() => {
-        val n = len(ToRunes(m.Composer))
+        val n = ToRunes(m.Composer).Size()
         return (m.Copy(ComposerCursor = clampCursor(target, n)), NoCmd[AppMsg]())
     }
 }
@@ -6827,7 +6828,7 @@ func onComposerCursorJump(m AppModel, target int) Tuple[AppModel, Cmd[AppMsg]] =
 func onComposerEndKey(m AppModel) Tuple[AppModel, Cmd[AppMsg]] = m.Focus match {
     case FocusSidebar() => (m.Copy(ConversationSticky = true), NoCmd[AppMsg]())
     case FocusComposer() => {
-        val n = len(ToRunes(m.Composer))
+        val n = ToRunes(m.Composer).Size()
         return (m.Copy(ComposerCursor = n), NoCmd[AppMsg]())
     }
 }

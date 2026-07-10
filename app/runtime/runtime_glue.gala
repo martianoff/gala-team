@@ -1,6 +1,7 @@
 package runtime
 
 import (
+    "martianoff/gala/go_builtins"
     "errors"
     "path/filepath"
     "martianoff/gala/fs"
@@ -264,7 +265,7 @@ func EnsureLeadWorktree(proj Project) Try[string] = Try(() => {
     }
     val parent = filepath.Dir(wtPath)
     fs.MkdirAll(parent, 0755) match {
-        case Failure(err) => panic(s"lead worktree mkdir ${parent}: ${err.Error()}")
+        case Failure(err) => go_builtins.Panic(s"lead worktree mkdir ${parent}: ${err.Error()}")
         case Success(_)   => {}
     }
     if leadWtPathIsLiveDir(wtPath) {
@@ -300,7 +301,7 @@ func EnsureLeadWorktree(proj Project) Try[string] = Try(() => {
     )
     val proc = subprocess.Spawn(opts) match {
         case Success(p)   => p
-        case Failure(err) => panic(s"git worktree add ${wtPath}: ${err.Error()}")
+        case Failure(err) => go_builtins.Panic(s"git worktree add ${wtPath}: ${err.Error()}")
     }
     val code = proc.Wait().Get()
     if code != 0 {
@@ -308,7 +309,7 @@ func EnsureLeadWorktree(proj Project) Try[string] = Try(() => {
             LogWorktreeCreate("_lead", wtPath, branch)
             return wtPath
         }
-        panic(s"git worktree add ${wtPath} exited with code ${code}")
+        go_builtins.Panic(s"git worktree add ${wtPath} exited with code ${code}")
     }
     LogWorktreeCreate("_lead", wtPath, branch)
     return wtPath
@@ -360,10 +361,10 @@ func ResetLeadBranch(proj Project) Try[bool] = Try(() => {
     )
     val proc = subprocess.Spawn(opts) match {
         case Success(p)   => p
-        case Failure(err) => panic(s"git reset --hard ${resetTarget}: ${err.Error()}")
+        case Failure(err) => go_builtins.Panic(s"git reset --hard ${resetTarget}: ${err.Error()}")
     }
     val code = proc.Wait().Get()
-    if code != 0 { panic(s"git reset --hard ${resetTarget} exited with code ${code}") }
+    if code != 0 { go_builtins.Panic(s"git reset --hard ${resetTarget} exited with code ${code}") }
     // Drop untracked files left behind by the prior turn so the next
     // session starts from a truly clean tree. `-f` force, `-d` recurse
     // into directories, `-x` include .gitignored entries (the prior
@@ -449,7 +450,7 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try(() => {
     // fresh `git worktree add` doesn't trip over leftover content.
     val parent = filepath.Dir(wtPath)
     fs.MkdirAll(parent, 0755) match {
-        case Failure(err) => panic(s"worktree mkdir ${parent}: ${err.Error()}")
+        case Failure(err) => go_builtins.Panic(s"worktree mkdir ${parent}: ${err.Error()}")
         case Success(_)   => {}
     }
     if leadWtPathIsLiveDir(wtPath) {
@@ -497,7 +498,7 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try(() => {
     )
     val proc = subprocess.Spawn(opts) match {
         case Success(p)   => p
-        case Failure(err) => panic(s"git worktree add ${wtPath}: ${err.Error()}")
+        case Failure(err) => go_builtins.Panic(s"git worktree add ${wtPath}: ${err.Error()}")
     }
     val code = proc.Wait().Get()
     if code != 0 {
@@ -512,7 +513,7 @@ func ensureWorktree(proj Project, m Member) Try[string] = Try(() => {
             LogWorktreeCreate(m.Name, wtPath, branch)
             return wtPath
         }
-        panic(s"git worktree add ${wtPath} exited with code ${code}")
+        go_builtins.Panic(s"git worktree add ${wtPath} exited with code ${code}")
     }
     LogWorktreeCreate(m.Name, wtPath, branch)
     return wtPath
@@ -656,10 +657,10 @@ func PruneWorktrees(proj Project) Try[bool] = Try(() => {
     )
     val proc = subprocess.Spawn(opts) match {
         case Success(p)   => p
-        case Failure(err) => panic(s"git worktree prune: ${err.Error()}")
+        case Failure(err) => go_builtins.Panic(s"git worktree prune: ${err.Error()}")
     }
     val code = proc.Wait().Get()
-    if code != 0 { panic(s"git worktree prune exited with code ${code}") }
+    if code != 0 { go_builtins.Panic(s"git worktree prune exited with code ${code}") }
     return true
 })
 
@@ -1467,19 +1468,19 @@ func stripTitleMarkdown(s string) string {
     for changed {
         changed = false
         out = strings.TrimSpace(out)
-        if strings.HasPrefix(out, "**") && strings.HasSuffix(out, "**") && len(out) >= 4 {
+        if strings.HasPrefix(out, "**") && strings.HasSuffix(out, "**") && out.Size() >= 4 {
             out = stripWrap(out, 2)
             changed = true
-        } else if strings.HasPrefix(out, "__") && strings.HasSuffix(out, "__") && len(out) >= 4 {
+        } else if strings.HasPrefix(out, "__") && strings.HasSuffix(out, "__") && out.Size() >= 4 {
             out = stripWrap(out, 2)
             changed = true
-        } else if strings.HasPrefix(out, "`") && strings.HasSuffix(out, "`") && len(out) >= 2 {
+        } else if strings.HasPrefix(out, "`") && strings.HasSuffix(out, "`") && out.Size() >= 2 {
             out = stripWrap(out, 1)
             changed = true
-        } else if strings.HasPrefix(out, "*") && strings.HasSuffix(out, "*") && len(out) >= 2 && !strings.HasPrefix(out, "**") {
+        } else if strings.HasPrefix(out, "*") && strings.HasSuffix(out, "*") && out.Size() >= 2 && !strings.HasPrefix(out, "**") {
             out = stripWrap(out, 1)
             changed = true
-        } else if strings.HasPrefix(out, "_") && strings.HasSuffix(out, "_") && len(out) >= 2 && !strings.HasPrefix(out, "__") {
+        } else if strings.HasPrefix(out, "_") && strings.HasSuffix(out, "_") && out.Size() >= 2 && !strings.HasPrefix(out, "__") {
             out = stripWrap(out, 1)
             changed = true
         }
@@ -1488,12 +1489,12 @@ func stripTitleMarkdown(s string) string {
 }
 
 // stripWrap removes `n` runes from each end of `s`. Caller must
-// ensure len(s) >= 2*n (enforced by stripTitleMarkdown's len
+// ensure s.Size() >= 2*n (enforced by stripTitleMarkdown's len
 // guards). Used only for symmetric markdown-emphasis stripping;
 // kept narrow rather than exposing a generic substring helper.
 func stripWrap(s string, n int) string {
     val rs = ToRunes(s)
-    val total = len(rs)
+    val total = rs.Size()
     val keep = total - 2 * n
     if keep <= 0 { return "" }
     val tail = SliceFrom(rs, n)
@@ -1517,7 +1518,7 @@ func stripWrap(s string, n int) string {
 // checked, falling through to a mid-word cut inside backticks.
 func capTitleAtWordBoundary(s string, cap int) string {
     val rs = ToRunes(s)
-    if len(rs) <= cap { return s }
+    if rs.Size() <= cap { return s }
     // Reserve 3 chars for "...".
     val hardLimit = cap - 3
     var cutAt = hardLimit

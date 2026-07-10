@@ -192,7 +192,7 @@ val userInputCodec = json.Codec[UserInputPayload](json.SnakeCase())
 
 func LogUserInput(text string) {
     if !DebugEnabled() { return }
-    val enc = userInputCodec.Encode(UserInputPayload(Text = text, TextLen = len(text)))
+    val enc = userInputCodec.Encode(UserInputPayload(Text = text, TextLen = text.Size()))
     if enc.IsFailure() { return }
     LogEvent(KindUserInput, "lead", enc.Get())
 }
@@ -202,7 +202,7 @@ val memberOutputCodec = json.Codec[MemberOutputPayload](json.SnakeCase())
 
 func LogMemberOutput(member string, visible string) {
     if !DebugEnabled() { return }
-    val enc = memberOutputCodec.Encode(MemberOutputPayload(Text = visible, TextLen = len(visible)))
+    val enc = memberOutputCodec.Encode(MemberOutputPayload(Text = visible, TextLen = visible.Size()))
     if enc.IsFailure() { return }
     LogEvent(KindMemberOutput, member, enc.Get())
 }
@@ -212,7 +212,7 @@ val dispatchCodec = json.Codec[DispatchPayload](json.SnakeCase())
 
 func LogDispatch(target string, body string) {
     if !DebugEnabled() { return }
-    val enc = dispatchCodec.Encode(DispatchPayload(Body = body, BodyLen = len(body)))
+    val enc = dispatchCodec.Encode(DispatchPayload(Body = body, BodyLen = body.Size()))
     if enc.IsFailure() { return }
     LogEvent(KindDispatch, target, enc.Get())
 }
@@ -315,8 +315,8 @@ func LogClaudeChunk(member string, dropped bool, reason string, visible string, 
         Reason     = reason,
         Visible    = visible,
         Error      = errText,
-        VisibleLen = len(visible),
-        ErrorLen   = len(errText),
+        VisibleLen = visible.Size(),
+        ErrorLen   = errText.Size(),
     ))
     if enc.IsFailure() { return }
     LogEvent(KindClaudeChunk, member, enc.Get())
@@ -368,7 +368,7 @@ func LogStderr(member string, line string) {
     if line == "" { return }
     val enc = stderrCodec.Encode(StderrPayload(
         Text    = line,
-        TextLen = len(line),
+        TextLen = line.Size(),
     ))
     if enc.IsFailure() { return }
     LogEvent(KindStderr, member, enc.Get())

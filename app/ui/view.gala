@@ -255,7 +255,7 @@ func guidanceRows(m AppModel) Array[string] {
         )
     }
     return docs.Map((d) =>
-        s"  • ${d.Slot}  →  ${d.Path}  (sha ${guidance.Sha256Short(d)}, ${len(d.Body)} bytes)"
+        s"  • ${d.Slot}  →  ${d.Path}  (sha ${guidance.Sha256Short(d)}, ${d.Body.ByteSize()} bytes)"
     )
 }
 
@@ -442,7 +442,7 @@ func isRejectFocus(c ApprovalChoice) bool = c match {
 func approvalFirstLine(body string, cap int) string {
     val flat = strings.Join(strings.Fields(body), " ")
     val rs = ToRunes(flat)
-    if len(rs) <= cap { return string(rs) }
+    if rs.Size() <= cap { return string(rs) }
     val keep = MaxInt(1, cap - 3)
     var prefix = EmptyArray[string]()
     var i = 0
@@ -551,7 +551,7 @@ func memberCard(m AppModel, mem Member) Widget {
 // workflow phase doesn't overrun the (width / member-count) card.
 func cardCap(s string, n int) string {
     val rs = ToRunes(s)
-    if len(rs) <= n { return s }
+    if rs.Size() <= n { return s }
     return runesPrefix(s, n - 1) + "…"
 }
 
@@ -574,7 +574,7 @@ func memberLastMessage(m AppModel, name string) string {
     if found == "" { return "—" }
     val flat = strings.Join(strings.Fields(found), " ")
     val rs = ToRunes(flat)
-    if len(rs) <= 24 { return string(rs) }
+    if rs.Size() <= 24 { return string(rs) }
     var prefix = EmptyArray[string]()
     var k = 0
     for k < 21 {
@@ -675,7 +675,7 @@ func activityGlyphFor(speaker string) string {
 func activityFirstLine(text string) string {
     val parts = strings.Split(text, "\n")
     var i = 0
-    val n = len(parts)
+    val n = ArrayFromSlice(parts).Size()
     var first = ""
     for i < n {
         val ln = strings.TrimSpace(parts[i])
@@ -684,7 +684,7 @@ func activityFirstLine(text string) string {
     }
     if first == "" { return "(empty)" }
     val rs = ToRunes(first)
-    if len(rs) <= 120 { return first }
+    if rs.Size() <= 120 { return first }
     var prefix = EmptyArray[string]()
     var k = 0
     for k < 117 {
@@ -799,7 +799,7 @@ func statusTagFor(s Status) string = s match {
 func firstLineOf(s string) string {
     val parts = strings.Split(s, "\n")
     var i = 0
-    val n = len(parts)
+    val n = ArrayFromSlice(parts).Size()
     for i < n {
         val ln = strings.TrimSpace(parts[i])
         if ln != "" { return ln }
@@ -945,7 +945,7 @@ func recoveryBanner(m AppModel) LayoutChild {
 func approvalSnippet(body string) string {
     val flat = strings.Join(strings.Fields(body), " ")
     val rs = ToRunes(flat)
-    val n = len(rs)
+    val n = rs.Size()
     return if (n <= 60) string(rs)
            else         string(SliceTo(rs, 60)) + "..."
 }
@@ -1273,13 +1273,13 @@ func buildBrandLineAt(m AppModel, cols int, prefix string) string {
 // pedantic about wide-glyph (CJK / emoji) cell widths because the
 // brand-line fits-or-truncates check tolerates a small overrun
 // without breaking layout (the renderer clips at terminal edge).
-func visibleWidth(s string) int = len(ToRunes(s))
+func visibleWidth(s string) int = ToRunes(s).Size()
 
 // runesPrefixView mirrors update.gala's runesPrefix — kept local so
 // view.gala doesn't import update.gala's helpers.
 func runesPrefixView(s string, n int) string {
     val rs = ToRunes(s)
-    if len(rs) <= n { return s }
+    if rs.Size() <= n { return s }
     var out = EmptyArray[string]()
     var i = 0
     val cap = if (n < 1) 1 else n
@@ -1685,7 +1685,7 @@ func renderConversationLine(m AppModel, cl session.ConversationLine, width int, 
     var inCode = false
     var firstProse = true
     var i = 0
-    val n = len(lines)
+    val n = ArrayFromSlice(lines).Size()
     for i < n {
         val ln = lines[i]
         val trimmed = strings.TrimSpace(ln)
@@ -1964,7 +1964,7 @@ func composerRendered(m AppModel) string {
         }
     }
     val rs = ToRunes(m.Composer)
-    val n = len(rs)
+    val n = rs.Size()
     val cur = clampCursor(m.ComposerCursor, n)
     val left = string(SliceTo(rs, cur))
     val right = string(SliceFrom(rs, cur))
@@ -2120,7 +2120,7 @@ func bandGlyph(status Status, tick int) string = status match {
 // bandPad right-pads `s` with spaces to `width`; returns `s` unchanged
 // when it already meets/exceeds the width.
 func bandPad(s string, width int) string {
-    val deficit = width - len(s)
+    val deficit = width - s.Size()
     if deficit <= 0 { return s }
     return s + strings.Repeat(" ", deficit)
 }
@@ -2251,7 +2251,7 @@ func activityRowStyle(status Status) Style = status match {
 func capForBand(s string, cols int) string {
     val maxw = MaxInt(8, cols - 1)
     val rs = ToRunes(s)
-    if len(rs) <= maxw { return s }
+    if rs.Size() <= maxw { return s }
     return runesPrefix(s, maxw - 1) + "…"
 }
 
@@ -2264,7 +2264,7 @@ func capForBand(s string, cols int) string {
 func capMiddle(s string, width int) string {
     val w = MaxInt(8, width)
     val rs = ToRunes(s)
-    if len(rs) <= w { return s }
+    if rs.Size() <= w { return s }
     val budget = w - 1            // one column for the ellipsis
     val head = budget / 2
     val tail = budget - head      // tail gets the odd column
@@ -2275,10 +2275,10 @@ func capMiddle(s string, width int) string {
 // it is already shorter). Rune-safe counterpart to runesPrefix.
 func runesSuffix(s string, n int) string {
     val rs = ToRunes(s)
-    if len(rs) <= n || n < 0 { return s }
+    if rs.Size() <= n || n < 0 { return s }
     var out = EmptyArray[string]()
-    var i = len(rs) - n
-    for i < len(rs) {
+    var i = rs.Size() - n
+    for i < rs.Size() {
         out = out.Append(string(rs[i]))
         i = i + 1
     }

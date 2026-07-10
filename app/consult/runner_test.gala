@@ -1,6 +1,7 @@
 package consult
 
 import (
+    "martianoff/gala/go_builtins"
     "os"
     "path/filepath"
     "strings"
@@ -50,7 +51,7 @@ func TestRunConsult_NonexistentRepo_TaggedAsProjectError(t T) T {
 
 func TestRunConsult_NonGitDir_TaggedAsProjectError(t T) T {
     val tmp = mustMkTempDir(t)
-    defer os.RemoveAll(tmp)
+    use cleanup = onExitErr(() => os.RemoveAll(tmp))
     val r = singleEntry("alpha", tmp, filepath.Join(tmp, "team.yaml"))
     val outcome = RunConsult(r, "alpha", "do work")
     return assertConsultErrPrefix(t, outcome, "alpha", "project:")
@@ -62,7 +63,7 @@ func TestRunConsult_NonGitDir_TaggedAsProjectError(t T) T {
 
 func TestRunConsult_MissingTeamYaml_TaggedAsTeamError(t T) T {
     val tmp = mustMkTempDir(t)
-    defer os.RemoveAll(tmp)
+    use cleanup = onExitErr(() => os.RemoveAll(tmp))
     fakeGitRepo(tmp)
     val r = singleEntry("alpha", tmp, filepath.Join(tmp, "missing-team.yaml"))
     val outcome = RunConsult(r, "alpha", "do work")
@@ -89,11 +90,11 @@ func assertConsultErrPrefix(t T, outcome ConsultOutcome, expectedName string, ex
 
 func mustMkTempDir(t T) string {
     val dir, err = os.MkdirTemp("", "gala_team_consult_runner_")
-    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    if err != nil { go_builtins.Panic(s"MkdirTemp: ${err.Error()}") }
     return dir
 }
 
 func fakeGitRepo(dir string) {
     val mkErr = os.MkdirAll(filepath.Join(dir, ".git"), os.FileMode(0755))
-    if mkErr != nil { panic(s"fakeGitRepo: ${mkErr.Error()}") }
+    if mkErr != nil { go_builtins.Panic(s"fakeGitRepo: ${mkErr.Error()}") }
 }

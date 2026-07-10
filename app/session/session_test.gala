@@ -8,6 +8,14 @@ import (
     . "martianoff/gala/collection_immutable"
 )
 
+// onExit adapts a cleanup thunk to Closeable so a `use` binding replaces the Go
+// `defer` (a hard error in GALA): the thunk runs on every exit path.
+struct onExit(run func())
+func (c onExit) Close() error {
+    c.run()
+    return nil
+}
+
 // mkTempDir creates a fresh empty directory for the duration of one test
 // case. Tests panic the test rather than skipping; the test framework
 // records the failure and moves on.
@@ -235,7 +243,7 @@ func TestLoadOrError_OnMissingFile_LeftWithReadError(t T) T {
     val dir = mkTempDir("loaderr_missing")
     return LoadOrError(dir) match {
         case Right(_)  => IsTrue(t, false)
-        case Left(err) => IsTrue(t, len(err) > 0)
+        case Left(err) => IsTrue(t, err.Size() > 0)
     }
 }
 
@@ -246,7 +254,7 @@ func TestLoadOrError_OnCorrupted_LeftWithDecodeError(t T) T {
     fs.WriteFileString(SessionPath(dir), "{not json", 0o644).Get()
     return LoadOrError(dir) match {
         case Right(_)  => IsTrue(t, false)
-        case Left(err) => IsTrue(t, len(err) > 0)
+        case Left(err) => IsTrue(t, err.Size() > 0)
     }
 }
 
@@ -263,7 +271,7 @@ func TestLoadOrError_OnCorrupted_LeftWithDecodeError(t T) T {
 
 func TestSessionIds_RoundTrip(t T) T {
     val dir = mkTempDir("sids_rt")
-    defer fs.RemoveAll(dir)
+    use cleanup = onExit(() => fs.RemoveAll(dir))
     val entries = ArrayOf(
         SessionIdEntry(Member = "Nadia", SessionId = "11111111-aaaa-bbbb-cccc-222222222222"),
         SessionIdEntry(Member = "Bram",   SessionId = "33333333-aaaa-bbbb-cccc-444444444444"),
@@ -296,7 +304,7 @@ func TestSessionIds_RoundTrip(t T) T {
 // the same as "no recovered ids" (first ensureSession spawns fresh).
 func TestSessionIds_LegacySnapshotLoadsAsEmptyArray(t T) T {
     val dir = mkTempDir("sids_legacy")
-    defer fs.RemoveAll(dir)
+    use cleanup = onExit(() => fs.RemoveAll(dir))
     val parent = filepath.Dir(SessionPath(dir))
     fs.MkdirAll(parent, 0o755).Get()
     // Hand-rolled snapshot WITHOUT a session_ids key — what older
@@ -314,7 +322,7 @@ func TestSessionIds_LegacySnapshotLoadsAsEmptyArray(t T) T {
 // decode of the next launch.
 func TestSessionIds_EmptyRoundTrip(t T) T {
     val dir = mkTempDir("sids_empty")
-    defer fs.RemoveAll(dir)
+    use cleanup = onExit(() => fs.RemoveAll(dir))
     val saveRes = Save(
         dir,
         "demo",
@@ -394,7 +402,7 @@ func TestSaveThenLoad_LegacySnapshotHasEmptyStateTag(t T) T {
 // the redundant round.
 func TestSaveThenLoad_PostPromptSentRoundTrips(t T) T {
     val dir = mkTempDir("postpromptsent")
-    defer fs.RemoveAll(dir)
+    use cleanup = onExit(() => fs.RemoveAll(dir))
     val orch = Orchestration(
         StateTag       = "Delegating",
         StatePending   = ArrayOf("Otis"),
@@ -420,7 +428,7 @@ func TestSaveThenLoad_PostPromptSentRoundTrips(t T) T {
 // extension and the user would resume from a fresh empty state.
 func TestSaveThenLoad_PostPromptSentDefaultsToEmpty(t T) T {
     val dir = mkTempDir("postpromptsent_legacy")
-    defer fs.RemoveAll(dir)
+    use cleanup = onExit(() => fs.RemoveAll(dir))
     val saved = Save(dir, "demo",
         ArrayOf(ConversationLine(Speaker = "you", Text = "hi")),
         EmptyArray[string]())

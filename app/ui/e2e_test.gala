@@ -1,6 +1,7 @@
 package ui
 
 import (
+    "martianoff/gala/go_builtins"
     "os"
     "strings"
     "martianoff/gala/time_utils"
@@ -35,7 +36,7 @@ import (
 
 func e2eProject() Project {
     val dir, err = os.MkdirTemp("", "gala_team_e2e_test_")
-    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    if err != nil { go_builtins.Panic(s"MkdirTemp: ${err.Error()}") }
     return Project(
         Name = "demo", Repo = dir,
         Github = None[string](),
@@ -287,7 +288,7 @@ func TestE2E_RespawnAfterRotation_PreservesDispatchBody(t T) T {
 // up with no context after a TL nudge had cleared the map.
 func TestE2E_SpawnTLNudge_PreservesLastDispatchedMsg(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val dispatchBody = "Refactor the foo module; tests must pass."
     val dispatchMsg = acp.NewEnvelope(base.Team.Lead.Name, "Felix", "dispatch", dispatchBody, 0)
@@ -312,7 +313,7 @@ func TestE2E_SpawnTLNudge_PreservesLastDispatchedMsg(t T) T {
 // → fresh claude session has zero context → "I don't have context."
 func TestE2E_DispatchThenNudgeThenRotation_ReplaysOriginalBody(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val dispatchBody = "Refactor the foo module; tests must pass."
     val dispatchMsg = acp.NewEnvelope(base.Team.Lead.Name, "Felix", "dispatch", dispatchBody, 0)
@@ -344,7 +345,7 @@ func TestE2E_DispatchThenNudgeThenRotation_ReplaysOriginalBody(t T) T {
 // FSM transition fires.
 func TestE2E_Heartbeat_InTLReview_NoMemberStuckRefires(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val staleNanos = int(base.NowAt.UnixNanos()) - int(time_utils.Seconds(int64(600)).ToNanos())
     val dispatchMsg = acp.NewEnvelope(base.Team.Lead.Name, "Felix", "dispatch", "old task", 0)
@@ -364,7 +365,7 @@ func TestE2E_Heartbeat_InTLReview_NoMemberStuckRefires(t T) T {
 // nudged regardless of how stale their delivery state is.
 func TestE2E_Heartbeat_InIdle_NoMemberStuckRefires(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val staleNanos = int(base.NowAt.UnixNanos()) - int(time_utils.Seconds(int64(600)).ToNanos())
     val dispatchMsg = acp.NewEnvelope(base.Team.Lead.Name, "Felix", "dispatch", "old task", 0)
@@ -385,7 +386,7 @@ func TestE2E_Heartbeat_InIdle_NoMemberStuckRefires(t T) T {
 // MemberStuck → TLNudging(reason="stuck", ...).
 func TestE2E_Heartbeat_InDelegating_StillFiresMemberStuck(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val staleNanos = int(base.NowAt.UnixNanos()) - int(time_utils.Seconds(int64(200)).ToNanos())
     val dispatchMsg = acp.WithAttempt(
@@ -424,7 +425,7 @@ func TestE2E_Heartbeat_InDelegating_StillFiresMemberStuck(t T) T {
 // pending; status flips to StWorking (the nudge respawn fired).
 func TestE2E_SessionFailed_NoStatusDirective_NudgesNotMemberDone(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val seeded = base.Copy(
         State         = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
@@ -447,7 +448,7 @@ func TestE2E_SessionFailed_NoStatusDirective_NudgesNotMemberDone(t T) T {
 // them.
 func TestE2E_SessionFailed_EmptyBuffer_NudgesNotMemberDone(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val seeded = base.Copy(
         State = Delegating(Pending = EmptyHashSet[string]().Add("Felix"), Dispatched = EmptyHashSet[string]().Add("Felix")),
@@ -465,7 +466,7 @@ func TestE2E_SessionFailed_EmptyBuffer_NudgesNotMemberDone(t T) T {
 // (the TL still needs to learn about the failure via a relay).
 func TestE2E_SessionFailed_NoStatusDirective_PastMaxNudges_Escalates(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val maxNudges = maxAutoRetriesOf(base)
     val seeded = base.Copy(
@@ -489,7 +490,7 @@ func TestE2E_SessionFailed_NoStatusDirective_PastMaxNudges_Escalates(t T) T {
 // parsing), the trailing EOF must remain a no-op — NOT a nudge.
 func TestE2E_SessionFailed_AlreadyFiredMemberDone_NoNudge(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val seeded = base.Copy(
         State            = TLReview(),
@@ -639,11 +640,11 @@ func TestE2EProperty_LooksLikeStreamJson_OnlyTrueForEnvelopes(t T) T {
 // turn gets its own one-shot retry budget.
 func TestE2E_KeySubmit_CapturesPromptAndResetsLatch(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val seed = base.Copy(
         Composer           = "do the thing",
-        ComposerCursor     = len("do the thing"),
+        ComposerCursor     = "do the thing".Size(),
         WatchdogRetryFired = true,
     )
     val (m, _) = Update(seed, KeySubmit())
@@ -659,7 +660,7 @@ func TestE2E_KeySubmit_CapturesPromptAndResetsLatch(t T) T {
 // LastUserPrompt mutation, no Composer change.
 func TestE2E_KeySubmit_EmptyComposer_NoOp(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val seed = base.Copy(
         Composer       = "",
@@ -677,11 +678,11 @@ func TestE2E_KeySubmit_EmptyComposer_NoOp(t T) T {
 // trip against a zero-valued instant.
 func TestE2E_KeySubmit_TransitionsToTLThinkingAndSpawns(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val seed = base.Copy(
         Composer       = "ship the feature",
-        ComposerCursor = len("ship the feature"),
+        ComposerCursor = "ship the feature".Size(),
     )
     val leadName = seed.Team.Lead.Name
     val (m, _) = Update(seed, KeySubmit())
@@ -698,11 +699,11 @@ func TestE2E_KeySubmit_TransitionsToTLThinkingAndSpawns(t T) T {
 // not re-minted per turn — drifting the sid would lose context.
 func TestE2E_KeySubmit_TwiceSameLead_SessionIdStableAcrossTurns(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val seed = base.Copy(
         Composer       = "turn one",
-        ComposerCursor = len("turn one"),
+        ComposerCursor = "turn one".Size(),
     )
     val leadName = seed.Team.Lead.Name
     val (m1, _) = Update(seed, KeySubmit())
@@ -710,7 +711,7 @@ func TestE2E_KeySubmit_TwiceSameLead_SessionIdStableAcrossTurns(t T) T {
     val m1Idle = m1.Copy(
         State          = Idle(),
         Composer       = "turn two",
-        ComposerCursor = len("turn two"),
+        ComposerCursor = "turn two".Size(),
     )
     val (m2, _) = Update(m1Idle, KeySubmit())
     val sid2 = m2.SessionIds.Get(leadName).GetOrElse("")
@@ -730,7 +731,7 @@ func TestE2E_KeySubmit_RendersUserLineBeforeSpawn(t T) T {
     val base = e2eModel()
     val seed = base.Copy(
         Composer       = "hello there",
-        ComposerCursor = len("hello there"),
+        ComposerCursor = "hello there".Size(),
     )
     val leadName = seed.Team.Lead.Name
     val (m, _) = Update(seed, KeySubmit())
@@ -792,11 +793,11 @@ func TestE2E_ClearPending_FlipsPendingToDelivered(t T) T {
 // LastUserPrompt — the auto-retry path needs all three.
 func TestE2E_KeySubmit_ThenSilentWatchdog_AutoRetries(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val seed = base.Copy(
         Composer       = "retry me",
-        ComposerCursor = len("retry me"),
+        ComposerCursor = "retry me".Size(),
     )
     val (m1, _) = Update(seed, KeySubmit())
     val staleM1 = m1.Copy(
@@ -817,11 +818,11 @@ func TestE2E_KeySubmit_ThenSilentWatchdog_AutoRetries(t T) T {
 // via a real KeySubmit + auto-retry rather than seeding by hand.
 func TestE2E_KeySubmit_SecondSilentWatchdog_LandsInIdle(t T) T {
     SetSpawnDisabledForTest(true)
-    defer SetSpawnDisabledForTest(false)
+    use cleanup = onExit(() => SetSpawnDisabledForTest(false))
     val base = e2eModel()
     val seed = base.Copy(
         Composer       = "first try",
-        ComposerCursor = len("first try"),
+        ComposerCursor = "first try".Size(),
     )
     val (m1, _) = Update(seed, KeySubmit())
     val leadName = m1.Team.Lead.Name

@@ -98,8 +98,8 @@ func isFailedStatus(s Status) bool = s match {
 // to keep the pipeline test self-contained.
 func pContains(haystack string, needle string) bool {
     var i = 0
-    val hayLen = len(haystack)
-    val ndlLen = len(needle)
+    val hayLen = haystack.Size()
+    val ndlLen = needle.Size()
     if ndlLen == 0 { return true }
     if hayLen < ndlLen { return false }
     val limit = hayLen - ndlLen

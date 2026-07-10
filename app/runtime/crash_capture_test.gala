@@ -1,11 +1,18 @@
 package runtime
 
 import (
+    "martianoff/gala/go_builtins"
     "os"
     "strings"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
 )
+
+// onExitErr adapts an error-returning cleanup thunk to Closeable so a `use`
+// binding replaces the Go `defer` (a hard error in GALA): it runs on every
+// exit path and its error is discarded by `use`, matching `defer`.
+struct onExitErr(run func() error)
+func (c onExitErr) Close() error = c.run()
 
 // RunGuarded is the top-level panic net wrapped around the TUI run in
 // cmd/main.gala. These tests lock in the two behaviours main() depends
@@ -32,10 +39,10 @@ func TestRunGuarded_CleanRunReportsNoCrash(t T) T {
 func TestRunGuarded_CapturesPanicAndWritesReport(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_crash_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     SetDebugRepo(dir)
     val crashed, msg, path = RunGuarded(() => {
-        panic("boom-sentinel-42")
+        go_builtins.Panic("boom-sentinel-42")
     })
     val t1 = IsTrue(t, crashed)
     val t2 = IsTrue(t1, strings.Contains(msg, "boom-sentinel-42"))

@@ -300,7 +300,7 @@ func TestView_Composer_LongText_ExpandsPanel(t T) T {
     val rows = strings.Split(out, "\n")
     var i = 0
     var hits = 0
-    val n = len(rows)
+    val n = ArrayFromSlice(rows).Size()
     for i < n {
         if strings.Contains(rows[i], "ship the metrics endpoint") {
             hits = hits + 1
@@ -316,7 +316,7 @@ func TestView_Composer_LongText_ExpandsPanel(t T) T {
 func TestView_Composer_LongText_AutoScrollsToCursor(t T) T {
     val long = strings.Repeat("ship the metrics endpoint ", 50)  // ~1300 chars, > cap rows wrapped
     // Pure ASCII — byte len == rune count, no need to dot-import go_interop.ToRunes.
-    val m = mkModel(mkTeam("X", "")).Copy(Composer = long, ComposerCursor = len(long))
+    val m = mkModel(mkTeam("X", "")).Copy(Composer = long, ComposerCursor = long.Size())
     val out = render(m)
     return IsTrue(t, strings.Contains(out, "▌"))
 }
@@ -660,7 +660,7 @@ func sampleArchiveV(savedAt int64, label string, projectName string, lineCount i
 func TestView_Header_VeryLongTeamName_DoesNotCrash(t T) T {
     val longName = strings.Repeat("Skunkworks", 30)  // 300 chars
     val out = render(mkModel(mkTeam(longName, "")))
-    val t1 = IsTrue(t, len(out) > 0)
+    val t1 = IsTrue(t, out.Size() > 0)
     return IsTrue(t1, strings.Contains(out, "state: idle"))
 }
 
@@ -669,7 +669,7 @@ func TestView_Header_VeryLongTeamName_DoesNotCrash(t T) T {
 func TestView_Header_VeryLongDescription_DoesNotCrash(t T) T {
     val longDesc = strings.Repeat("a long product team description ", 20)
     val out = render(mkModel(mkTeam("X", longDesc)))
-    return IsTrue(t, len(out) > 0)
+    return IsTrue(t, out.Size() > 0)
 }
 
 // 60+ rune approval body must truncate — the rendered banner still
@@ -695,7 +695,7 @@ func TestView_Composer_VeryLongText_DoesNotCrash(t T) T {
     val long = strings.Repeat("ship the metrics endpoint ", 20)  // ~520 chars
     val m = mkModel(mkTeam("X", "")).Copy(Composer = long)
     val out = render(m)
-    return IsTrue(t, len(out) > 0)
+    return IsTrue(t, out.Size() > 0)
 }
 
 // 200-line conversation now goes through ConversationLog. Sticky
@@ -797,7 +797,7 @@ func splitTopBorder(out string) string {
     val lines = strings.Split(out, "\n")
     val headerRows = if (viewportW < HeaderNarrowCols()) HeaderRowsNarrow()
                      else                                 HeaderRowsWide()
-    if len(lines) <= headerRows { return out }
+    if ArrayFromSlice(lines).Size() <= headerRows { return out }
     return lines[headerRows]
 }
 
@@ -1011,7 +1011,7 @@ func TestView_Sidebar_FiftyMembers_DoesNotCrash(t T) T {
         DangerouslySkipPermissions = false,
     )
     val out = render(mkModel(tm))
-    val t1 = IsTrue(t, len(out) > 0)
+    val t1 = IsTrue(t, out.Size() > 0)
     return IsTrue(t1, strings.Contains(out, "Iris"))
 }
 
@@ -1035,7 +1035,7 @@ func TestView_Sidebar_VeryLongMemberName_DoesNotCrash(t T) T {
         DangerouslySkipPermissions = false,
     )
     val out = render(mkModel(tm))
-    return IsTrue(t, len(out) > 0)
+    return IsTrue(t, out.Size() > 0)
 }
 
 // Empty team name — header should still render the state label even
@@ -1082,7 +1082,7 @@ func TestView_History_LongLabelAndProjectName_DoesNotCrash(t T) T {
         HistoryMode = true,
         Archives    = ArrayOf(long),
     )
-    return IsTrue(t, len(render(m)) > 0)
+    return IsTrue(t, render(m).Size() > 0)
 }
 
 // LastError with a multi-line / very long error string — footer

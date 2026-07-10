@@ -1,7 +1,7 @@
 package ui
 
 import (
-    "strings"
+    "martianoff/gala/strings"
     "time"
     "martianoff/gala/time_utils"
     "github.com/martianoff/gala_team/app/guidance"
@@ -675,10 +675,10 @@ func activityGlyphFor(speaker string) string {
 func activityFirstLine(text string) string {
     val parts = strings.Split(text, "\n")
     var i = 0
-    val n = ArrayFromSlice(parts).Size()
+    val n = parts.Size()
     var first = ""
     for i < n {
-        val ln = strings.TrimSpace(parts[i])
+        val ln = strings.TrimSpace(parts.Get(i))
         if ln != "" { first = ln; i = n }
         i = i + 1
     }
@@ -799,9 +799,9 @@ func statusTagFor(s Status) string = s match {
 func firstLineOf(s string) string {
     val parts = strings.Split(s, "\n")
     var i = 0
-    val n = ArrayFromSlice(parts).Size()
+    val n = parts.Size()
     for i < n {
-        val ln = strings.TrimSpace(parts[i])
+        val ln = strings.TrimSpace(parts.Get(i))
         if ln != "" { return ln }
         i = i + 1
     }
@@ -1685,9 +1685,9 @@ func renderConversationLine(m AppModel, cl session.ConversationLine, width int, 
     var inCode = false
     var firstProse = true
     var i = 0
-    val n = ArrayFromSlice(lines).Size()
+    val n = lines.Size()
     for i < n {
-        val ln = lines[i]
+        val ln = lines.Get(i)
         val trimmed = strings.TrimSpace(ln)
         if strings.HasPrefix(trimmed, "```") {
             if !inCode {

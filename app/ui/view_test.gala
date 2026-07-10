@@ -1,7 +1,7 @@
 package ui
 
 import (
-    "strings"
+    "martianoff/gala/strings"
     "github.com/martianoff/gala-tui"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/test"
@@ -152,8 +152,8 @@ func TestView_Header_WideMode_BrandFlushWithApple(t T) T {
     // Header rows: 0 spacer, 1 brand, 2 state, 3 tokens/empty, 4 sep.
     // Both row 1 and row 2 carry apple cells (stem on r1, body on r2)
     // AND text — that's the "flush" property the user asked for.
-    val brandRow = rows[1]
-    val stateRow = rows[2]
+    val brandRow = rows.Get(1)
+    val stateRow = rows.Get(2)
     val t1 = IsTrue(t,  strings.Contains(brandRow, "│"))        // leaf in brand row
     val t2 = IsTrue(t1, strings.Contains(brandRow, "Skunkworks")) // brand text on same row
     val t3 = IsTrue(t2, strings.Contains(stateRow, "█"))        // body on state row
@@ -300,9 +300,9 @@ func TestView_Composer_LongText_ExpandsPanel(t T) T {
     val rows = strings.Split(out, "\n")
     var i = 0
     var hits = 0
-    val n = ArrayFromSlice(rows).Size()
+    val n = rows.Size()
     for i < n {
-        if strings.Contains(rows[i], "ship the metrics endpoint") {
+        if strings.Contains(rows.Get(i), "ship the metrics endpoint") {
             hits = hits + 1
         }
         i = i + 1
@@ -797,8 +797,8 @@ func splitTopBorder(out string) string {
     val lines = strings.Split(out, "\n")
     val headerRows = if (viewportW < HeaderNarrowCols()) HeaderRowsNarrow()
                      else                                 HeaderRowsWide()
-    if ArrayFromSlice(lines).Size() <= headerRows { return out }
-    return lines[headerRows]
+    if lines.Size() <= headerRows { return out }
+    return lines.Get(headerRows)
 }
 
 // ---------------------------------------------------------------------------

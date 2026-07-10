@@ -2,7 +2,7 @@ package ui
 
 import (
     "martianoff/gala/go_builtins"
-    "strings"
+    "martianoff/gala/strings"
     "martianoff/gala/concurrent"
     "martianoff/gala/json"
     "martianoff/gala/subprocess"
@@ -1808,9 +1808,9 @@ func paletteActions(m AppModel) Array[PaletteAction[AppMsg]] {
 // LastError and the conversation transcript.
 func truncateForToast(s string) string {
     val parts = strings.SplitN(strings.TrimSpace(s), "\n", 2)
-    val firstLine = parts[0]
+    val firstLine = parts.Get(0)
     val cap = 80
-    if ToRunes(firstLine).Size() <= cap { return firstLine }
+    if firstLine.Size() <= cap { return firstLine }
     // strings.SplitN with a length-1 separator is safe at byte
     // boundary `cap` since gala doesn't expose a clean substring op
     // — feeding the second part through Drop avoids the slice syntax.
@@ -5476,9 +5476,9 @@ func formatDirectiveMarkers(text string) string {
     val lines = strings.Split(text, "\n")
     var kept = EmptyArray[string]()
     var i = 0
-    val n = ArrayFromSlice(lines).Size()
+    val n = lines.Size()
     for i < n {
-        val ln = lines[i]
+        val ln = lines.Get(i)
         val replacement = rewriteMarkerLine(ln)
         if replacement != "" {
             kept = kept.Append(replacement)
@@ -5532,10 +5532,10 @@ func parseTargetMarker(trimmed string, prefix string) Tuple[string, string] {
     // SplitN(afterOpen, ")", 2) yields [target, rest] when the close
     // paren exists, [afterOpen] when it doesn't (mid-stream chunk).
     val parts = strings.SplitN(afterOpen, ")", 2)
-    if ArrayFromSlice(parts).Size() < 2 {
+    if parts.Size() < 2 {
         return (strings.TrimSpace(afterOpen), "")
     }
-    return (strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]))
+    return (strings.TrimSpace(parts.Get(0)), strings.TrimSpace(parts.Get(1)))
 }
 
 // formatRoutedMarker stitches the label and the same-line body. Empty
@@ -6069,10 +6069,10 @@ func parseRawSummary(text string) string {
 func parseRenderedSummary(text string) string {
     val lines = strings.Split(text, "\n")
     var i = 0
-    val n = ArrayFromSlice(lines).Size()
+    val n = lines.Size()
     var startIdx = -1
     for i < n {
-        if strings.TrimSpace(lines[i]) == "Summary:" {
+        if strings.TrimSpace(lines.Get(i)) == "Summary:" {
             startIdx = i + 1
         }
         i = i + 1
@@ -6081,7 +6081,7 @@ func parseRenderedSummary(text string) string {
     var body = EmptyArray[string]()
     var j = startIdx
     for j < n {
-        body = body.Append(lines[j])
+        body = body.Append(lines.Get(j))
         j = j + 1
     }
     return strings.TrimSpace(body.MkString("\n"))
@@ -6459,7 +6459,7 @@ func pendingPrTitle(m AppModel) string {
         val line = m.Conversation.Get(i)
         if line.Speaker == "you" && !strings.HasPrefix(line.Text, "/") {
             val trimmed = strings.TrimSpace(line.Text)
-            val first = strings.SplitN(trimmed, "\n", 2)[0]
+            val first = strings.SplitN(trimmed, "\n", 2).Get(0)
             return truncateTitle(first, 80)
         }
         i = i - 1

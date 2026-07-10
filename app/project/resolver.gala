@@ -1,6 +1,7 @@
 package project
 
 import (
+    "martianoff/gala/go_builtins"
     "path/filepath"
     "martianoff/gala/fs"
     "martianoff/gala/strings"
@@ -68,7 +69,7 @@ func Resolve(dir string, overrides Overrides) Try[Project] = Try(() => {
 func absoluteOrPanic(dir string) string {
     val abs, err = filepath.Abs(dir)
     if err != nil {
-        panic(s"--project: cannot resolve absolute path of '${dir}': ${err.Error()}")
+        go_builtins.Panic(s"--project: cannot resolve absolute path of '${dir}': ${err.Error()}")
     }
     return abs
 }
@@ -78,13 +79,13 @@ func absoluteOrPanic(dir string) string {
 func requireGitRepo(dir string) {
     val statRes = fs.Stat(dir)
     if statRes.IsFailure() {
-        panic(s"--project: '${dir}' does not exist or is not accessible: ${statRes.GetError().Error()}")
+        go_builtins.Panic(s"--project: '${dir}' does not exist or is not accessible: ${statRes.GetError().Error()}")
     }
     if !statRes.Get().IsDir {
-        panic(s"--project: '${dir}' is not a directory")
+        go_builtins.Panic(s"--project: '${dir}' is not a directory")
     }
     if !fs.Exists(filepath.Join(dir, ".git")) {
-        panic(s"--project: '${dir}' is not a git repository (no .git entry)")
+        go_builtins.Panic(s"--project: '${dir}' is not a git repository (no .git entry)")
     }
 }
 
@@ -131,7 +132,7 @@ func runGit(repo string, args Array[string]) Try[string] = Try(() => {
     drainStderr(proc) // discard
     val code = proc.Wait().Get()
     if code != 0 {
-        panic(s"git ${args.MkString(" ")} exited with code ${code}")
+        go_builtins.Panic(s"git ${args.MkString(" ")} exited with code ${code}")
     }
     return out
 })

@@ -1,6 +1,7 @@
 package consult
 
 import (
+    "martianoff/gala/go_builtins"
     "os"
     "path/filepath"
     "strings"
@@ -10,6 +11,12 @@ import (
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"
 )
+
+// onExitErr adapts an error-returning cleanup thunk to Closeable so a `use`
+// binding replaces the Go `defer` (a hard error in GALA): the thunk runs on
+// every exit path and its error is discarded by `use`, matching `defer`.
+struct onExitErr(run func() error)
+func (c onExitErr) Close() error = c.run()
 
 // dispatch_test — verifies the routing rule in DispatchConsult: when an
 // in-project sibling team and a registry entry both define the same
@@ -28,7 +35,7 @@ import (
 // In-project sibling beats registry entry when both define the same key.
 func TestDispatchConsult_InProjectBeatsRegistry(t T) T {
     val tmp = mkTempGitRepo(t)
-    defer os.RemoveAll(tmp)
+    use cleanup = onExitErr(() => os.RemoveAll(tmp))
 
     val sibling = makeSiblingTeam("transpiler")
     val proj    = Project(
@@ -65,7 +72,7 @@ func TestDispatchConsult_InProjectBeatsRegistry(t T) T {
 // no-op that always picks one branch.
 func TestDispatchConsult_NoSibling_FallsThroughToRegistry(t T) T {
     val tmp = mkTempGitRepo(t)
-    defer os.RemoveAll(tmp)
+    use cleanup = onExitErr(() => os.RemoveAll(tmp))
     val proj = Project(
         Name = "demo", Repo = tmp,
         Github = None[string](),
@@ -110,8 +117,8 @@ func makeSiblingTeam(key string) Team {
 
 func mkTempGitRepo(t T) string {
     val dir, err = os.MkdirTemp("", "dispatch_test_")
-    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    if err != nil { go_builtins.Panic(s"MkdirTemp: ${err.Error()}") }
     val mkErr = os.MkdirAll(filepath.Join(dir, ".git"), os.FileMode(0755))
-    if mkErr != nil { panic(s"fake .git: ${mkErr.Error()}") }
+    if mkErr != nil { go_builtins.Panic(s"fake .git: ${mkErr.Error()}") }
     return dir
 }

@@ -1,7 +1,7 @@
 package runtime
 
 import (
-    "strings"
+    "martianoff/gala/strings"
     "martianoff/gala/json"
     . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
@@ -68,8 +68,8 @@ func LooksLikeClaudeStreamJson(s string) bool {
     // Try the first line in isolation — handles the multi-envelope
     // dump shape.
     val parts = strings.SplitN(trimmed, "\n", 2)
-    val firstLineDecoded = if (len(parts) == 0) false
-                           else streamJsonHeaderCodec.Decode(strings.TrimSpace(parts[0])) match {
+    val firstLineDecoded = if (parts.Size() == 0) false
+                           else streamJsonHeaderCodec.Decode(strings.TrimSpace(parts.Get(0))) match {
                                case Success(h) => h.Type != ""
                                case Failure(_) => false
                            }
@@ -105,11 +105,11 @@ func LooksLikeStaleClaudeSessionError(err string) bool {
 func ExtractClaudeEnvelopeType(trimmed string) string {
     val needle = "\"type\":\""
     val parts = strings.SplitN(trimmed, needle, 2)
-    if len(parts) < 2 { return "" }
-    val rest = parts[1]
+    if parts.Size() < 2 { return "" }
+    val rest = parts.Get(1)
     val tail = strings.SplitN(rest, "\"", 2)
-    if len(tail) < 2 { return "" }
-    return tail[0]
+    if tail.Size() < 2 { return "" }
+    return tail.Get(0)
 }
 
 // ExtractFirstClaudeToolUseId scans `envelope` (a type:"user"
@@ -123,11 +123,11 @@ func ExtractClaudeEnvelopeType(trimmed string) string {
 func ExtractFirstClaudeToolUseId(envelope string) string {
     val needle = "\"tool_use_id\":\""
     val parts = strings.SplitN(envelope, needle, 2)
-    if len(parts) < 2 { return "" }
-    val rest = parts[1]
+    if parts.Size() < 2 { return "" }
+    val rest = parts.Get(1)
     val tail = strings.SplitN(rest, "\"", 2)
-    if len(tail) < 2 { return "" }
-    return tail[0]
+    if tail.Size() < 2 { return "" }
+    return tail.Get(0)
 }
 
 // ============================================================================
@@ -497,11 +497,11 @@ func FilterClaudeStreamJsonFor(member string, envelope string) ClaudeChunk {
 func extractJsonField(trimmed string, key string) string {
     val needle = s"\"${key}\":\""
     val parts = strings.SplitN(trimmed, needle, 2)
-    if len(parts) < 2 { return "" }
-    val rest = parts[1]
+    if parts.Size() < 2 { return "" }
+    val rest = parts.Get(1)
     val tail = strings.SplitN(rest, "\"", 2)
-    if len(tail) < 2 { return "" }
-    return tail[0]
+    if tail.Size() < 2 { return "" }
+    return tail.Get(0)
 }
 
 // RateLimitEventChunk inspects a rate_limit_event envelope and
@@ -572,7 +572,7 @@ struct ExtractedEnvelopes(
 // envelopes, always assemble first.
 func ExtractCompleteEnvelopes(buf string) ExtractedEnvelopes {
     val rs = ToRunes(buf)
-    val n = len(rs)
+    val n = rs.Size()
     var envelopes = EmptyArray[string]()
     var preJunk = ""
     var i = 0
@@ -810,10 +810,10 @@ func AllClaudeTaskToolUseIds(parts Array[ClaudePart]) Array[string] {
 func ExtractFirstClaudeQuestionText(envelope string) string {
     val needle = "\"question\":\""
     val parts = strings.SplitN(envelope, needle, 2)
-    if len(parts) < 2 { return "" }
-    val afterKey = parts[1]
+    if parts.Size() < 2 { return "" }
+    val afterKey = parts.Get(1)
     val rs = ToRunes(afterKey)
-    val n = len(rs)
+    val n = rs.Size()
     var out = EmptyArray[string]()
     var i = 0
     var escaped = false

@@ -78,7 +78,7 @@ func TestLoad_RelativePathsResolveUnderRepo(t T) T {
     val res = Load(proj, ArrayOf("docs/a.md", "docs/b.md"))
     val t1 = IsSuccess(t, res)
     val text = res.Get()
-    return IsTrue(t1, len(text) > 0)
+    return IsTrue(t1, text.Size() > 0)
 }
 
 func TestLoad_PreservesOrderAndContent(t T) T {
@@ -205,8 +205,8 @@ func TestWrapPromptSafe_MissingDoc_DegradesGracefully(t T) T {
 func stringFind(haystack string, needle string) int {
     val hay = ToBytes(haystack)
     val nd = ToBytes(needle)
-    val hayN = len(hay)
-    val ndN = len(nd)
+    val hayN = hay.Size()
+    val ndN = nd.Size()
     if ndN == 0 { return 0 }
     if hayN < ndN { return -1 }
     var i = 0

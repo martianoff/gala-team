@@ -1,6 +1,7 @@
 package session
 
 import (
+    "martianoff/gala/go_builtins"
     "os"
     "path/filepath"
     "time"
@@ -341,10 +342,10 @@ func AppendEvent(repoDir string, eventJson string) Try[bool] = Try(() => {
     // O_APPEND open isn't surfaced by martianoff/gala/fs; keep the
     // raw os.OpenFile call here so appends remain atomic per write.
     val f, openErr = os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, os.FileMode(0644))
-    if openErr != nil { panic(s"session: open ${path}: ${openErr.Error()}") }
+    if openErr != nil { go_builtins.Panic(s"session: open ${path}: ${openErr.Error()}") }
     val _, writeErr = f.WriteString(eventJson + "\n")
     val closeErr = f.Close()
-    if writeErr != nil { panic(s"session: write ${path}: ${writeErr.Error()}") }
-    if closeErr != nil { panic(s"session: close ${path}: ${closeErr.Error()}") }
+    if writeErr != nil { go_builtins.Panic(s"session: write ${path}: ${writeErr.Error()}") }
+    if closeErr != nil { go_builtins.Panic(s"session: close ${path}: ${closeErr.Error()}") }
     return true
 })

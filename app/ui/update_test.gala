@@ -1,6 +1,7 @@
 package ui
 
 import (
+    "martianoff/gala/go_builtins"
     "os"
     "path/filepath"
     "strings"
@@ -23,6 +24,18 @@ import (
     . "github.com/martianoff/gala_team/app/util"
 )
 
+// onExitErr / onExit adapt cleanup thunks to Closeable so a `use` binding
+// replaces the Go `defer` (a hard error in GALA): the thunk runs on every
+// exit path. onExitErr forwards an error return (discarded by `use`, matching
+// `defer`); onExit wraps a void/Try cleanup.
+struct onExitErr(run func() error)
+func (c onExitErr) Close() error = c.run()
+struct onExit(run func())
+func (c onExit) Close() error {
+    c.run()
+    return nil
+}
+
 // sampleBatchPr builds a stub BatchPr for the merge / batch-list
 // tests. Stable shape (canned title, Unix-epoch timestamp) so
 // snapshot-style assertions stay deterministic across runs.
@@ -38,7 +51,7 @@ func sampleBatchPr(url string) BatchPr = BatchPr(
 // new dir so tests don't share state.
 func sampleProject() Project {
     val dir, err = os.MkdirTemp("", "gala_team_update_test_")
-    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    if err != nil { go_builtins.Panic(s"MkdirTemp: ${err.Error()}") }
     return Project(
         Name = "demo", Repo = dir,
         Github = None[string](),
@@ -545,7 +558,7 @@ func TestApprovalModal_NShortcutRejectsEvenWhenFocusOnYes(t T) T {
 // without any visible signal — surprise rejection is the worst kind.
 func TestApprovalModal_FocusResetsOnReentry(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
@@ -725,7 +738,7 @@ func resolveApprovalReady(seed AppModel, msg AppMsg) AppModel {
 // other than main.
 func emptyLeadBranchProject() Project {
     val dir, err = os.MkdirTemp("", "gala_team_pr_ready_test_")
-    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
+    if err != nil { go_builtins.Panic(s"MkdirTemp: ${err.Error()}") }
     runGitInTmp(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInTmp(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                              "commit", "--allow-empty", "-q", "-m", "base"))
@@ -753,7 +766,7 @@ func emptyLeadBranchProject() Project {
 //     would have appended it).
 func TestTLSummary_BlocksApprovalWhenLeadBranchEmpty(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val seedConvo = EmptyArray[session.ConversationLine]()
     val seed = InitialModel(proj, sampleTeam(), DefaultWorkflow(), DefaultPolicy()).Copy(
         State        = TLThinking(),
@@ -774,7 +787,7 @@ func TestTLSummary_BlocksApprovalWhenLeadBranchEmpty(t T) T {
 // we add a divergent commit so checkPrReady returns None.
 func TestTLSummary_EntersApprovalWhenLeadBranchHasCommits(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     // Create the actual lead branch with commits — checkPrReady
     // probes the explicit `gala_team/<proj-slug>/lead` ref, not HEAD.
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
@@ -801,7 +814,7 @@ func TestTLSummary_EntersApprovalWhenLeadBranchHasCommits(t T) T {
 // regardless of which worktree the user has checked out.
 func TestTLSummary_LeadHasCommitsButHeadOnMasterStillEntersApproval(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     // Create lead branch with a commit, then check the user back to master.
     // proj.Repo's HEAD is now on master (zero commits past master),
     // but the lead BRANCH has work — the bug was treating these as the
@@ -830,7 +843,7 @@ func TestTLSummary_LeadHasCommitsButHeadOnMasterStillEntersApproval(t T) T {
 // avoid by putting this gate in place.
 func TestTLSummary_NudgesWhenBodyLacksSections(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "feature"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "feature work"))
@@ -852,7 +865,7 @@ func TestTLSummary_NudgesWhenBodyLacksSections(t T) T {
 // should reject it.
 func TestTLSummary_NudgesWhenBodyMentionsMemberName(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "feature"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "feature work"))
@@ -1216,7 +1229,7 @@ func TestModalCapturesMouse_TrueInApproval(t T) T {
 // sections so validatePrBody passes.
 func TestResume_RecoversApprovalWhenSummaryAndCommitsExist(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
@@ -1241,7 +1254,7 @@ func TestResume_RecoversApprovalWhenSummaryAndCommitsExist(t T) T {
 // re-engages.
 func TestResume_RecoveryRejectsBadSummaryAndStaysOutOfApproval(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
@@ -1262,7 +1275,7 @@ func TestResume_RecoveryRejectsBadSummaryAndStaysOutOfApproval(t T) T {
 // the same modal that's stuck.
 func TestResume_StaysIdleWhenLeadBranchEmpty(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val convo = EmptyArray[session.ConversationLine]()
         .Append(session.ConversationLine(Speaker = "Iris", Text = "@summary\nold work\n@end"))
     val seed = resumedModel(proj, convo)
@@ -1280,7 +1293,7 @@ func TestResume_StaysIdleWhenLeadBranchEmpty(t T) T {
 // case is the absence of @summary.)
 func TestResume_StaysIdleWhenNoSummary(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
@@ -1299,7 +1312,7 @@ func TestResume_StaysIdleWhenNoSummary(t T) T {
 // win. The body recovered should be the latest summary's body.
 func TestResume_LatestSummaryWinsWhenMultiple(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
@@ -1324,7 +1337,7 @@ func TestResume_LatestSummaryWinsWhenMultiple(t T) T {
 // real session never recovers Approval.
 func TestResume_RecoversApprovalFromRenderedSummary(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
@@ -1345,7 +1358,7 @@ func TestResume_RecoversApprovalFromRenderedSummary(t T) T {
 // readiness alone isn't what's blocking recovery.
 func TestResume_IgnoresSummaryFromNonLead(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
@@ -4552,7 +4565,7 @@ func TestJsonExtract_PartialEnvelope_HeldInLeftover(t T) T {
     // hold the entire input as leftover for the next chunk.
     val ext = ExtractCompleteEnvelopes("{\"type\":\"assistant\",\"message\":{\"content\":[{")
     val t1 = Eq(t, ext.Envelopes.Size(), 0)
-    return IsTrue(t1, len(ext.Leftover) > 0)
+    return IsTrue(t1, ext.Leftover.Size() > 0)
 }
 
 func TestJsonExtract_BraceInsideString_DoesNotConfuseCounter(t T) T {
@@ -5369,7 +5382,7 @@ func TestTlLivelock_SpawnTLRelay_ClearsStaleTurnBuffer(t T) T {
 func setupDebugRepo(label string) string {
     val _ = os.Setenv("GALA_TEAM_DEBUG", "1")
     val dir, mkErr = os.MkdirTemp("", "gala_team_debug_" + label)
-    if mkErr != nil { panic(s"MkdirTemp: ${mkErr.Error()}") }
+    if mkErr != nil { go_builtins.Panic(s"MkdirTemp: ${mkErr.Error()}") }
     SetDebugRepo(dir)
     // Close any cached events.jsonl handle left over from a prior
     // test in the same binary — debugFile is a package-level singleton
@@ -5393,7 +5406,7 @@ func readEventsFile(path string) string {
 
 func TestSpawnFailureLog_EmitsEvent(t T) T {
     val dir = setupDebugRepo("spawn_fail")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     LogSpawnFailure("Mara", "qa_auto", "spawn Mara: workspace failed")
     val contents = readEventsFile(eventsFilePath(dir))
     val t1 = IsTrue(t, strings.Contains(contents, "\"kind\":\"spawn_failure\""))
@@ -5404,7 +5417,7 @@ func TestSpawnFailureLog_EmitsEvent(t T) T {
 
 func TestStderrLog_EmitsEventWithTextAndLength(t T) T {
     val dir = setupDebugRepo("stderr")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     LogStderr("Mara", "usage_limit_reached")
     val contents = readEventsFile(eventsFilePath(dir))
     val t1 = IsTrue(t, strings.Contains(contents, "\"kind\":\"stderr\""))
@@ -5414,7 +5427,7 @@ func TestStderrLog_EmitsEventWithTextAndLength(t T) T {
 
 func TestStderrLog_DropsEmptyLine(t T) T {
     val dir = setupDebugRepo("stderr_empty")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     LogStderr("Mara", "")
     val contents = readEventsFile(eventsFilePath(dir))
     return IsFalse(t, strings.Contains(contents, "\"kind\":\"stderr\""))
@@ -5426,7 +5439,7 @@ func TestStderrLog_DropsEmptyLine(t T) T {
 // events.jsonl even after the toast TTL expires.
 func TestOnStderr_FiresLogStderrEvent(t T) T {
     val dir = setupDebugRepo("on_stderr")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     val m = sampleModel()
     val (_, _) = Update(m, StderrArrived(Member = "Mara", Line = "Error: rate limit reached"))
     val contents = readEventsFile(eventsFilePath(dir))
@@ -5442,14 +5455,14 @@ func TestOnStderr_FiresLogStderrEvent(t T) T {
 // for the same reason it clamps the toast.
 func TestOnStderr_LastErrorIsTruncated(t T) T {
     val dir = setupDebugRepo("on_stderr_trunc")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     val m = sampleModel()
     // 4 KB stderr line. truncateForToast clamps to ~80 chars.
     val giant = strings.Repeat("x", 4000)
     val (m1, _) = Update(m, StderrArrived(Member = "Mara", Line = giant))
     return m1.LastError match {
         case None()    => IsTrue(t, false)
-        case Some(err) => IsTrue(t, len(err) < 200)
+        case Some(err) => IsTrue(t, err.Size() < 200)
     }
 }
 
@@ -5477,7 +5490,7 @@ func TestApplyChunkVisible_LongErrorText_IsTruncatedInLastError(t T) T {
     val (m, _) = applyChunkVisible(seed, "Felix", errChunk)
     return m.LastError match {
         case None()    => IsTrue(t, false)
-        case Some(err) => IsTrue(t, len(err) < 200)
+        case Some(err) => IsTrue(t, err.Size() < 200)
     }
 }
 
@@ -5523,7 +5536,7 @@ func TestApplyChunkVisible_StreamJsonErrorText_SuppressedTag(t T) T {
 // still lands in events.jsonl via LogStderr.
 func TestOnStderr_StreamJsonShape_SilentlyAbsorbed(t T) T {
     val dir = setupDebugRepo("on_stderr_streamjson")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     val m = sampleModel()
     val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_01abc\",\"type\":\"tool_result\",\"content\":\"ok\"}]}}"
     val (m1, _) = Update(m, StderrArrived(Member = "Otis", Line = envelope))
@@ -5543,7 +5556,7 @@ func TestOnStderr_StreamJsonShape_SilentlyAbsorbed(t T) T {
 // auth / rate-limit messages too.
 func TestOnStderr_NonEnvelopeLine_StillSurfaces(t T) T {
     val dir = setupDebugRepo("on_stderr_nonenvelope")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     val m = sampleModel()
     val (m1, _) = Update(m, StderrArrived(Member = "Otis", Line = "Error: rate limit hit, retry in 60s"))
     return m1.LastError match {
@@ -5560,7 +5573,7 @@ func TestOnStderr_NonEnvelopeLine_StillSurfaces(t T) T {
 // watchdog kills + auto-retries a live subprocess.
 func TestOnStderr_BumpsLastChunkAt(t T) T {
     val dir = setupDebugRepo("on_stderr_alive")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     val m = sampleModel()
     val t1 = m.LastChunkAt.Get("Otis") match {
         case None()    => IsTrue(t, true)
@@ -5578,7 +5591,7 @@ func TestOnStderr_BumpsLastChunkAt(t T) T {
 // signal is stream-agnostic.
 func TestOnStderr_StreamJsonShape_BumpsLastChunkAt(t T) T {
     val dir = setupDebugRepo("on_stderr_alive_json")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     val m = sampleModel()
     val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_xyz\",\"type\":\"tool_result\",\"content\":\"ok\"}]}}"
     val (m1, _) = Update(m, StderrArrived(Member = "Otis", Line = envelope))
@@ -5597,7 +5610,7 @@ func TestOnStderr_StreamJsonShape_BumpsLastChunkAt(t T) T {
 // the lead is genuinely idle.
 func TestOnStderr_StreamJsonToolResult_RemovesFromOutstandingTaskTools(t T) T {
     val dir = setupDebugRepo("on_stderr_taskresult")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     val seed = sampleModel().Copy(
         OutstandingTaskTools = EmptyHashMap[string, HashSet[string]]()
             .Put("Otis", EmptyHashSet[string]().Add("toolu_explore_01")),
@@ -5614,7 +5627,7 @@ func TestOnStderr_StreamJsonToolResult_RemovesFromOutstandingTaskTools(t T) T {
 // directive parser into spurious dispatches.
 func TestOnStderr_StreamJsonShape_DoesNotAppendToTranscript(t T) T {
     val dir = setupDebugRepo("on_stderr_no_transcript")
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     val m = sampleModel()
     val before = m.Conversation.Size()
     val envelope = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"tool_use_id\":\"toolu_abc\",\"type\":\"tool_result\",\"content\":\"don't surface me\"}]}}"
@@ -5631,7 +5644,7 @@ func TestOnStderr_StreamJsonShape_DoesNotAppendToTranscript(t T) T {
 // fired but were silently dropped after the first write failure.
 func TestHeartbeat_QAGateAbandonedMember_DrainsToTLReview(t T) T {
     val proj  = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val mara = Member(
         Name = "Mara", Role = QA(),
         Personality = "rigorous",
@@ -5690,7 +5703,7 @@ func TestHeartbeat_QAGateAbandonedMember_DrainsToTLReview(t T) T {
 // lands (and that handler is the one that flips Mara to StWorking).
 func TestSpawnQAReview_ReturnsImmediatelyForQATeam(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val mara = Member(
         Name = "Mara", Role = QA(),
         Personality = "rigorous",
@@ -5715,7 +5728,7 @@ func TestSpawnQAReview_ReturnsImmediatelyForQATeam(t T) T {
 // the review).
 func TestApplyQAPromptReady_FlipsQAToWorking(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val mara = Member(
         Name = "Mara", Role = QA(),
         Personality = "rigorous",
@@ -5744,7 +5757,7 @@ func TestApplyQAPromptReady_FlipsQAToWorking(t T) T {
 // transitioned away.
 func TestApplyQAPromptReady_DroppedWhenNotInQAGate(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val mara = Member(
         Name = "Mara", Role = QA(),
         Personality = "rigorous",
@@ -5769,7 +5782,7 @@ func TestApplyQAPromptReady_DroppedWhenNotInQAGate(t T) T {
 // reviewer where it stalled and leaves the lead untouched.
 func TestQaGateStuck_RepromptsReviewer_NotTL(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val mara = Member(
         Name = "Mara", Role = QA(),
         Personality = "rigorous",
@@ -5814,7 +5827,7 @@ func TestQaGateStuck_RepromptsReviewer_NotTL(t T) T {
 // any non-pending member, so no MemberStuck FSM event fires.
 func TestHeartbeat_DoesNotEscalateNonPendingMember(t T) T {
     val proj  = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val team  = sampleTeam()
     val now   = time_utils.FromUnixSeconds(int64(10000))
     val stale = time_utils.FromUnixSeconds(int64(9700))  // 300s ago, past StuckAfterSeconds=120
@@ -5850,7 +5863,7 @@ func TestHeartbeat_DoesNotEscalateNonPendingMember(t T) T {
 // of nothing, then a tui_exit pinning latest.json to Delegating.
 func TestHeartbeat_AbandonedMember_PersistsPostTransitionState(t T) T {
     val proj  = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val team  = sampleTeam()
     val now   = time_utils.FromUnixSeconds(int64(20000))
     val stale = time_utils.FromUnixSeconds(int64(19000))  // 1000s ago, past AbandonAfterSeconds=300
@@ -5888,7 +5901,7 @@ func TestHeartbeat_AbandonedMember_PersistsPostTransitionState(t T) T {
 // preserves the FSM (and the status map) until the nudge resolves.
 func TestHeartbeat_SkipsWalkWhileStuckNudgeInFlight(t T) T {
     val proj  = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     val team  = sampleTeam()
     val now   = time_utils.FromUnixSeconds(int64(10000))
     val stale = time_utils.FromUnixSeconds(int64(9500))  // 500s ago, past AbandonAfterSeconds=300
@@ -6402,7 +6415,7 @@ func TestOnApprovalReadyResult_BlockedDismissesModal(t T) T {
 // keeps checkPrReady's git rev-list off the UI thread.
 func TestTLSummary_DefersTransitionUntilSummaryReadyResult(t T) T {
     val proj = emptyLeadBranchProject()
-    defer os.RemoveAll(proj.Repo)
+    use cleanup = onExitErr(() => os.RemoveAll(proj.Repo))
     runGitInTmp(proj.Repo, ArrayOf("checkout", "-q", "-b", "gala_team/demo/lead"))
     runGitInTmp(proj.Repo, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                                    "commit", "--allow-empty", "-q", "-m", "lead work"))
@@ -6443,8 +6456,8 @@ func TestOnSummaryReadyResult_DroppedWhenNothingPending(t T) T {
 // queries). Treating the test as an existence/smoke check.
 func TestGitFilesList_RunsAgainstRealRepo(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_gitfiles_test_")
-    if err != nil { panic(s"MkdirTemp: ${err.Error()}") }
-    defer os.RemoveAll(dir)
+    if err != nil { go_builtins.Panic(s"MkdirTemp: ${err.Error()}") }
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     runGitInTmp(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInTmp(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                              "commit", "--allow-empty", "-q", "-m", "base"))

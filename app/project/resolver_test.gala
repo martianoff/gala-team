@@ -1,11 +1,18 @@
 package project
 
 import (
+    "martianoff/gala/go_builtins"
     "os"
     "path/filepath"
     . "martianoff/gala/test"
     . "martianoff/gala/std"
 )
+
+// onExitErr adapts an error-returning cleanup thunk to Closeable so a `use`
+// binding replaces the Go `defer` (a hard error in GALA): it runs on every
+// exit path and its error is discarded by `use`, matching `defer`.
+struct onExitErr(run func() error)
+func (c onExitErr) Close() error = c.run()
 
 // resolver tests cover only the non-shelling-out paths.  Real git
 // auto-detection is exercised end-to-end by the cmd/main.gala startup
@@ -19,14 +26,14 @@ func TestResolve_NonexistentDir_Fails(t T) T {
 
 func TestResolve_NonGitDir_Fails(t T) T {
     val tmp = mustMkTempDir(t)
-    defer os.RemoveAll(tmp)
+    use cleanup = onExitErr(() => os.RemoveAll(tmp))
     val res = Resolve(tmp, NoOverrides())
     return IsFailure(t, res)
 }
 
 func TestResolve_OverridesWinOverDetection(t T) T {
     val tmp = mustMkTempDir(t)
-    defer os.RemoveAll(tmp)
+    use cleanup = onExitErr(() => os.RemoveAll(tmp))
     val gitDir = filepath.Join(tmp, ".git")
     val mkErr = os.MkdirAll(gitDir, os.FileMode(0755))
     val _ = mkErr
@@ -48,7 +55,7 @@ func TestResolve_OverridesWinOverDetection(t T) T {
 func mustMkTempDir(t T) string {
     val dir, err = os.MkdirTemp("", "gala_team_test_*")
     if err != nil {
-        panic(s"MkdirTemp: ${err.Error()}")
+        go_builtins.Panic(s"MkdirTemp: ${err.Error()}")
     }
     return dir
 }

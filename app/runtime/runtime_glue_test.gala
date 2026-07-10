@@ -162,7 +162,7 @@ func TestLeadWorktreePath_PerProjectConvention(t T) T {
 func TestEnsureLeadWorktree_FallsBackForNonGitDir(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_lead_wt_fallback_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     val proj = Project(
         Name = "demo", Repo = dir,
         Github = None[string](),
@@ -181,7 +181,7 @@ func TestEnsureLeadWorktree_FallsBackForNonGitDir(t T) T {
 func TestEnsureLeadWorktree_CreatesAndIsIdempotent(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_lead_wt_create_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                               "commit", "--allow-empty", "-q", "-m", "init"))
@@ -231,7 +231,7 @@ func runGitInDir(dir string, args Array[string]) {
 func TestFsNukeUntilGone_RemovesPopulatedDir(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_nuke_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     // Non-empty: a nested dir mimics an engineer's leftover work.
     val child, cerr = os.MkdirTemp(dir, "child_")
     if cerr != nil { return IsTrue(t, false) }
@@ -250,7 +250,7 @@ func TestFsNukeUntilGone_RemovesPopulatedDir(t T) T {
 func TestRemoveWorktree_DeregistersDirtySoNextSpawnIsClean(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_wt_reset_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                               "commit", "--allow-empty", "-q", "-m", "init"))
@@ -330,7 +330,7 @@ func TestGhTitle_PreservesInnerMarkdown(t T) T {
 func TestGhTitle_CapsAtWordBoundary(t T) T {
     val long = "Crypto MVP hash functions only and lead is now three commits ahead of master with full integration test coverage"
     val title = GhTitle(long)
-    val t1 = IsTrue(t, len(title) <= 70)
+    val t1 = IsTrue(t, title.Size() <= 70)
     val t2 = IsTrue(t1, strings.HasSuffix(title, "..."))
     // Must end with a complete word + ellipsis, not a partial word.
     val withoutEllipsis = strings.TrimSuffix(title, "...")
@@ -357,7 +357,7 @@ func TestGhTitle_ShortTitlePassthrough(t T) T {
 func TestGhTitle_RollbackFloorIsInclusive(t T) T {
     val body = "Replace panic-driven failure with explicit Try returns in `subprocess` and `crypto.RandomBytes`."
     val title = GhTitle(body)
-    val t1 = IsTrue(t, len(title) <= 70)
+    val t1 = IsTrue(t, title.Size() <= 70)
     // Must NOT cut mid-word inside the backticks — the regression
     // shape is `subproce` (and similar truncated tokens).
     val t2 = IsFalse(t1, strings.Contains(title, "subproce..."))
@@ -388,7 +388,7 @@ func TestGhTitle_BoldWrapAndLongTitleRegression(t T) T {
     val body = "**Crypto MVP — hash functions only. Lead is now 3 commits ahead of master.**\n```\n99a2ad1 feat..."
     val title = GhTitle(body)
     val t1 = IsTrue(t, !strings.Contains(title, "**"))
-    val t2 = IsTrue(t1, len(title) <= 70)
+    val t2 = IsTrue(t1, title.Size() <= 70)
     val t3 = IsTrue(t2, strings.HasPrefix(title, "Crypto MVP"))
     return t3
 }
@@ -424,7 +424,7 @@ func TestGhTitle_PrefersHeadlineOverSections(t T) T {
 func TestFirstCommitSubjectSinceBase_SingleCommit(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_first_commit_single_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                               "commit", "--allow-empty", "-q", "-m", "init"))
@@ -441,7 +441,7 @@ func TestFirstCommitSubjectSinceBase_SingleCommit(t T) T {
 func TestFirstCommitSubjectSinceBase_PicksOldest(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_first_commit_oldest_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                               "commit", "--allow-empty", "-q", "-m", "init"))
@@ -461,7 +461,7 @@ func TestFirstCommitSubjectSinceBase_PicksOldest(t T) T {
 func TestFirstCommitSubjectSinceBase_NoCommits_ReturnsEmpty(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_first_commit_empty_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                               "commit", "--allow-empty", "-q", "-m", "init"))
@@ -473,7 +473,7 @@ func TestFirstCommitSubjectSinceBase_NoCommits_ReturnsEmpty(t T) T {
 func TestFirstCommitSubjectSinceBase_MissingRef_ReturnsEmpty(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_first_commit_missing_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                               "commit", "--allow-empty", "-q", "-m", "init"))
@@ -488,7 +488,7 @@ func TestFirstCommitSubjectSinceBase_MissingRef_ReturnsEmpty(t T) T {
 func TestFirstCommitSubjectSinceBase_LongSubject_ReturnedVerbatim(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_first_commit_long_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                               "commit", "--allow-empty", "-q", "-m", "init"))
@@ -520,7 +520,7 @@ func TestFirstCommitSubjectSinceBase_LongSubject_ReturnedVerbatim(t T) T {
 func TestFirstCommitSubjectSinceBase_RemoteOnlyBranch_ReturnsEmpty(t T) T {
     val dir, err = os.MkdirTemp("", "gala_team_first_commit_remote_only_")
     if err != nil { return IsTrue(t, false) }
-    defer os.RemoveAll(dir)
+    use cleanup = onExitErr(() => os.RemoveAll(dir))
     runGitInDir(dir, ArrayOf("init", "-q", "-b", "main"))
     runGitInDir(dir, ArrayOf("-c", "user.email=t@t", "-c", "user.name=t",
                               "commit", "--allow-empty", "-q", "-m", "init"))

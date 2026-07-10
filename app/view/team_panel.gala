@@ -406,7 +406,7 @@ func statusGlyph(status Status, tick int) string = status match {
     case StFailed(_)        => "✗"
 }
 
-// spinnerIdx clamps `tick` into the [0, len(frames)) range,
+// spinnerIdx clamps `tick` into the [0, frames.Size()) range,
 // handling negative ticks defensively (happens in tests with
 // hand-built models).
 func spinnerIdx(tick int) int {
@@ -420,7 +420,7 @@ func spinnerIdx(tick int) int {
 // padRight space-pads `s` on the right up to `width`.  Truncates if
 // `s` is already longer than `width` (rare; member names are short).
 func padRight(s string, width int) string {
-    val deficit = width - len(s)
+    val deficit = width - s.Size()
     if deficit <= 0 { return s }
     return s + spacesOf(deficit)
 }
@@ -429,7 +429,7 @@ func padRight(s string, width int) string {
 // exceeds `width` it's returned unchanged — the sidebar gives up
 // alignment rather than dropping characters from a status string.
 func padLeft(s string, width int) string {
-    val n = len(s)
+    val n = s.Size()
     if n >= width { return s }
     return spacesOf(width - n) + s
 }

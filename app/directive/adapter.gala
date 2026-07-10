@@ -78,7 +78,7 @@ func stripPlanBullet(s string) string {
     if (strings.HasPrefix(s, "* ")) { return strings.TrimSpace(strings.TrimPrefix(s, "* ")) }
     if (strings.HasPrefix(s, "• ")) { return strings.TrimSpace(strings.TrimPrefix(s, "• ")) }
     val rs = ToRunes(s)
-    val n = len(rs)
+    val n = rs.Size()
     var i = 0
     for i < n && rs[i] >= '0' && rs[i] <= '9' { i = i + 1 }
     if (i > 0 && i < n && (rs[i] == '.' || rs[i] == ')')) {

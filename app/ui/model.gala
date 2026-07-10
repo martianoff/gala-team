@@ -113,7 +113,7 @@ struct AppModel(
     // cleanly without the Option-of-generic-struct quirk.
     ViewMode ViewMode,
     Composer     string,                           // current draft prompt text
-    // Cursor position (rune offset, 0..len(Composer in runes)) for
+    // Cursor position (rune offset, 0..Composer in runes.Size()) for
     // edit-in-place. Without this, every keystroke could only append
     // and Backspace could only chop the last character — no way to
     // fix mistakes mid-line. Left/Right/Home/End/Delete now use this

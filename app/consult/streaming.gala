@@ -1,6 +1,7 @@
 package consult
 
 import (
+    "martianoff/gala/go_builtins"
     "errors"
     "martianoff/gala/concurrent"
     "github.com/martianoff/gala_team/app/onboarding"
@@ -85,13 +86,13 @@ func SpawnInProjectConsult(tm Team, proj Project, name string, body string) Try[
     val lead = tm.Lead
     val (wrapped, _) = onboarding.WrapPromptSafe(proj, tm, lead, Shared(), body)
     val sess = SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
-        case Failure(e) => panic(s"spawn: ${e.Error()}")
+        case Failure(e) => go_builtins.Panic(s"spawn: ${e.Error()}")
         case Success(s) => s
     }
     val sendRes = SendFuture(sess, wrapped).Await()
     if sendRes.IsFailure() {
         val _ = CloseSession(sess)
-        panic(s"send: ${sendRes.GetError().Error()}")
+        go_builtins.Panic(s"send: ${sendRes.GetError().Error()}")
     }
     return ConsultSession(
         Name     = name,
@@ -108,27 +109,27 @@ func SpawnInProjectConsult(tm Team, proj Project, name string, body string) Try[
 // of having to thread per-step error events through the chunk pump.
 func SpawnConsult(r Registry, name string, body string) Try[ConsultSession] = Try(() => {
     val entry = Get(r, name) match {
-        case None()     => panic(s"no registry entry for '${name}'")
+        case None()     => go_builtins.Panic(s"no registry entry for '${name}'")
         case Some(e)    => e
     }
     val proj = Resolve(entry.Repo, NoOverrides()) match {
-        case Failure(e) => panic(s"project: ${e.Error()}")
+        case Failure(e) => go_builtins.Panic(s"project: ${e.Error()}")
         case Success(p) => p
     }
     val tm = loadTeamFromFile(entry.TeamYaml) match {
-        case Failure(e) => panic(s"team: ${e.Error()}")
+        case Failure(e) => go_builtins.Panic(s"team: ${e.Error()}")
         case Success(c) => c.Team
     }
     val lead = tm.Lead
     val (wrapped, _) = onboarding.WrapPromptSafe(proj, tm, lead, Shared(), body)
     val sess = SpawnSession(proj, lead, proj.Repo, tm.DangerouslySkipPermissions, NewSessionId(), true) match {
-        case Failure(e) => panic(s"spawn: ${e.Error()}")
+        case Failure(e) => go_builtins.Panic(s"spawn: ${e.Error()}")
         case Success(s) => s
     }
     val sendRes = SendFuture(sess, wrapped).Await()
     if sendRes.IsFailure() {
         val _ = CloseSession(sess)
-        panic(s"send: ${sendRes.GetError().Error()}")
+        go_builtins.Panic(s"send: ${sendRes.GetError().Error()}")
     }
     return ConsultSession(
         Name     = name,

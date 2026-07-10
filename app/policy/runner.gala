@@ -1,6 +1,7 @@
 package policy
 
 import (
+    "martianoff/gala/go_builtins"
     "martianoff/gala/subprocess"
     "martianoff/gala/concurrent"
     "martianoff/gala/time_utils"
@@ -56,10 +57,10 @@ func RunHooks(cwd string, hooks Array[Hook]) Try[bool] = Try(() => {
     for i < n {
         val hook = hooks.Get(i)
         runOne(cwd, hook) match {
-            case Failure(err) => panic(s"${hook.Name}: ${err.Error()}")
+            case Failure(err) => go_builtins.Panic(s"${hook.Name}: ${err.Error()}")
             case Success(r)   => {
                 if r.ExitCode != 0 {
-                    panic(s"${hook.Name} exited with code ${r.ExitCode}: ${r.Stderr}")
+                    go_builtins.Panic(s"${hook.Name} exited with code ${r.ExitCode}: ${r.Stderr}")
                 }
             }
         }
@@ -109,7 +110,7 @@ func runOne(cwd string, hook Hook) Try[HookResult] = Try(() => {
     )
     val proc = subprocess.Spawn(opts) match {
         case Success(p)   => p
-        case Failure(err) => panic(s"spawn ${hook.Cmd}: ${err.Error()}")
+        case Failure(err) => go_builtins.Panic(s"spawn ${hook.Cmd}: ${err.Error()}")
     }
     val timeout = HookTimeout()
     val started = time_utils.Now()
@@ -124,7 +125,7 @@ func runOne(cwd string, hook Hook) Try[HookResult] = Try(() => {
     val elapsed = time_utils.Between(started, time_utils.Now())
     if elapsed.ToNanos() >= timeout.ToNanos() {
         val minutes = timeout.ToNanos() / int64(60000000000)
-        panic(s"${hook.Name}: timed out after ${minutes}m (watchdog killed the subprocess)")
+        go_builtins.Panic(s"${hook.Name}: timed out after ${minutes}m (watchdog killed the subprocess)")
     }
     return HookResult(
         Name     = hook.Name,

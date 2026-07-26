@@ -29,7 +29,7 @@ type ClaudeProcessTransport struct {}
 func NewClaudeProcessTransport() AgentTransport = ClaudeProcessTransport{}
 
 // Open spawns `claude` for `spec` behind the AgentSession port. The
-// prompt is delivered via stdin (see Send), not argv: Windows caps
+// prompt is delivered via stdin (see SendAsync), not argv: Windows caps
 // argv around 32 KB and the onboarding pack alone can exceed that on
 // the first turn.
 func (t ClaudeProcessTransport) Open(spec AgentSpec) Try[AgentSession] {
@@ -55,24 +55,29 @@ struct ClaudeProcessSession(
     Proc subprocess.Process,
 )
 
-// Send writes one input envelope to the child's stdin. The stream-json
-// input format keeps stdin open across writes so a tool_result can be
-// delivered mid-turn (AskUserQuestion). A failed write usually means
-// the child already exited; the Try carries the cause.
-func (s ClaudeProcessSession) Send(in AgentInput) Try[bool] = in match {
-    case PromptInput(text)           => s.Proc.WriteLine(encodeUserPromptEnvelope(text))
-    case ToolResultInput(id, answer) => s.Proc.WriteLine(encodeToolResultEnvelope(id, answer))
+// SendAsync writes one input envelope to the child's stdin off the calling
+// goroutine. The stream-json input format keeps stdin open across writes so a
+// tool_result can be delivered mid-turn (AskUserQuestion). WriteLineAsync owns
+// the goroutine-safe capture of the Process handle inside the subprocess
+// package, so this stays a fully-checked call with no escape hatch here; the
+// Future's inner Try carries the write cause (a failed write usually means the
+// child already exited).
+func (s ClaudeProcessSession) SendAsync(in AgentInput) concurrent.Future[Try[bool]] = in match {
+    case PromptInput(text)           => s.Proc.WriteLineAsync(encodeUserPromptEnvelope(text))
+    case ToolResultInput(id, answer) => s.Proc.WriteLineAsync(encodeToolResultEnvelope(id, answer))
 }
 
-// EndTurn closes the child's stdin so it can wrap up the turn. Dispatched
-// once the turn's `result` event lands (no more inputs coming).
-func (s ClaudeProcessSession) EndTurn() Try[bool] = s.Proc.CloseStdin()
+// EndTurnAsync closes the child's stdin off-thread so it can wrap up the turn.
+// Dispatched once the turn's `result` event lands (no more inputs coming);
+// CloseStdinAsync owns the off-thread handle capture inside subprocess.
+func (s ClaudeProcessSession) EndTurnAsync() concurrent.Future[Try[bool]] = s.Proc.CloseStdinAsync()
 
-// Captures the process handle `s.Proc` to do the blocking read off-thread;
-// spawnFuture is the unchecked dispatch that permits the goroutine-safe handle
-// capture (see its doc in runtime_glue.gala).
+// Reads the next stdout line off-thread and classifies it. ReadLineAsync owns
+// the goroutine-safe capture of the Process handle inside the subprocess
+// package and hands back a Future[Try[string]], so this stays a fully-checked
+// pipeline: Map runs classifyClaudeRead on the read result to yield the event.
 func (s ClaudeProcessSession) NextEvent() concurrent.Future[AgentEvent] =
-    spawnFuture[AgentEvent](() => classifyClaudeRead(s.Proc.ReadLine()))
+    s.Proc.ReadLineAsync().Map(classifyClaudeRead)
 
 // Close kills the child and waits for it to fully exit. The wait is
 // deliberate — the caller that replaces a live lead turn wants the old
@@ -90,7 +95,7 @@ func (s ClaudeProcessSession) Close() Try[bool] =
 // on NextEvent instead. runtime_glue's stderr pump narrows to this type
 // and falls back to a clean end for any non-Claude session.
 func (s ClaudeProcessSession) NextDiagnosticFuture() concurrent.Future[AgentEvent] =
-    spawnFuture[AgentEvent](() => classifyClaudeDiagnostic(s.Proc.ReadStderrLine()))
+    s.Proc.ReadStderrLineAsync().Map(classifyClaudeDiagnostic)
 
 // classifyReadFailure maps a read failure to a terminal AgentEvent: a
 // clean end (subprocess reports it as Failure(io.EOF)) is AgentTurnEnded,

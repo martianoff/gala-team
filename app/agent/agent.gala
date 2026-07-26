@@ -56,15 +56,22 @@ sealed type AgentInput {
 
 // AgentSession is one live conversation turn with an agent.
 //
-//   Send      — deliver an AgentInput. Try carries a delivery failure.
-//   EndTurn   — signal "no more input this turn"; the agent may wrap up.
-//   NextEvent — the next AgentEvent, asynchronously. Re-invoked by the
-//               caller as a self-perpetuating pump (one in flight at a
-//               time).
-//   Close     — terminate the session and release its resources.
+//   SendAsync    — deliver an AgentInput off the calling goroutine. The
+//                  Future's inner Try carries a delivery failure.
+//   EndTurnAsync — signal "no more input this turn" off-thread; the agent
+//                  may wrap up. Inner Try carries a close failure.
+//   NextEvent    — the next AgentEvent, asynchronously. Re-invoked by the
+//                  caller as a self-perpetuating pump (one in flight at a
+//                  time).
+//   Close        — terminate the session and release its resources.
+//
+// The write operations are async so the transport owns any goroutine that
+// touches its underlying handle: a local subprocess adapter drives stdin
+// off-thread without app code ever capturing the (goroutine-safe but not
+// statically shareable) Process handle across a Future boundary.
 type AgentSession interface {
-    Send(in AgentInput) Try[bool]
-    EndTurn() Try[bool]
+    SendAsync(in AgentInput) concurrent.Future[Try[bool]]
+    EndTurnAsync() concurrent.Future[Try[bool]]
     NextEvent() concurrent.Future[AgentEvent]
     Close() Try[bool]
 }

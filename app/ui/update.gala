@@ -4995,21 +4995,15 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // transitions the FSM away during the wait (Ctrl+C, recovery), the
 // applyQAPromptReady handler guards on State == QAGate and drops
 // the result quietly.
-func qaPromptReadyCmd(m AppModel) Cmd[AppMsg] {
-    // Snapshot the shareable slices of the model the prompt builder needs, so
-    // the off-thread Future body captures only immutable data — never the whole
-    // AppModel, which transitively holds live session handles (m.Sessions) that
-    // are not safe to share across the goroutine boundary. The N×3 git
-    // subprocesses still run off-thread (the point of the Future); only the set
-    // of captured inputs changed, not where the work runs.
-    val team = m.Team
-    val statuses = m.Statuses
-    val doneBodies = m.MemberDoneBodies
-    val project = m.Project
-    val wsMode = m.Policy.WorkspaceMode
-    return FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
-        QAPromptReady(Prompt = buildQAReviewPrompt(team, statuses, doneBodies, project, wsMode))))
-}
+// The off-thread body reads only the model's immutable fields (m.Team,
+// m.Statuses, m.MemberDoneBodies, m.Project, m.Policy.WorkspaceMode); the
+// capture check clears it on those field reads without ever touching the live
+// session handles in m.Sessions. The N×3 git subprocesses inside
+// buildQAReviewPrompt run off-thread — the point of the Future.
+func qaPromptReadyCmd(m AppModel) Cmd[AppMsg] =
+    FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
+        QAPromptReady(Prompt = buildQAReviewPrompt(
+            m.Team, m.Statuses, m.MemberDoneBodies, m.Project, m.Policy.WorkspaceMode))))
 
 // applyQAPromptReady consumes a QAPromptReady message — the result
 // of the off-thread buildQAReviewPrompt — and runs the same
@@ -6431,12 +6425,11 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
     // for whether the user's local default branch has fallen behind the
     // merged-on-GitHub commits — surfaced as a warn-only advisory by
     // onBaseDriftChecked. Batched so neither blocks the other.
-    // Snapshot Project (shareable) out of the model so the off-thread git
-    // check captures only immutable data, not the whole AppModel (which holds
-    // unshareable live session handles).
-    val driftProject = m.Project
+    // The off-thread body reads only the immutable m.Project field, so the
+    // capture check clears it without ever touching the live session handles in
+    // the rest of the model.
     val driftCmd = FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
-        BaseDriftChecked(Behind = LocalBaseBehindStr(driftProject))))
+        BaseDriftChecked(Behind = LocalBaseBehindStr(m.Project))))
     return (m.Copy(
         OpenPrs        = nextOpenPrs,
         ActiveBase     = None[string](),

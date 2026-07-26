@@ -698,29 +698,12 @@ func agentDiagnosticToMsg(name string, ev AgentEvent) Msg = ev match {
     case AgentFailed(_)                => RtStderrEnded(Member = name)
 }
 
-// spawnFuture runs `body` on a raw goroutine (go_interop.SpawnWithRecover — the
-// documented UNCHECKED escape hatch from the Sendable capture check) and
-// delivers its result as a Future, turning a panic into a Failure exactly like
-// concurrent.Future's own contract (a Promise completed on the worker goroutine).
-//
-// It exists for the async subprocess pumps below, whose bodies must capture a
-// live session/process handle (MemberSession → AgentSession → subprocess.Process)
-// into the goroutine. Those handles are deliberately goroutine-safe —
-// subprocess.Process guards its state with a mutex/once/signal, so Kill/Wait on
-// one goroutine and ReadLine on another is well-defined — but that internal
-// synchronization is invisible to the compile-time shareability checker, which
-// conservatively rejects the capture (GALA-E0037). Routing through
-// SpawnWithRecover keeps the exact Promise-completion + panic→Failure semantics
-// of concurrent.Future while taking explicit responsibility for the handle's
-// thread-safety. Bodies that capture only shareable data must use
-// concurrent.Future directly so they stay under the safety check.
-func spawnFuture[T any](body func() T) concurrent.Future[T] {
-    val p = concurrent.NewPromise[T]()
-    SpawnWithRecover(
-        () => { p.Success(body()) },
-        (r) => { p.Failure(PanicToError(r)) },
-    )
-    return p.Future()
+// writeResultToMsg maps an off-thread write outcome to the runtime Msg shared
+// by all three send/close pumps: a clean write is RtWriteSent, a delivery
+// failure is RtSessionFailed carrying the cause.
+func writeResultToMsg(name string, r Try[bool]) Msg = r match {
+    case Success(_)   => RtWriteSent(Member = name)
+    case Failure(err) => RtSessionFailed(Member = name, Err = err)
 }
 
 // NextChunkFuture schedules the next output event and maps it to a Msg.
@@ -753,12 +736,10 @@ func NextStderrFuture(s MemberSession) concurrent.Future[Msg] {
 // or follow-up can follow; CloseSendFuture is the explicit end.
 func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    // Captures the session handle `s`; see spawnFuture for why this uses the
-    // unchecked dispatch rather than concurrent.Future directly.
-    return spawnFuture[Msg](() => s.Session.Send(PromptInput(Text = prompt)) match {
-        case Success(_)   => RtWriteSent(Member = name)
-        case Failure(err) => RtSessionFailed(Member = name, Err = err)
-    })
+    // SendAsync drives the write off-thread inside the transport, which owns the
+    // Process handle's goroutine-safety, so this stays a fully-checked Future
+    // pipeline — no session handle captured here.
+    return s.Session.SendAsync(PromptInput(Text = prompt)).Map((r) => writeResultToMsg(name, r))
 }
 
 // SendToolResultFuture answers a prior AskUserQuestion tool_use.
@@ -767,20 +748,14 @@ func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
 // unanswered.
 func SendToolResultFuture(s MemberSession, toolUseId string, answer string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return spawnFuture[Msg](() => s.Session.Send(ToolResultInput(ToolUseId = toolUseId, Answer = answer)) match {
-        case Success(_)   => RtWriteSent(Member = name)
-        case Failure(err) => RtSessionFailed(Member = name, Err = err)
-    })
+    return s.Session.SendAsync(ToolResultInput(ToolUseId = toolUseId, Answer = answer)).Map((r) => writeResultToMsg(name, r))
 }
 
 // CloseSendFuture ends the turn's input so the agent can wrap up.
 // Dispatched when a `result` event lands.
 func CloseSendFuture(s MemberSession) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return spawnFuture[Msg](() => s.Session.EndTurn() match {
-        case Success(_)   => RtWriteSent(Member = name)
-        case Failure(err) => RtSessionFailed(Member = name, Err = err)
-    })
+    return s.Session.EndTurnAsync().Map((r) => writeResultToMsg(name, r))
 }
 
 // ----------------------------------------------------------------------------

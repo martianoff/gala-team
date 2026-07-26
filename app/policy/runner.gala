@@ -114,10 +114,19 @@ func runOne(cwd string, hook Hook) Try[HookResult] = Try(() => {
     }
     val timeout = HookTimeout()
     val started = time_utils.Now()
-    concurrent.Future[bool](() => {
+    // Dispatch the watchdog through the execution context's raw goroutine
+    // primitive (GlobalEC().Execute — an UNCHECKED plain-func dispatch) rather
+    // than a Future: Process is a documented goroutine-safe handle (Kill from
+    // the watchdog while this thread Waits / ReadLines) but is not statically
+    // provable as shareable, so capturing it cannot cross a Future's Sendable
+    // boundary. Execute is fire-and-forget, matching this watchdog — the Future
+    // value it produced before was discarded. (go_interop.Spawn would be the
+    // documented escape hatch, but its bare name collides with subprocess.Spawn
+    // here; the EC's Execute method call is unambiguous and runs on the same
+    // GlobalEC the discarded Future used.)
+    GlobalEC().Execute(() => {
         time_utils.Sleep(timeout)
         proc.Kill()
-        return true
     })
     val stdout = drainStream(proc, true)
     val stderr = drainStream(proc, false)

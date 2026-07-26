@@ -2,7 +2,7 @@ package runtime
 
 import (
     "strings"
-    "martianoff/gala/concurrent"
+    "martianoff/gala/go_interop"
     "martianoff/gala/subprocess"
     "martianoff/gala/time_utils"
     . "martianoff/gala/std"
@@ -72,10 +72,15 @@ func RunWithTimeout(opts subprocess.SpawnOpts, timeout time_utils.Duration) Try[
     // parent's reaping; either Kill fires on an already-exited
     // process (no-op) or fires fractions of a millisecond before
     // — irrelevant once stdout is drained.
-    concurrent.Future[bool](() => {
+    // Fire-and-forget watchdog dispatched through go_interop.Spawn (the
+    // documented UNCHECKED escape hatch) rather than a Future: Process is a
+    // documented goroutine-safe handle (Kill here while the loop below
+    // ReadLines / Waits) but is not statically provable as shareable, so
+    // capturing it cannot cross a Future's Sendable boundary. The Future value
+    // this produced before was discarded, so a bare goroutine is a truer fit.
+    go_interop.Spawn(() => {
         time_utils.Sleep(timeout)
         proc.Kill()
-        return true
     })
 
     val started = time_utils.Now()

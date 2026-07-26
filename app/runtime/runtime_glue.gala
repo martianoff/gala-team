@@ -698,6 +698,31 @@ func agentDiagnosticToMsg(name string, ev AgentEvent) Msg = ev match {
     case AgentFailed(_)                => RtStderrEnded(Member = name)
 }
 
+// spawnFuture runs `body` on a raw goroutine (go_interop.SpawnWithRecover — the
+// documented UNCHECKED escape hatch from the Sendable capture check) and
+// delivers its result as a Future, turning a panic into a Failure exactly like
+// concurrent.Future's own contract (a Promise completed on the worker goroutine).
+//
+// It exists for the async subprocess pumps below, whose bodies must capture a
+// live session/process handle (MemberSession → AgentSession → subprocess.Process)
+// into the goroutine. Those handles are deliberately goroutine-safe —
+// subprocess.Process guards its state with a mutex/once/signal, so Kill/Wait on
+// one goroutine and ReadLine on another is well-defined — but that internal
+// synchronization is invisible to the compile-time shareability checker, which
+// conservatively rejects the capture (GALA-E0037). Routing through
+// SpawnWithRecover keeps the exact Promise-completion + panic→Failure semantics
+// of concurrent.Future while taking explicit responsibility for the handle's
+// thread-safety. Bodies that capture only shareable data must use
+// concurrent.Future directly so they stay under the safety check.
+func spawnFuture[T any](body func() T) concurrent.Future[T] {
+    val p = concurrent.NewPromise[T]()
+    SpawnWithRecover(
+        () => { p.Success(body()) },
+        (r) => { p.Failure(PanicToError(r)) },
+    )
+    return p.Future()
+}
+
 // NextChunkFuture schedules the next output event and maps it to a Msg.
 // RtChunkArrived on output; RtSessionFailed on turn-end (Err.Error()
 // == "EOF") or a real read error — callers match on Err to distinguish
@@ -728,7 +753,9 @@ func NextStderrFuture(s MemberSession) concurrent.Future[Msg] {
 // or follow-up can follow; CloseSendFuture is the explicit end.
 func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.Future[Msg](() => s.Session.Send(PromptInput(Text = prompt)) match {
+    // Captures the session handle `s`; see spawnFuture for why this uses the
+    // unchecked dispatch rather than concurrent.Future directly.
+    return spawnFuture[Msg](() => s.Session.Send(PromptInput(Text = prompt)) match {
         case Success(_)   => RtWriteSent(Member = name)
         case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })
@@ -740,7 +767,7 @@ func SendFuture(s MemberSession, prompt string) concurrent.Future[Msg] {
 // unanswered.
 func SendToolResultFuture(s MemberSession, toolUseId string, answer string) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.Future[Msg](() => s.Session.Send(ToolResultInput(ToolUseId = toolUseId, Answer = answer)) match {
+    return spawnFuture[Msg](() => s.Session.Send(ToolResultInput(ToolUseId = toolUseId, Answer = answer)) match {
         case Success(_)   => RtWriteSent(Member = name)
         case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })
@@ -750,7 +777,7 @@ func SendToolResultFuture(s MemberSession, toolUseId string, answer string) conc
 // Dispatched when a `result` event lands.
 func CloseSendFuture(s MemberSession) concurrent.Future[Msg] {
     val name = s.Member.Name
-    return concurrent.Future[Msg](() => s.Session.EndTurn() match {
+    return spawnFuture[Msg](() => s.Session.EndTurn() match {
         case Success(_)   => RtWriteSent(Member = name)
         case Failure(err) => RtSessionFailed(Member = name, Err = err)
     })

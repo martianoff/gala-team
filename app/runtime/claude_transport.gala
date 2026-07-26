@@ -62,7 +62,7 @@ struct ClaudeProcessSession(
 // package, so this stays a fully-checked call with no escape hatch here; the
 // Future's inner Try carries the write cause (a failed write usually means the
 // child already exited).
-func (s ClaudeProcessSession) SendAsync(in AgentInput) concurrent.Future[Try[bool]] = in match {
+func (s ClaudeProcessSession) SendAsync(in AgentInput) concurrent.Future[Try[Void]] = in match {
     case PromptInput(text)           => s.Proc.WriteLineAsync(encodeUserPromptEnvelope(text))
     case ToolResultInput(id, answer) => s.Proc.WriteLineAsync(encodeToolResultEnvelope(id, answer))
 }
@@ -70,7 +70,7 @@ func (s ClaudeProcessSession) SendAsync(in AgentInput) concurrent.Future[Try[boo
 // EndTurnAsync closes the child's stdin off-thread so it can wrap up the turn.
 // Dispatched once the turn's `result` event lands (no more inputs coming);
 // CloseStdinAsync owns the off-thread handle capture inside subprocess.
-func (s ClaudeProcessSession) EndTurnAsync() concurrent.Future[Try[bool]] = s.Proc.CloseStdinAsync()
+func (s ClaudeProcessSession) EndTurnAsync() concurrent.Future[Try[Void]] = s.Proc.CloseStdinAsync()
 
 // Reads the next stdout line off-thread and classifies it. ReadLineAsync owns
 // the goroutine-safe capture of the Process handle inside the subprocess

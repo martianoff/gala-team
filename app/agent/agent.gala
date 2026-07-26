@@ -70,8 +70,8 @@ sealed type AgentInput {
 // off-thread without app code ever capturing the (goroutine-safe but not
 // statically shareable) Process handle across a Future boundary.
 type AgentSession interface {
-    SendAsync(in AgentInput) concurrent.Future[Try[bool]]
-    EndTurnAsync() concurrent.Future[Try[bool]]
+    SendAsync(in AgentInput) concurrent.Future[Try[Void]]
+    EndTurnAsync() concurrent.Future[Try[Void]]
     NextEvent() concurrent.Future[AgentEvent]
     Close() Try[bool]
 }

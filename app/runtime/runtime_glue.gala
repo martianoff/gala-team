@@ -701,7 +701,7 @@ func agentDiagnosticToMsg(name string, ev AgentEvent) Msg = ev match {
 // writeResultToMsg maps an off-thread write outcome to the runtime Msg shared
 // by all three send/close pumps: a clean write is RtWriteSent, a delivery
 // failure is RtSessionFailed carrying the cause.
-func writeResultToMsg(name string, r Try[bool]) Msg = r match {
+func writeResultToMsg(name string, r Try[Void]) Msg = r match {
     case Success(_)   => RtWriteSent(Member = name)
     case Failure(err) => RtSessionFailed(Member = name, Err = err)
 }

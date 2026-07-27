@@ -1,3 +1,5 @@
 github.com/google/uuid v1.6.0 h1:MBFjEJD9r2JbWTf60PIpRbGkQWFHMQtHSVaH+d59L8Q=
-github.com/martianoff/gala-tui v0.7.3 h1:hQ1MJdX6BuaExT0OGzNEoVHtde2ldYjsn3hMGiKdlGE=
-github.com/martianoff/gala-tui v0.7.3/gala.mod h1:A129Ck07kDbnC8kJ7k16zNbsUmGtxFW2J9yhVww0JVs=
+github.com/martianoff/gala-acp v0.2.0 h1:9WhBDrE9P6nITrgI5suKKivegh/BS8CC+xI9zg80zgg=
+github.com/martianoff/gala-acp v0.2.0/gala.mod h1:sWJvzVUd1OTk4fSxWZZ24OfaqEk+6Oi84O2x/zh5ueQ=
+github.com/martianoff/gala-tui v0.11.0 h1:JCT2/pIVzbIeRsjE7XT4Fh8i95w42KovLlishdb4pFQ=
+github.com/martianoff/gala-tui v0.11.0/gala.mod h1:PuJI+JAfnQuOWNBDSimyCD3Y4LOJL5mTAbjzpIG8j2k=

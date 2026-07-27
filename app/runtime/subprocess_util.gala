@@ -2,7 +2,6 @@ package runtime
 
 import (
     "strings"
-    "martianoff/gala/concurrent"
     "martianoff/gala/subprocess"
     "martianoff/gala/time_utils"
     . "martianoff/gala/std"
@@ -68,15 +67,13 @@ func RunWithTimeout(opts subprocess.SpawnOpts, timeout time_utils.Duration) Try[
     }
     val proc = procTry.Get()
 
-    // Watchdog goroutine. On a timely exit, Kill() races with the
-    // parent's reaping; either Kill fires on an already-exited
-    // process (no-op) or fires fractions of a millisecond before
-    // — irrelevant once stdout is drained.
-    concurrent.Future[bool](() => {
-        time_utils.Sleep(timeout)
-        proc.Kill()
-        return true
-    })
+    // Watchdog. On a timely exit, Kill() races with the parent's reaping;
+    // either Kill fires on an already-exited process (no-op) or fires fractions
+    // of a millisecond before — irrelevant once stdout is drained. KillAfter
+    // owns the goroutine-safe capture of the Process handle inside the
+    // subprocess package, so this stays fully checked with no escape hatch;
+    // Cancel the timer once Wait returns so a timely run leaves no pending kill.
+    val guard = proc.KillAfter(timeout)
 
     val started = time_utils.Now()
     var lines = EmptyArray[string]()
@@ -94,6 +91,7 @@ func RunWithTimeout(opts subprocess.SpawnOpts, timeout time_utils.Duration) Try[
         }
     }
     val codeTry = proc.Wait()
+    guard.Cancel()
     if codeTry.IsFailure() {
         // Wait failure usually means the watchdog killed the process
         // mid-read; still report as TimedOut so callers don't treat

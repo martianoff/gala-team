@@ -114,14 +114,16 @@ func runOne(cwd string, hook Hook) Try[HookResult] = Try(() => {
     }
     val timeout = HookTimeout()
     val started = time_utils.Now()
-    concurrent.Future[bool](() => {
-        time_utils.Sleep(timeout)
-        proc.Kill()
-        return true
-    })
+    // Arm a watchdog that kills the child if it is still running after
+    // `timeout`. KillAfter owns the goroutine-safe capture of the Process
+    // handle inside the subprocess package, so this stays a fully-checked call
+    // with no escape hatch here. Cancel the timer once Wait returns so a
+    // healthy run leaves no pending kill.
+    val guard = proc.KillAfter(timeout)
     val stdout = drainStream(proc, true)
     val stderr = drainStream(proc, false)
     val code = proc.Wait().Get()
+    guard.Cancel()
     val elapsed = time_utils.Between(started, time_utils.Now())
     if elapsed.ToNanos() >= timeout.ToNanos() {
         val minutes = timeout.ToNanos() / int64(60000000000)

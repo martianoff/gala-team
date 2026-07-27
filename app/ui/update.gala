@@ -2263,28 +2263,27 @@ func onSubmit(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
     }
     // Show the line as pending until the spawn delivers it.
     val m2 = m1.Copy(Conversation = markLastUserLinePending(m1.Conversation))
-    // Take the prior in-flight lead subprocess (if any) out of the model
-    // NOW — fast bookkeeping only; PendingClosures drops its trailing
-    // chunks — but kill it on the worker below, never on this thread.
-    val oldLeadSession = m2.Sessions.Get(lead.Name)
-    val m0 = oldLeadSession match {
-        case Some(_) => m2.Copy(
-            Sessions        = m2.Sessions.Remove(lead.Name),
-            PendingClosures = m2.PendingClosures.Put(lead.Name, m2.PendingClosures.Get(lead.Name).GetOrElse(0) + 1),
-        )
-        case None()  => m2
-    }
+    // Take the prior in-flight lead subprocess (if any) out of the model AND
+    // close it here, synchronously, before respawning. The kill cannot be
+    // deferred to the spawn goroutine below: a MemberSession wraps an
+    // AgentSession interface over a live subprocess, which is not safe to share
+    // across a goroutine boundary, so capturing it into the async body is
+    // rejected at compile time. closeLiveSession performs the exact same
+    // Sessions.Remove + PendingClosures bump this path did before, and also
+    // reaps the old subprocess — matching every other respawn path in this file.
+    val m0 = closeLiveSession(m2, lead.Name)
     val tReturn = time_utils.Now()
-    // Diagnostic: synchronous onSubmit duration. The kill + spawn are now
-    // both off-thread, so a large total here points at reconcile (the
-    // stranded-session sweep) or the pure model build, NOT subprocess
-    // work. No-op unless GALA_TEAM_DEBUG is set.
+    // Diagnostic: synchronous onSubmit duration. The new-turn spawn is
+    // off-thread; the old subprocess kill (closeLiveSession above) is
+    // synchronous, so a large total here points at that kill, reconcile
+    // (the stranded-session sweep), or the pure model build. No-op unless
+    // GALA_TEAM_DEBUG is set.
     LogEvent("submit_timing", "lead", s"{\"reconcile_ms\":${submitElapsedMs(tSubmitEnter, tAfterReconcile)},\"total_ms\":${submitElapsedMs(tSubmitEnter, tReturn)}}")
     val proj      = m0.Project
     val mode      = m0.Policy.WorkspaceMode
     val skipPerms = m0.Team.DangerouslySkipPermissions
     return (m0, FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
-        spawnLeadOffThread(oldLeadSession, proj, lead, mode, skipPerms, sid, firstTurn, effectivePrompt))))
+        spawnLeadOffThread(proj, lead, mode, skipPerms, sid, firstTurn, effectivePrompt))))
 }
 
 // markLastUserLinePending flags the last conversation line as Pending so
@@ -2312,22 +2311,17 @@ func markPendingLinesUndelivered(convo Array[session.ConversationLine]) Array[se
         else cl)
 
 // spawnLeadOffThread runs entirely on a worker goroutine
-// (concurrent.Future(...)), so the UI loop never blocks on it. It first
-// kills the prior lead subprocess — waiting for it to exit so its stream
-// can't race the new turn — THEN ensures the workspace + spawns the new
-// claude, packaging the outcome as a LeadSpawned message. This ordering
-// (paint pending line on the UI thread → kill old here → spawn here →
-// send on LeadSpawned) is what keeps the typed message visible
-// immediately while the slow work happens behind it.
+// (concurrent.Future(...)), so the UI loop never blocks on it. The prior
+// lead subprocess has already been reaped on the UI thread (closeLiveSession
+// in onSubmit) so its stream can't race the new turn; this body ensures the
+// workspace + spawns the new claude, packaging the outcome as a LeadSpawned
+// message. This ordering (paint pending line + kill old on the UI thread →
+// spawn here → send on LeadSpawned) is what keeps the typed message visible
+// immediately while the slow spawn work happens behind it.
 func spawnLeadOffThread(
-    oldSession Option[MemberSession],
     proj Project, lead Member, mode WorkspaceMode, skipPerms bool,
     sid string, firstTurn bool, prompt string,
 ) AppMsg {
-    oldSession match {
-        case Some(s) => { val _ = CloseSession(s) }
-        case None()  => {}
-    }
     return EnsureWorkspace(proj, lead, mode) match {
         case Failure(e)  => LeadSpawned(Prompt = prompt, Session = None[MemberSession](), Sid = sid, ErrText = s"workspace ${lead.Name}: ${e.Error()}")
         case Success(ws) => SpawnSession(proj, lead, ws, skipPerms, sid, firstTurn) match {
@@ -5001,8 +4995,15 @@ func spawnQAReview(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
 // transitions the FSM away during the wait (Ctrl+C, recovery), the
 // applyQAPromptReady handler guards on State == QAGate and drops
 // the result quietly.
+// The off-thread body reads only the model's immutable fields (m.Team,
+// m.Statuses, m.MemberDoneBodies, m.Project, m.Policy.WorkspaceMode); the
+// capture check clears it on those field reads without ever touching the live
+// session handles in m.Sessions. The N×3 git subprocesses inside
+// buildQAReviewPrompt run off-thread — the point of the Future.
 func qaPromptReadyCmd(m AppModel) Cmd[AppMsg] =
-    FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() => QAPromptReady(Prompt = buildQAReviewPrompt(m))))
+    FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
+        QAPromptReady(Prompt = buildQAReviewPrompt(
+            m.Team, m.Statuses, m.MemberDoneBodies, m.Project, m.Policy.WorkspaceMode))))
 
 // applyQAPromptReady consumes a QAPromptReady message — the result
 // of the off-thread buildQAReviewPrompt — and runs the same
@@ -5115,8 +5116,14 @@ func isCurrentlyDispatched(m AppModel, name string) bool =
 // branch + the suggested `git diff` command that lists their changed
 // files. QA's instructions point at it so the review is grounded in
 // actual diffs, not just engineer summaries.
-func buildQAReviewPrompt(m AppModel) string {
-    val allEngineers = MembersOf(m.Team, Engineer())
+func buildQAReviewPrompt(
+    team Team,
+    statuses HashMap[string, Status],
+    doneBodies HashMap[string, string],
+    project Project,
+    wsMode WorkspaceMode,
+) string {
+    val allEngineers = MembersOf(team, Engineer())
     // Filter to engineers the TL actually dispatched in this turn —
     // anyone with a status entry has been touched (working, done,
     // stuck, failed). Without this filter the QA inspects every
@@ -5124,17 +5131,17 @@ func buildQAReviewPrompt(m AppModel) string {
     // them — caused the ghost-Mira incident where Theo wasted
     // cycles diagnosing a worktree the TL never spawned for the
     // current task.
-    val engineers = allEngineers.Filter((eng) => m.Statuses.Get(eng.Name).IsDefined())
+    val engineers = allEngineers.Filter((eng) => statuses.Get(eng.Name).IsDefined())
     val skippedNames = allEngineers.Collect({
-        case eng if !m.Statuses.Get(eng.Name).IsDefined() => eng.Name
+        case eng if !statuses.Get(eng.Name).IsDefined() => eng.Name
     })
     val rosterNote = if (skippedNames.IsEmpty())
         ""
     else
         s"\n\n_Note: team.yaml lists these engineers too but the TL did not dispatch them this turn — do NOT review their worktrees: ${skippedNames.MkString(", ")}._"
-    val manifest = buildDeliverableManifest(m, engineers)
+    val manifest = buildDeliverableManifest(project, wsMode, engineers)
     val sections = engineers.Map((eng) => {
-        val body = m.MemberDoneBodies.Get(eng.Name).GetOrElse("")
+        val body = doneBodies.Get(eng.Name).GetOrElse("")
         if body == "" {
             return s"## ${eng.Name}\n\n(no explicit @finished block — review the engineer's transcript directly if needed)"
         }
@@ -5160,18 +5167,18 @@ func buildQAReviewPrompt(m AppModel) string {
 // reviewer's. Per the user's note "QA might not necessarily be trained
 // to handle this", the orchestrator does it on QA's behalf and hands
 // over a flat list of paths to inspect.
-func buildDeliverableManifest(m AppModel, engineers Array[Member]) string {
+func buildDeliverableManifest(project Project, wsMode WorkspaceMode, engineers Array[Member]) string {
     val rows = engineers.Map((eng) => {
-        val cwd = onboarding.WorkspacePathFor(m.Project, eng, m.Policy.WorkspaceMode)
-        val branch = manifestBranchFor(m, eng)
-        val deliverable = listEngineerDeliverable(cwd, m.Project.DefaultBranch)
+        val cwd = onboarding.WorkspacePathFor(project, eng, wsMode)
+        val branch = manifestBranchFor(project, wsMode, eng)
+        val deliverable = listEngineerDeliverable(cwd, project.DefaultBranch)
         val filesBlock = if (deliverable.IsEmpty())
-            "  - files:  (none — worktree is clean and no commits past " + m.Project.DefaultBranch + ")"
+            "  - files:  (none — worktree is clean and no commits past " + project.DefaultBranch + ")"
         else
             s"  - files (committed=C, modified=M, new=?):\n${deliverable.Map((row) => s"      ${row}").MkString("\n")}"
         return s"- **${eng.Name}** (${RoleName(eng.Role)})\n  - cwd:    ${cwd}\n  - branch: ${branch}\n${filesBlock}"
     })
-    return s"# Deliverable manifest\n\nEach engineer's workspace + branch + the files they actually changed (pre-aggregated by the orchestrator — read directly, no need to run git yourself).\n\nFile prefixes: `C` = committed past ${m.Project.DefaultBranch}, `M` = uncommitted modification (tracked file with edits), `?` = untracked new file. Inspect every entry — uncommitted work is part of the deliverable too even if the engineer forgot to commit.\n\n${rows.MkString("\n")}"
+    return s"# Deliverable manifest\n\nEach engineer's workspace + branch + the files they actually changed (pre-aggregated by the orchestrator — read directly, no need to run git yourself).\n\nFile prefixes: `C` = committed past ${project.DefaultBranch}, `M` = uncommitted modification (tracked file with edits), `?` = untracked new file. Inspect every entry — uncommitted work is part of the deliverable too even if the engineer forgot to commit.\n\n${rows.MkString("\n")}"
 }
 
 // listEngineerDeliverable returns the union of (a) committed-past-
@@ -5242,12 +5249,12 @@ func gitFilesList(cwd string, args Array[string]) Array[string] {
 // buildDeliverableManifest so update.gala can stay free of a dot-
 // imported `policy` (which conflicts with the local `policy` symbol
 // used elsewhere in this file).
-func manifestBranchFor(m AppModel, eng Member) string {
-    val name = policy.WorkspaceModeName(m.Policy.WorkspaceMode)
+func manifestBranchFor(project Project, wsMode WorkspaceMode, eng Member) string {
+    val name = policy.WorkspaceModeName(wsMode)
     if name == "worktree-per-engineer" {
-        return WorktreeBranchFor(m.Project, eng)
+        return WorktreeBranchFor(project, eng)
     }
-    return m.Project.DefaultBranch
+    return project.DefaultBranch
 }
 
 // findMemberByName scans the team for a Member whose Name matches.
@@ -6418,6 +6425,9 @@ func onPrCreated(m AppModel, url string, branch string) Tuple[AppModel, Cmd[AppM
     // for whether the user's local default branch has fallen behind the
     // merged-on-GitHub commits — surfaced as a warn-only advisory by
     // onBaseDriftChecked. Batched so neither blocks the other.
+    // The off-thread body reads only the immutable m.Project field, so the
+    // capture check clears it without ever touching the live session handles in
+    // the rest of the model.
     val driftCmd = FutureCmd[AppMsg](Fut = concurrent.Future[AppMsg](() =>
         BaseDriftChecked(Behind = LocalBaseBehindStr(m.Project))))
     return (m.Copy(

@@ -135,14 +135,14 @@ func DefaultGuardrails() Guardrails = Guardrails(
 // Policy is the full per-team orchestration ruleset. Parsed from the
 // optional `policy:` block in team.yaml.
 struct Policy(
-    WorkspaceMode WorkspaceMode,
-    PreMerge      Array[Hook],
-    PostMerge     Array[Hook],
-    PreDone       Array[Hook],
-    PreQA         Array[Hook],
-    MergeRule     MergeRule,
-    Heartbeat     Heartbeat,
-    Guardrails    Guardrails,
+    WorkspaceMode WorkspaceMode = Shared(),
+    PreMerge      Array[Hook] = EmptyArray[Hook](),
+    PostMerge     Array[Hook] = EmptyArray[Hook](),
+    PreDone       Array[Hook] = EmptyArray[Hook](),
+    PreQA         Array[Hook] = EmptyArray[Hook](),
+    MergeRule     MergeRule = SquashMerge(),
+    Heartbeat     Heartbeat = DefaultHeartbeat(),
+    Guardrails    Guardrails = DefaultGuardrails(),
     // AutoApprove turns the per-PR approval gate off: when an @summary
     // resolves cleanly (PR-ready + valid body), the orchestrator runs
     // the same approveAndKickHooks pipeline a manual approve would
@@ -151,23 +151,15 @@ struct Policy(
     // in AppModel.OpenPrs; merge stays manual so the user reviews the
     // batch in GitHub. F7 toggles the same flag mid-session for the
     // running model.
-    AutoApprove   bool,
+    AutoApprove   bool = false,
 )
 
 // DefaultPolicy returns the most permissive shape — shared workspace,
 // no hooks, squash merge, design-default heartbeat. This is what a
 // team gets if they omit the `policy:` block entirely.
-func DefaultPolicy() Policy = Policy(
-    WorkspaceMode = Shared(),
-    PreMerge      = EmptyArray[Hook](),
-    PostMerge     = EmptyArray[Hook](),
-    PreDone       = EmptyArray[Hook](),
-    PreQA         = EmptyArray[Hook](),
-    MergeRule     = SquashMerge(),
-    Heartbeat     = DefaultHeartbeat(),
-    Guardrails    = DefaultGuardrails(),
-    AutoApprove   = false,
-)
+// Every field defaults to the permissive shape in the declaration, so this is
+// now just the empty construction.
+func DefaultPolicy() Policy = Policy()
 
 // PolicyViolation is the union of every reason the orchestrator can
 // block a transition. Surfaced via toasts + the activity log; the

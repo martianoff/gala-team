@@ -250,25 +250,25 @@ val ClaudeResultCodec    = json.Codec[ClaudeResultEvent](json.SnakeCase())
 //   CostUsd:    running cost from result.total_cost_usd (only set on
 //               the final turn event). Summed into m.TotalCostUsd.
 struct ClaudeChunk(
-    Visible   string,
-    ErrorText string,
-    LiveTurn  Option[ClaudeUsage],
-    FinalTurn Option[ClaudeUsage],
-    CostUsd   float64,
+    Visible   string = "",
+    ErrorText string = "",
+    LiveTurn  Option[ClaudeUsage] = None[ClaudeUsage](),
+    FinalTurn Option[ClaudeUsage] = None[ClaudeUsage](),
+    CostUsd   float64 = 0.0,
     // AskQuestionId is non-empty when this chunk's assistant envelope
     // contained an `AskUserQuestion` tool_use block. Carries the
     // tool_use_id we'll join on when sending the user's answer back as
     // a tool_result envelope. The chunk also carries the question
     // text (extracted from the input JSON) so the conversation log
     // can render it cleanly even when the model's narration is sparse.
-    AskQuestionId   string,
-    AskQuestionText string,
+    AskQuestionId   string = "",
+    AskQuestionText string = "",
     // TurnEnded fires on the `result` envelope and tells onChunk it's
     // time to close the subprocess's stdin so the per-turn process
     // can exit. With `--input-format stream-json` claude keeps stdin
     // open forever; without this signal the subprocess would idle
     // after every turn.
-    TurnEnded bool,
+    TurnEnded bool = false,
     // IsToolActivity is true when the assistant chunk contains only a
     // `tool_use` part (Edit/Read/Bash/...) and no visible text — i.e.
     // the model is silently doing work. The orchestrator uses this
@@ -277,7 +277,7 @@ struct ClaudeChunk(
     // to Slow/Stuck) WITHOUT appending a conversation line — those
     // "using <Tool>" lines added no value to the chat and would have
     // spammed the transcript with one entry per tool call.
-    IsToolActivity bool,
+    IsToolActivity bool = false,
     // IsSynthetic flags a claude-code auto-emitted assistant envelope
     // (message.model == "<synthetic>"). These appear when --resume
     // input is isMeta or otherwise non-actionable and carry stub text
@@ -287,7 +287,7 @@ struct ClaudeChunk(
     // m.SyntheticOnlyChunks[name] so the heartbeat / respawn paths
     // can tell a poisoned session (stdout flowing, no model output)
     // apart from a healthy silent one.
-    IsSynthetic bool,
+    IsSynthetic bool = false,
     // TaskToolUseIds carries every Task tool_use id the assistant
     // envelope opened (claude commonly batches parallel tool calls
     // into one content[] array; past sessions saw 3 Explore Tasks
@@ -296,7 +296,7 @@ struct ClaudeChunk(
     // so enforceStateWatchdog keeps the silence-based kill paused as
     // long as ANY of the spawned subagents is still running. Empty
     // for envelopes that opened no Task subagent.
-    TaskToolUseIds Array[string],
+    TaskToolUseIds Array[string] = EmptyArray[string](),
     // TaskToolResultId is the tool_use_id of a tool_result the parent
     // just emitted in a type:"user" envelope. Non-empty means a Task
     // subagent finished; applyChunkVisible removes the id from
@@ -304,7 +304,7 @@ struct ClaudeChunk(
     // unconditionally for any tool_result we see — the OutstandingTaskTools
     // set is the source of truth for which ids matter, so removing a
     // never-tracked id is a harmless no-op.
-    TaskToolResultId string,
+    TaskToolResultId string = "",
     // WorkflowProgressLabel is the latest claude-code Workflow tool
     // status, extracted from `system / subtype:"task_progress"`
     // envelopes. Carries the envelope's `description` field (e.g.
@@ -314,10 +314,12 @@ struct ClaudeChunk(
     // claude-code emits these ~3/sec while a workflow runs; the UI
     // overwrites the per-member slot on each tick, so only the
     // latest progress is surfaced (no log spam).
-    WorkflowProgressLabel string,
+    WorkflowProgressLabel string = "",
 )
 
 // EmptyClaudeChunk is the "drop this line" marker.
+// Spelled out rather than `ClaudeChunk()` so this file builds against both
+// GALA 0.80.0 (where field defaults are inert) and 0.81.0 (where they apply).
 func EmptyClaudeChunk() ClaudeChunk = ClaudeChunk(
     Visible          = "",
     ErrorText        = "",

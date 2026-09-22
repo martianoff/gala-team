@@ -53,7 +53,7 @@ struct TeamConfig(
     Teams    Array[Team],
     Workflow Workflow,
     Policy   Policy,
-    Guidance Array[GuidancePair],
+    Guidance Array[GuidancePair] = EmptyArray[GuidancePair](),
 )
 
 // GuidancePair is the parsed (slot, path) pair from the guidance:

@@ -318,9 +318,23 @@ struct ClaudeChunk(
 )
 
 // EmptyClaudeChunk is the "drop this line" marker.
-// Every field defaults to its zero value in the declaration, so this is now
-// just the empty construction.
-func EmptyClaudeChunk() ClaudeChunk = ClaudeChunk()
+// Spelled out rather than `ClaudeChunk()` so this file builds against both
+// GALA 0.80.0 (where field defaults are inert) and 0.81.0 (where they apply).
+func EmptyClaudeChunk() ClaudeChunk = ClaudeChunk(
+    Visible          = "",
+    ErrorText        = "",
+    LiveTurn         = None[ClaudeUsage](),
+    FinalTurn        = None[ClaudeUsage](),
+    CostUsd          = 0.0,
+    AskQuestionId    = "",
+    AskQuestionText  = "",
+    TurnEnded        = false,
+    IsToolActivity   = false,
+    IsSynthetic      = false,
+    TaskToolUseIds        = EmptyArray[string](),
+    TaskToolResultId      = "",
+    WorkflowProgressLabel = "",
+)
 
 // SyntheticClaudeChunk marks a claude-code synthetic envelope. The caller
 // (applyChunkVisible) reads IsSynthetic and bumps the per-member

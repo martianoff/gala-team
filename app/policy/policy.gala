@@ -157,9 +157,19 @@ struct Policy(
 // DefaultPolicy returns the most permissive shape — shared workspace,
 // no hooks, squash merge, design-default heartbeat. This is what a
 // team gets if they omit the `policy:` block entirely.
-// Every field defaults to the permissive shape in the declaration, so this is
-// now just the empty construction.
-func DefaultPolicy() Policy = Policy()
+// Spelled out rather than `Policy()` so this file builds against both GALA
+// 0.80.0 (where field defaults are inert) and 0.81.0 (where they apply).
+func DefaultPolicy() Policy = Policy(
+    WorkspaceMode = Shared(),
+    PreMerge      = EmptyArray[Hook](),
+    PostMerge     = EmptyArray[Hook](),
+    PreDone       = EmptyArray[Hook](),
+    PreQA         = EmptyArray[Hook](),
+    MergeRule     = SquashMerge(),
+    Heartbeat     = DefaultHeartbeat(),
+    Guardrails    = DefaultGuardrails(),
+    AutoApprove   = false,
+)
 
 // PolicyViolation is the union of every reason the orchestrator can
 // block a transition. Surfaced via toasts + the activity log; the

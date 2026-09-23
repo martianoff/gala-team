@@ -21,3 +21,4 @@ MODULE.bazel.lock
 !.claude/skills/**
 
 team.yaml
+gala-team

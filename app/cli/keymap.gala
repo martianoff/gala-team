@@ -18,7 +18,7 @@ import (
 // ============================================================================
 
 // InputToAppMsg lifts a unified gala-tui InputEvent (key, mouse,
-// resize, unknown) into an AppMsg. Keyboard dispatches via
+// resize, paste, focus, unknown) into an AppMsg. Keyboard dispatches via
 // KeyToAppMsg; mouse button presses become MouseAt; scroll-wheel
 // events drop to NoOp (the conversation pane doesn't yet have a
 // scroll viewport, and routing scroll deltas as clicks would
@@ -29,6 +29,13 @@ func InputToAppMsg(ev InputEvent) AppMsg = ev match {
     case KeyInput(key)     => KeyToAppMsg(key)
     case MouseInput(me)    => mouseToAppMsg(me)
     case ResizeInput(_, _) => NoOp()
+    // Paste and focus reporting only arrive if the app enables the
+    // corresponding terminal modes, and this one does not — so a bracketed
+    // paste still lands as the individual key events it always did. If the
+    // composer ever turns paste mode on, this is the arm that routes the
+    // pasted content to it in one message instead of a keystroke at a time.
+    case PasteInput(_)     => NoOp()
+    case FocusInput(_)     => NoOp()
     case UnknownInput()    => NoOp()
 }
 

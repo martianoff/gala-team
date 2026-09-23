@@ -4,6 +4,6 @@ gala 0.80.0
 
 require (
 	github.com/martianoff/gala-acp v0.3.0
-	github.com/martianoff/gala-tui v0.11.0
+	github.com/martianoff/gala-tui v0.12.0
 	github.com/google/uuid v1.6.0 // go
 )

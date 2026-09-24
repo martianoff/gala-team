@@ -547,13 +547,25 @@ func isRegisteredWorktree(proj Project, wtPath string) bool {
     val _ = proc.Wait()
     val abs, absErr = filepath.Abs(wtPath)
     if absErr != nil { return false }
-    val needle = "worktree " + filepath.ToSlash(abs)
-    val needleAlt = "worktree " + abs
+    // Compare against the symlink-resolved path too. `filepath.Abs` does not
+    // resolve symlinks and `git worktree list` reports the resolved path, so
+    // a repo reached through one never matched: on macOS a temp dir is
+    // /var/... and git calls it /private/var/..., and this returned false for
+    // a worktree that was plainly registered. Every caller reads that as "not
+    // registered", so the deregister-before-respawn step quietly did nothing.
+    // EvalSymlinks fails on a path that no longer exists, which is a legitimate
+    // state here, so its error falls back to the unresolved form.
+    val resolved, evalErr = filepath.EvalSymlinks(abs)
+    val candidates = if (evalErr != nil) ArrayOf(abs) else ArrayOf(abs, resolved)
     return lines.Exists((l) => {
         val t = strings.TrimSpace(l)
-        return t == needle || t == needleAlt ||
-               strings.EqualFold(t, needle) ||
-               strings.EqualFold(t, needleAlt)
+        return candidates.Exists((c) => {
+            val needle = "worktree " + filepath.ToSlash(c)
+            val needleAlt = "worktree " + c
+            return t == needle || t == needleAlt ||
+                   strings.EqualFold(t, needle) ||
+                   strings.EqualFold(t, needleAlt)
+        })
     })
 }
 

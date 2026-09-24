@@ -164,7 +164,7 @@ func helpOverlay(m AppModel, base Widget) Widget {
         Fixed(1, title),
         Fixed(1, FillCh('-')),
     ).AppendAll(widgets).Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
-    return Overlay(base, Modal(w, h, body))
+    return ModalOver(base, w, h, body)
 }
 
 // helpRows is the parity matrix laid out as a flat list of "key  →
@@ -213,7 +213,7 @@ func projectInfoOverlay(m AppModel, base Widget) Widget {
         Fixed(1, title),
         Fixed(1, FillCh('-')),
     ).AppendAll(widgets).Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
-    return Overlay(base, Modal(w, h, body))
+    return ModalOver(base, w, h, body)
 }
 
 // workspaceName mirrors the policy.WorkspaceModeName helper so we
@@ -236,7 +236,7 @@ func guidanceOverlay(m AppModel, base Widget) Widget {
         Fixed(1, title),
         Fixed(1, FillCh('-')),
     ).AppendAll(widgets).Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
-    return Overlay(base, Modal(w, h, body))
+    return ModalOver(base, w, h, body)
 }
 
 // guidanceRows formats the loaded guidance docs as one row per slot.
@@ -285,7 +285,7 @@ func recoveryModalOverlay(m AppModel, base Widget) Widget {
         Fixed(1, FillCh('-')),
     ).AppendAll(infoWidgets).Append(Fixed(1, Empty())).Append(Fixed(3, buttonRow))
         .Append(Fixed(1, FillCh('-'))).Append(Fixed(1, footer)))
-    return Overlay(base, Modal(w, h, body))
+    return ModalOver(base, w, h, body)
 }
 
 // recoveryButtonRow renders the three buttons as real ButtonClick

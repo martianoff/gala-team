@@ -24,6 +24,7 @@ import (
     . "github.com/martianoff/gala_team/app/runtime"
     . "github.com/martianoff/gala_team/app/team"
     . "github.com/martianoff/gala_team/app/util"
+    . "github.com/martianoff/gala_team/app/view"
 )
 
 // ============================================================================
@@ -2319,7 +2320,7 @@ func markPendingLinesUndelivered(convo Array[session.ConversationLine]) Array[se
 // spawn here → send on LeadSpawned) is what keeps the typed message visible
 // immediately while the slow spawn work happens behind it.
 func spawnLeadOffThread(
-    proj Project, lead Member, mode WorkspaceMode, skipPerms bool,
+    proj Project, lead Member, mode policy.WorkspaceMode, skipPerms bool,
     sid string, firstTurn bool, prompt string,
 ) AppMsg {
     return EnsureWorkspace(proj, lead, mode) match {
@@ -5121,7 +5122,7 @@ func buildQAReviewPrompt(
     statuses HashMap[string, Status],
     doneBodies HashMap[string, string],
     project Project,
-    wsMode WorkspaceMode,
+    wsMode policy.WorkspaceMode,
 ) string {
     val allEngineers = MembersOf(team, Engineer())
     // Filter to engineers the TL actually dispatched in this turn —
@@ -5167,7 +5168,7 @@ func buildQAReviewPrompt(
 // reviewer's. Per the user's note "QA might not necessarily be trained
 // to handle this", the orchestrator does it on QA's behalf and hands
 // over a flat list of paths to inspect.
-func buildDeliverableManifest(project Project, wsMode WorkspaceMode, engineers Array[Member]) string {
+func buildDeliverableManifest(project Project, wsMode policy.WorkspaceMode, engineers Array[Member]) string {
     val rows = engineers.Map((eng) => {
         val cwd = onboarding.WorkspacePathFor(project, eng, wsMode)
         val branch = manifestBranchFor(project, wsMode, eng)
@@ -5249,7 +5250,7 @@ func gitFilesList(cwd string, args Array[string]) Array[string] {
 // buildDeliverableManifest so update.gala can stay free of a dot-
 // imported `policy` (which conflicts with the local `policy` symbol
 // used elsewhere in this file).
-func manifestBranchFor(project Project, wsMode WorkspaceMode, eng Member) string {
+func manifestBranchFor(project Project, wsMode policy.WorkspaceMode, eng Member) string {
     val name = policy.WorkspaceModeName(wsMode)
     if name == "worktree-per-engineer" {
         return WorktreeBranchFor(project, eng)

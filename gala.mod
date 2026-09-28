@@ -1,9 +1,9 @@
 module github.com/martianoff/gala_team
 
-gala 0.80.0
+gala 0.84.0
 
 require (
 	github.com/martianoff/gala-acp v0.3.0
-	github.com/martianoff/gala-tui v0.12.0
+	github.com/martianoff/gala-tui v0.15.2
 	github.com/google/uuid v1.6.0 // go
 )

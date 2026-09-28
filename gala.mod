@@ -1,6 +1,6 @@
 module github.com/martianoff/gala_team
 
-gala 0.84.0
+gala 0.84.1
 
 require (
 	github.com/martianoff/gala-acp v0.3.0

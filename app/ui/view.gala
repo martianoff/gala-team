@@ -521,7 +521,7 @@ func memberCard(m AppModel, mem Member) Widget {
     val phaseRaw = m.WorkflowStatus.Get(mem.Name).GetOrElse("")
     val phaseText = if (phaseRaw == "" || !isActiveStatus(st)) ""
                     else s"  ⚙ ${cardCap(phaseRaw, 26)}"
-    val phase = TextStyled(phaseText, DefaultStyle().WithFg(BrightCyan()))
+    val phase = TextStyled(phaseText, DefaultStyle().WithFg(BrightCyan))
     val preview = TextStyled(s"  \"${memberLastMessage(m, mem.Name)}\"",
         DefaultStyle().WithDim())
     val tokens = m.TokenUsage.Get(mem.Name).GetOrElse(zeroUsage())
@@ -624,7 +624,7 @@ func activityBody(m AppModel) Widget {
     val skip = n - keepCount
     val taken = convo.Drop(skip)
     val rows = taken.Reverse().Map((cl session.ConversationLine) => {
-        val rowStyle = if (cl.Undelivered) DefaultStyle().WithBold().WithFg(BrightRed())
+        val rowStyle = if (cl.Undelivered) DefaultStyle().WithBold().WithFg(BrightRed)
                        else                speakerStyle(m.Team, cl.Speaker)
         val glyph = if (cl.Undelivered) "⚠" else activityGlyphFor(cl.Speaker)
         return TextStyled(s"  ${activityTimestamp(cl.At)}  ${glyph} ${cl.Speaker}  →  ${activityFirstLine(cl.Text)}", rowStyle)
@@ -849,7 +849,7 @@ func planViewerPanel(m AppModel) Widget {
     val shipped = m.PlanShipped
     val header = TextStyled(
         s"  📋 Plan — ${total} step(s) · ${shipped} shipped   (↑/↓ scroll · Esc / F8 close)",
-        DefaultStyle().WithBold().WithFg(BrightYellow()))
+        DefaultStyle().WithBold().WithFg(BrightYellow))
     if total == 0 {
         return Column(ArrayOf[LayoutChild](
             Fixed(1, header),
@@ -867,7 +867,7 @@ func planViewerPanel(m AppModel) Widget {
     val bar = planProgressBar(shipped, total, 24)
     var rows = ArrayOf[LayoutChild](
         Fixed(1, header),
-        Fixed(1, TextStyled(s"  ${bar} ${shipped}/${total}", DefaultStyle().WithFg(BrightCyan()))),
+        Fixed(1, TextStyled(s"  ${bar} ${shipped}/${total}", DefaultStyle().WithFg(BrightCyan))),
         Fixed(1, Empty()))
     if startIdx > 0 {
         rows = rows.Append(Fixed(1, TextStyled(
@@ -877,8 +877,8 @@ func planViewerPanel(m AppModel) Widget {
     for i < endIdx {
         val flat  = strings.Join(strings.Fields(m.Plan.Get(i)), " ")
         val glyph = if (i < shipped) "✓" else if (i == shipped) "▶" else "☐"
-        val st = if (i < shipped)       DefaultStyle().WithFg(BrightGreen())
-                 else if (i == shipped) DefaultStyle().WithBold().WithFg(BrightCyan())
+        val st = if (i < shipped)       DefaultStyle().WithFg(BrightGreen)
+                 else if (i == shipped) DefaultStyle().WithBold().WithFg(BrightCyan)
                  else                   DefaultStyle().WithDim()
         rows = rows.Append(Fixed(1, TextStyled(
             s"  ${glyph} ${i + 1}. ${truncateTitle(flat, bodyMax)}", st)))
@@ -898,7 +898,7 @@ func planViewerPanel(m AppModel) Widget {
 func approvalBanner(m AppModel) LayoutChild = m.State match {
     case Approval(body) => Fixed(2, Column(ArrayOf[LayoutChild](
         Fixed(1, TextStyled(s"  ▶ Ready to ship: ${approvalSnippet(body)}",
-            DefaultStyle().WithBold().WithFg(BrightYellow()))),
+            DefaultStyle().WithBold().WithFg(BrightYellow))),
         Fixed(1, TextStyled("    Review the summary — approve or reject in the dialog below",
             DefaultStyle().WithDim())),
     )))
@@ -918,7 +918,7 @@ func recoveryBanner(m AppModel) LayoutChild {
     if m.WipingWorktrees {
         return Fixed(2, Column(ArrayOf[LayoutChild](
             Fixed(1, TextStyled("  ⟳ Wiping worktrees (git fetch + reset + clean)…",
-                DefaultStyle().WithBold().WithFg(BrightYellow()))),
+                DefaultStyle().WithBold().WithFg(BrightYellow))),
             Fixed(1, TextStyled("    typically 5-10s; the TUI stays interactive while it runs",
                 DefaultStyle().WithDim())),
         )))
@@ -931,7 +931,7 @@ func recoveryBanner(m AppModel) LayoutChild {
                     else                  s", ${agents} agents pending"
     return Fixed(2, Column(ArrayOf[LayoutChild](
         Fixed(1, TextStyled(s"  ↻ Restored ${lines} line(s) from prior session${agentNote}",
-            DefaultStyle().WithBold().WithFg(BrightCyan()))),
+            DefaultStyle().WithBold().WithFg(BrightCyan))),
         Fixed(1, TextStyled("    type a prompt to continue · Esc to discard and start fresh",
             DefaultStyle().WithDim())),
     )))
@@ -1015,7 +1015,7 @@ func headerWidget(m AppModel) Widget {
 // crowding. Total height: 4 rows.
 func narrowHeader(m AppModel, cols int) Widget {
     val brand = buildBrandLine(m, cols)
-    val brandLine = TextStyled(brand, DefaultStyle().WithBold().WithFg(BrightCyan()))
+    val brandLine = TextStyled(brand, DefaultStyle().WithBold().WithFg(BrightCyan))
     val sub = TextStyled(s"      ${stateLabel(m.State)}${autoBadgeText(m)}${tokenSuffix(m)}",
         DefaultStyle().WithDim())
     return Column(ArrayOf[LayoutChild](
@@ -1044,7 +1044,7 @@ func narrowHeader(m AppModel, cols int) Widget {
 func wideHeader(m AppModel, cols int) Widget {
     val budget = cols - HeaderAppleLeftPad() - HeaderAppleWidth() - HeaderApplePad()
     val brand = buildBrandLineNoEmoji(m, budget)
-    val brandLine = TextStyled(brand, DefaultStyle().WithBold().WithFg(BrightCyan()))
+    val brandLine = TextStyled(brand, DefaultStyle().WithBold().WithFg(BrightCyan))
     val stateLine = TextStyled(s"${stateLabel(m.State)}${autoBadgeText(m)}",
         DefaultStyle().WithDim())
     val tokens = wideTokensText(m)
@@ -1124,8 +1124,8 @@ func autoBadgeText(m AppModel) string {
 func appleColumn(tick int) Widget {
     val nZones = 7
     val shineZone = (tick / appleShineDivisor()) % nZones
-    val leafSt = DefaultStyle().WithFg(BrightGreen()).WithBold()
-    val stemSt = DefaultStyle().WithFg(Yellow()).WithDim()
+    val leafSt = DefaultStyle().WithFg(BrightGreen).WithBold()
+    val stemSt = DefaultStyle().WithFg(Yellow).WithDim()
     return Column(ArrayOf[LayoutChild](
         Fixed(1, appleRow0(stemSt, leafSt)),
         Fixed(1, appleRow1(shineZone, nZones)),
@@ -1138,11 +1138,11 @@ func appleColumn(tick int) Widget {
 // trailing column gets BrightRed, the rest are plain red.
 func applePalette(zone int, shineZone int, nZones int) Style =
     if (zone == shineZone)
-        DefaultStyle().WithFg(BrightWhite()).WithBold()
+        DefaultStyle().WithFg(BrightWhite).WithBold()
     else if (zone == (shineZone + 1) % nZones)
-        DefaultStyle().WithFg(BrightRed())
+        DefaultStyle().WithFg(BrightRed)
     else
-        DefaultStyle().WithFg(Red())
+        DefaultStyle().WithFg(Red)
 
 // appleSpace and appleCell are 1-col LayoutChildren — the apple grid
 // is built as a Row of these so each cell can carry its own style.
@@ -1652,11 +1652,11 @@ func renderConversationLine(m AppModel, cl session.ConversationLine, width int, 
     // (prose + any code) reads red, and the prefix carries an
     // explicit "⚠ … (not delivered)" tag.
     val baseProseStyle = if (cl.Undelivered)
-                             DefaultStyle().WithBold().WithFg(BrightRed())
+                             DefaultStyle().WithBold().WithFg(BrightRed)
                          else
                              speakerStyle(m.Team, cl.Speaker)
-    val baseCodeStyle = DefaultStyle().WithFg(BrightCyan())
-    val baseCodeBarStyle = DefaultStyle().WithFg(BrightCyan()).WithDim()
+    val baseCodeStyle = DefaultStyle().WithFg(BrightCyan)
+    val baseCodeBarStyle = DefaultStyle().WithFg(BrightCyan).WithDim()
     // Selection highlight: every entry under the selected line gets
     // reverse-video so the whole rendered message reads as one
     // unambiguous unit, even when it spans prose + code + fence bars.
@@ -1776,10 +1776,10 @@ func renderConversationLine(m AppModel, cl session.ConversationLine, width int, 
 //   unknown  → dim white      (consult target from another team, etc.)
 func speakerStyle(team Team, speaker string) Style {
     if speaker == "you" {
-        return DefaultStyle().WithBold().WithFg(BrightWhite())
+        return DefaultStyle().WithBold().WithFg(BrightWhite)
     }
     return MemberByName(team, speaker) match {
-        case None()    => DefaultStyle().WithFg(BrightWhite()).WithDim()
+        case None()    => DefaultStyle().WithFg(BrightWhite).WithDim()
         case Some(mem) => DefaultStyle().WithBold().WithFg(MemberColor(team, mem))
     }
 }
@@ -1843,7 +1843,7 @@ val consultViewerMaxEntries = 3
 // running" hint below.
 func consultViewerPanel(m AppModel) Widget {
     val header = TextStyled("  Consult viewer  (Ctrl+T to close)",
-        DefaultStyle().WithBold().WithFg(BrightYellow()))
+        DefaultStyle().WithBold().WithFg(BrightYellow))
     val active = m.ActiveConsults
     if active.IsEmpty() {
         return Column(ArrayOf[LayoutChild](
@@ -1890,7 +1890,7 @@ func consultViewerPanel(m AppModel) Widget {
 func consultEntryRows(m AppModel, name string, sess ConsultSession) Array[LayoutChild] {
     val title = TextStyled(
         s"  ▶ ${name}  ·  team: ${sess.TeamName}  ·  ${sess.Project.Name}",
-        DefaultStyle().WithBold().WithFg(BrightCyan()),
+        DefaultStyle().WithBold().WithFg(BrightCyan),
     )
     val buffer = m.ConsultBuffers.Get(name).GetOrElse(EmptyArray[string]())
     val total = buffer.Size()
@@ -1910,7 +1910,7 @@ func consultEntryRows(m AppModel, name string, sess ConsultSession) Array[Layout
                    else
                        tail.Map((line) => Fixed(1, TextStyled(
                            s"      ${line}",
-                           DefaultStyle().WithFg(BrightCyan()),
+                           DefaultStyle().WithFg(BrightCyan),
                        )))
     return ArrayOf[LayoutChild](Fixed(1, title))
         .AppendAll(hiddenRow)
@@ -1944,7 +1944,7 @@ func composerWidget(m AppModel) Widget {
 // future inline-rename / mode-indicator overlays stay in sync.
 func composerStyle(m AppModel) Style =
     if (m.Composer == "") DefaultStyle().WithDim()
-    else                  DefaultStyle().WithFg(BrightWhite())
+    else                  DefaultStyle().WithFg(BrightWhite)
 
 // composerRendered builds the displayable string with the cursor
 // glyph (▌) inserted at the user's cursor offset. Extracted from
@@ -2052,13 +2052,13 @@ func footerWidget(m AppModel) Widget {
     if m.QuitPending {
         return TextStyled(
             "  ⚠ Quit? Press Ctrl+Q again to confirm · Esc to cancel",
-            DefaultStyle().WithBold().WithFg(BrightYellow()),
+            DefaultStyle().WithBold().WithFg(BrightYellow),
         )
     }
     if m.EraseSessionPending {
         return TextStyled(
             "  ⚠ Erase session? Press Ctrl+N again to confirm · Esc to cancel",
-            DefaultStyle().WithBold().WithFg(BrightYellow()),
+            DefaultStyle().WithBold().WithFg(BrightYellow),
         )
     }
     // LastError is rendered as a separate banner above the composer
@@ -2136,7 +2136,7 @@ func activityBand(m AppModel) LayoutChild {
     val withErr = m.LastError match {
         case Some(err) => header.Append(Fixed(1, TextStyled(
             capForBand(s"  ⚠ ${err}${errorRemedy(err)}", cols),
-            DefaultStyle().WithFg(BrightRed()))))
+            DefaultStyle().WithFg(BrightRed))))
         case None()    => header
     }
     val children = memberRows.FoldLeft(withErr, (acc, w) => acc.Append(Fixed(1, w)))
@@ -2236,12 +2236,12 @@ func activityDetail(m AppModel, name string, status Status) string {
 // need attention (failed / stuck), yellow for caution (slow / help),
 // cyan for healthy in-flight work, default otherwise.
 func activityRowStyle(status Status) Style = status match {
-    case StFailed(_)        => DefaultStyle().WithFg(BrightRed())
-    case StStuck()          => DefaultStyle().WithFg(BrightRed())
-    case StSlow()           => DefaultStyle().WithFg(BrightYellow())
-    case StHelpWaiting(_)   => DefaultStyle().WithFg(BrightYellow())
-    case StRecovering(_, _) => DefaultStyle().WithFg(BrightCyan())
-    case StWorking()        => DefaultStyle().WithFg(BrightCyan())
+    case StFailed(_)        => DefaultStyle().WithFg(BrightRed)
+    case StStuck()          => DefaultStyle().WithFg(BrightRed)
+    case StSlow()           => DefaultStyle().WithFg(BrightYellow)
+    case StHelpWaiting(_)   => DefaultStyle().WithFg(BrightYellow)
+    case StRecovering(_, _) => DefaultStyle().WithFg(BrightCyan)
+    case StWorking()        => DefaultStyle().WithFg(BrightCyan)
     case _                  => DefaultStyle()
 }
 
@@ -2357,11 +2357,11 @@ func planPanel(m AppModel) LayoutChild {
     val titleRow = if (complete)
         Fixed(1, TextStyled(
             s"  📋 Plan complete — ${bar} ${total}/${total} PRs shipped",
-            DefaultStyle().WithBold().WithFg(BrightGreen())))
+            DefaultStyle().WithBold().WithFg(BrightGreen)))
     else
         Fixed(1, TextStyled(
             s"  📋 Plan — step ${shipped + 1} of ${total}  ${bar} ${shipped}/${total} shipped",
-            DefaultStyle().WithBold().WithFg(BrightCyan())))
+            DefaultStyle().WithBold().WithFg(BrightCyan)))
     val startIdx = if (total <= planPanelMaxRows) 0
                    else MinInt(MaxInt(0, shipped - 1), total - planPanelMaxRows)
     val endIdx = MinInt(total, startIdx + planPanelMaxRows)
@@ -2374,8 +2374,8 @@ func planPanel(m AppModel) LayoutChild {
     for i < endIdx {
         val flat = strings.Join(strings.Fields(m.Plan.Get(i)), " ")
         val glyph = if (i < shipped) "✓" else if (i == shipped) "▶" else "☐"
-        val st = if (i < shipped)       DefaultStyle().WithFg(BrightGreen())
-                 else if (i == shipped) DefaultStyle().WithBold().WithFg(BrightCyan())
+        val st = if (i < shipped)       DefaultStyle().WithFg(BrightGreen)
+                 else if (i == shipped) DefaultStyle().WithBold().WithFg(BrightCyan)
                  else                   DefaultStyle().WithDim()
         rows = rows.Append(Fixed(1, TextStyled(
             s"  ${glyph} ${i + 1}. ${truncateTitle(flat, bodyMax)}", st)))
@@ -2472,7 +2472,7 @@ val historyIndexVisibleRows = 18
 func historyIndexPanel(m AppModel) Widget {
     val header = TextStyled(
         "  History  ·  ↑↓ navigate · Enter open · Ctrl+H close",
-        DefaultStyle().WithBold().WithFg(BrightYellow()),
+        DefaultStyle().WithBold().WithFg(BrightYellow),
     )
     if m.Archives.IsEmpty() {
         return Column(ArrayOf[LayoutChild](
@@ -2544,7 +2544,7 @@ func scrollEdgeHint(text string) Widget = TextStyled(text, DefaultStyle().WithDi
 func archiveRowWidget(meta session.SnapshotMeta, isCursor bool) Widget {
     val marker = if (isCursor) "▶ " else "  "
     val text = s"  ${marker}${formatSavedAt(meta.SavedAt)}  ·  ${meta.Label}  ·  ${meta.ProjectName}  (${meta.LineCount} lines)"
-    val style = if (isCursor) DefaultStyle().WithBold().WithFg(BrightCyan())
+    val style = if (isCursor) DefaultStyle().WithBold().WithFg(BrightCyan)
                 else          DefaultStyle().WithDim()
     return TextStyled(text, style)
 }
@@ -2558,7 +2558,7 @@ val historyVisibleLines = 20
 func historyDetailPanel(m AppModel, snap session.Snapshot) Widget {
     val header = TextStyled(
         s"  ${formatSavedAt(snap.SavedAt)}  ·  ${snap.ProjectName}  ·  Esc to return to index",
-        DefaultStyle().WithBold().WithFg(BrightYellow()),
+        DefaultStyle().WithBold().WithFg(BrightYellow),
     )
     val all = snap.Conversation
     val total = all.Size()

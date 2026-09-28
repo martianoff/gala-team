@@ -329,8 +329,8 @@ func memberRowStyle(team Team, mem Member, isCursor bool) Style {
 // truth — colour drift between the two surfaces is the whole bug
 // this exists to prevent.
 func MemberColor(team Team, mem Member) Color = mem.Role match {
-    case TeamLead() => BrightCyan()
-    case QA()       => BrightGreen()
+    case TeamLead() => BrightCyan
+    case QA()       => BrightGreen
     case Engineer() => EngineerColor(EngineerOrdinal(team, mem))
 }
 
@@ -357,12 +357,12 @@ func EngineerOrdinal(team Team, mem Member) int {
 // non-bright colors (visually muddy on most themes).
 func EngineerColor(ordinal int) Color {
     val mod = ordinal - (ordinal / 6) * 6
-    if mod == 0 { return BrightYellow() }
-    if mod == 1 { return BrightMagenta() }
-    if mod == 2 { return BrightBlue() }
-    if mod == 3 { return Yellow() }
-    if mod == 4 { return Magenta() }
-    return Cyan()
+    if mod == 0 { return BrightYellow }
+    if mod == 1 { return BrightMagenta }
+    if mod == 2 { return BrightBlue }
+    if mod == 3 { return Yellow }
+    if mod == 4 { return Magenta }
+    return Cyan
 }
 
 // memberRowText is the visual encoding of one member row.  Padded to a

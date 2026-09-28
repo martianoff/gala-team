@@ -109,8 +109,8 @@ func pipelineBox(event PipelineEvent) Widget {
 }
 
 func pipelineNodeStyle(status Status) Style = status match {
-    case StWorking() => DefaultStyle().WithFg(BrightCyan()).WithBold()
-    case StDone()    => DefaultStyle().WithFg(BrightGreen())
-    case StFailed(_) => DefaultStyle().WithFg(BrightRed())
+    case StWorking() => DefaultStyle().WithFg(BrightCyan).WithBold()
+    case StDone()    => DefaultStyle().WithFg(BrightGreen)
+    case StFailed(_) => DefaultStyle().WithFg(BrightRed)
     case _           => DefaultStyle()
 }

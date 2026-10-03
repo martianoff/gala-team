@@ -52,7 +52,7 @@ func TestDispatchConsult_InProjectBeatsRegistry(t T) T {
     val res = DispatchConsult(ArrayOf(sibling), proj, r, "transpiler", "do work")
     return res match {
         case Success(s) => {
-            val _ = CloseConsultSession(s)  // best-effort cleanup
+            CloseConsultSession(s)  // best-effort cleanup
             return IsTrue(t, s.TeamName == "Transpiler Wizards")
         }
         case Failure(e) => {

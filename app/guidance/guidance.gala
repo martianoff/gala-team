@@ -75,7 +75,7 @@ func LoadDoc(repoDir string, slot string, rawPath string) Try[GuidanceDoc] = Try
 // sha256Hex returns the hex-encoded sha256 of `b`.
 func sha256Hex(b []byte) string {
     val h = sha256.New()
-    val _, _ = h.Write(b)
+    h.Write(b)
     val sum = h.Sum(nil)
     return hex.EncodeToString(sum)
 }

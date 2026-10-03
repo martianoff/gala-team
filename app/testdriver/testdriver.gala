@@ -330,7 +330,7 @@ func emitFrame(m AppModel, term TermDims, errOverride Option[string]) {
     w.WriteKey("turnBuffer"); w.WriteString(m.TurnBuffer)
     w.WriteKey("plain"); w.WriteString(rendered)
     w.WriteEndObject()
-    val _ = os.Stdout.WriteString(w.String() + "\n")
+    os.Stdout.WriteString(w.String() + "\n")
 }
 
 // emitSnapshot writes a frame including styled rendering at the
@@ -370,7 +370,7 @@ func emitSnapshot(m AppModel, term TermDims, detail string) {
         w.WriteKey("styled"); w.WriteString(styled)
     }
     w.WriteEndObject()
-    val _ = os.Stdout.WriteString(w.String() + "\n")
+    os.Stdout.WriteString(w.String() + "\n")
 }
 
 // emitError writes a {"type":"error","reason":"..."} JSON line. Used
@@ -382,7 +382,7 @@ func emitError(reason string) {
     w.WriteKey("type");   w.WriteString("error")
     w.WriteKey("reason"); w.WriteString(reason)
     w.WriteEndObject()
-    val _ = os.Stdout.WriteString(w.String() + "\n")
+    os.Stdout.WriteString(w.String() + "\n")
 }
 
 // stateName projects AppState to the matching JSON-friendly string.

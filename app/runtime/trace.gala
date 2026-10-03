@@ -120,7 +120,7 @@ func TraceClaudeLine(member string, raw string, visible string, errText string, 
     // failure (e.g. disk full) doesn't re-open thrash the FS, and we
     // explicitly choose not to spam stderr from inside the chunk pump
     // — diagnostic capture is best-effort; a missed line is not a bug.
-    val _ = AppendTraceLine(path, encoded.Get())
+    AppendTraceLine(path, encoded.Get())
 }
 
 // sanitiseSegment strips path separators from a member name before

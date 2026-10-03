@@ -1523,7 +1523,7 @@ func freshSession(m AppModel) Tuple[AppModel, Cmd[AppMsg]] {
         val curr = acc.Get(name).GetOrElse(0)
         return acc.Put(name, curr + 1)
     })
-    val _ = CloseAllSessions(m.Sessions)
+    CloseAllSessions(m.Sessions)
     ResetSession()
     val cleared = clearSessionState(m.Copy(PendingClosures = withPending, WipingWorktrees = true))
     val wipeCmd = runtimeFutureToCmd(WipeWorktreesFuture(m.Project, m.Team.Members, m.Policy.WorkspaceMode))
@@ -1812,11 +1812,6 @@ func truncateForToast(s string) string {
     val firstLine = parts.Get(0)
     val cap = 80
     if firstLine.Size() <= cap { return firstLine }
-    // strings.SplitN with a length-1 separator is safe at byte
-    // boundary `cap` since gala doesn't expose a clean substring op
-    // — feeding the second part through Drop avoids the slice syntax.
-    val tail = strings.TrimPrefix(firstLine, firstLine)
-    val _ = tail
     return runesPrefix(firstLine, cap) + "…"
 }
 
@@ -2760,7 +2755,7 @@ func closeLiveSession(m AppModel, name string) AppModel {
     return m.Sessions.Get(name) match {
         case None()    => m
         case Some(s)   => {
-            val _ = CloseSession(s)
+            CloseSession(s)
             // Bump the pending-closures counter so the inevitable
             // SessionFailed event from the killed subprocess is
             // recognized as stale and dropped (instead of removing
@@ -6496,7 +6491,7 @@ func truncateTitle(s string, maxLen int) string {
 // browser; the OSC 8 hyperlink in the conversation log is the
 // fallback.
 func onOpenBrowser(m AppModel, url string) Tuple[AppModel, Cmd[AppMsg]] {
-    val _ = OpenInBrowser(url)
+    OpenInBrowser(url)
     return (m, NoCmd[AppMsg]())
 }
 
@@ -6558,7 +6553,7 @@ func onConsultEnded(m AppModel, name string, errText Option[string]) Tuple[AppMo
     val priorBuffer = m.ConsultBuffers.Get(name).GetOrElse(EmptyArray[string]())
     val cleaned = m.ActiveConsults.Get(name) match {
         case Some(s) => {
-            val _ = CloseConsultSession(s)
+            CloseConsultSession(s)
             return m.Copy(ActiveConsults = m.ActiveConsults.Remove(name))
         }
         case None() => m

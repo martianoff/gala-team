@@ -344,11 +344,8 @@ func slugify(name string) string {
 func validate(teams Array[Team], workflow Workflow, pol Policy, guidance Array[GuidancePair]) TeamConfig {
     teams.ForEach((tm) => validateOneTeam(tm, workflow))
 
-    val _ = teams.FoldLeft(EmptyHashMap[string, bool](), (seen, tm) => {
-        if seen.Contains(tm.Key) {
-            go_builtins.Panic(s"team.yaml: duplicate team key '${tm.Key}'")
-        }
-        return seen.Put(tm.Key, true)
+    firstDuplicateBy(teams, _.Key).ForEach((tm) => {
+        go_builtins.Panic(s"team.yaml: duplicate team key '${tm.Key}'")
     })
 
     return TeamConfig(
@@ -372,10 +369,13 @@ func validateOneTeam(tm Team, workflow Workflow) {
     if workflow.QARequired && qas.IsEmpty() {
         go_builtins.Panic(s"team.yaml: workflow.qa_required is true but team '${tm.Name}' has no qa members")
     }
-    val _ = tm.Members.FoldLeft(EmptyHashMap[string, bool](), (seen, m) => {
-        if seen.Contains(m.Name) {
-            go_builtins.Panic(s"team.yaml: team '${tm.Name}' has duplicate member name '${m.Name}'")
-        }
-        return seen.Put(m.Name, true)
+    firstDuplicateBy(tm.Members, _.Name).ForEach((m) => {
+        go_builtins.Panic(s"team.yaml: team '${tm.Name}' has duplicate member name '${m.Name}'")
     })
 }
+
+// firstDuplicateBy returns the first element of xs whose key also appears on
+// another element, or None when every key is unique. Quadratic, which is fine
+// for the handful of teams and members a team.yaml declares.
+func firstDuplicateBy[T any](xs Array[T], key func(T) string) Option[T] =
+    xs.Find((x) => xs.Count((o) => key(o) == key(x)) > 1)

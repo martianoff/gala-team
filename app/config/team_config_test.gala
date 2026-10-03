@@ -60,7 +60,8 @@ val dupNameYaml = "teams:\n" +
     "        personality: \"First.\"\n" +
     "      - role: engineer\n" +
     "        name: \"Iris\"\n" +
-    "        personality: \"Second.\"\n"
+    "        personality: \"Second.\"\n" +
+    "workflow:\n  qa_required: false\n"
 
 func TestLoadValidTeam(t T) T {
     val res = LoadFromString(validTeamYaml)
@@ -84,8 +85,15 @@ func TestLoadNoQa_AllowedWhenQaNotRequired(t T) T {
     return IsTrue(t2, qas.IsEmpty())
 }
 
+// failsWith asserts res is a Failure whose message mentions needle, so a
+// test pins the check that rejected the config, not merely that some check did.
+func failsWith(t T, res Try[TeamConfig], needle string) T = res match {
+    case Failure(err) => Contains(t, err.Error(), needle)
+    case Success(_)   => Fail(t, s"expected a failure mentioning '${needle}'")
+}
+
 func TestLoadNoLead_Fails(t T) T = IsFailure(t, LoadFromString(noLeadYaml))
-func TestLoadDupName_Fails(t T) T = IsFailure(t, LoadFromString(dupNameYaml))
+func TestLoadDupName_Fails(t T) T = failsWith(t, LoadFromString(dupNameYaml), "duplicate member name")
 
 func TestLoadEmptyMembers_Fails(t T) T {
     val empty = "teams:\n  - key: main\n    name: \"X\"\n    members: []\n"
@@ -429,7 +437,7 @@ val dupKeyYaml = "teams:\n" +
     "workflow:\n  qa_required: false\n"
 
 func TestLoadMultiTeams_DuplicateKey_Fails(t T) T =
-    IsFailure(t, LoadFromString(dupKeyYaml))
+    failsWith(t, LoadFromString(dupKeyYaml), "duplicate team key")
 
 // A teams list with no entries — must fail (top-level must declare at
 // least one team, same constraint as the legacy shape).

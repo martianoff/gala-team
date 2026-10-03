@@ -118,7 +118,7 @@ func LogEvent(kind string, member string, payloadJson string) {
     )
     val encoded = envelopeCodec.Encode(rec)
     if encoded.IsFailure() { return }
-    val _ = AppendDebugEvent(encoded.Get())
+    AppendDebugEvent(encoded.Get())
 }
 
 // SessionInitPayload is the payload of a session_init event.
@@ -169,7 +169,7 @@ func ResetSession() {
     // traces/<member>/*.jsonl on disk because the chunk pump's
     // long-lived handles kept the files locked.
     ResetTraceState()
-    val _ = ResetDebugDir()
+    ResetDebugDir()
     LogSessionInit()
 }
 

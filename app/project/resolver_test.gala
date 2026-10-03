@@ -35,8 +35,7 @@ func TestResolve_OverridesWinOverDetection(t T) T {
     val tmp = mustMkTempDir(t)
     use cleanup = onExitErr(() => os.RemoveAll(tmp))
     val gitDir = filepath.Join(tmp, ".git")
-    val mkErr = os.MkdirAll(gitDir, os.FileMode(0755))
-    val _ = mkErr
+    FromError(os.MkdirAll(gitDir, os.FileMode(0755))).Get()
 
     val overrides = Overrides(
         Name          = Some[string]("my-project"),

@@ -214,11 +214,7 @@ func runGitInDir(dir string, args Array[string]) {
         SliceEmpty[string](),
         dir,
     )
-    val proc = subprocess.Spawn(opts)
-    proc match {
-        case Success(p) => { val _ = p.Wait() }
-        case Failure(_) => {}
-    }
+    subprocess.Spawn(opts).ForEach((p) => p.Wait())
 }
 
 // ----------------------------------------------------------------------------
@@ -275,7 +271,7 @@ func TestRemoveWorktree_DeregistersDirtySoNextSpawnIsClean(t T) T {
     val staleDir, serr = os.MkdirTemp(wtPath, "stale_old_change_")
     if serr != nil { return IsTrue(t, false) }
     // Start fresh's per-engineer cleanup.
-    val _ = RemoveWorktree(proj, mem)
+    RemoveWorktree(proj, mem)
     val regAfter = isRegisteredWorktree(proj, wtPath)
     val t1 = IsTrue(t, regBefore)
     val t2 = IsFalse(t1, regAfter)

@@ -24,9 +24,7 @@ func (c onExitErr) Close() error = c.run()
 // A clean guarded run reports not-crashed and leaves the crash channel
 // empty so main() falls through to its normal session_done path.
 func TestRunGuarded_CleanRunReportsNoCrash(t T) T {
-    val crashed, msg, path = RunGuarded(() => {
-        val _ = strings.Contains("ok", "ok")
-    })
+    val crashed, msg, path = RunGuarded(() => {})
     val t1 = IsFalse(t, crashed)
     val t2 = Eq(t1, msg, "")
     return Eq(t2, path, "")

@@ -46,7 +46,7 @@ func flagValue(name string, dflt string) string {
 // die prints msg to stderr + exits 1. Used for missing required args
 // and config-load failures.
 func die(msg string) {
-    val _ = os.Stderr.WriteString(s"gala_team_headless: ${msg}\n")
+    os.Stderr.WriteString(s"gala_team_headless: ${msg}\n")
     os.Exit(1)
 }
 
@@ -56,7 +56,7 @@ func main() {
     // TUI binary's flag.
     val args = ArrayOf(os.Args...)
     if args.Contains("--version") || args.Contains("-V") {
-        val _ = os.Stdout.WriteString(s"gala_team_headless ${version.Version()} (${version.GitDescribe()}) commit ${version.Commit()}\n")
+        os.Stdout.WriteString(s"gala_team_headless ${version.Version()} (${version.GitDescribe()}) commit ${version.Commit()}\n")
         os.Exit(0)
     }
     val teamPath = flagValue("--team", "")
@@ -103,15 +103,15 @@ func main() {
         RunHeadlessAs(proj, cfg.Team, cfg.Policy.WorkspaceMode, member, prompt)
     outcome match {
         case Left(err) => {
-            val _ = os.Stderr.WriteString(s"gala_team_headless: ${err}\n")
+            os.Stderr.WriteString(s"gala_team_headless: ${err}\n")
             runtime.LogSessionDone("headless_error")
             os.Exit(1)
         }
         case Right(result) => {
             EncodeJson(result) match {
                 case Success(j) => {
-                    val _ = os.Stdout.WriteString(j)
-                    val _ = os.Stdout.WriteString("\n")
+                    os.Stdout.WriteString(j)
+                    os.Stdout.WriteString("\n")
                 }
                 case Failure(e) => die(s"encode result: ${e.Error()}")
             }

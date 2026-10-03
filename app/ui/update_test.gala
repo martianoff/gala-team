@@ -688,7 +688,7 @@ func runGitInTmp(dir string, args Array[string]) {
         dir,
     )
     val proc = subprocess.Spawn(opts).Get()
-    val _ = proc.Wait().Get()
+    proc.Wait().Get()
 }
 
 // resolveSummaryReady is a test helper that runs the TL @summary
@@ -5380,7 +5380,7 @@ func TestTlLivelock_SpawnTLRelay_ClearsStaleTurnBuffer(t T) T {
 // ----------------------------------------------------------------------------
 
 func setupDebugRepo(label string) string {
-    val _ = os.Setenv("GALA_TEAM_DEBUG", "1")
+    os.Setenv("GALA_TEAM_DEBUG", "1")
     val dir, mkErr = os.MkdirTemp("", "gala_team_debug_" + label)
     if mkErr != nil { go_builtins.Panic(s"MkdirTemp: ${mkErr.Error()}") }
     SetDebugRepo(dir)
@@ -5391,7 +5391,7 @@ func setupDebugRepo(label string) string {
     // but the FD lives on). ResetDebugDir wipes the (still-empty)
     // debug subdir of the new repo and drops the handle so the next
     // AppendDebugEvent re-opens cleanly.
-    val _ = ResetDebugDir()
+    ResetDebugDir()
     return dir
 }
 

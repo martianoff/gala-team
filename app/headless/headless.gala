@@ -183,8 +183,8 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
     // doesn't surface a UI for interactive tool calls, so we close
     // stdin immediately and the model proceeds with whatever defaults
     // it would have used had a UI dismissed the question.
-    val _ = SendFuture(s, wirePrompt).Await()
-    val _ = CloseSendFuture(s).Await()
+    SendFuture(s, wirePrompt).Await()
+    CloseSendFuture(s).Await()
 
     var stopped = false
     var failure = onbErr.Map((e) => s"onboarding: ${e}")
@@ -261,7 +261,7 @@ func driveLoop(proj Project, tm Team, s MemberSession, displayPrompt string, wir
         }
     }
 
-    val _ = CloseSession(s)
+    CloseSession(s)
     return HeadlessResult(
         Project      = proj,
         TeamName     = tm.Name,

@@ -156,7 +156,7 @@ func printUsage() {
         "  (dialog)   Approve / reject via the on-screen dialog (Tab/Enter/Esc/click)\n" +
         "\n" +
         "See README.md for the full team.yaml schema and key bindings.\n"
-    val _ = os.Stdout.WriteString(usage)
+    os.Stdout.WriteString(usage)
 }
 
 // die prints a one-line user-facing error to stderr and exits with
@@ -164,7 +164,7 @@ func printUsage() {
 // — invalid CLI args, unparseable team.yaml, missing project repo —
 // so the user sees a clean diagnostic instead of a Go stack trace.
 func die(msg string) {
-    val _ = os.Stderr.WriteString(s"gala_team: ${msg}\n")
+    os.Stderr.WriteString(s"gala_team: ${msg}\n")
     os.Exit(1)
 }
 
@@ -319,7 +319,7 @@ func main() {
         os.Exit(0)
     }
     if hasFlag(ArrayOf("--version", "-V")) {
-        val _ = os.Stdout.WriteString(s"gala_team ${version.Version()} (${version.GitDescribe()}) commit ${version.Commit()}\n")
+        os.Stdout.WriteString(s"gala_team ${version.Version()} (${version.GitDescribe()}) commit ${version.Commit()}\n")
         os.Exit(0)
     }
     validateArgs()
@@ -341,7 +341,7 @@ func main() {
     // Append .gala_team/ to .gitignore on first run so engineer
     // worktrees + session snapshots don't leak into the user's
     // commits. Best-effort — non-git dirs and IO errors are silent.
-    val _ = session.EnsureGitignore(proj.Repo)
+    session.EnsureGitignore(proj.Repo)
     val cfgRaw = loadTeamConfig(teamPath)
     val cfg = PickMainTeam(cfgRaw, teamKey) match {
         case Success(c) => c
@@ -366,7 +366,7 @@ func main() {
     // warnings on stderr but don't sink startup.
     val (guidanceBundle, guidanceWarns) = loadGuidance(proj, cfg.Guidance)
     guidanceWarns.ForEach((w) => {
-        val _ = os.Stderr.WriteString(s"gala_team: guidance warning: ${w}\n")
+        os.Stderr.WriteString(s"gala_team: guidance warning: ${w}\n")
     })
     val seeded = primeFromSnapshot(InitialModelWithTeams(proj, cfg.Team, cfg.Workflow, cfg.Policy, registry, cfg.Teams))
     val initial = seeded.Copy(Archives = archives, Guidance = guidanceBundle)
@@ -399,13 +399,13 @@ func main() {
     // to crash-<pid>.txt under the debug dir (always, flag-independent),
     // and we surface where it landed before exiting non-zero.
     val crashed, panicMsg, reportPath = runtime.RunGuarded(() => {
-        val _ = RunWithMouse[AppModel, AppMsg](program, (ev) => InputToAppMsg(ev), tickSub)
+        RunWithMouse[AppModel, AppMsg](program, (ev) => InputToAppMsg(ev), tickSub)
     })
     if crashed {
         runtime.LogSessionDone("panic")
-        val _ = os.Stderr.WriteString(s"gala_team: fatal: ${panicMsg}\n")
+        os.Stderr.WriteString(s"gala_team: fatal: ${panicMsg}\n")
         if reportPath != "" {
-            val _ = os.Stderr.WriteString(s"gala_team: crash report written to ${reportPath}\n")
+            os.Stderr.WriteString(s"gala_team: crash report written to ${reportPath}\n")
         }
         os.Exit(1)
     }

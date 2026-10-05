@@ -6554,7 +6554,7 @@ func onConsultEnded(m AppModel, name string, errText Option[string]) Tuple[AppMo
     val cleaned = m.ActiveConsults.Get(name) match {
         case Some(s) => {
             CloseConsultSession(s)
-            return m.Copy(ActiveConsults = m.ActiveConsults.Remove(name))
+            m.Copy(ActiveConsults = m.ActiveConsults.Remove(name))
         }
         case None() => m
     }

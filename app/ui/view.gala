@@ -726,7 +726,7 @@ func memberDetailBody(m AppModel, name string, width int) Widget {
         case Some(mb) => {
             val model = mb.Model.GetOrElse("(default)")
             val st = m.Statuses.Get(name).GetOrElse(StIdle())
-            return TextStyled(s"  Role: ${RoleName(mb.Role)}    Model: ${model}    Status: ${statusTagFor(st)}",
+            TextStyled(s"  Role: ${RoleName(mb.Role)}    Model: ${model}    Status: ${statusTagFor(st)}",
                 DefaultStyle().WithDim())
         }
         case None() => TextStyled(s"  ${name} is not on this team", DefaultStyle().WithDim())

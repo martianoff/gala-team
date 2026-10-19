@@ -155,7 +155,7 @@ func applyOneCommand(m AppModel, term TermDims, raw string) DriverStep {
 // the object in the decoder's stream so subsequent reads can fetch
 // per-command fields. Returns ("", false) if the input isn't an object
 // or "type" is absent.
-func readType(d *json.JsonDecoderImpl) Tuple[string, bool] {
+func readType(d FieldDecoder) Tuple[string, bool] {
     // The decoder API is sequential; we don't peek. Convention: every
     // command starts with "type" as the first key. If a command sends
     // type after other fields, the dispatch below will misread it.
@@ -175,7 +175,7 @@ func readType(d *json.JsonDecoderImpl) Tuple[string, bool] {
 // driver doesn't crash when a chunk-line value is an array / object /
 // int / null. Real claude stream-json envelopes routinely carry
 // `"tools":["Read","Write",...]` etc.
-func readOptionalString(d *json.JsonDecoderImpl, target string) Option[string] {
+func readOptionalString(d FieldDecoder, target string) Option[string] {
     for d.HasMoreFields() {
         val key = d.ReadKey()
         if key == target { return Some(d.ReadString()) }
@@ -184,7 +184,7 @@ func readOptionalString(d *json.JsonDecoderImpl, target string) Option[string] {
     return None[string]()
 }
 
-func readOptionalInt(d *json.JsonDecoderImpl, target string) Option[int] {
+func readOptionalInt(d FieldDecoder, target string) Option[int] {
     for d.HasMoreFields() {
         val key = d.ReadKey()
         if key == target { return Some(d.ReadInt()) }
@@ -197,7 +197,7 @@ func readOptionalInt(d *json.JsonDecoderImpl, target string) Option[int] {
 // when the command type isn't recognised (or doesn't correspond to a
 // driver-injectable AppMsg — keys/mouse/tick/msg are; resize/snapshot
 // are handled out-of-band above).
-func decodeAppMsg(kind string, d *json.JsonDecoderImpl) Option[AppMsg] {
+func decodeAppMsg(kind string, d FieldDecoder) Option[AppMsg] {
     if kind == "key"   { return decodeKey(d) }
     if kind == "tick"  { return Some[AppMsg](TickMsg()) }
     if kind == "mouse" { return decodeMouse(d) }
@@ -207,7 +207,7 @@ func decodeAppMsg(kind string, d *json.JsonDecoderImpl) Option[AppMsg] {
 
 // decodeKey reads {"key":"Enter"} or {"char":"h"} etc. and maps to
 // the matching AppMsg case.
-func decodeKey(d *json.JsonDecoderImpl) Option[AppMsg] {
+func decodeKey(d FieldDecoder) Option[AppMsg] {
     var keyName = ""
     var keyChar = ""
     for d.HasMoreFields() {
@@ -256,7 +256,7 @@ func decodeKey(d *json.JsonDecoderImpl) Option[AppMsg] {
     return None[AppMsg]()
 }
 
-func decodeMouse(d *json.JsonDecoderImpl) Option[AppMsg] {
+func decodeMouse(d FieldDecoder) Option[AppMsg] {
     var x = 0
     var y = 0
     var pressed = false
@@ -274,7 +274,7 @@ func decodeMouse(d *json.JsonDecoderImpl) Option[AppMsg] {
 
 // decodeNamedMsg reads {"name":"ChunkArrived","member":"Iris","line":"..."}.
 // Each known msg name pulls the additional fields it needs.
-func decodeNamedMsg(d *json.JsonDecoderImpl) Option[AppMsg] {
+func decodeNamedMsg(d FieldDecoder) Option[AppMsg] {
     var name   = ""
     var member = ""
     var line   = ""

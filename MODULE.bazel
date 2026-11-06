@@ -4,25 +4,13 @@ module(
 )
 
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "gala", version = "0.85.0")
-bazel_dep(name = "gala_acp", version = "0.4.0")
-bazel_dep(name = "gala_tui", version = "0.15.4")
+bazel_dep(name = "gala", version = "0.100.0")
+bazel_dep(name = "gala_acp", version = "0.5.0")
+bazel_dep(name = "gala_tui", version = "0.16.0")
 bazel_dep(name = "gazelle", version = "0.47.0")
-bazel_dep(name = "rules_gala", version = "0.3.2")
+bazel_dep(name = "rules_gala", version = "0.6.6")
 bazel_dep(name = "rules_go", version = "0.59.0")
-bazel_dep(name = "gala_gazelle", version = "0.3.1", dev_dependency = True)
-
-# gala-acp is the shared Agent Communication Protocol kernel (envelope
-# identity + dedup Ledger + delivery FSM + the generic run contract),
-# extracted from this project's app/protocol so it can be reused. Pinned to
-# the published repo until it lands in a Bazel registry. Bump `commit` to
-# adopt a newer gala-acp; for local co-development swap this for a
-# local_path_override(module_name = "gala_acp", path = "../gala-acp").
-git_override(
-    module_name = "gala_acp",
-    remote = "https://github.com/martianoff/gala-acp.git",
-    commit = "86f56499c9f2579d8dff1ddfef29afac0945b264",
-)
+bazel_dep(name = "gala_gazelle", version = "0.4.0", dev_dependency = True)
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.25.5")

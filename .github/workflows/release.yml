@@ -3,6 +3,13 @@ name: Release
 on:
   release:
     types: [created]
+  # Rebuild and upload the binaries of an existing release, e.g. after a
+  # build job timed out. The tag's code is built with this workflow.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to build and upload binaries for
+        required: true
 
 permissions:
   contents: write
@@ -26,9 +33,12 @@ jobs:
             gala_asset: gala-linux-amd64
           - os: darwin
             arch: arm64
-            runner: macos-latest
+            # Cross-compiled on Linux: compiling gala_team needs more memory
+            # than the macOS runner has, and swapping there pushed the build
+            # past the job timeout.
+            runner: ubuntu-latest
             ext: ""
-            gala_asset: gala-darwin-arm64
+            gala_asset: gala-linux-amd64
           - os: windows
             arch: amd64
             runner: windows-latest
@@ -38,6 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
           fetch-depth: 0
 
       - name: Add swap space (Linux only)
@@ -45,7 +56,7 @@ jobs:
         # `go build`; swap lets it spill instead of OOM-kill. macOS /
         # Windows runners have different memory profiles and don't
         # support this action, so skip there.
-        if: matrix.os == 'linux'
+        if: matrix.runner == 'ubuntu-latest'
         uses: pierotofy/set-swap-space@49819abfb41bd9b44fb781159c033dba90353a7c
         with:
           swap-size-gb: 10
@@ -77,7 +88,7 @@ jobs:
         if: matrix.os != 'windows'
         shell: bash
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           python3 -c "
           import pathlib, re, os
@@ -92,7 +103,7 @@ jobs:
         if: matrix.os == 'windows'
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           $tag = $env:RELEASE_TAG -replace '^v',''
           if (-not $tag) { $tag = 'dev' }
@@ -102,6 +113,9 @@ jobs:
       - name: Build binary (Unix)
         if: matrix.os != 'windows'
         shell: bash
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
         run: |
           mkdir -p dist
           gala build -o dist/gala_team-${{ matrix.os }}-${{ matrix.arch }} ./cmd
@@ -143,6 +157,7 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
           files: |
             artifacts/gala_team-*
             artifacts/checksums-sha256.txt

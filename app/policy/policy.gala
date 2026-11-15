@@ -1,7 +1,6 @@
 package policy
 
 import (
-    . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
 )
 

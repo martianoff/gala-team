@@ -7,7 +7,6 @@ import (
     "github.com/martianoff/gala_team/app/config"
     "github.com/martianoff/gala_team/app/headless"
     . "martianoff/gala/std"
-    . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"
     . "github.com/martianoff/gala_team/app/team"

@@ -2,7 +2,6 @@ package runtime
 
 import (
     . "martianoff/gala/test"
-    . "martianoff/gala/std"
 )
 
 // Canonical tests for the small claude-code stream-json helpers

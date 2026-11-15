@@ -6,7 +6,6 @@ import (
     "path/filepath"
     "strings"
     . "martianoff/gala/test"
-    . "martianoff/gala/std"
     . "martianoff/gala/collection_immutable"
 )
 

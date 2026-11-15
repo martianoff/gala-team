@@ -2,7 +2,6 @@ package cli
 
 import (
     . "martianoff/gala/test"
-    . "martianoff/gala/std"
     . "github.com/martianoff/gala-tui"
     . "github.com/martianoff/gala_team/app/ui"
 )

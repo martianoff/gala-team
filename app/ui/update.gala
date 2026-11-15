@@ -4,7 +4,6 @@ import (
     "martianoff/gala/go_builtins"
     "martianoff/gala/strings"
     "martianoff/gala/concurrent"
-    "martianoff/gala/json"
     "martianoff/gala/subprocess"
     "runtime"
     "github.com/martianoff/gala_team/app/onboarding"

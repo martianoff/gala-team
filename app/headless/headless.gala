@@ -7,7 +7,6 @@ import (
     "github.com/martianoff/gala_team/app/protocol"
     "github.com/martianoff/gala_team/app/session"
     . "martianoff/gala/std"
-    . "martianoff/gala/go_interop"
     . "martianoff/gala/collection_immutable"
     . "github.com/martianoff/gala_team/app/policy"
     . "github.com/martianoff/gala_team/app/project"

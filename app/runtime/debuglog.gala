@@ -4,7 +4,6 @@ import (
     "os"
     "time"
     "martianoff/gala/json"
-    . "martianoff/gala/std"
     "github.com/martianoff/gala_team/app/version"
 )
 

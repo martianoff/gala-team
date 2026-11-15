@@ -7,7 +7,6 @@ import (
     "martianoff/gala/json"
     gala_tui "github.com/martianoff/gala-tui"
     . "martianoff/gala/std"
-    . "martianoff/gala/collection_immutable"
     . "martianoff/gala/go_interop"
     . "github.com/martianoff/gala_team/app/fsm"
     . "github.com/martianoff/gala_team/app/ui"

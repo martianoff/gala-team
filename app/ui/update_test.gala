@@ -4510,7 +4510,6 @@ func TestPartitionQaTargets_DropsQaKeepsEngineers(t T) T {
 
 func firstOfStringPair(p Tuple[string, string]) string = p match {
     case (n, _) => n
-    case _      => ""
 }
 
 func TestPartitionQaTargets_AllEngineers_Untouched(t T) T {

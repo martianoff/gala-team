@@ -4192,7 +4192,6 @@ func onSessionFailed(m AppModel, name string, err string) Tuple[AppModel, Cmd[Ap
             if !dispatchTargets.IsEmpty() && nonQa.IsEmpty() {
                 val droppedNames = dispatchTargets.Map((p) => p match {
                     case (n, _) => n
-                    case _      => ""
                 })
                 val (m1, nudgeCmds) = spawnTLNudge(
                     setStatus(cleanedB, name, StIdle()),

@@ -1,5 +1,5 @@
 github.com/google/uuid v1.6.0 h2:TXvc9U0fpKgiDCOXr5gJr27D7lyBB2wnjFUweDgqEwE=
-github.com/martianoff/gala-acp v0.5.2 h2:U/mW+G30QpY1Dwl+3KZGU86qsI+djvGpnZcvCqi15K8=
-github.com/martianoff/gala-acp v0.5.2/gala.mod h1:Ec1Ufodi/z0AD9Pg/0c+oV0L4YkyV5I8bjMVbpLs5vg=
-github.com/martianoff/gala-tui v0.16.2 h2:enDUV/vw41AG44W+jqet4UkH4q7YzS3BSRc4hQqM5lM=
-github.com/martianoff/gala-tui v0.16.2/gala.mod h1:o/lcZSzEmVkPaJOvb2mmJio2fnUqboH0Xzstn4WGv2k=
+github.com/martianoff/gala-acp v0.5.3 h2:5L0QH2gtoT3jtvo7qYKDJvFh74WdqGB1MFtdSGWPUAU=
+github.com/martianoff/gala-acp v0.5.3/gala.mod h1:e/Y/0wV1PW/4mKsoqsjUP3FOC20cWuxi61N/t9ToXWs=
+github.com/martianoff/gala-tui v0.16.3 h2:DgihWP4z7/RHvdRkvuaahcpUd6VL78I87mCuqSY70n0=
+github.com/martianoff/gala-tui v0.16.3/gala.mod h1:tYjnIf4s5Lqi4nZMZbjukWx1X/eZwI5fc9RHUs9s7xM=
